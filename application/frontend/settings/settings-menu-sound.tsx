@@ -14,6 +14,7 @@ const notificationItem = CHAT_PREF_MENU_SECTIONS
   ?.items[0];
 
 export function SoundSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
+  const volumeLabel = prefs.completionSoundVolume === 0 ? 'Off' : `${prefs.completionSoundVolume}%`;
   return (
     <div key="sound" class="toolbar-settings-section">
       <div class="toolbar-settings-section-label">Completion notifications</div>
@@ -22,9 +23,6 @@ export function SoundSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPre
         <div class="toolbar-settings-item toolbar-settings-mode-row toolbar-settings-sound-row">
           <span class="toolbar-settings-item-label">Sound volume</span>
           <div class="toolbar-settings-sound-controls">
-            <span class="toolbar-settings-control-value">
-              {prefs.completionSoundVolume === 0 ? 'Off' : `${prefs.completionSoundVolume}%`}
-            </span>
             <input
               type="range"
               class="toolbar-settings-slider"
@@ -34,7 +32,9 @@ export function SoundSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPre
               value={prefs.completionSoundVolume}
               onInput={(e) => onSetPrefs({ completionSoundVolume: Number((e.target as HTMLInputElement).value) })}
               aria-label="Completion sound volume"
+              aria-valuetext={volumeLabel}
             />
+            <span class="toolbar-settings-control-value">{volumeLabel}</span>
             <button
               type="button"
               class="toolbar-settings-test-btn"

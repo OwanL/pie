@@ -176,6 +176,9 @@ export function onOperationalError(payload: OperationalErrorPayload, deps: Handl
     undefined,
     payload.dedupeKey,
   )) return;
+  if (payload.code === 'SESSION_WORKER_EXITED' && payload.certainty === 'definitive') {
+    deps.state.clearSessionRuntimeKnown(sessionPath);
+  }
   const detail = formatOperationalErrorDetail(payload);
   const incident = { ...payload, detail };
   if (incident.severity === 'error') deps.runObserver.onBackendError(sessionPath, incident.code);

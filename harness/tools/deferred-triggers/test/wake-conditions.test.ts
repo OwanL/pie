@@ -7,9 +7,19 @@ import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   MAX_COMMAND_TIMEOUT_MS,
   MIN_COMMAND_INTERVAL_MS,
+  isValidTimerStartedAt,
   parseCommandPredicateResult,
   validateWakeConditions,
 } from '../wake-conditions.js';
+
+test('timer starts require valid ISO timestamps and accept explicit timezone offsets', () => {
+  for (const value of ['2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00+01:00']) {
+    assert.equal(isValidTimerStartedAt(value), true, value);
+  }
+  for (const value of [undefined, '', 'January 1 2026', '2026-02-30T00:00:00.000Z', '2026-01-01T25:00:00Z']) {
+    assert.equal(isValidTimerStartedAt(value), false, String(value));
+  }
+});
 
 test('command wake conditions apply defaults and resolve cwd at registration', () => {
   const registrationCwd = path.join(process.cwd(), 'project');

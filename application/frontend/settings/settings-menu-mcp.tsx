@@ -6,6 +6,7 @@ import { useEffect } from 'preact/hooks';
 import type { ChatPrefs, McpServerInfo } from '../../lib/protocol/index.js';
 import { McpServerList } from '../composer/mcp-server-list';
 import { SettingCheckbox } from './setting-checkbox';
+import { SettingsHelp } from './settings-help';
 import type { OnSetPrefs } from './settings-menu-types';
 
 export const MCP_SETTING_LABELS = [
@@ -46,23 +47,15 @@ export function McpSection({ prefs, mcpServers, mcpServersStatus, mcpPendingAppl
         <SettingCheckbox
           label="MCP enabled"
           checked={prefs.mcpEnabled}
+          hint="Exposes configured MCP servers through the mcp tool in every session. Turning it off hides tools immediately; servers stay configured and return when re-enabled."
           onChange={() => onSetPrefs({ mcpEnabled: !prefs.mcpEnabled })}
         />
-        <div class="toolbar-settings-item-hint">
-          Exposes configured MCP servers to the model through the mcp tool. Turning it off hides the
-          tools immediately — servers stay configured and are re-exposed when re-enabled.
-        </div>
 
         {/* Per-server toggles */}
         <div class="toolbar-settings-ui-control">
           <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Servers</span>
+            <span class="toolbar-settings-ui-control-label">Servers<SettingsHelp label="Servers">Toggling a server writes a disabled override to .pi/mcp.json. It applies on the next session reload or backend restart; the server stays configured.</SettingsHelp></span>
             <button type="button" class="mcp-server-refresh" onClick={onMcpListRequested}>Refresh</button>
-          </div>
-          <div class="toolbar-settings-item-hint">
-            Toggling a server writes a <span class="toolbar-settings-mono">disabled</span> override to{' '}
-            <span class="toolbar-settings-mono">.pi/mcp.json</span> and applies on the next session
-            reload / backend restart. Servers stay configured in their mcp.json files.
           </div>
           {!prefs.mcpEnabled && (
             <div class="toolbar-settings-item-hint mcp-global-off-hint">
@@ -82,13 +75,7 @@ export function McpSection({ prefs, mcpServers, mcpServersStatus, mcpPendingAppl
         {/* Where servers are configured */}
         <div class="toolbar-settings-ui-control">
           <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Server config</span>
-          </div>
-          <div class="toolbar-settings-item-hint">
-            Servers are defined in <span class="toolbar-settings-mono">~/.config/mcp/mcp.json</span> (all
-            projects), <span class="toolbar-settings-mono">.mcp.json</span> (project), or{' '}
-            <span class="toolbar-settings-mono">.pi/mcp.json</span> (project overrides). See{' '}
-            <span class="toolbar-settings-mono">docs/operations/MCP.md</span> for the full reference.
+            <span class="toolbar-settings-ui-control-label">Server config<SettingsHelp label="Server config">Servers are defined in ~/.config/mcp/mcp.json (all projects), .mcp.json (project), or .pi/mcp.json (project overrides). See docs/operations/MCP.md for the full reference.</SettingsHelp></span>
           </div>
         </div>
       </div>

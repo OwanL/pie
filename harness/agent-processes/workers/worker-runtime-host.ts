@@ -31,6 +31,7 @@ import {
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
 } from '../../../analytics/authority/storage-cutoff-authorization.js';
 import { compactDurableMessageForTransport, findDurableDetail } from '../../session-storage/transcripts/lazy-details';
+import { captureModelExchangeEntries, findToolModelExchange } from '../../session-storage/transcripts/tool-model-exchange';
 import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
 import { deriveContextUsageEvidenceFromBranch } from '../../session-storage/transcripts/context-usage';
 import { projectRegistryModels, resolveActiveModel } from '../../model-providers/catalog/model-catalog';
@@ -1493,6 +1494,12 @@ export class WorkerRuntimeHost {
       kind: 'runtime.event',
       event: event as never,
       payload: body,
+    }, {
+      // Initial hydration and correlated/replacement publications are required
+      // lifecycle records, never replaceable even when their payload is HOT.
+      replaceableSessionOpened: event === 'session.opened' && this.runtimeReady
+        && body.selectionToken === undefined && body.operationId === undefined
+        && body.replacesSessionPath === undefined,
     });
   }
 
@@ -1604,10 +1611,13 @@ export class WorkerRuntimeHost {
     if (ref.source !== 'durable') {
       return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
-    const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
-    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
+    const transcript = ensureDisplayTranscriptCache(context).transcript;
+    const found = ref.kind === 'model-exchange'
+      ? findToolModelExchange(transcript, captureModelExchangeEntries(context.session.sessionManager.getBranch()), ref)
+      : findDurableDetail(transcript, ref);
+    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'message' in found ? found.message : 'The durable detail is no longer available.' };
     if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
-    if (found.sizeBytes !== ref.sizeBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh and retry.' };
+    if (found.sizeBytes !== ref.sizeBytes && !(ref.kind === 'model-exchange' && ref.sizeBytes === 0)) return { sessionPath: context.sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh and retry.' };
     return { sessionPath: context.sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
   }
 

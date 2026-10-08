@@ -89,6 +89,9 @@ interface ProviderToolProtocolLeakState {
  * the ActiveRequest. It only retains enough text to recognize a marker split
  * across adjacent provider deltas. */
 const providerToolProtocolLeakByRequest = new WeakMap<ActiveRequest, ProviderToolProtocolLeakState>();
+/** Replayed user append boundaries must not bind an older entry to a later
+ * queued row, even when both prompts have identical content. */
+const deliveredUserEntriesByRequest = new WeakMap<ActiveRequest, Set<string>>();
 
 function countNewPatternMatches(text: string, previousTailLength: number, pattern: RegExp): number {
   let count = 0;
@@ -897,6 +900,7 @@ function handleContentToolSessionEvent(
           ? queuedAttributions.shift()
           : undefined;
         if (context.activeRequest) {
+          context.activeRequest.userMessageLocalId = localId || undefined;
           context.activeRequest.agentMessageLocalId = isAgentSessionMessageLocalId(localId) ? localId : undefined;
           context.activeRequest.agentMessageProvenanceEntryId = undefined;
           context.activeRequest.agentMessageDurabilityConfirmed = false;
@@ -1320,6 +1324,24 @@ function handleContentToolSessionEvent(
         emitDurableBranchObservation(deps, context, event.sessionEntryId);
       }
       if (event.message.role === 'user') {
+        const active = context.activeRequest;
+        if (event.sessionEntryId) {
+          const deliveredEntries = deliveredUserEntriesByRequest.get(active) ?? new Set<string>();
+          if (deliveredEntries.has(event.sessionEntryId)) return;
+          deliveredEntries.add(event.sessionEntryId);
+          deliveredUserEntriesByRequest.set(active, deliveredEntries);
+          if (active.userMessageLocalId) {
+            // Binding only: queue promotion/operation settlement remains owned
+            // by message_start. Never recover identity from text or timestamps.
+            deps.emit('message.queuedDelivered', {
+              sessionPath: context.sessionPath,
+              text: extractUserMessageText(event.message),
+              localId: active.userMessageLocalId,
+              durableEntryId: event.sessionEntryId,
+            } satisfies QueuedDeliveredPayload);
+            active.userMessageLocalId = undefined;
+          }
+        }
         if (isAgentSessionMessageLocalId(context.activeRequest.agentMessageLocalId)
           && (!event.sessionEntryId || event.sessionEntryId !== context.activeRequest.agentMessageProvenanceEntryId)) {
           reportAgentMessageProvenanceFailure(deps, context, event.sessionEntryId, 'missing_user_entry');

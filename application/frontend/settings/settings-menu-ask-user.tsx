@@ -34,11 +34,9 @@ export function AskUserSettings({ prefs, onSetPrefs }: AskUserSettingsProps) {
       <SettingCheckbox
         label="Include for subagents"
         checked={enabled}
+        hint={<>When enabled, <code>ask_user</code> is removed from the shared dropped-tools list; when off, it is added, so subagents decide without prompting you. This mirrors the Subagent settings' dropped-tools control.</>}
         onChange={() => onSetPrefs(setAskUserForSubagents(prefs, !enabled))}
       />
-      <div class="toolbar-settings-item-hint">
-        When off, subagents cannot call <code>ask_user</code> — they must decide without prompting you. Mirrored to the subagent runner via the shared dropped-tools list.
-      </div>
     </div>
   );
 }

@@ -36,10 +36,13 @@ function resolveCounter(): TokenCounter | null {
 	if (req) {
 		try {
 			const mod = req("gpt-tokenizer/encoding/cl100k_base");
+			// Count literal content, not chat-control tokens. Reserved spellings
+			// may appear in prompts or tool results and must be ordinary BPE text.
+			const options = { disallowedSpecial: new Set<string>() };
 			const countFn: (input: string) => number =
 				typeof mod.countTokens === "function"
-					? mod.countTokens
-					: (text: string) => mod.encode(text).length;
+					? (text: string) => mod.countTokens(text, options)
+					: (text: string) => mod.encode(text, options).length;
 			cachedCounter = (text: string) => (text ? countFn(text) : 0);
 		} catch {
 			cachedCounter = null;
@@ -52,7 +55,8 @@ function resolveCounter(): TokenCounter | null {
 }
 
 /**
- * Count BPE tokens in `text` using cl100k_base. Falls back to the chars/4
+ * Count literal text as ordinary BPE tokens using cl100k_base, including
+ * reserved special-token spellings. Falls back to the chars/4
  * heuristic only if the tokenizer cannot be resolved in the current runtime.
  */
 export function countTokens(text: string): number {

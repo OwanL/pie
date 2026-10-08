@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { captureModelExchangeEntries, type CapturedModelExchangeEntry } from './tool-model-exchange';
 
 import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../metadata/session-name';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../agent-processes/lib/rpc/wire.js';
@@ -27,6 +28,7 @@ import { buildIdleSessionCapabilities } from '../../agent-processes/workers/sess
 
 export interface SessionBrowseSnapshot {
   readonly sessionPath: string;
+  readonly modelExchangeEntries?: readonly CapturedModelExchangeEntry[];
   readonly cache: Readonly<ReturnType<typeof buildDisplayTranscriptCache>>;
   /** Durable summary before review-sidecar decoration. */
   readonly summary: Readonly<SessionSummary>;
@@ -113,6 +115,7 @@ export async function openSessionBrowseSnapshot(options: {
   );
   return Object.freeze({
     sessionPath,
+    modelExchangeEntries: Object.freeze(captureModelExchangeEntries(branch)),
     cache,
     summary,
     activeModel,

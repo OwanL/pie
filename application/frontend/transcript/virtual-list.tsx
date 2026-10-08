@@ -77,6 +77,7 @@ function useTranscriptRows({
   busy,
   compacting,
   liveTurnPhase,
+  prepassStartedAt,
   prefs,
   pruningSettings,
   pendingAssistantModelId,
@@ -89,6 +90,7 @@ function useTranscriptRows({
   busy: boolean;
   compacting?: boolean;
   liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
+  prepassStartedAt?: number | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pendingAssistantModelId?: string;
@@ -115,9 +117,10 @@ function useTranscriptRows({
     busy,
     showPruningMessages: prefs.showPruningMessages,
     activityState,
+    prepassStartedAt,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-  }), sessionKey), [sessionKey, systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, pendingAssistantModelId, pendingAssistantThinkingLevel]);
+  }), sessionKey), [sessionKey, systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, prepassStartedAt, pendingAssistantModelId, pendingAssistantThinkingLevel]);
 
   return rows;
 }
@@ -376,6 +379,7 @@ export function TranscriptVirtualList({
   busy,
   compacting,
   liveTurnPhase,
+  prepassStartedAt,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -404,6 +408,7 @@ export function TranscriptVirtualList({
     busy,
     compacting,
     liveTurnPhase,
+    prepassStartedAt,
     prefs,
     pruningSettings,
     pendingAssistantModelId,
@@ -577,21 +582,21 @@ export function TranscriptVirtualList({
               onCancelPrepass={onCancelPrepass}
             />
           ))}
+          </div>
         </div>
 
-          {(!isAtBottom || transcriptWindow.hasNewer) && (
-            <button
-              type="button"
-              class="transcript-jump-latest"
-              aria-label="Jump to bottom"
-              title="Jump to bottom"
-              onClick={jumpToLatest}
-            >
-              <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
-              <span>Bottom</span>
-            </button>
-          )}
-        </div>
+        {(!isAtBottom || transcriptWindow.hasNewer) && (
+          <button
+            type="button"
+            class="transcript-jump-latest"
+            aria-label="Jump to bottom"
+            title="Jump to bottom"
+            onClick={jumpToLatest}
+          >
+            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
+            <span>Bottom</span>
+          </button>
+        )}
         <MessageRail
           rows={rows}
           virtualizer={virtualizer}

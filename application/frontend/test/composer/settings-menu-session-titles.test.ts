@@ -48,7 +48,22 @@ test('session-title behavior exposes only the enable toggle and timeout', () => 
   assert.match(container.textContent ?? '', /Generate session titles/);
   assert.match(container.textContent ?? '', /Title timeout/);
   assert.doesNotMatch(container.textContent ?? '', /Title model/);
-  assert.equal((container.querySelector('[aria-label="Session title timeout"]') as HTMLInputElement).value, '15');
+  const timeout = container.querySelector('[aria-label="Session title timeout"]') as HTMLInputElement;
+  assert.equal(timeout.value, '15');
+  assert.match(container.textContent ?? '', /seconds/);
+  const unitId = timeout.getAttribute('aria-describedby');
+  assert.ok(unitId);
+  assert.equal(container.querySelector(`#${unitId}`)?.textContent, 'seconds');
+
+  // A host-provided settings update refreshes the displayed value without sending a patch.
+  act(() => {
+    render(h(SessionTitlesSection, {
+      settings: { ...settings, timeoutSec: 20 },
+      onSetSessionTitlesSettings: (patch) => calls.push(patch),
+    }), container);
+  });
+  assert.equal(timeout.value, '20');
+  assert.deepEqual(calls, []);
 
   const toggle = container.querySelector('[role="checkbox"]');
   assert.ok(toggle);

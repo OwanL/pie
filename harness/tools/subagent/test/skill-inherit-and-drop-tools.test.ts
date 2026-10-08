@@ -116,11 +116,11 @@ test("runSingleAgent omits catalog tools unsupported by in-memory children", asy
 			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined,
-			["read", "defer_trigger", "session_control", "bash"],
+			["read", "wakeup_timer", "session_control", "bash"],
 			{ sdk },
 		);
 		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "bash"]);
-		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["defer_trigger", "session_control"]);
+		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["wakeup_timer", "session_control"]);
 	} finally {
 		if (previous === undefined) delete process.env[DROP_ENV];
 		else process.env[DROP_ENV] = previous;

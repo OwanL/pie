@@ -144,11 +144,15 @@ function packageResolver() {
 function fakeVerifier(trace) {
   return `
     import { createHash } from 'node:crypto';
-    import { readdir, readFile, stat } from 'node:fs/promises';
+    import { readdir, readFile, realpath, stat } from 'node:fs/promises';
     import path from 'node:path';
     const hash = value => createHash('sha256').update(value).digest('hex');
+    // This fixture models a legacy full SDK, whose runtime also supplies tooling.
+    export async function verifyPiRuntimeToolingArtifact(artifactDir) {
+      return verifyPiRuntimeArtifact(artifactDir);
+    }
     export async function verifyPiRuntimeArtifact(artifactDir) {
-      const root = path.resolve(artifactDir);
+      const root = await realpath(artifactDir);
       const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8'));
       const files = [];
       async function walk(dir, prefix = '') {
@@ -334,6 +338,7 @@ function fakeRuntimePublicationModule(trace) {
     import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
     import path from 'node:path';
     import { appendFile } from 'node:fs/promises';
+    export async function assertRuntimeBootstrapSupportsSchema() { throw new Error('unexpected capability check'); }
     export async function hasRuntimeBootstrap() { return false; }
     export async function installRuntimeBootstrap() {}
     export async function resolveRuntimeGeneration() { return null; }

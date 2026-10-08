@@ -376,6 +376,14 @@ export class MessageRouter {
       case 'restartBackend':
         return this.onRestartBackend(context);
 
+      case 'setPruningRefreshPending':
+        this.dispatchEvent({ kind: 'Command', cmd: {
+          kind: 'SetPruningRefreshPending', corrId: crypto.randomUUID(),
+          sessionPath: msg.sessionPath, pending: msg.pending,
+        } });
+        this.scheduleRender();
+        return;
+
       case 'retrySend':
         return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>, context);
 
@@ -568,7 +576,7 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: {
-        kind: 'Send', corrId, operationId, operationAttempt: 1,
+        kind: 'Send', corrId, operationId, operationAttempt: 1, composerSend: true,
         operationSource: operationSourceFromRenderer(context),
         backendGeneration: this.service.getBackendGeneration?.() ?? 0, sessionPath, text, inputs,
         composedText, localId, userParts, previousSummary,

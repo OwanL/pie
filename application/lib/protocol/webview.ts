@@ -397,6 +397,7 @@ export interface ViewState {
   transcriptLoaded: boolean;
   /** Host-owned pending inputs for the active session. */
   pendingComposerInputs: ComposerInput[];
+  pruningRefreshPending?: boolean;
   /** Most recent run summary for the active session, including recently completed runs. */
   activeRunSummary: ActiveRunSummary | null;
   /** Per-session run summaries used for tab affordances and context menus. */
@@ -760,6 +761,7 @@ type WebviewToHostMessagePayload =
   | { type: 'addComposerInput'; sessionPath: string; input: ComposerInputDraft }
   | { type: 'removeComposerInput'; sessionPath: string; inputId: string }
   | { type: 'setComposerDraft'; sessionPath: string; text: string }
+  | { type: 'setPruningRefreshPending'; sessionPath: string; pending: boolean }
   | {
       type: 'send';
       sessionPath: string;
@@ -941,7 +943,7 @@ type WebviewToHostMessagePayload =
   | {
       /** Cancel a deferred trigger owned by `sessionPath`. When `triggerId`
        *  is omitted, cancels ALL active triggers for that creator session
-       *  (mirrors the `defer_trigger` tool's `cancel` action with no
+       *  (mirrors the `wakeup_timer` tool's `cancel` action with no
        *  `triggerId`). The host appends a `cancel` op to the sidecar and
        *  updates its in-memory set; the next snapshot reflects the removal. */
       type: 'cancelDeferredTrigger';

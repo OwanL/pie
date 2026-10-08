@@ -15,7 +15,7 @@ tree:
 - [`ask-user/`](ask-user/) — `ask_user`
 - [`warm-bash/`](warm-bash/) — `bash`
 - [`computer-use/`](computer-use/) — `computer`
-- [`deferred-triggers/`](deferred-triggers/) — `defer_trigger`
+- [`deferred-triggers/`](deferred-triggers/) — `wakeup_timer`
 - [`playwright/`](playwright/) — `playwright`
 - [`request-capability/`](request-capability/) — `request_capability`
 - [`session-changes/`](session-changes/) — `session_changes`
@@ -36,7 +36,7 @@ backend factory [`harness/agent-processes/coordinator/backend-tools.ts`](../../h
 backend-dependent definitions for primary runtimes and initial-context
 inventory. Inventory has identical schemas/guidance but no operational
 transport. In-memory subagents do not get `session_control` or
-`defer_trigger`; their capability fence uses the same catalog. The owner-routed
+`wakeup_timer`; their capability fence uses the same catalog. The owner-routed
 test is under [`session-control/test/`](session-control/test/), and the
 cross-owner catalog/SDK integration gate is under [`test/integration/`](../../test/integration/).
 

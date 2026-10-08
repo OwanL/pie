@@ -21,6 +21,7 @@
     "harness/agent-instructions/skills"
   ],
   "pruning": {
+    "followUpEnabled": false,
     "model": "gpt-5-mini",
     "provider": "github-copilot",
     "thinkingLevel": "low",

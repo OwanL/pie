@@ -684,6 +684,8 @@ export interface AfterProviderResponseEvent {
 /** Fired after user submits prompt but before agent loop. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	/** One-prompt skill-pruning refresh hint; does not change pruning settings. */
+	refreshPruning?: boolean;
 	/** The raw user prompt text (after expansion). */
 	prompt: string;
 	/** Images attached to the user prompt, if any. */

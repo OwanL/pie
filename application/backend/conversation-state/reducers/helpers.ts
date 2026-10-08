@@ -338,6 +338,7 @@ export function evictSession(
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
   const { [sp]: _dt, ...remainingDraftText } = state.composer.draftTextBySession;
+  const { [sp]: _pr, ...remainingPruningRefresh } = state.composer.pruningRefreshPendingBySession;
   const { [sp]: _fc, ...remainingFileChanges } = state.fileChanges.bySession;
   const { [sp]: _fce, ...remainingFileChangesExpanded } = state.fileChanges.expandedBySession;
   const { [sp]: _rfr, ...remainingReadFilePaths } = state.fileChanges.readFilePathsBySession;
@@ -501,6 +502,7 @@ export function evictSession(
         pendingComposerInputsBySession: remainingComposer,
         activeRunSummaryBySession: remainingRunSummaries,
         draftTextBySession: remainingDraftText,
+        pruningRefreshPendingBySession: remainingPruningRefresh,
       },
       fileChanges: {
         ...state.fileChanges,

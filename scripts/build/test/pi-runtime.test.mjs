@@ -72,6 +72,47 @@ test('buildPiRuntime rejects retired npm refresh before creating output or acqui
   assert.throws(() => lstatSync(output), { code: 'ENOENT' });
 });
 
+test('production role packing preserves ordered compilation, smoke, stability and full verification checkpoints', () => {
+  const source = readFileSync(new URL('../pi-runtime.mjs', import.meta.url), 'utf8');
+  const builder = source.slice(source.indexOf('export async function buildPiRuntime'), source.indexOf('\nif (process.argv[1]'));
+  const checkpoints = [
+    'assertPrivateOutput(output)',
+    'acquireDevelopmentReader(SOURCE)',
+    'const inputEvidence = await capturePiRuntimeInputs()',
+    'const compilation = await assertPiWorkspaceBuildStamp',
+    'await materializeDeployedNodeModules',
+    'fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: runtime }) === compilation.compiledSha256',
+    "packPiRuntime({ runtimeDir: runtime, toolingDir: path.join(output, 'pi-tooling')",
+    'fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: packed.tooling.artifactDir }) === compilation.compiledSha256',
+    'await smoke(runtime, work, env)',
+    'await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) })',
+    'const afterDeploy = await capturePiRuntimeInputs()',
+    'fingerprintPiRuntimeInputs(inputEvidence) === fingerprintPiRuntimeInputs(afterDeploy)',
+    'const verified = await verifyPiRuntimeArtifact(runtime)',
+    'const tooling = await verifyPiRuntimeToolingArtifact(runtime)',
+    "await writeFile(path.join(output, 'build-evidence.json')",
+    'return verified;',
+    'await reader.release({ teardownConfirmed })',
+  ];
+  let previous = -1;
+  for (const checkpoint of checkpoints) {
+    const current = builder.indexOf(checkpoint, previous + 1);
+    assert.ok(current > previous, `missing/out-of-order checkpoint: ${checkpoint}`);
+    previous = current;
+  }
+  assert.match(builder, /provenance: \{ upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,[\s\S]*sourceTreeSha256: inputEvidence\.sourceTreeSha256, lockSha256: inputEvidence\.lockSha256, target: inputEvidence\.target/);
+  assert.match(builder, /toolingIdentity: tooling\.identity, rolePacking: packed\.evidence/);
+  assert.match(builder, /compiledSha256: compilation\.compiledSha256/);
+  assert.doesNotMatch(builder, /writePiRuntimeManifest|refresh-lock.*install/);
+});
+
+test('buildPiRuntime rejects an existing private output before acquiring a workspace reader', async t => {
+  const output = mkdtempSync(path.join(os.tmpdir(), 'pie-pi-runtime-existing-'));
+  t.after(() => rmSync(output, { recursive: true, force: true }));
+  await assert.rejects(buildPiRuntime({ output }), /Output already exists/);
+  assert.deepEqual(readdirSync(output), []);
+});
+
 test('resolveNativeModifierHelper requires the current Windows/macOS target helper', (t) => {
   const runtime = mkdtempSync(path.join(os.tmpdir(), 'pie-pi-runtime-native-'));
   t.after(() => rmSync(runtime, { recursive: true, force: true }));

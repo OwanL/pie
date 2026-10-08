@@ -254,7 +254,8 @@ function isLazyDetailRef(value: unknown): value is LazyDetailRef {
     ['key', 'kind', 'source', 'sessionPath', 'messageId', 'sizeBytes', 'summary', 'available'],
     ['toolCallId', 'executionId', 'partIndex', 'sourceRevision', 'childCount', 'lineCount'])) return false;
   return boundedString(value.key, PATH_BYTES)
-    && (value.kind === 'tool-result' || value.kind === 'reasoning')
+    && (value.kind === 'tool-result' || value.kind === 'reasoning' || value.kind === 'model-exchange')
+    && (value.kind !== 'model-exchange' || (value.source === 'durable' && typeof value.toolCallId === 'string' && value.toolCallId.length > 0))
     && (value.source === 'durable' || value.source === 'live')
     && boundedString(value.sessionPath, PATH_BYTES) && boundedString(value.messageId, ID_BYTES)
     && nonNegativeInteger(value.sizeBytes) && typeof value.summary === 'string' && typeof value.available === 'boolean'

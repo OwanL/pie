@@ -5,11 +5,13 @@
 @import './aggregate-stats-strip.css';
 @import './layout.css';
 @import './transcript.css';
+@import './system-prompts.css';
 @import './inline-editor.css';
 @import './tool-call.css';
 @import './highlight.css';
 @import './composer.css';
 @import './model-picker.css';
+@import './settings-menu.css';
 @import './context-menu.css';
 @import './file-changes.css';
 @import './extension-ui-prompt.css';
@@ -445,6 +447,11 @@
   line-height: 1.6;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+@media (pointer: coarse) {
+  .message-body,
+  .message-prose { font-size: max(14px, var(--panel-font-size, 11px)); }
 }
 
 /* ── Shared keyframe animations ─────────────────────────────────────────── */

@@ -2,13 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import DOMPurify from 'dompurify';
-import { h } from 'preact';
-import renderToString from 'preact-render-to-string';
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
+import { installDom } from '../../helpers/dom';
+import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open';
+installDom();
 
 import { DEFAULT_CHAT_PREFS, type ToolCall } from '../../../../lib/protocol/index.js';
 import type { ToolRendererProps } from '../../../transcript/registry';
 
-// Keep markdown output deterministic without requiring a browser DOM.
+// Keep markdown output deterministic in the isolated DOM fixture.
 DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
 
 // Trigger side-effect renderer registration.
@@ -31,7 +34,16 @@ function renderAskUser(toolCall: ToolCall): string {
     onContextMenu: noopContextMenu,
     renderToolCall: noopRenderToolCall,
   };
-  return renderToString(h(Renderer as any, props));
+  clearCollapsibleCache();
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  act(() => render(h(Renderer as any, props), container));
+  assert.equal(container.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'false');
+  act(() => (container.querySelector('.tool-call-toggle') as HTMLButtonElement).click());
+  const html = container.innerHTML;
+  act(() => render(null, container));
+  container.remove();
+  return html;
 }
 
 test('completed ask_user preserves the prompt options and marks the selected answer', () => {
@@ -62,7 +74,7 @@ test('completed ask_user preserves the prompt options and marks the selected ans
   assert.match(html, />Keep the current flow<\/span>/);
   assert.match(
     html,
-    /aria-label="Use the proposed flow, selected answer" class="ask-user-option ask-user-option-selected">Use the proposed flow<\/span>/,
+    /aria-label="Use the proposed flow, selected answer"/,
   );
   assert.match(html, /ask-user-answer-label">Answer:<\/span>/);
   assert.match(html, /ask-user-answer-text">Use the proposed flow<\/span>/);

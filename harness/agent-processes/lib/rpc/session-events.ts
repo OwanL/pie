@@ -465,6 +465,8 @@ export interface PreflightFailedPayload {
  *  queue one message at a time in enqueue order), so text is not used for
  *  matching (the SDK may have expanded skill/template commands). */
 export interface QueuedDeliveredPayload {
+  /** Durable user-entry binding only; requires localId and does not promote delivery. */
+  durableEntryId?: string;
   sessionPath: string;
   text: string;
   operationId?: string;

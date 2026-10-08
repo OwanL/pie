@@ -357,6 +357,7 @@ test('buildTranscriptRows shows a pending pruning header in a stable assistant p
     activityState,
     pendingAssistantModelId: 'gpt-5.4',
     pendingAssistantThinkingLevel: 'xhigh',
+    prepassStartedAt: 5_000,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -367,10 +368,10 @@ test('buildTranscriptRows shows a pending pruning header in a stable assistant p
   assert.equal(assistantRow?.kind === 'message' ? assistantRow.message.thinkingLevel : null, 'xhigh');
   assert.deepEqual(
     assistantRow?.kind === 'message' ? assistantRow.pruningHeaderState : null,
-    { kind: 'pending', label: 'pruning skills/tools' },
+    { kind: 'pending', label: 'pruning skills/tools', prepassStartedAt: 5_000 },
   );
-  assert.equal(assistantRow?.kind === 'message' && assistantRow.activityState ? assistantRow.activityState.phase : null, 'pruning');
-  assert.equal(assistantRow?.kind === 'message' && assistantRow.activityState ? assistantRow.activityState.label : null, 'pruning skills/tools');
+  assert.equal(assistantRow?.kind === 'message' ? assistantRow.activityState : undefined, null,
+    'pending header owns prepass status; no duplicate activity banner');
 });
 
 test('buildTranscriptRows suppresses standalone typingIndicator when busy and last message is assistant', () => {

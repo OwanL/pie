@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import test, { describe } from 'node:test';
 
 import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
+import { RUNTIME_INITIALIZATION_TIMEOUT_MS } from '../runtime-initialization-timeout.js';
 import {
   WorkerClient,
   WorkerRequestTimeoutError,
@@ -120,6 +121,87 @@ test('real inherited-FD transport keeps JSON-looking, partial, and bounded-large
     assert.equal(exited.failure, undefined);
   } finally {
     await cleanup(client);
+  }
+});
+
+test('default bootstrap budget keeps a cold inherited-FD worker starting past 15 seconds', async () => {
+  const clock = new FakeClock();
+  // Explicit undefined removes this suite's short fixture override.
+  const client = createClient('gated-ready', { scheduler: clock, startupTimeoutMs: undefined });
+  let settled = false;
+  const started = client.start();
+  void started.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await waitUntil(() => client.getSnapshot().stdoutTail.includes('READINESS-HELD'));
+    assert.equal(clock.timerCount(), 1, 'bootstrap owns a readiness timer, not a heartbeat timer');
+    clock.advance(15_001);
+    await Promise.resolve();
+    assert.equal(client.getSnapshot().status, 'starting');
+    assert.equal(settled, false, 'bootstrap remains pending until validated readiness');
+    assert.equal(client.getSnapshot().stdoutTail.includes('RUNTIME-COMMAND'), false);
+
+    assert.deepEqual(await client.ping(), { kind: 'pong' });
+    assert.equal((await started).mode, 'phase2');
+    assert.equal(client.getSnapshot().status, 'ready');
+    assert.equal(clock.timerCount(), 1, 'readiness clears bootstrap and arms only the heartbeat watchdog');
+    assert.deepEqual(await client.shutdown('cold bootstrap complete'), { kind: 'shutting-down' });
+    await client.waitForConfirmedExit(5_000);
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('a genuinely stuck bootstrap still expires at the shared production initialization deadline', async () => {
+  const clock = new FakeClock();
+  const client = createClient('gated-ready', { scheduler: clock, startupTimeoutMs: undefined });
+  const started = client.start();
+  void started.catch(() => undefined);
+  try {
+    await waitUntil(() => client.getSnapshot().stdoutTail.includes('READINESS-HELD'));
+    clock.advance(RUNTIME_INITIALIZATION_TIMEOUT_MS - 1);
+    assert.equal(client.getSnapshot().status, 'starting');
+    clock.advance(2);
+    await assert.rejects(started, new RegExp(`Worker did not become ready within ${RUNTIME_INITIALIZATION_TIMEOUT_MS} ms`));
+    await client.waitForConfirmedExit(5_000);
+    assert.equal(client.getSnapshot().status, 'exited');
+    assert.equal(clock.timerCount(), 0);
+    assert.equal(client.getSnapshot().stdoutTail.includes('RUNTIME-COMMAND'), false);
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('explicit short bootstrap deadline fails boundedly, confirms exit, and permits a later fresh retry', async () => {
+  const clock = new FakeClock();
+  const client = createClient('gated-ready', { scheduler: clock, startupTimeoutMs: 50 });
+  const started = client.start();
+  void started.catch(() => undefined);
+  try {
+    await waitUntil(() => client.getSnapshot().stdoutTail.includes('READINESS-HELD'));
+    clock.advance(51);
+    await assert.rejects(started, /Worker did not become ready within 50 ms/);
+    await client.waitForConfirmedExit(5_000);
+    assert.equal(client.getSnapshot().status, 'exited');
+    assert.equal(clock.timerCount(), 0);
+    assert.equal(client.getSnapshot().stdoutTail.includes('RUNTIME-COMMAND'), false);
+  } finally {
+    await cleanup(client);
+  }
+
+  const retry = createClient('gated-ready', {
+    scheduler: new FakeClock(), startupTimeoutMs: undefined, workerGeneration: 2,
+  });
+  const retried = retry.start();
+  void retried.catch(() => undefined);
+  try {
+    await waitUntil(() => retry.getSnapshot().stdoutTail.includes('READINESS-HELD'));
+    assert.deepEqual(await retry.ping(), { kind: 'pong' });
+    await retried;
+    assert.equal(retry.getSnapshot().status, 'ready');
+    assert.deepEqual(await retry.shutdown('retry complete'), { kind: 'shutting-down' });
+    await retry.waitForConfirmedExit(5_000);
+  } finally {
+    await cleanup(retry);
   }
 });
 

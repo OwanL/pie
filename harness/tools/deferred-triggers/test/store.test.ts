@@ -34,6 +34,48 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('timer starts replay only once for pending creator-owned wakeup-mode timers', () => {
+  const start = '2026-01-01T00:00:01.000Z';
+  const later = '2026-01-01T00:00:02.000Z';
+  for (const id of ['wake', 'legacy', 'immediate', 'non-timer', 'claimed', 'retryable', 'cancelled', 'fired']) {
+    appendTriggerOp({ id, op: 'register', sessionPath: '/creator', targetSession: '/target',
+      triggers: id === 'non-timer' ? [{ kind: 'user_input' }] : [{ kind: 'timer', ms: 1000 }],
+      ...(id === 'legacy' ? {} : { wakeupMode: id !== 'immediate' }) });
+  }
+  appendTriggerOp({ id: 'claimed', op: 'claim', sessionPath: '/creator', claimId: 'claim' });
+  appendTriggerOp({ id: 'retryable', op: 'failed', sessionPath: '/creator' });
+  appendTriggerOp({ op: 'cancel', sessionPath: '/creator', targetId: 'cancelled' });
+  appendTriggerOp({ id: 'fired', op: 'fire', sessionPath: '/creator' });
+  appendTriggerOp({ id: 'wake', op: 'timer-started', sessionPath: '/target', at: start });
+  appendTriggerOp({ id: 'wake', op: 'timer-started', sessionPath: '/creator', at: '2026-02-30T00:00:00.000Z' });
+  assert.equal(replayTriggers(readTriggerOps()).get('wake')?.timerStartedAt, undefined);
+  for (const id of ['wake', 'legacy', 'immediate', 'non-timer', 'claimed', 'retryable', 'cancelled', 'fired', 'missing']) {
+    appendTriggerOp({ id, op: 'timer-started', sessionPath: '/creator', at: start });
+    appendTriggerOp({ id, op: 'timer-started', sessionPath: '/creator', at: later });
+  }
+  const active = replayTriggers(readTriggerOps());
+  assert.equal(active.get('wake')?.timerStartedAt, start);
+  assert.equal(active.get('legacy')?.wakeupMode, false);
+  assert.equal(active.get('immediate')?.wakeupMode, false);
+  for (const id of ['legacy', 'immediate', 'non-timer', 'claimed', 'retryable']) {
+    assert.equal(active.get(id)?.timerStartedAt, undefined, id);
+  }
+  for (const id of ['cancelled', 'fired', 'missing']) assert.equal(active.has(id), false);
+});
+
+test('parsing validates timer-started timestamps, ids, and registration flags', () => {
+  const records = [
+    { op: 'register', id: 'legacy', sessionPath: '/creator', triggers: [{ kind: 'timer', ms: 1 }] },
+    { op: 'register', id: 'bad-mode', sessionPath: '/creator', triggers: [{ kind: 'timer', ms: 1 }], wakeupMode: 'true' },
+    ...[undefined, '', 'January 1 2026', '2026-02-30T00:00:00.000Z'].map((at) =>
+      ({ op: 'timer-started', id: 'legacy', sessionPath: '/creator', at })),
+    { op: 'timer-started', sessionPath: '/creator', at: '2026-01-01T00:00:00.000Z' },
+    { op: 'timer-started', id: 'legacy', sessionPath: '/creator', at: '2026-01-01T00:00:00.000Z' },
+  ];
+  fs.writeFileSync(path.join(dir, TRIGGERS_FILE), records.map((op) => JSON.stringify(op)).join('\n'));
+  assert.deepEqual(readTriggerOps().map((op) => op.op), ['register', 'timer-started']);
+});
+
 test('append + read round-trips a register op', () => {
   appendTriggerOp({
     id: 't1',

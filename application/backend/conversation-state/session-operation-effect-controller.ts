@@ -164,6 +164,7 @@ export class SessionOperationEffectController {
           operationId: effect.operationId,
           operationAttempt,
           text: effect.text,
+          refreshPruning: effect.refreshPruning === true,
           inputs: effect.inputs,
           localId: effect.localId,
         }, {
@@ -694,9 +695,12 @@ export class SessionOperationEffectController {
     } catch (error) {
       const detail = toErrorMessage(error);
       const code = error && typeof error === 'object' && 'code' in error
-        ? String((error as { code?: unknown }).code ?? '') : '';
-      const state = code === 'SESSION_GENERATION_ENDED' || code === 'SESSION_NOT_FOUND'
-        || detail.includes('SESSION_GENERATION_ENDED') || detail.includes('SESSION_NOT_FOUND')
+        && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code : undefined;
+      // A missing hot owner can be transient while promotion is still live.
+      // Only a structured owning-generation death code authorizes rollback;
+      // diagnostic message text is not lifecycle evidence.
+      const state = code === 'SESSION_GENERATION_ENDED'
         ? 'generation-ended' as const
         : 'reconciliation-unavailable' as const;
       const common = {

@@ -29,7 +29,7 @@ export function shouldSkipPruning(
 	if (!isInSubagentContext() && activeConfig.mainAgentEnabled === false) {
 		return { skip: true, reason: "main-agent-disabled" };
 	}
-	if (event.prompt.trim().length < MIN_PROMPT_LENGTH) {
+	if (event.prompt.trim().length < MIN_PROMPT_LENGTH && !(event.refreshPruning && !isInSubagentContext())) {
 		return { skip: true, reason: "too-short" };
 	}
 	return { skip: false };
@@ -55,6 +55,7 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 		thinkingLevel: input.thinkingLevel,
 		mainAgentEnabled: input.mainAgentEnabled ?? true,
 		subagentEnabled: input.subagentEnabled ?? true,
+		followUpEnabled: input.followUpEnabled ?? false,
 		skills: {
 			strategy: input.skills.strategy,
 			ceiling: input.skills.ceiling,

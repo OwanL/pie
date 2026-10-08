@@ -24,4 +24,4 @@
  * few seconds later. Keep this single source of truth; do not redeclare the
  * timeout elsewhere.
  */
-export const BACKEND_READY_TIMEOUT_MS = 120_000;
+export { RUNTIME_INITIALIZATION_TIMEOUT_MS as BACKEND_READY_TIMEOUT_MS } from '../../../harness/agent-processes/lib/rpc/runtime-initialization-timeout.js';

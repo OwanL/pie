@@ -28,6 +28,7 @@ export interface ModelAssignmentRowProps {
   emptyLabel: string;
   clearable?: boolean;
   disabled?: boolean;
+  ariaDescribedBy?: string;
   thinking?: ModelAssignmentThinkingConfig;
   /** Model used when `current` is null (for example the active model). */
   fallbackModel?: ModelInfo | null;
@@ -36,6 +37,7 @@ export interface ModelAssignmentRowProps {
   modelTitle?: string;
   clearLabel?: string;
   clearTitle?: string;
+  compactLabels?: boolean;
 }
 
 function findEntry(entries: ModelPickerEntry[], current: ModelAssignment | null): ModelPickerEntry | undefined {
@@ -62,6 +64,8 @@ export function ModelAssignmentRow({
   modelTitle,
   clearLabel,
   clearTitle,
+  compactLabels = false,
+  ariaDescribedBy,
 }: ModelAssignmentRowProps) {
   const selectedEntry = findEntry(entries, current);
   const fallbackMatchesCurrent = !!fallbackModel && !!current
@@ -99,8 +103,8 @@ export function ModelAssignmentRow({
 
   return (
     <>
-      <div class="toolbar-settings-item toolbar-settings-mode-row">
-        <span class="toolbar-settings-item-label">{label}</span>
+      <div class="toolbar-settings-item toolbar-settings-mode-row" data-settings-label={label}>
+        <span class="toolbar-settings-item-label">{compactLabels ? 'Model' : label}</span>
         <div class="toolbar-settings-inline-actions">
           <ModelPicker
             compact
@@ -111,6 +115,7 @@ export function ModelAssignmentRow({
             title={modelTitle ?? `Select ${label.toLowerCase()}`}
             entries={entries}
             disabled={disabled}
+            ariaDescribedBy={ariaDescribedBy}
             onChange={handleModelChange}
           />
           {clearable && current?.model && (
@@ -118,6 +123,7 @@ export function ModelAssignmentRow({
               type="button"
               class="toolbar-settings-stepper-btn"
               disabled={disabled}
+              aria-describedby={ariaDescribedBy}
               aria-label={resolvedClearLabel}
               title={clearTitle ?? resolvedClearLabel}
               onClick={handleClear}
@@ -125,17 +131,23 @@ export function ModelAssignmentRow({
           )}
         </div>
       </div>
-      {thinking && (
-        <ThinkingSelect
-          value={thinking.value}
-          model={selectedModel}
-          includeInherit={thinking.includeInherit}
-          disabled={disabled}
-          label={thinking.label ?? 'Thinking'}
-          ariaLabel={thinking.ariaLabel}
-          onChange={thinking.onChange}
-        />
-      )}
+      {thinking && (() => {
+        const thinkingLabel = thinking.label ?? 'Thinking';
+        return (
+          <label class="toolbar-settings-item toolbar-settings-mode-row" data-settings-label={thinkingLabel}>
+            <span class="toolbar-settings-item-label">{compactLabels ? 'Thinking' : thinkingLabel}</span>
+            <ThinkingSelect
+              value={thinking.value}
+              model={selectedModel}
+              includeInherit={thinking.includeInherit}
+              disabled={disabled}
+              ariaLabel={thinking.ariaLabel ?? thinkingLabel}
+              ariaDescribedBy={ariaDescribedBy}
+              onChange={thinking.onChange}
+            />
+          </label>
+        );
+      })()}
     </>
   );
 }

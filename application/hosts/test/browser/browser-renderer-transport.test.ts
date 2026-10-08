@@ -211,6 +211,40 @@ test('ingress: valid messages route; lifecycle messages update the session direc
   assert.deepEqual(registration.focused, [true]);
 });
 
+test('ingress: deferred trigger cancel routes stamped creator targeting and cancel-all unchanged', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: 7 }), false);
+
+  const command = {
+    type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator', triggerId: 'trigger-1',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', viewGeneration: 7,
+  };
+  const cancelAll = {
+    type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator',
+    clientCommandId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', viewGeneration: 7,
+  };
+  socket.emit('message', JSON.stringify(command), false);
+  socket.emit('message', JSON.stringify(cancelAll), false);
+
+  assert.deepEqual(routed.slice(1), [command, cancelAll]);
+  assert.deepEqual(socket.closed, []);
+});
+
+test('ingress: malformed deferred trigger cancels never route', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: PIE_BUILD_ID, viewGeneration: 7 }), false);
+  const command = {
+    type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator', triggerId: 'trigger-1',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', viewGeneration: 7,
+  };
+  for (const fields of [{ triggerId: 42 }, { sessionPath: null }, { extra: true }, { clientCommandId: 'invalid' }]) {
+    socket.emit('message', JSON.stringify({ ...command, ...fields }), false);
+  }
+  assert.equal(routed.length, 1, 'only ready routes');
+});
+
 test('ingress: readiness from another compiled build routes normally', () => {
   const { socket, transport, registration, routed } = createHarness();
   transport.start(registration.registration);

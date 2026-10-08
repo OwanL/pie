@@ -514,6 +514,8 @@ pi.on("session_shutdown", async (event, ctx) => {
 
 Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.
 
+`event.refreshPruning?: boolean` carries the one-prompt skill-pruning refresh hint from `PromptOptions`. Extensions may use it to refresh selection for this prompt without changing global pruning settings. Queued steering/follow-up delivery and empty continuation do not fire this event.
+
 ```typescript
 pi.on("before_agent_start", async (event, ctx) => {
   // event.prompt - user's prompt text

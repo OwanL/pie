@@ -28,6 +28,52 @@ import {
 // backend must agree on. Bumps require a coordinated change.
 // ---------------------------------------------------------------------------
 
+test('tool inspection retrieves captured model exchange without substituting display records', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /durable `model-exchange` lazy detail, not display inputs\/results/u);
+  assert.match(contract, /confirmed by a successful provider response/u);
+  assert.match(contract, /explicitly unavailable, never reconstructed/u);
+  const { captureModelExchangeEntries, findToolModelExchange, modelExchangeRef } = await import('../../harness/session-storage/transcripts/tool-model-exchange.js');
+  const { validateWebviewToHostMessage } = await import('../../application/lib/validation/protocol-validation.js');
+  const tool = { id: 'call', durableEntryId: 'result', name: 'display', input: 'display input', result: 'display output', status: 'completed' as const };
+  const transcript: ChatMessage[] = [{ id: 'assistant', role: 'assistant', createdAt: '', markdown: '', status: 'completed', parts: [{ kind: 'toolCall', toolCall: tool }] }];
+  const ref = modelExchangeRef('/session', tool);
+  assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', sessionPath: '/session', ref }).ok, true);
+  assert.equal(findToolModelExchange(transcript, [], ref).status, 'unavailable');
+  const captured = { produced: { name: 'read', arguments: { path: 'model.ts' } }, received: ['provider-visible content'] };
+  const entries = captureModelExchangeEntries([
+    { type: 'custom', customType: 'pie.tool-model-exchange', data: { version: 1, toolCallId: 'call', produced: captured.produced } },
+    { type: 'message', id: 'assistant', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'call' }] } },
+    { type: 'message', id: 'result', message: { role: 'toolResult', toolCallId: 'call' } },
+    { type: 'custom', customType: 'pie.tool-model-exchange', data: { version: 1, toolCallId: 'call', received: captured.received } },
+  ]);
+  const found = findToolModelExchange(transcript, entries, ref);
+  assert.equal(found.status, 'loaded');
+  if (found.status === 'loaded') assert.deepEqual(found.value, captured);
+});
+
+test('wakeup timers project durable response-relative starts and admit creator-owned cancellation', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /`wakeupMode` defaults to `true`: timer delays start only after the creator finishes its response/u);
+  assert.match(contract, /reloads never restart the delay/u);
+  assert.match(contract, /`cancelDeferredTrigger` carries the creator `sessionPath` and optional `triggerId` through both renderer transports/u);
+  const { replayTriggers } = await import('../../application/backend/deferred-triggers/store.js');
+  const trigger = replayTriggers([
+    { op: 'register', id: 'wake', sessionPath: '/creator.jsonl', targetSession: '/target.jsonl',
+      triggers: [{ kind: 'timer', ms: 1000 }], wakeupMode: true, message: 'check', at: '2026-10-08T12:00:00.000Z' },
+    { op: 'timer-started', id: 'wake', sessionPath: '/creator.jsonl', at: '2026-10-08T12:00:05.000Z' },
+    { op: 'timer-started', id: 'wake', sessionPath: '/creator.jsonl', at: '2026-10-08T12:00:10.000Z' },
+  ]).get('wake');
+  assert.equal(trigger?.wakeupMode, true);
+  assert.equal(trigger?.timerStartedAt, '2026-10-08T12:00:05.000Z');
+  const { validateBrowserToHostMessage } = await import('../../application/lib/validation/browser-ingress.js');
+  const cancellation = { type: 'cancelDeferredTrigger', sessionPath: '/creator.jsonl', triggerId: 'wake',
+    clientCommandId: '123e4567-e89b-42d3-a456-426614174000', viewGeneration: 1 };
+  const accepted = validateBrowserToHostMessage(cancellation, Buffer.byteLength(JSON.stringify(cancellation)));
+  assert.equal(accepted.ok, true, accepted.ok ? '' : accepted.reason);
+  if (accepted.ok) assert.deepEqual(accepted.value, cancellation);
+});
+
 test('runtime lease release stays behind awaited production backend shutdown', async () => {
   // Bootstrap's executable delayed-deactivation tests cover lease retention.
   // Guard the production delegate too: Disposable.dispose() is fire-and-forget
@@ -47,6 +93,15 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   assert.ok(backendDispose > transportShutdown, 'backend disposal must follow transport settlement');
   assert.ok(runtimeStop > backendDispose, 'analytics runtime stop must follow backend disposal');
   assert.match(entry, /await extension\?\.shutdown\(\)/u);
+});
+
+test('restored missing-tab recovery distinguishes filesystem absence from transient and lifecycle failures', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Startup omits restored paths confirmed absent or not regular files, while transient filesystem errors retain tabs/u);
+  assert.match(contract, /fresh host confirmation of `ENOENT`\/`ENOTDIR` and current generation, data-epoch, and operation-ownership checks/u);
+  assert.match(contract, /Running, hidden-running, closing, and other active-operation targets remain protected/u);
+  assert.match(contract, /a prior authoritative open success wins over a late error/u);
+  assert.match(contract, /without stopping a runtime or deleting session files/u);
 });
 
 test('host artifact delivery binds Pi to verified output and distinguishes standalone lifetimes', async () => {
@@ -127,6 +182,15 @@ test('agent session-control messages retain user-role provenance through queue d
   assert.match(stateContract, /explicitly flushing a fresh session at user append rather than waiting for an assistant response/u);
   assert.match(stateContract, /Duplicate observations cannot downgrade a delivered row/u);
   assert.match(agentContract, /publishes an Agent-attributed user-role transcript row/u);
+});
+
+test('user append bindings reconcile optimistic rows without changing delivery ownership', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /exact `localId`\/`durableEntryId` binding for direct or queued prompts of any origin/u);
+  assert.match(contract, /never promotes, reorders, or settles an operation/u);
+  assert.match(contract, /even without a shared partial-window prefix/u);
+  assert.match(contract, /an older snapshot omitting that entry preserves the pending row/u);
+  assert.match(contract, /missing or fenced append identities never manufacture durability/u);
 });
 
 test('PROTOCOL_VERSION is a positive integer', () => {
@@ -1034,6 +1098,16 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   }
   closeDetailSubscription('subagent:msg-1:tool-1', 'unmount');
   assert.equal(posts.length, 2, 'unmount after collapse does not double-post');
+});
+
+test('renderer-local image previews extend only to bounded inline Markdown raster presentation', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /same narrow allowance covers inline presentation of local Markdown raster images/u);
+  assert.match(contract, /targeted, bounded `imagePreviewResult` imperative/u);
+  assert.match(contract, /Markdown parsing and content caches remain pure and retain only the reference\/placeholder/u);
+  assert.match(contract, /cancelled or discarded when the session, cwd, renderer root, or connection changes/u);
+  assert.match(contract, /Loading is bounded; unavailable, timed-out, or invalid images retain a readable text fallback/u);
+  assert.match(contract, /never copied into `ViewState`, snapshots, or durable state/u);
 });
 
 test('changed-files peek/hover overlay is webview-local, not host state', () => {

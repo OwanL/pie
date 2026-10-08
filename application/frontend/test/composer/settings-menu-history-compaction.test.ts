@@ -30,16 +30,17 @@ function makeProps(overrides: Partial<Parameters<typeof HistoryCompactionSection
   };
 }
 
-test('HistoryCompactionSection renders soft and hard trigger controls with model token equivalents', () => {
+test('HistoryCompactionSection keeps effective token equivalents out of persistent SSR content', () => {
   const html = renderToString(h(HistoryCompactionSection, makeProps()));
 
   assert.match(html, /History compaction/);
   assert.match(html, /Proactive automatic compaction/);
   assert.match(html, /Soft trigger/);
   assert.match(html, /Hard trigger/);
-  assert.match(html, /about 140k tokens/);
-  assert.match(html, /about 170k tokens/);
-  assert.match(html, /Never interrupts reasoning or a running tool/);
+  assert.doesNotMatch(html, /about 140k tokens/);
+  assert.doesNotMatch(html, /about 170k tokens/);
+  assert.match(html, /aria-label="About Triggers &amp; retention"/);
+  assert.doesNotMatch(html, /Never interrupts reasoning or a running tool/);
 });
 
 test('HistoryCompactionSection renders retention and instructions without model assignment', () => {
@@ -72,6 +73,22 @@ test('HistoryCompactionSection shows active-model profile controls in token mode
   const html = renderToString(h(HistoryCompactionSection, makeProps({ settings })));
 
   assert.match(html, /Custom thresholds for active model/);
+});
+
+test('HistoryCompactionSection renders token units for global and active-model thresholds', () => {
+  const settings = convertMode(DEFAULT_HISTORY_COMPACTION_SETTINGS, 'tokens', 200_000);
+  settings.modelProfiles['test/m1'] = {
+    softThreshold: 120_000,
+    hardThreshold: 150_000,
+    keepRecentTokens: 20_000,
+  };
+  const html = renderToString(h(HistoryCompactionSection, makeProps({ settings })));
+
+  assert.equal((html.match(/class="toolbar-settings-number-unit">tokens<\/span>/g) ?? []).length, 6);
+  assert.match(html, /value="140000"/);
+  assert.match(html, /value="170000"/);
+  assert.match(html, /value="120000"/);
+  assert.match(html, /value="150000"/);
 });
 
 test('HistoryCompactionSection hides active-model profile controls in percentage mode', () => {

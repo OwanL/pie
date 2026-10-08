@@ -3,7 +3,6 @@ import type { ChatPrefs, ModelInfo, SubagentBucketAssignment } from '../../lib/p
 
 export type BooleanPrefKey =
   | 'autoExpandReasoning'
-  | 'autoExpandToolCalls'
   | 'autoExpandSubagentCalls'
   | 'suppressCompletionNotifications'
   | 'showPruningMessages'
@@ -37,14 +36,10 @@ export interface ChatPrefMenuSection {
   items: ChatPrefMenuItem[];
 }
 
-const CHAT_PREF_CONTEXT_ITEMS: Record<ChatPrefContextType, ChatPrefMenuItem> = {
+const CHAT_PREF_CONTEXT_ITEMS: Partial<Record<ChatPrefContextType, ChatPrefMenuItem>> = {
   reasoning: {
     key: 'autoExpandReasoning',
     label: 'Auto-expand reasoning',
-  },
-  toolCalls: {
-    key: 'autoExpandToolCalls',
-    label: 'Auto-expand tool calls',
   },
   subagentCalls: {
     key: 'autoExpandSubagentCalls',
@@ -57,9 +52,8 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
     id: 'transcript',
     label: 'Transcript',
     items: [
-      CHAT_PREF_CONTEXT_ITEMS.reasoning,
-      CHAT_PREF_CONTEXT_ITEMS.toolCalls,
-      CHAT_PREF_CONTEXT_ITEMS.subagentCalls,
+      CHAT_PREF_CONTEXT_ITEMS.reasoning!,
+      CHAT_PREF_CONTEXT_ITEMS.subagentCalls!,
     ],
   },
   {
@@ -114,23 +108,25 @@ export function toggleChatPref(prefs: ChatPrefs, key: BooleanPrefKey): Partial<C
   return { [key]: !prefs[key] } as Partial<ChatPrefs>;
 }
 
-export function getChatPrefContextKey(type: ChatPrefContextType): BooleanPrefKey {
-  return CHAT_PREF_CONTEXT_ITEMS[type].key;
+export function getChatPrefContextKey(type: ChatPrefContextType): BooleanPrefKey | null {
+  return CHAT_PREF_CONTEXT_ITEMS[type]?.key ?? null;
 }
 
 export function getChatPrefContextLabel(type: ChatPrefContextType): string {
-  return CHAT_PREF_CONTEXT_ITEMS[type].label;
+  return CHAT_PREF_CONTEXT_ITEMS[type]?.label ?? '';
 }
 
 export function getChatPrefContextValue(prefs: ChatPrefs, type: ChatPrefContextType): boolean {
-  return prefs[getChatPrefContextKey(type)];
+  const key = getChatPrefContextKey(type);
+  return key ? prefs[key] : false;
 }
 
 export function toggleChatPrefForContext(
   prefs: ChatPrefs,
   type: ChatPrefContextType,
 ): Partial<ChatPrefs> {
-  return toggleChatPref(prefs, getChatPrefContextKey(type));
+  const key = getChatPrefContextKey(type);
+  return key ? toggleChatPref(prefs, key) : {};
 }
 
 export function getToolCallContextType(toolName: string): Exclude<ChatPrefContextType, 'reasoning'> {

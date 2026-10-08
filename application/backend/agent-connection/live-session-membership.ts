@@ -226,15 +226,16 @@ export function hostLiveMembershipFingerprint(snapshot: HostLiveMembershipSnapsh
 
 /** Ordered host→coordinator sync bridge. Issues one bounded snapshot per
  *  backend generation change or reducer-state change; only the newest issued
- *  snapshot advances the fingerprint after its acknowledgement, so a failed
- *  send is retried by the next reducer transition. Synchronization point of
+ *  snapshot owns the fingerprint while pending and after acknowledgement, so
+ *  identical in-flight snapshots stay silent. A failed latest send releases
+ *  the fingerprint for retry by the next reducer transition. Synchronization point of
  *  the close-ingress contract: `afterDispatch` runs synchronously *between*
  *  the reducer transition and its effect handlers, so the coordinator observes
  *  a UI/agent close (and its closing reservation) strictly before any later
  *  host mutation, including the close bridge's own acknowledgement and
  *  stop/interrupt writes. */
 export class HostLiveMembershipSync {
-  private lastSentFingerprint: string | undefined;
+  private lastIssuedFingerprint: string | undefined;
   private lastBackendGeneration: number | undefined;
   private lastIssuedSeq = 0;
 
@@ -259,13 +260,16 @@ export class HostLiveMembershipSync {
       // reduced state is unchanged; the coordinator restarted with empty
       // membership authority.
       this.lastBackendGeneration = generation;
-      this.lastSentFingerprint = undefined;
+      this.lastIssuedFingerprint = undefined;
     }
     const snapshot = projectHostLiveMembership(state, this.projectionOptions);
     const fingerprint = hostLiveMembershipFingerprint(snapshot);
-    if (this.lastSentFingerprint !== undefined && this.lastSentFingerprint === fingerprint) return;
+    if (this.lastIssuedFingerprint === fingerprint) return;
     const issued = ++this.lastIssuedSeq;
     const revision = ++revisionCounter;
+    // Reserve synchronously without waiting for acknowledgement or delaying
+    // changed membership/closing snapshots on the FIFO transport.
+    this.lastIssuedFingerprint = fingerprint;
     void this.options
       .request({
         revision,
@@ -273,13 +277,11 @@ export class HostLiveMembershipSync {
         sessions: snapshot.sessions,
         closing: snapshot.closing,
       })
-      .then(() => {
-        if (issued !== this.lastIssuedSeq) return;
-        this.lastSentFingerprint = fingerprint;
-      })
       .catch((error) => {
-        // The stale fingerprint is kept only if a newer snapshot was not
-        // issued meanwhile; either way the next transition recomputes.
+        // Completion of superseded sends must not invalidate newer state or
+        // a new transport generation. Success needs no fingerprint mutation.
+        if (generation !== this.lastBackendGeneration || issued !== this.lastIssuedSeq) return;
+        this.lastIssuedFingerprint = undefined;
         this.options.log?.(
           `host live-membership sync failed; retrying on the next transition: ${error instanceof Error ? error.message : String(error)}`,
         );

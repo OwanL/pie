@@ -352,6 +352,8 @@ export function onQueuedDelivered(payload: QueuedDeliveredPayload, deps: Handler
     text: payload.text,
     ...(payload.operationId ? { operationId: payload.operationId } : {}),
     localId: payload.localId,
+    ...(payload.durableEntryId !== undefined ? { durableEntryId: payload.durableEntryId } : {}),
+    ...(payload.operationAttempt !== undefined ? { operationAttempt: payload.operationAttempt } : {}),
   });
 }
 

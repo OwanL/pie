@@ -14,6 +14,7 @@ export interface ThinkingSelectProps {
   model: ModelInfo | null;
   includeInherit?: boolean;
   disabled?: boolean;
+  ariaDescribedBy?: string;
   /** Visible row label. Omit it when the select is embedded in a chip. */
   label?: string;
   /** Accessible label for an unlabeled select, or an override for a visible label. */
@@ -31,6 +32,7 @@ export function ThinkingSelect({
   model,
   includeInherit = false,
   disabled = false,
+  ariaDescribedBy,
   label,
   ariaLabel,
 }: ThinkingSelectProps) {
@@ -62,6 +64,7 @@ export function ThinkingSelect({
       value={selectValue}
       disabled={disabled}
       aria-label={ariaLabel ?? label ?? 'Thinking'}
+      aria-describedby={ariaDescribedBy}
       onChange={(event: JSX.TargetedEvent<HTMLSelectElement>) => onChange(event.currentTarget.value as ThinkingSelectValue)}
     >
       {options.map((option) => (

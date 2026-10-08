@@ -46,6 +46,7 @@ sessionTitles:
   thinkingLevel: off
   timeoutSec: 15
 profileOrder:
+  - claude-haiku-5.5
   - provider: github-copilot
     id: gpt-6.1-sol
   - claude-sonnet-5.5
@@ -837,6 +838,45 @@ providers:
           - high
           - xhigh
         disabledReason: null
+      - id: claude-haiku-5.5
+        name: "Copilot: Claude Haiku 5.5"
+        api: anthropic-messages
+        compat:
+          supportsEagerToolInputStreaming: false
+          forceAdaptiveThinking: true
+        reasoning: true
+        input:
+          - text
+          - image
+        contextWindow: 100000
+        maxTokens: 128000
+        thinkingLevelMap:
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+          minimal: low
+        pricing:
+          input: 0.1
+          output: 0.5
+          cacheRead: 0.01
+          cacheWrite: 0.12
+          tiers:
+            - inputTokensAbove: 100000
+              input: 0.5
+              output: 2.5
+              cacheRead: 0.05
+              cacheWrite: 0.62
+        eligible: false
+        thinking:
+          - minimal
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+        disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
       - id: claude-opus-4.8-fast
         name: "Copilot: Claude Opus 4.8 (fast mode)"
         api: anthropic-messages
@@ -1010,13 +1050,13 @@ providers:
         pricing:
           input: 2
           output: 10
-          cacheRead: 0.2
+          cacheRead: 0.1
           cacheWrite: 2.5
           tiers:
             - inputTokensAbove: 200000
               input: 2
               output: 10
-              cacheRead: 0.2
+              cacheRead: 0.1
               cacheWrite: 2.5
         eligible: false
         thinking:

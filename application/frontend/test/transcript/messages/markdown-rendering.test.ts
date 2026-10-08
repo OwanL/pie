@@ -43,6 +43,19 @@ async function loadRenderMarkdown() {
   return mod.renderMarkdown;
 }
 
+test('local raster markdown images use safe placeholders, never filesystem src', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const html = renderMarkdown('![Chart & details](C:/workspace/chart.png "A & title")');
+  assert.match(html, /data-pie-inline-image="C:\/workspace\/chart.png"/);
+  assert.match(html, /data-pie-image-alt="Chart &amp; details"/);
+  assert.match(html, /title="A &amp; title"/);
+  assert.doesNotMatch(html, /<img|src=/);
+  assert.match(html, /Chart &amp; details/);
+  assert.doesNotMatch(renderMarkdown('![Chart](chart.png)', true, false), /data-pie-inline-image/);
+  assert.doesNotMatch(renderMarkdown('![Vector](C:/vector.svg)'), /data-pie-inline-image/);
+  assert.match(renderMarkdown('![Remote](https://example.com/chart.png)'), /src="https:\/\/example.com\/chart.png"/);
+});
+
 test('renderMarkdown wraps fenced code with a language label and copy button', async () => {
   const renderMarkdown = await loadRenderMarkdown();
   const html = renderMarkdown('```ts\nconst x = 1;\n```');
@@ -301,9 +314,12 @@ test('transcript.css styles the enhanced code-block affordances', async () => {
   assert.match(css, /\.md-table-wrap\s*\{[\s\S]*?overflow-x:\s*auto;/);
 });
 
-test('jump-to-latest stays above the composer via --composer-height', async () => {
+test('jump-to-latest anchors inside the transcript instead of assuming composer or footer height', async () => {
   const css = await readTranscriptCss();
   const rule = css.match(/\.transcript-jump-latest\s*\{[\s\S]*?\n\}/);
   assert.ok(rule, 'expected .transcript-jump-latest rule in transcript.css');
-  assert.match(rule![0], /bottom:\s*calc\(var\(--composer-height[^)]*\)\s*\+\s*\d+px\);/);
+  assert.match(rule![0], /position:\s*absolute;/);
+  assert.match(rule![0], /bottom:\s*8px;/);
+  assert.doesNotMatch(rule![0], /--composer-height|position:\s*fixed;/);
+  assert.match(css, /@media \(pointer: coarse\)\s*\{\s*\.transcript-jump-latest \{ height: 44px;/);
 });

@@ -518,13 +518,13 @@ test('transcript message menu guards Delete from here behind a two-step confirm'
   menu.container.remove();
 });
 
-test('assistant tool menu keeps auto-expand + Copy raw and omits message-only actions', () => {
+test('assistant tool menu keeps Copy raw, drops auto-expand, and omits message-only actions', () => {
   const menu = renderTranscriptMenu({
     type: 'toolCalls',
     rawData: '{"name":"read_file"}',
     message: null,
   });
-  assert.deepEqual(menu.labels(), ['Auto-expand tool calls', 'Copy raw']);
+  assert.deepEqual(menu.labels(), ['Copy raw']);
   render(null, menu.container);
   menu.container.remove();
 });
@@ -560,7 +560,7 @@ test('reasoning menus copy the reasoning block while tool menus omit Copy text w
     rawData: '{"name":"bash"}',
     message: { role: 'assistant', plainText: undefined, editable: false, canTruncate: false },
   });
-  assert.deepEqual(tool.labels(), ['Auto-expand tool calls', 'Copy raw']);
+  assert.deepEqual(tool.labels(), ['Copy raw']);
   render(null, tool.container);
   tool.container.remove();
 });

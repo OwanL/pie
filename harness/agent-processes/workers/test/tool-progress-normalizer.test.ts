@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { encode } from 'gpt-tokenizer/encoding/cl100k_base';
 
 import { isBoundedToolPreview, normalizeToolProgress } from '../tool-progress-normalizer';
 import { estimateTextTokens } from '../../../../lib/token-estimation';
@@ -148,6 +149,48 @@ test('modern subagent counters include the in-progress tool-call draft', () => {
     assert.deepEqual(child.usage, { output: 120 });
     assert.equal((child.usage as Record<string, unknown>).input, undefined, 'missing usage channels stay unknown instead of becoming zero');
   }
+});
+
+test('reserved spellings in live subagent output and tool drafts cannot terminate progress normalization', () => {
+  const marker = '<' + '|im_start|' + '>';
+  const literalTokens = (text: string) => encode(text.trim(), { disallowedSpecial: new Set<string>() }).length;
+  const fields = [
+    { streamingText: `Explain ${marker}`, streamed: literalTokens(`Explain ${marker}`) },
+    { streamingReasoning: `Inspect ${marker}`, streamed: literalTokens(`Inspect ${marker}`) },
+    { draftingToolCall: { id: 'draft-1', name: marker, argumentsText: JSON.stringify({ text: marker }) },
+      streamed: literalTokens(marker) + literalTokens(JSON.stringify({ text: marker })) },
+  ];
+  for (const { streamed, ...output } of fields) {
+    const preview = normalizeToolProgress('subagent', { details: { mode: 'single', results: [{
+      agent: 'worker', task: 'inspect text', exitCode: -1, streaming: true,
+      usage: { output: 120 }, ...output,
+    }] } });
+    assert.equal(preview.kind, 'subagent');
+    if (preview.kind !== 'subagent') continue;
+    const child = preview.children[0]!;
+    assert.equal(child.cumulativeOutputTokens, 120 + streamed);
+    assert.deepEqual(child.usage, { output: 120 }, 'reported usage is not rewritten');
+    if ('streamingText' in output) assert.equal(child.streamingText, output.streamingText);
+  }
+
+  const longText = 'normal text '.repeat(1_000) + marker;
+  const tail = longText.slice(-8_192);
+  const preview = normalizeToolProgress('subagent', { details: { results: [{
+    agent: 'worker', task: 'inspect long text', exitCode: -1, streaming: true,
+    usage: { output: 120 }, streamingText: longText,
+  }] } });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    assert.equal(preview.children[0]?.streamingText, tail);
+    assert.equal(preview.children[0]?.cumulativeOutputTokens,
+      120 + Math.round(literalTokens(tail) * (longText.length / tail.length)));
+  }
+
+  const preserved = normalizeToolProgress('subagent', { details: { results: [{
+    agent: 'worker', exitCode: -1, cumulativeOutputTokens: 42, streamingText: marker,
+  }] } });
+  assert.equal(preserved.kind, 'subagent');
+  if (preserved.kind === 'subagent') assert.equal(preserved.children[0]?.cumulativeOutputTokens, 42);
 });
 
 test('unchanged modern subagent revision reuses its compact normalized preview', () => {

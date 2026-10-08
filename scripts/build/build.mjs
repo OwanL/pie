@@ -9,10 +9,10 @@ import {
   findCompatibleInstalledExtensionDir,
   publishRendererGeneration,
 } from './publication.mjs';
-import { hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration } from './runtime-publication.mjs';
+import { assertRuntimeBootstrapSupportsSchema, hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration } from './runtime-publication.mjs';
 import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
-import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
 
 // Ordinary compilation never constructs a release or discovers installed Pie.
 // The legacy immutable lane remains explicitly selected for delivery/publication.
@@ -150,6 +150,7 @@ async function validateOutputDirectory(requested) {
 }
 
 let selectedPiRuntime;
+let selectedTooling;
 let retainedRuntimeOutput;
 let selectedInputFingerprint;
 let publicationPaused = false;
@@ -238,6 +239,7 @@ async function copyArtifactEntries(source, destination) {
       await mkdir(to);
       await copyArtifactEntries(from, to);
     } else if (info.isFile()) {
+      if (info.nlink !== 1) throw new Error(`Refusing to copy Pi runtime hardlink: ${from}`);
       await copyFile(from, to);
     } else {
       throw new Error(`Refusing to copy non-regular Pi runtime entry: ${from}`);
@@ -245,57 +247,92 @@ async function copyArtifactEntries(source, destination) {
   }
 }
 
+async function verifyRuntimeRoles(directory) {
+  const [runtime, tooling] = await Promise.all([
+    verifyPiRuntimeArtifact(directory), verifyPiRuntimeToolingArtifact(directory),
+  ]);
+  return { ...runtime, tooling: tooling.artifactDir === runtime.artifactDir ? undefined : tooling };
+}
+
+async function roleRoots(verified) {
+  return Promise.all([verified, verified.tooling].filter(Boolean).map(async (role) => {
+    const [info, canonical] = await Promise.all([lstat(role.artifactDir), realpath(role.artifactDir)]);
+    if (info.isSymbolicLink() || !info.isDirectory() || canonical !== role.artifactDir) {
+      throw new Error('Verified output Pi role root is not an ordinary canonical directory.');
+    }
+    return { artifactDir: role.artifactDir, dev: info.dev, ino: info.ino };
+  }));
+}
+
+async function assertRoleRoots(roots) {
+  for (const root of roots) {
+    const [info, canonical] = await Promise.all([lstat(root.artifactDir), realpath(root.artifactDir)]);
+    if (info.isSymbolicLink() || !info.isDirectory() || canonical !== root.artifactDir
+      || info.dev !== root.dev || info.ino !== root.ino) {
+      throw new Error('Preverified output Pi role root changed during the build.');
+    }
+  }
+}
+
+function assertRoleAgreement(verified, source) {
+  if (verified.identity !== selectedPiRuntime.identity) {
+    throw new Error(`Output Pi runtime identity mismatch (${verified.identity} != ${selectedPiRuntime.identity}).`);
+  }
+  if (verified.tooling?.identity !== source.tooling?.identity) {
+    throw new Error('Output Pi tooling identity mismatch.');
+  }
+}
+
 async function materializeSelectedPiRuntime() {
   if (!selectedPiRuntime) return;
   const sourceBeforeCopy = await withBuildTiming('runtime source verification before materialization', () =>
-    verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir));
+    verifyRuntimeRoles(selectedPiRuntime.artifactDir));
   if (sourceBeforeCopy.identity !== selectedPiRuntime.identity) {
     throw new Error('Verified --pi-runtime source identity changed during the build.');
   }
 
   const copiedDirectory = path.join(outDir, 'pi-runtime');
   if (retainedRuntimeOutput?.identity === selectedPiRuntime.identity) {
-    const [copiedInfo, copiedRealPath] = await Promise.all([
-      lstat(copiedDirectory),
-      realpath(copiedDirectory),
-    ]);
-    if (copiedInfo.isSymbolicLink() || !copiedInfo.isDirectory()
-      || copiedInfo.dev !== retainedRuntimeOutput.dev || copiedInfo.ino !== retainedRuntimeOutput.ino
-      || copiedRealPath !== retainedRuntimeOutput.artifactDir) {
-      throw new Error('Preverified output Pi runtime changed during the build.');
-    }
+    await assertRoleRoots(retainedRuntimeOutput.roots);
     const copied = await withBuildTiming('retained materialized runtime verification', () =>
-      verifyPiRuntimeArtifact(copiedDirectory));
-    if (copied.identity !== selectedPiRuntime.identity) {
-      throw new Error(`Retained output Pi runtime identity mismatch (${copied.identity} != ${selectedPiRuntime.identity}).`);
-    }
+      verifyRuntimeRoles(copiedDirectory));
+    assertRoleAgreement(copied, sourceBeforeCopy);
+    assertRoleAgreement(await verifyRuntimeRoles(selectedPiRuntime.artifactDir), sourceBeforeCopy);
     return;
   }
 
   // Watch app-only emissions reuse the immutable copy. Never replace it while
   // dependent children are alive; rotation cleans output after their close.
-  try {
+  let existingInfo;
+  try { existingInfo = await lstat(copiedDirectory); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (existingInfo) {
     const existing = await withBuildTiming('existing materialized runtime verification', () =>
-      verifyPiRuntimeArtifact(copiedDirectory));
-    if (existing.identity !== selectedPiRuntime.identity) throw new Error('Output Pi runtime belongs to another selection.');
+      verifyRuntimeRoles(copiedDirectory));
+    await roleRoots(existing);
+    assertRoleAgreement(existing, sourceBeforeCopy);
+    assertRoleAgreement(await verifyRuntimeRoles(selectedPiRuntime.artifactDir), sourceBeforeCopy);
     return;
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
   }
   await mkdir(copiedDirectory);
   await withBuildTiming('verified runtime artifact copy', () =>
     copyArtifactEntries(sourceBeforeCopy.artifactDir, copiedDirectory));
+  if (sourceBeforeCopy.tooling) {
+    const toolingDirectory = path.join(outDir, 'pi-tooling');
+    await mkdir(toolingDirectory);
+    await copyArtifactEntries(sourceBeforeCopy.tooling.artifactDir, toolingDirectory);
+  }
 
   const [sourceAfterCopy, copied] = await withBuildTiming('post-copy runtime verification (parallel wall)', () => Promise.all([
-    withBuildTiming('post-copy source verification', () => verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir)),
-    withBuildTiming('copied runtime verification', () => verifyPiRuntimeArtifact(copiedDirectory)),
+    withBuildTiming('post-copy source verification', () => verifyRuntimeRoles(selectedPiRuntime.artifactDir)),
+    withBuildTiming('copied runtime verification', () => verifyRuntimeRoles(copiedDirectory)),
   ]));
   if (sourceAfterCopy.identity !== selectedPiRuntime.identity) {
     throw new Error('Verified --pi-runtime source identity changed while it was copied.');
   }
-  if (copied.identity !== selectedPiRuntime.identity) {
-    throw new Error(`Copied Pi runtime identity mismatch (${copied.identity} != ${selectedPiRuntime.identity}).`);
-  }
+  assertRoleAgreement(sourceAfterCopy, sourceBeforeCopy);
+  assertRoleAgreement(copied, sourceBeforeCopy);
+  await roleRoots(copied);
   console.log(`[build] Materialized verified Pi runtime ${copied.identity} → ${copiedDirectory}`);
 }
 
@@ -319,11 +356,20 @@ async function publishToInstalledExtension() {
   // Source-default generations carry their verified runtime, not a machine's
   // legacy packaged SDK path.
   await assertFreshSelection();
+  if (activate) {
+    // Upgrade first: the backwards-compatible loader can still select the old
+    // generation if staging fails. No running host is interrupted.
+    await withBuildTiming('startup loader publication', () => installRuntimeBootstrap({ extensionDir: extDir, pkg }));
+  }
+  const roles = await verifyRuntimeRoles(selectedPiRuntime.artifactDir);
+  if (roles.tooling) {
+    await assertRuntimeBootstrapSupportsSchema({ extensionDir: extDir, schema: 2 });
+  }
+  await assertFreshSelection();
   const staged = await withBuildTiming('full runtime publication', () =>
     publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg }));
   console.log(`[build] Staged complete runtime ${staged.generation} → ${extDir}`);
   if (activate) {
-    await withBuildTiming('startup loader publication', () => installRuntimeBootstrap({ extensionDir: extDir, pkg }));
     console.log('[build] Startup loader installed. Restart VS Code when convenient to load the staged runtime; active sessions were not interrupted.');
   }
 
@@ -417,7 +463,7 @@ function createBuildTypecheckOverlay() {
   return createTsconfigOverlay(path.join(rootDir, 'tsconfig.json'), {
     layout: 'planned', typescript: true, includeOwnerDependencies: true,
     ...(directory ? { directory } : {}),
-    ...(selectedPiRuntime ? { sdkPath: selectedPiRuntime.sdkPath } : {}),
+    ...(selectedTooling ? { sdkPath: selectedTooling.sdkPath } : {}),
   });
 }
 
@@ -436,7 +482,7 @@ async function runTypecheck(label) {
   }
 }
 
-function runTypecheckWatch() {
+async function runTypecheckWatch() {
   const overlay = createBuildTypecheckOverlay();
   try {
     const child = spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath, '--watch', '--preserveWatchOutput'], 'Starting TypeScript watch');
@@ -503,14 +549,15 @@ async function findReusableMaterializedRuntime() {
   let verified;
   try {
     verified = await withBuildTiming('pre-clean materialized runtime verification', () =>
-      verifyPiRuntimeArtifact(copiedDirectory));
+      verifyRuntimeRoles(copiedDirectory));
+    verified.roots = await roleRoots(verified);
   } catch {
     // An incomplete, corrupt, or symlink-containing cache is not reusable.
     // buildOnce will remove the entire output just as it did before this cache.
     return null;
   }
   if (verified.identity !== selectedPiRuntime.identity) return null;
-  return { ...verified, dev: copiedInfo.dev, ino: copiedInfo.ino };
+  return verified;
 }
 
 async function prepareOneShotOutput() {
@@ -527,18 +574,11 @@ async function prepareOneShotOutput() {
   await assertFreshSelection();
 
   if (reusableRuntime) {
-    const copiedDirectory = path.join(outDir, 'pi-runtime');
     let stillVerifiedPath = false;
     try {
-      const [outputInfo, copiedInfo, copiedRealPath] = await Promise.all([
-        lstat(outDir),
-        lstat(copiedDirectory),
-        realpath(copiedDirectory),
-      ]);
-      stillVerifiedPath = !outputInfo.isSymbolicLink() && outputInfo.isDirectory()
-        && !copiedInfo.isSymbolicLink() && copiedInfo.isDirectory()
-        && copiedInfo.dev === reusableRuntime.dev && copiedInfo.ino === reusableRuntime.ino
-        && copiedRealPath === reusableRuntime.artifactDir;
+      const outputInfo = await lstat(outDir);
+      await assertRoleRoots(reusableRuntime.roots);
+      stillVerifiedPath = !outputInfo.isSymbolicLink() && outputInfo.isDirectory();
     } catch {
       // Fall back to the established full output reset if the verified path
       // disappeared or changed while it was being checked.
@@ -546,7 +586,7 @@ async function prepareOneShotOutput() {
 
     if (stillVerifiedPath) {
       for (const entry of await readdir(outDir)) {
-        if (entry !== 'pi-runtime') {
+        if (entry !== 'pi-runtime' && !(entry === 'pi-tooling' && reusableRuntime.tooling)) {
           // rm unlinks symlinks rather than traversing their targets.
           await rm(path.join(outDir, entry), { recursive: true, force: true });
         }
@@ -617,7 +657,7 @@ async function watchSelection() {
     publicationPaused = false;
     const node = runViteWatch('node');
     const webview = runViteWatch();
-    const tsc = skipTypecheck ? null : runTypecheckWatch();
+    const tsc = skipTypecheck ? null : await runTypecheckWatch();
     await new Promise((resolve, reject) => {
       onAbort = () => { pausePublication(); resolve(); };
       cancellation.signal.addEventListener('abort', onAbort, { once: true });
@@ -683,21 +723,26 @@ try {
         : 'Pi runtime acquisition and verification');
       try {
         await withPiRuntime({ artifactDir: requestedPiRuntime, signal: cancellation.signal }, async (context) => {
-          if (requestedPiRuntime) {
-            const [canonicalRuntime, canonicalOutput] = await Promise.all([
-              canonicalPath(context.artifactDir),
-              canonicalPath(outDir),
-            ]);
-            if (containsPath(canonicalRuntime, canonicalOutput) || containsPath(canonicalOutput, canonicalRuntime)) {
-              throw new Error('--output-dir must not overlap the verified --pi-runtime artifact.');
-            }
-          }
-          finishSelectionTiming();
           selectedPiRuntime = context;
+          selectedTooling = undefined;
           retainedRuntimeOutput = undefined;
           children = [];
           publicationPaused = false;
           try {
+            // Delivery needs both roles even when typechecking is skipped. Verify
+            // tooling before claiming output or starting any output/cache writer.
+            // This selection belongs only to the current context's lifetime.
+            selectedTooling = await context.getToolingRuntime();
+            const [canonicalRuntime, canonicalTooling, canonicalOutput] = await Promise.all([
+              canonicalPath(context.artifactDir),
+              canonicalPath(selectedTooling.artifactDir),
+              canonicalPath(outDir),
+            ]);
+            if ([canonicalRuntime, canonicalTooling].some((role) =>
+              containsPath(role, canonicalOutput) || containsPath(canonicalOutput, role))) {
+              throw new Error('--output-dir must not overlap the verified --pi-runtime artifact. Runtime and tooling roles are both protected.');
+            }
+            finishSelectionTiming();
             if (watchMode) await watchSelection();
             else {
               await assertFreshSelection();

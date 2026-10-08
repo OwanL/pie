@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { verifyPiRuntimeArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const installedModules = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -129,6 +129,7 @@ function makeBuildFixture(t) {
     export async function publishRendererGeneration() { throw new Error('unexpected renderer publication'); }
   `);
   write(repo, 'scripts/build/runtime-publication.mjs', `
+    export async function assertRuntimeBootstrapSupportsSchema() { throw new Error('unexpected capability check'); }
     export async function hasRuntimeBootstrap() { throw new Error('unexpected runtime publication'); }
     export async function installRuntimeBootstrap() { throw new Error('unexpected runtime activation'); }
     export async function publishRuntimeGeneration() { throw new Error('unexpected runtime publication'); }
@@ -277,6 +278,40 @@ test('explicit delivery source-bound isolated build selects candidate graph and 
   assert.match(readFileSync(path.join(copiedArtifact, 'node_modules/@earendil-works/pi-coding-agent/THIRD-PARTY-NOTICES.txt'), 'utf8'), /preserve verbatim/u);
   const copied = await verifyPiRuntimeArtifact(copiedArtifact);
   assert.equal(copied.identity, artifact.identity, 'the complete copied artifact re-verifies to the source identity');
+});
+
+test('split delivery uses tooling declarations but bundles runtime and copies both independent roles', async (t) => {
+  const fixture = makeBuildFixture(t);
+  const toolingDir = path.join(path.dirname(fixture.artifactDir), 'pi-tooling');
+  makeArtifact(toolingDir);
+  write(toolingDir, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js', "export const candidateBuildMarker = 'tooling-must-not-be-bundled';\n");
+  const provenance = {
+    upstreamVersion: '0.80.6', upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
+    sourceTreeSha256: 'a'.repeat(64), lockSha256: 'b'.repeat(64),
+    target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  };
+  const tooling = await writePiRuntimeManifest(toolingDir, provenance);
+  for (const name of artifactPackages) rmSync(path.join(fixture.artifactDir, `node_modules/${name}/dist/index.d.ts`));
+  write(fixture.artifactDir, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: tooling.identity,
+  }));
+  const runtime = await writePiRuntimeManifest(fixture.artifactDir, provenance);
+  const output = path.join(fixture.outputs, 'split-build');
+  assertBuildSucceeded(runBuild(fixture, ['--delivery', '--output-dir', output, '--pi-runtime', fixture.artifactDir]));
+  const overlay = JSON.parse(readFileSync(path.join(output, '.cache/typecheck/tsconfig.overlay.json'), 'utf8'));
+  assert.equal(path.resolve(overlay.compilerOptions.paths['@earendil-works/pi-coding-agent'][0]), path.join(tooling.sdkPath, 'dist/index.d.ts'));
+  assert.match(readFileSync(path.join(output, 'extension.js'), 'utf8'), /verified-candidate-sdk-graph/);
+  assert.doesNotMatch(readFileSync(path.join(output, 'extension.js'), 'utf8'), /tooling-must-not-be-bundled/);
+  assertSameTree(fixture.artifactDir, path.join(output, 'pi-runtime'));
+  assertSameTree(toolingDir, path.join(output, 'pi-tooling'));
+  assert.equal((await verifyPiRuntimeArtifact(path.join(output, 'pi-runtime'))).identity, runtime.identity);
+  assert.equal((await verifyPiRuntimeToolingArtifact(path.join(output, 'pi-runtime'))).identity, tooling.identity);
+  const copy = path.join(output, 'pi-tooling/node_modules/@earendil-works/pi-coding-agent/LICENSE');
+  assert.equal(lstatSync(copy).nlink, 1);
+  writeFileSync(copy, 'independent copied bytes');
+  assert.match(readFileSync(path.join(toolingDir, 'node_modules/@earendil-works/pi-coding-agent/LICENSE'), 'utf8'), /MIT License/);
+  const independent = runBuild(fixture, ['--delivery', '--output-dir', path.join(fixture.outputs, 'independent'), '--pi-runtime', fixture.artifactDir]);
+  assertBuildSucceeded(independent); // Damaging output did not damage either source role.
 });
 
 test('explicit delivery build acquires once and selects its SDK graph', async (t) => {

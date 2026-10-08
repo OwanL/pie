@@ -16,6 +16,8 @@ export interface ActiveRequest {
   id: string;
   /** Stable message mutation identity; distinct from request/turn IDs. */
   operationId?: string;
+  /** Exact optimistic row for the current direct or delivered queued user prompt. */
+  userMessageLocalId?: string;
   /** session_control row correlated to the current/most recently delivered user prompt. */
   agentMessageLocalId?: string;
   /** Last durable user entry linked to agent provenance, for duplicate event guards. */

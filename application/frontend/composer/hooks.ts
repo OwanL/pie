@@ -28,14 +28,24 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
  * mirroring how word processors undo by word/action rather than per keystroke. */
 const CHECKPOINT_DEBOUNCE_MS = 500;
 
-export function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
+function mobileVisibleHeight(): number | undefined {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function'
+    || !window.matchMedia('(pointer: coarse)').matches) return undefined;
+  const viewport = window.visualViewport;
+  return viewport?.scale === 1 ? viewport.height : window.innerHeight;
+}
+
+export function resizeComposerTextarea(textarea: HTMLTextAreaElement, visibleHeight = mobileVisibleHeight()): void {
+  const maxHeight = typeof visibleHeight === 'number' && Number.isFinite(visibleHeight) && visibleHeight > 0
+    ? Math.min(COMPOSER_TEXTAREA_MAX_HEIGHT, Math.max(48, Math.floor(visibleHeight / 4)))
+    : COMPOSER_TEXTAREA_MAX_HEIGHT;
   // Measure without native scrollbar chrome shrinking the text's available width.
   textarea.style.overflowY = 'hidden';
   textarea.style.height = 'auto';
   const contentHeight = textarea.scrollHeight;
-  textarea.style.height = `${Math.min(contentHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)}px`;
+  textarea.style.height = `${Math.min(contentHeight, maxHeight)}px`;
   // Short textareas can otherwise expose native arrow buttons for rounding overflow.
-  textarea.style.overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? 'auto' : 'hidden';
+  textarea.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
 }
 
 export function useComposerInput({
@@ -133,6 +143,23 @@ export function useComposerInput({
       resizeComposerTextarea(textarea);
     }
   }, [text, initialRows]);
+
+  // A mobile keyboard can reduce the visible height without changing the draft.
+  // Refit the existing textarea, leaving its value and undo history untouched.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const viewport = window.visualViewport;
+    const refit = () => {
+      if (viewport && viewport.scale !== 1) return;
+      if (textareaRef.current) resizeComposerTextarea(textareaRef.current);
+    };
+    window.addEventListener('resize', refit);
+    viewport?.addEventListener('resize', refit);
+    return () => {
+      window.removeEventListener('resize', refit);
+      viewport?.removeEventListener('resize', refit);
+    };
+  }, []);
 
   // Latch that suppresses a second submit between the moment we post a send
   // and when the host round-trip flips `busy` to true (or clears pending

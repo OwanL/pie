@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 
-import { readRuntimeContext } from './runner.js';
+import { readRuntimeContext } from './runtime-context.js';
 import {
   captureSubagentProviderDispatch,
   readSubagentAnalyticsAttemptState,

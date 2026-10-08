@@ -1,29 +1,18 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useMemo } from 'preact/hooks';
 import type { ComponentChild } from 'preact';
 
 import type { ChatPrefs, ToolCall } from '../../../lib/protocol/index.js';
 import { renderMarkdown } from '../markdown';
 import { getToolCallContextType } from '../../shell/chat-prefs';
-import { cx } from '../../lib/components/cx';
-import { toMouseEvent } from '../../lib/components/preact-events';
 import {
   formatValueAsHighlightedYaml,
   textFromToolResult,
 } from '../highlight';
-import {
-  formatToolCallResultForDisplay,
-  ToolCallCard,
-  ToolCallHeader,
-  TOOL_CALL_COMPLETION_PULSE_MS,
-  type ToolCallHeaderSummaryModel,
-} from '../tool-call-card';
+import { ToolCallCard } from '../tool-call-card';
 import { registerToolRenderer, type ToolRendererProps } from '../registry';
-import { toolDisclosureKey, useCollapsibleOpen } from '../use-collapsible-open';
-import { deriveToolTail } from '../activity-tail';
-import { TurnActivityTailBody } from '../activity-tail-preview';
 import type { TranscriptContextMenuHandler } from '../types';
 
 // ─── Input type ──────────────────────────────────────────────────────────────
@@ -188,10 +177,6 @@ function WebSearchBody({ toolCall, parsed }: WebSearchBodyProps) {
     resultBlock = <div class="web-search-pending">Searching the web…</div>;
   }
 
-  const resultLabel = isRunning && !hasResultText && toolCall.result === undefined
-    ? 'Searching'
-    : 'Result';
-
   return (
     <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
       <div class="tool-call-section">
@@ -216,7 +201,6 @@ function WebSearchBody({ toolCall, parsed }: WebSearchBodyProps) {
       </div>
       {resultBlock && (
         <div class="tool-call-section">
-          <div class="tool-call-section-label">{resultLabel}</div>
           {resultBlock}
         </div>
       )}
@@ -232,91 +216,19 @@ interface WebSearchCardProps {
   prefs: ChatPrefs;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
+  workingDirectory: string | null;
 }
 
-function WebSearchCard({
-  toolCall,
-  parsed,
-  prefs,
-  onOpenFile,
-  onContextMenu,
-}: WebSearchCardProps) {
-  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), prefs.autoExpandToolCalls);
-  const contextType = getToolCallContextType('web_search');
-  const handleContextMenu = (e: MouseEvent) =>
-    onContextMenu(contextType, JSON.stringify(toolCall, null, 2), e);
-
-  // Brief success-tinted ring flash on completion — parity with the generic
-  // ToolCallCard so a web_search card doesn't read as the only tool that
-  // silently settles. CSS lives on `.tool-call-just-completed` (tool-call.css).
-  const [justCompleted, setJustCompleted] = useState(false);
-  const prevRunningRef = useRef(false);
-  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    const wasRunning = prevRunningRef.current;
-    const nowRunning = toolCall.status === 'running';
-    prevRunningRef.current = nowRunning;
-    if (wasRunning && !nowRunning && toolCall.status === 'completed') {
-      setJustCompleted(true);
-      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
-      pulseTimerRef.current = setTimeout(() => {
-        pulseTimerRef.current = null;
-        setJustCompleted(false);
-      }, TOOL_CALL_COMPLETION_PULSE_MS);
-    }
-  }, [toolCall.status]);
-  useEffect(() => () => {
-    if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
-  }, []);
-
-  const errorDetail = toolCall.status === 'failed'
-    ? (textFromToolResult(toolCall.result) ?? formatToolCallResultForDisplay(toolCall)) || undefined
-    : undefined;
-
-  const headerSummary = buildHeaderSummary(parsed);
-  const summaryModel: ToolCallHeaderSummaryModel = { kind: 'text', text: headerSummary };
-  const inlineLivePreview = !open && toolCall.status === 'running'
-    ? deriveToolTail(toolCall, prefs.activityTailLines)
-    : null;
-
-  return (
-    <div
-      class={cx(
-        'tool-call-card overflow-clip border-x-0 border-t-0 border-b border-border-subtle bg-transparent transition-colors duration-100',
-        'forced-colors:border forced-colors:border-[ButtonText]',
-        justCompleted && 'tool-call-just-completed',
-      )}
-      data-status={toolCall.status}
-      role="group"
-      aria-label={`web_search tool call, ${toolCall.status}`}
-      onContextMenu={(e) => { e.preventDefault(); handleContextMenu(toMouseEvent(e)); }}
-    >
-      <ToolCallHeader
-        open={open}
-        name="web_search"
-        status={toolCall.status}
-        summary={headerSummary}
-        summaryModel={summaryModel}
-        errorDetail={errorDetail}
-        durationMs={toolCall.durationMs}
-        prefs={prefs}
-        onOpenFile={onOpenFile}
-        onToggle={() => setOpen((v) => !v)}
-      />
-      {inlineLivePreview && (
-        <div class="tool-call-live-preview" role="status" aria-label="web_search live result preview">
-          <TurnActivityTailBody tail={inlineLivePreview.tail} continuous />
-        </div>
-      )}
-      {open && (
-        <div class="tool-call-body-wrap">
-          <div class="tool-call-body-inner">
-            <WebSearchBody toolCall={toolCall} parsed={parsed} />
-          </div>
-        </div>
-      )}
-    </div>
-  );
+function WebSearchCard({ toolCall, parsed, prefs, onOpenFile, onContextMenu, workingDirectory }: WebSearchCardProps) {
+  return <ToolCallCard
+    toolCall={toolCall}
+    workingDirectory={workingDirectory}
+    prefs={prefs}
+    summary={buildHeaderSummary(parsed)}
+    renderDetails={(resolvedCall) => <WebSearchBody toolCall={resolvedCall} parsed={parsed} />}
+    onOpenFile={onOpenFile}
+    onContextMenu={(e) => onContextMenu(getToolCallContextType('web_search'), JSON.stringify(toolCall, null, 2), e)}
+  />;
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -337,7 +249,6 @@ function renderWebSearchTool({
     return (
       <ToolCallCard
         toolCall={toolCall}
-        autoExpand={prefs.autoExpandToolCalls}
         activityTailLines={prefs.activityTailLines}
         workingDirectory={workingDirectory}
         prefs={prefs}
@@ -351,6 +262,7 @@ function renderWebSearchTool({
     <WebSearchCard
       toolCall={toolCall}
       parsed={parsed}
+      workingDirectory={workingDirectory}
       prefs={prefs}
       onOpenFile={onOpenFile}
       onContextMenu={onContextMenu}

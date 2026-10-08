@@ -474,7 +474,7 @@ function validatePruningSettingsPatch(value: unknown): value is Partial<PruningS
       if (v !== undefined && (typeof v !== 'string' || v.length === 0)) return false;
     } else if (key === 'thinkingLevel') {
       if (v !== undefined && (typeof v !== 'string' || !THINKING_LEVEL_SET.has(v as ThinkingLevel))) return false;
-    } else if (key === 'mainAgentEnabled' || key === 'subagentEnabled') {
+    } else if (key === 'mainAgentEnabled' || key === 'subagentEnabled' || key === 'followUpEnabled') {
       if (v !== undefined && typeof v !== 'boolean') return false;
     } else {
       return false;
@@ -625,7 +625,8 @@ export function validateHostToWebviewDetailMessage(
     case 'detail.terminal':
       return isNonNegativeSafeInteger(value.revision)
         && isObject(value.durableRef) && isString(value.durableRef.key)
-        && (value.durableRef.kind === 'tool-result' || value.durableRef.kind === 'reasoning')
+        && (value.durableRef.kind === 'tool-result' || value.durableRef.kind === 'reasoning' || value.durableRef.kind === 'model-exchange')
+        && (value.durableRef.kind !== 'model-exchange' || (value.durableRef.source === 'durable' && isString(value.durableRef.toolCallId) && value.durableRef.toolCallId.length > 0))
         && (value.durableRef.source === 'durable' || value.durableRef.source === 'live')
         && isString(value.durableRef.sessionPath) && isString(value.durableRef.messageId)
         && isNonNegativeSafeInteger(value.durableRef.sizeBytes)
@@ -707,6 +708,10 @@ export function validateWebviewToHostMessage(
       if (!isString(value.text)) return fail('setComposerDraft: missing string `text`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'setPruningRefreshPending':
+      if (!isString(value.sessionPath) || typeof value.pending !== 'boolean') return fail('setPruningRefreshPending: requires sessionPath and boolean pending');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'send':
       if (!isString(value.sessionPath)) return fail('send: missing `sessionPath`');
       if (!isString(value.text)) return fail('send: missing string `text`');
@@ -760,7 +765,8 @@ export function validateWebviewToHostMessage(
     case 'requestDetail':
       if (!isString(value.sessionPath)) return fail('requestDetail: missing string `sessionPath`');
       if (!isObject(value.ref) || !isString(value.ref.key)
-        || (value.ref.kind !== 'tool-result' && value.ref.kind !== 'reasoning')
+        || (value.ref.kind !== 'tool-result' && value.ref.kind !== 'reasoning' && value.ref.kind !== 'model-exchange')
+        || (value.ref.kind === 'model-exchange' && (value.ref.source !== 'durable' || !isString(value.ref.toolCallId) || value.ref.toolCallId.length === 0))
         || (value.ref.source !== 'durable' && value.ref.source !== 'live')
         || value.ref.sessionPath !== value.sessionPath
         || !isString(value.ref.messageId)

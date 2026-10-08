@@ -25,6 +25,9 @@ export interface CommandBase {
 /** Send a new user message. */
 export interface SendCommand extends CommandBase {
   kind: 'Send';
+  /** Trusted composer origin; internal sends never consume the latch. */
+  composerSend?: boolean;
+  refreshPruning?: boolean;
   /** Stable mutation identity; distinct from corrId/localId/requestId/turnId. */
   operationId?: string;
   /** Transport attempt for this logical operation; production ingress starts at 1. */
@@ -389,6 +392,7 @@ export interface DetailFetchPagesCommand extends CommandBase {
 }
 
 export type Command =
+  | { kind: 'SetPruningRefreshPending'; corrId: string; sessionPath: string; pending: boolean }
   | SendCommand
   | ContinueCommand
   | EditCommand

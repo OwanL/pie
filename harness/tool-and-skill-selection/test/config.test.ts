@@ -88,6 +88,23 @@ test("loadConfig parses a valid full config", () => {
 	assert.deepEqual(result.tools.alwaysKeep, []);
 });
 
+test("loadConfig defaults follow-up pruning off and accepts only booleans", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-follow-up-"));
+	const settingsPath = path.join(dir, "settings.json");
+	try {
+		assert.equal(captureWarns(() => loadConfig(settingsPath)).result.followUpEnabled, false);
+		for (const followUpEnabled of [undefined, false, true, "true", 1, null]) {
+			writeFileSync(settingsPath, JSON.stringify({ pruning: { followUpEnabled } }));
+			const { result, warnings } = captureWarns(() => loadConfig(settingsPath));
+			assert.equal(result.followUpEnabled, followUpEnabled === true);
+			assert.equal(warnings.some((warning) => warning.includes("pruning.followUpEnabled")),
+				followUpEnabled !== undefined && typeof followUpEnabled !== "boolean");
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("loadConfig parses independent main-agent and subagent switches", () => {
 	const result = loadConfig(tempSettings(JSON.stringify({
 		pruning: { mainAgentEnabled: false, subagentEnabled: true },

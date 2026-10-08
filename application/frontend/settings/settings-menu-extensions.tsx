@@ -26,16 +26,16 @@ interface ExtensionItemProps {
 
 function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt }: ExtensionItemProps) {
   const checked = prefs.extensionToggles[ext.id] !== false;
-  const hasSettings = EXTENSIONS_WITH_SETTINGS.has(ext.id);
-  const onChevronClick = () => setExpandedExt(isExpanded ? null : ext.id);
   const movedNote = MOVED_SETTINGS_NOTES[ext.id];
+  const hasSettings = EXTENSIONS_WITH_SETTINGS.has(ext.id) && !movedNote;
+  const onChevronClick = () => setExpandedExt(isExpanded ? null : ext.id);
   return (
     <div class="toolbar-settings-ext-group">
       <div class="toolbar-settings-ext-row">
         <SettingCheckbox
           label={ext.label}
           checked={checked}
-          title={ext.description}
+          hint={movedNote ? `${ext.description} ${movedNote}` : ext.description}
           onChange={() => onSetPrefs(setExtensionEnabled(prefs, ext.id, !checked))}
           trailing={hasSettings && (
             <button
@@ -50,9 +50,6 @@ function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt }: E
           )}
         />
       </div>
-      {hasSettings && isExpanded && movedNote && (
-        <div class="toolbar-settings-note">{movedNote}</div>
-      )}
       {hasSettings && isExpanded && ext.id === 'warm-bash' && (
         <BashSection prefs={prefs} onSetPrefs={onSetPrefs} />
       )}

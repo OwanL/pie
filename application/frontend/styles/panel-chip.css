@@ -134,11 +134,11 @@
   border: 0;
   border-radius: 2px;
   background: transparent;
-  color: color-mix(in srgb, var(--panel-foreground) 58%, var(--panel-muted));
-  font-family: var(--panel-font-mono);
-  font-size: 9.5px;
-  font-weight: 500;
-  line-height: 1;
+  color: var(--panel-muted);
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
   letter-spacing: 0.01em;
   text-transform: none;
 }
@@ -147,20 +147,39 @@
   max-width: min(52ch, 100%);
 }
 
-/* The completed prepass is transcript metadata, not a standalone badge. A
-   small kicker and disclosure chevron preserve hierarchy and affordance while
-   the shell itself stays on the assistant surface. */
-.pruning-header-kicker {
-  display: inline-flex;
-  align-items: center;
-  padding-right: 6px;
-  border-right: 1px solid var(--panel-border-subtle);
+/* Plain transcript metadata, with a disclosure chevron rather than badge chrome. */
+.pruning-header-label {
   color: var(--panel-muted);
   font-family: var(--vscode-font-family, sans-serif);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.pruning-header-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A steady marker avoids decorative motion (including in reduced-motion mode). */
+.pruning-header-active-marker {
+  flex: 0 0 auto;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--panel-muted);
+}
+
+.pruning-header-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--panel-muted);
+}
+
+.panel-chip-pruning:not(.panel-chip-danger) .panel-chip-label {
+  color: var(--panel-muted);
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .panel-chip-pruning.panel-chip-interactive {
@@ -171,25 +190,19 @@
 .panel-chip-pruning.panel-chip-interactive:focus-visible {
   border-color: transparent;
   background: transparent;
-  color: var(--panel-foreground-soft);
-}
-
-.panel-chip-pruning.panel-chip-interactive:hover .panel-chip-label {
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
-  text-underline-offset: 2px;
 }
 
 .panel-chip-pruning.panel-chip-accent {
   color: var(--panel-foreground-soft);
 }
 
-.panel-chip-pruning.panel-chip-accent .pruning-header-kicker {
-  color: color-mix(in srgb, var(--panel-accent) 72%, var(--panel-muted));
+.panel-chip-pruning.panel-chip-accent .pruning-header-label {
+  color: var(--panel-foreground-soft);
 }
 
 .panel-chip-pruning.panel-chip-danger {
   color: var(--panel-danger);
+  font-weight: 400;
   opacity: 1;
 }
 
@@ -208,16 +221,20 @@
   background: transparent;
   color: var(--panel-warning);
 }
+.pruning-header-pending-row .panel-chip-warning .panel-chip-label {
+  color: var(--panel-warning);
+  font-weight: 400;
+}
 
 /* ── Expanded pruning diagnostics panel ─────────────────────────────────── */
-/* A scannable, editorial detail layout: a compact stat row, skill/tool
-   sections, contextual banners, and collapsed sub-sections for reasoning and
+/* A compact metadata line, skill/tool sections, contextual banners,
+   and collapsed sub-sections for reasoning and
    raw prepass prompts/output. It deliberately shares the assistant surface. */
 
 .pruning-detail-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -272,91 +289,19 @@
   color: var(--panel-warning);
 }
 
-/* ── Stat row: at-a-glance kept/total tiles + prepass provenance ────────── */
-.pruning-stat-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px 10px;
-}
-
-.pruning-stat-tile {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding-right: 10px;
-  border-right: 1px solid var(--panel-border-subtle);
-  background: transparent;
-}
-
-.pruning-stat-value {
-  font-family: var(--panel-font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.1;
-  font-variant-numeric: tabular-nums;
-  color: var(--panel-foreground-soft);
-}
-
-.pruning-stat-label {
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  line-height: 1;
-  text-transform: uppercase;
-  color: var(--panel-muted);
-}
-
-.pruning-stat-tile-accent .pruning-stat-value {
-  color: var(--panel-accent);
-}
-
-.pruning-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 3px;
-  margin-left: auto;
-  text-align: right;
-}
-
+/* ── Quiet provenance, savings, and actual mode ──────────────────────── */
 .pruning-meta-line {
-  font-family: var(--panel-font-mono);
-  font-size: 10px;
-  line-height: 1.3;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--panel-muted);
-}
-
-.pruning-mode-badge {
-  display: inline-flex;
-  align-items: center;
-  height: 14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--panel-muted);
-  font-family: var(--panel-font-mono);
-  font-size: 8.5px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.pruning-mode-shadow {
-  color: color-mix(in srgb, var(--panel-accent) 72%, var(--panel-muted));
-}
-
-.pruning-mode-off {
-  color: var(--panel-danger);
+  overflow-wrap: anywhere;
 }
 
 /* ── Category sections: Skills / Tools with kept + pruned tags ──────────── */
 .pruning-category {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -367,16 +312,14 @@
 }
 
 .pruning-category-title {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1.45;
-  text-transform: uppercase;
   color: var(--panel-muted);
 }
 
 .pruning-category-count {
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, var(--panel-muted) 80%, transparent);
 }
@@ -428,11 +371,9 @@
 
 .pruning-raw-label {
   color: var(--panel-muted);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1.45;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -456,11 +397,9 @@
 }
 
 .pruning-sub-header {
-  padding: 4px 6px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  padding: 3px 4px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--panel-muted);
 }
 
@@ -471,14 +410,6 @@
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
-}
-
-@media (max-width: 520px) {
-  .pruning-meta {
-    margin-left: 0;
-    align-items: flex-start;
-    text-align: left;
-  }
 }
 
 @media (forced-colors: active) {

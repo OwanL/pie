@@ -72,6 +72,18 @@ test('mergePruningSettings: restores true defaults for switches missing from leg
   assert.equal(merged.subagentEnabled, true);
 });
 
+test('mergePruningSettings: follow-up switch defaults off for legacy settings and preserves explicit values', () => {
+  const legacy = { ...base };
+  delete legacy.followUpEnabled;
+  assert.equal(DEFAULT_PRUNING_SETTINGS.followUpEnabled, false);
+  assert.equal(mergePruningSettings(legacy, {}).followUpEnabled, false);
+  const enabled = mergePruningSettings(legacy, { followUpEnabled: true });
+  assert.deepEqual(enabled, { ...base, followUpEnabled: true });
+  assert.equal(mergePruningSettings(enabled, { mode: 'off' }).followUpEnabled, true);
+  assert.equal(mergePruningSettings(enabled, { followUpEnabled: false }).followUpEnabled, false);
+  assert.equal(legacy.followUpEnabled, undefined);
+});
+
 test('mergePruningSettings: treats prepassTimeoutSec null as a real value, not omitted', () => {
   const cleared = mergePruningSettings(base, { prepassTimeoutSec: null });
   assert.equal(cleared.prepassTimeoutSec, null, 'null clears the override');

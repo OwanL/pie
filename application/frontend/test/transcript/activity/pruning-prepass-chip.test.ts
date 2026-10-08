@@ -120,7 +120,9 @@ test('Brief F: agent-reply pruning chip renders a pending state with Cancel', ()
 
   const pendingChip = container.querySelector('.panel-chip-pruning-pending');
   assert.ok(pendingChip, 'pending pruning chip renders');
-  assert.match(pendingChip!.textContent!, /pruning skills\/tools/i);
+  assert.equal(pendingChip!.textContent, 'Prepass');
+  assert.ok(pendingChip!.querySelector('.pruning-header-active-marker'));
+  assert.equal(pendingChip!.getAttribute('aria-label'), 'pruning skills/tools');
 
   const cancelBtn = container.querySelector('[aria-label="Cancel pruning prepass"]') as HTMLButtonElement;
   assert.ok(cancelBtn, 'Cancel affordance present on the agent-reply pruning chip');

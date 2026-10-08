@@ -19,6 +19,7 @@ import { act } from 'preact/test-utils';
 import renderToString from 'preact-render-to-string';
 
 import { useBufferedText } from '../../transcript/use-buffered-text';
+import { LoadingIndicator } from '../../shell/loading-indicator';
 
 import { buildTranscriptRows, estimateTranscriptRowSize } from '../../transcript/virtual-list-rows';
 import { AGENT_ACTIVITY_LABELS, deriveTurnActivityState } from '../../transcript/activity';
@@ -87,7 +88,9 @@ test('buildTranscriptRows adds an assistant placeholder row when busy after a us
   const kinds = rows.map((r) => r.kind);
   assert.deepEqual(kinds, ['message', 'message']);
   assert.equal(rows[1]?.kind === 'message' ? rows[1].message.id : null, 'assistant-placeholder:user-1');
-  assert.equal(rows[1]?.kind === 'message' && rows[1].activityState ? rows[1].activityState.phase : null, 'pruning');
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].pruningHeaderState?.kind : null, 'pending');
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].activityState : undefined, null,
+    'the pending prepass header replaces the duplicate footer activity');
 });
 
 test('buildTranscriptRows omits typingIndicator when last message is already streaming', () => {
@@ -299,6 +302,26 @@ test('deriveTurnActivityState returns thinking phase when assistant is not strea
 });
 
 // ─── Panel loading states ────────────────────────────────────────────────────
+
+test('LoadingIndicator preserves visible status without duplicated animated ellipsis', () => {
+  const html = renderToString(h(LoadingIndicator, { status: 'Loading conversation', class: 'session-loading' }));
+  assert.match(html, /role="status"/);
+  assert.match(html, /loading-indicator session-loading/);
+  assert.match(html, /class="loading-wheel" aria-hidden="true"/);
+  assert.match(html, /Loading conversation/);
+  assert.doesNotMatch(html, /loading-ellipsis/);
+  assert.doesNotMatch(html, /aria-label=/);
+});
+
+test('LoadingIndicator bare spinner retains default or custom accessible name', () => {
+  for (const ariaLabel of [undefined, 'Recovering session']) {
+    const html = renderToString(h(LoadingIndicator, { ariaLabel }));
+    assert.match(html, /role="status"/);
+    assert.ok(html.includes(`aria-label="${ariaLabel ?? 'Loading'}"`));
+    assert.doesNotMatch(html, /loading-status/);
+    assert.match(html, /class="loading-wheel" aria-hidden="true"/);
+  }
+});
 
 test('panel shows loading surface during initial backend boot', () => {
   assert.equal(

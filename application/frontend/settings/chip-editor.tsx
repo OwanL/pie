@@ -3,6 +3,7 @@
 
 import type { ComponentChildren } from 'preact';
 import { PickerTag } from '../lib/components/PickerTag';
+import { SettingsHelp } from './settings-help';
 
 export interface ChipEditorProps {
   label: string;
@@ -35,8 +36,7 @@ export function ChipEditor({
 }: ChipEditorProps) {
   return (
     <div class="toolbar-settings-keep-picker">
-      <div class="toolbar-settings-keep-picker-label">{label}</div>
-      {hint && <div class="toolbar-settings-item-hint">{hint}</div>}
+      <div class="toolbar-settings-keep-picker-label">{label}{hint && <SettingsHelp label={label}>{hint}</SettingsHelp>}</div>
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
           {selected.map((name) => (

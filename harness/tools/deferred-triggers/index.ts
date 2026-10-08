@@ -45,7 +45,7 @@ function ok(text: string, details?: unknown) {
 
 function err(message: string) {
   return {
-    content: [{ type: 'text' as const, text: `defer_trigger error: ${message}` }],
+    content: [{ type: 'text' as const, text: `wakeup_timer error: ${message}` }],
     details: { error: message },
     isError: true as const,
   };
@@ -85,13 +85,13 @@ function describeTriggers(specs: TriggerSpec[]): string {
 }
 
 function renderList(triggers: ActiveTrigger[]): string {
-  if (triggers.length === 0) return 'No pending deferred triggers for this session.';
+  if (triggers.length === 0) return 'No pending wakeup timers for this session.';
   const rows = triggers.map((t) => {
     const message = t.message.trim() || t.note.trim();
     const target = t.targetSession === t.sessionPath ? 'caller' : t.targetSession;
     return `  ${t.id}  [${describeTriggers(t.triggers)}]  target: ${target}  delivery: ${t.deliveryState}${t.deliveryDetail ? ` (${t.deliveryDetail})` : ''}  message: ${message || '(none)'}  registered: ${t.registeredAt}`;
   });
-  return `Pending deferred triggers (${triggers.length}):\n${rows.join('\n')}`;
+  return `Pending wakeup timers (${triggers.length}):\n${rows.join('\n')}`;
 }
 
 function getSessionPath(ctx: ToolExecuteCtx): string | undefined {
@@ -115,6 +115,7 @@ async function registerWake(
   message: string,
   creatorSession: string,
   targetSession: string,
+  wakeupMode: boolean,
   ctx: ToolExecuteCtx,
 ): Promise<{ id: string; specs: TriggerSpec[] } | { error: string }> {
   const { specs, error } = validateWakeConditions(rawTriggers, { registrationCwd: registrationCwd(ctx) });
@@ -130,28 +131,30 @@ async function registerWake(
       op: 'register',
       sessionPath: creatorSession,
       targetSession,
+      wakeupMode,
       triggers: specs,
       message,
       at: new Date().toISOString(),
     });
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause);
-    return { error: `could not persist the deferred trigger: ${detail}` };
+    return { error: `could not persist the wakeup timer: ${detail}` };
   }
   return { id, specs };
 }
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
-    name: 'defer_trigger',
-    label: 'Defer / resume',
+    name: 'wakeup_timer',
+    label: 'Wakeup timer',
     description: 'Register, list, or cancel durable triggers that deliver a message to a session after a timer, user input, another session finishes, or a periodic predicate. Registration never ends this turn. All actions require the calling session\'s persisted JSONL path, so in-memory subagent sessions are not supported.',
     promptSnippet: 'Register an asynchronous condition and message for a session to receive later.',
     promptGuidelines: [
-      'Use defer_trigger action register to persist a trigger and required message; registration does not end the current turn, so continue working or finish normally.',
-      'Every defer_trigger action requires the calling session\'s persisted JSONL path; in-memory subagent sessions cannot register, list, or cancel triggers.',
+      'Use wakeup_timer action register to persist a trigger and required message; registration does not end the current turn, so continue working or finish normally.',
+      'Every wakeup_timer action requires the calling session\'s persisted JSONL path; in-memory subagent sessions cannot register, list, or cancel triggers.',
       'Use targetSession only with an explicitly persisted session path. The target must be open when delivery occurs; a closed or unavailable target is not redirected to the caller.',
-      'Use defer_trigger action list or cancel to manage triggers created by the current session. On a wake, re-check the task and either complete it or register another trigger.',
+      'Use wakeup_timer action list or cancel to manage triggers created by the current session. On a wake, re-check the task and either complete it or register another trigger.',
+      'Timer delays start after the creator response settles by default; set wakeupMode false to start them at registration. Other condition kinds are unaffected.',
       'Conditions in one registration use OR semantics. A command predicate exits 0 when satisfied and 1 when not yet satisfied; other exits are evaluation errors and are retried periodically.',
     ],
     parameters: deferTriggerSchema,
@@ -164,7 +167,7 @@ export default function (pi: ExtensionAPI) {
       ctx: ToolExecuteCtx,
     ) {
       if (isDisabledByToggle()) {
-        return err('The deferred-triggers extension is disabled. Enable it in Settings → Extensions to defer/resume sessions.');
+        return err('The Wakeup timer extension is disabled. Enable it in Settings → Extensions to wake sessions.');
       }
       const p = (params ?? {}) as Partial<DeferTriggerParams>;
       if (p.action !== 'register' && p.action !== 'cancel' && p.action !== 'list') {
@@ -189,7 +192,7 @@ export default function (pi: ExtensionAPI) {
         if (targetId) {
           const owned = listActiveForSession(creatorSession).some((trigger) => trigger.id === targetId);
           if (!owned) {
-            return err(`deferred trigger ${targetId} is not owned by the current session.`);
+            return err(`wakeup timer ${targetId} is not owned by the current session.`);
           }
         }
         try {
@@ -205,11 +208,15 @@ export default function (pi: ExtensionAPI) {
         }
         return ok(
           targetId
-            ? `Cancelled deferred trigger ${targetId} for this session.`
-            : 'Cancelled all pending deferred triggers for this session.',
+            ? `Cancelled wakeup timer ${targetId} for this session.`
+            : 'Cancelled all pending wakeup timers for this session.',
         );
       }
 
+      if (p.wakeupMode !== undefined && typeof p.wakeupMode !== 'boolean') {
+        return err('wakeupMode must be a boolean when provided for action register.');
+      }
+      const wakeupMode = p.wakeupMode ?? true;
       const message = readMessage(p.message);
       if (!message.trim()) {
         return err('message is required and must be a non-empty string for action register.');
@@ -222,11 +229,12 @@ export default function (pi: ExtensionAPI) {
         message,
         creatorSession,
         target.target,
+        wakeupMode,
         ctx,
       );
       if ('error' in registration) return err(registration.error);
       return ok(
-        `Registered deferred trigger ${registration.id}:\n  [${describeTriggers(registration.specs)}]\n  target: ${target.target}\n  message: ${message}\n\nThe current turn continues; the target session must be open when the trigger fires.`,
+        `Registered wakeup timer ${registration.id}:\n  [${describeTriggers(registration.specs)}]\n  target: ${target.target}\n  message: ${message}\n\nThe current turn continues; the target session must be open when the trigger fires.`,
         { id: registration.id },
       );
     },

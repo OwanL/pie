@@ -448,7 +448,7 @@ const PACKAGE_TEST_METADATA = {
     testGlobs: ['harness/tools/deferred-triggers/test/**/*.test.ts'],
     coverageIncludes: ['harness/tools/deferred-triggers/index.ts', 'harness/tools/deferred-triggers/store.ts', 'harness/tools/deferred-triggers/types.ts'],
     // store.ts (the op-log replay) is the unit-testable core; index.ts is
-    // env-glue (registers the `defer_trigger` tool) and types.ts is the schema.
+    // env-glue (registers the `wakeup_timer` tool) and types.ts is the schema.
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },

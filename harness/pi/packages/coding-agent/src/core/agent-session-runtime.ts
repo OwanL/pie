@@ -12,7 +12,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CompactionHooks, CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager, type ContextMessageOmissionsResolver } from "./session-manager.ts";
+import { type ContextMessageOmissionsResolver, SessionManager } from "./session-manager.ts";
 import type {
 	SessionOwnershipAdapter,
 	SessionOwnershipReservation,
@@ -234,7 +234,10 @@ export class AgentSessionRuntime {
 			}
 			return operation();
 		});
-		this.replacementTail = run.then(() => undefined, () => undefined);
+		this.replacementTail = run.then(
+			() => undefined,
+			() => undefined,
+		);
 		return run;
 	}
 
@@ -256,10 +259,7 @@ export class AgentSessionRuntime {
 		}
 	}
 
-	private async abortReplacementReservation(
-		reservation: SessionOwnershipReservation,
-		error: unknown,
-	): Promise<void> {
+	private async abortReplacementReservation(reservation: SessionOwnershipReservation, error: unknown): Promise<void> {
 		try {
 			await this.ownershipAdapter!.abortPrecommit(
 				reservation,
@@ -732,20 +732,16 @@ export class AgentSessionRuntime {
 				intent: { requestedPath: inputPath, importSourcePath: resolvedPath },
 				prepare: (canonicalPath, canonicalSelfReopen) => {
 					const importingCurrentPath = canonicalSelfReopen && sameResolvedPath(resolvedPath, canonicalPath);
-					const manager = importAlreadyAtDestination || importingCurrentPath
-						? SessionManager.preparePieOpen(
-								canonicalPath,
-								sessionDir,
-								cwdOverride,
-								this.ownershipAdapter!,
-							)
-						: SessionManager.preparePieImport(
-								resolvedPath,
-								canonicalPath,
-								sessionDir,
-								cwdOverride,
-								this.ownershipAdapter!,
-							);
+					const manager =
+						importAlreadyAtDestination || importingCurrentPath
+							? SessionManager.preparePieOpen(canonicalPath, sessionDir, cwdOverride, this.ownershipAdapter!)
+							: SessionManager.preparePieImport(
+									resolvedPath,
+									canonicalPath,
+									sessionDir,
+									cwdOverride,
+									this.ownershipAdapter!,
+								);
 					assertSessionCwdExists(manager, this.cwd);
 					return manager;
 				},
@@ -822,20 +818,21 @@ export async function createAgentSessionRuntime(
 	}
 	// Keep caller-owned context and compaction policies on the shared factory so
 	// replacement, self-reopen, and rebuild paths receive the same configuration.
-	const sharedFactory: CreateAgentSessionRuntimeFactory = options.contextMessageOmissions || options.compactionHooks
-		? (runtimeOptions) => {
-				if (options.contextMessageOmissions) {
-					runtimeOptions.sessionManager.setContextMessageOmissionsResolver(options.contextMessageOmissions);
+	const sharedFactory: CreateAgentSessionRuntimeFactory =
+		options.contextMessageOmissions || options.compactionHooks
+			? (runtimeOptions) => {
+					if (options.contextMessageOmissions) {
+						runtimeOptions.sessionManager.setContextMessageOmissionsResolver(options.contextMessageOmissions);
+					}
+					return createRuntime({
+						...runtimeOptions,
+						...(options.contextMessageOmissions
+							? { contextMessageOmissions: options.contextMessageOmissions }
+							: {}),
+						...(options.compactionHooks ? { compactionHooks: options.compactionHooks } : {}),
+					});
 				}
-				return createRuntime({
-					...runtimeOptions,
-					...(options.contextMessageOmissions
-						? { contextMessageOmissions: options.contextMessageOmissions }
-						: {}),
-					...(options.compactionHooks ? { compactionHooks: options.compactionHooks } : {}),
-				});
-			}
-		: createRuntime;
+			: createRuntime;
 	const result = await sharedFactory(options);
 	return new AgentSessionRuntime(
 		result.session,

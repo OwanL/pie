@@ -22,6 +22,7 @@ import {
 } from '../shell/chat-prefs';
 import {
   filterEnabledProviders,
+  formatModelSpec,
   getModelThinkingLevels,
   isModelSelectedBySpec,
   orderModelsForPicker,
@@ -32,8 +33,8 @@ import { ModelPicker } from './model-picker';
 import { ThinkingSelect } from './thinking-select';
 import { ChipEditor } from './chip-editor';
 import { SettingCheckbox } from './setting-checkbox';
+import { SettingsHelp } from './settings-help';
 import { SliderRow } from './slider-row';
-import { UiGroupLabel } from './ui-appearance-settings';
 import type { OnSetPrefs } from './settings-menu-types';
 
 type BucketKey = 'small' | 'medium' | 'frontier';
@@ -114,17 +115,23 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
     () => modelEntries.filter((entry) => !isSelected(entry.model)),
     [availableModels, modelEntries, selectedModels.join('\u0000')],
   );
-  const pendingParsed = parseModelSpec(pendingModel);
-  const pendingModelInfo = availableModels.find((model) =>
-    model.id === pendingParsed.id && (!pendingParsed.provider || model.provider === pendingParsed.provider));
+  // Resolve against the current addable picker entries, not the full catalog
+  // used for persisted chip labels. This also shares the picker's legacy-id
+  // duplicate semantics through availableOptions/isSelected.
+  const pendingModelInfo = availableOptions.find((entry) =>
+    formatModelSpec(entry.model) === pendingModel)?.model;
+  const pendingEligible = !!pendingModelInfo;
   const pendingSupportedLevels = getModelThinkingLevels(pendingModelInfo);
+  const pendingSupportedLevelsKey = pendingSupportedLevels.join('\u0000');
+  const canAdd = pendingEligible && !!pendingThinkingLevel && pendingSupportedLevels.includes(pendingThinkingLevel);
 
   // Pick a sensible default reasoning level for the newly selected model so
   // the user can add it in one click. Prefer medium for reasoning models,
   // then low, then the first supported level; non-reasoning models fall back
   // to off.
   useEffect(() => {
-    if (!pendingModel) {
+    if (!pendingModel || !pendingEligible) {
+      setPendingModel('');
       setPendingThinkingLevel('');
       return;
     }
@@ -132,8 +139,11 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
     const defaultLevel = defaults.find((level) => pendingSupportedLevels.includes(level))
       ?? pendingSupportedLevels[0]
       ?? 'off';
-    setPendingThinkingLevel(defaultLevel);
-  }, [pendingModel]);
+    // Capability refreshes repair only unsupported levels; unrelated prop
+    // renders must not overwrite a supported, intentional user choice.
+    setPendingThinkingLevel((current) =>
+      current && pendingSupportedLevels.includes(current) ? current : defaultLevel);
+  }, [pendingModel, pendingEligible, pendingSupportedLevelsKey]);
 
   // Focus management: move focus into the add row when it appears with a
   // selected reasoning level, and back to the picker trigger when a pending
@@ -144,7 +154,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
     if (!pendingModel) {
       if (prevPendingModel.current) {
         const trigger = pickerWrapRef.current?.querySelector('[aria-haspopup="listbox"]') as HTMLButtonElement | null;
-        trigger?.focus();
+        if (trigger && !trigger.disabled) trigger.focus();
       }
       prevPendingModel.current = '';
       return;
@@ -161,7 +171,9 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
   }, [pendingModel, pendingThinkingLevel]);
 
   const addAssignment = () => {
-    if (!pendingModel || !pendingThinkingLevel || selectedModels.includes(pendingModel)) return;
+    // Revalidate synchronously too: a confirmation can arrive after new props
+    // render but before the pending-state reconciliation effect runs.
+    if (!canAdd || !pendingThinkingLevel) return;
     onChange([...selected, { model: pendingModel, thinkingLevel: pendingThinkingLevel }]);
     setPendingModel('');
     setPendingThinkingLevel('');
@@ -194,8 +206,12 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
 
   return (
     <div class="toolbar-settings-keep-picker" onKeyDown={handleKeyDown}>
-      <div class="toolbar-settings-keep-picker-label">{label}</div>
-      <div class="toolbar-settings-item-hint">{hint}</div>
+      <div class="toolbar-settings-keep-picker-label">
+        {label}
+        <SettingsHelp label={`${label} bucket models`}>
+          {hint}{selected.length === 0 && <> Empty buckets use the parent model and its reasoning level.</>}
+        </SettingsHelp>
+      </div>
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
           {selected.map((entry) => {
@@ -226,14 +242,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
         </div>
       )}
       {selected.length === 0 && (
-        <div class="toolbar-settings-bucket-warning" role="note">
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M6 1.6 L10.7 10.1 H1.3 Z" />
-            <line x1="6" y1="4.9" x2="6" y2="7.1" />
-            <circle cx="6" cy="8.6" r="0.55" fill="currentColor" stroke="none" />
-          </svg>
-          <span>No assignments — inherits the parent model and reasoning</span>
-        </div>
+        <div class="toolbar-settings-bucket-inherit">Uses parent model</div>
       )}
       <div class="toolbar-settings-keep-picker-wrap" ref={pickerWrapRef}>
         {!pendingModel && (
@@ -275,7 +284,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
             <button
               type="button"
               class="toolbar-settings-bucket-add-btn"
-              disabled={!pendingThinkingLevel}
+              disabled={!canAdd}
               onClick={addAssignment}
             >
               <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -325,11 +334,7 @@ function DropToolsEditor({ selected, onChange }: DropToolsEditorProps) {
   return (
     <ChipEditor
       label="Drop tools for subagents"
-      hint={
-        <>
-          Tool names listed here are removed from every subagent's tool set — e.g. <code>ask_user</code> to stop subagents prompting the user mid-delegation. Applies to both agents with an explicit <code>tools:</code> list and unrestricted agents.
-        </>
-      }
+      hint={<>Remove these tools from every subagent, including explicit <code>tools:</code> lists and unrestricted agents. Example: <code>ask_user</code> prevents mid-delegation prompts.</>}
       selected={selected}
       onRemove={removeTool}
       removeLabel={(name) => `Stop dropping ${name}`}
@@ -376,9 +381,11 @@ export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, m
   );
   return (
     <div class="toolbar-settings-ext-settings">
-      <div class="toolbar-settings-item-hint">
-        Each bucket holds provider-qualified models eligible for that tier. When a subagent requests a bucket, one model is picked from a balanced random cycle. Empty buckets fall back to the parent's active model.
-      </div>
+      <h3 class="toolbar-settings-assignment-title">Subagent model buckets
+        <SettingsHelp label="Subagent model buckets">
+          Each bucket holds provider-qualified models eligible for that tier. When a subagent requests a bucket, one model is picked from a balanced random cycle. Empty buckets fall back to the parent's active model.
+        </SettingsHelp>
+      </h3>
       {BUCKET_DEFS.map((def) => (
         <BucketModelsEditor
           key={def.key}
@@ -414,6 +421,8 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
 
   return (
     <div class="toolbar-settings-ext-settings">
+      <section class="toolbar-settings-content-group" role="group" aria-label="Model selection & routing">
+        <h3 class="toolbar-settings-content-group-title">Model selection &amp; routing</h3>
       <SettingCheckbox
         label="Always use parent model"
         checked={prefs.subagentAlwaysParentModel}
@@ -423,27 +432,25 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
       <SettingCheckbox
         label="Route around busy providers"
         checked={prefs.subagentRouteAroundSaturatedProviders}
+        hint="Prefer a requested-bucket model with an immediate ProviderGate slot; if none is available, use normal selection and queue. Always use parent model takes precedence."
         onChange={() => onSetPrefs(toggleChatPref(prefs, 'subagentRouteAroundSaturatedProviders'))}
       />
-      <div class="toolbar-settings-item-hint">
-        Prefer another enabled model/provider in the requested bucket when its ProviderGate has an immediate slot. If capacity is unavailable or every candidate is busy, keep normal selection and queue. “Always use parent model” takes precedence.
-      </div>
 
       <SettingCheckbox
         label="Fallback on provider failure"
         checked={prefs.subagentFallbackOnProviderFailure}
+        hint="After provider retries fail (timeout, connection error, rate limit, or server error), retry another model in the same bucket only before visible output or tool execution. Work is never replayed."
         onChange={() => onSetPrefs(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure'))}
       />
-      <div class="toolbar-settings-item-hint">
-        Retry on another model in the same bucket when a provider fails after exhausting its own retries (for example a timeout, connection error, rate limit, or server error). Failover only happens before visible output or tool execution, so work is not replayed unsafely.
-      </div>
 
-      <UiGroupLabel label="Default providers" />
-      <div class="toolbar-settings-item-hint">
-        Sets the initial selection in each chat's subagent provider selector. Per-chat changes override these defaults. Configured providers stay visible if a session's live model list is temporarily stale.
+      <div class="toolbar-settings-ui-group-label">
+        Default providers
+        <SettingsHelp label="Default providers">
+          Initial provider selection for each chat; per-chat changes override it. Configured providers stay visible when the live model list is stale. Add models to the buckets in Models to configure provider defaults.
+        </SettingsHelp>
       </div>
       {subagentProviders.length === 0 && (
-        <div class="toolbar-settings-item-hint">Add models to the buckets in Models to configure provider defaults.</div>
+        <div class="toolbar-settings-item-hint">No providers configured</div>
       )}
       {subagentProviders.map((provider) => {
         const enabled = isSubagentProviderEnabled(prefs, provider);
@@ -457,16 +464,25 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         );
       })}
 
-      <UiGroupLabel label="Dropped tools" />
+      </section>
+
+      <section class="toolbar-settings-content-group" role="group" aria-label="Tools">
+        <h3 class="toolbar-settings-content-group-title">Tools</h3>
       <DropToolsEditor
         selected={prefs.subagentDropTools ?? []}
         onChange={(tools) => onSetPrefs(setSubagentDropTools(prefs, tools))}
       />
 
-      <UiGroupLabel label="Nested bucket allowlist" />
-      <div class="toolbar-settings-item-hint">
-        Which model tiers nested sub-agents (depth ≥ 1) may use. A requested tier that isn't allowed is downgraded to the highest allowed tier at or below it — for example, a disallowed Frontier request runs on Medium (or Small if only that tier is allowed). The root agent is never restricted.
-      </div>
+      </section>
+
+      <section class="toolbar-settings-content-group" role="group" aria-label="Delegation">
+        <h3 class="toolbar-settings-content-group-title">Delegation</h3>
+      <h4 class="toolbar-settings-ui-group-label">
+        Nested bucket allowlist
+        <SettingsHelp label="Nested bucket allowlist">
+          Controls which tiers nested subagents (depth ≥ 1) may use; disallowed requests downgrade to the highest allowed tier at or below the request. The root agent is never restricted.
+        </SettingsHelp>
+      </h4>
       {NESTED_TOGGLE_DEFS.map((def) => {
         const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
         return (
@@ -479,10 +495,12 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         );
       })}
 
-      <UiGroupLabel label="Delegation by bucket" />
-      <div class="toolbar-settings-item-hint">
-        Choose which effective subagent tiers may create further subagents. Disabled tiers become leaves and receive an error if they call the subagent tool. The root agent is never restricted.
-      </div>
+      <h4 class="toolbar-settings-ui-group-label">
+        Delegation by bucket
+        <SettingsHelp label="Delegation by bucket">
+          Controls which effective subagent tiers may spawn further subagents; disabled tiers become leaves and subagent-tool calls return an error. The root agent is never restricted.
+        </SettingsHelp>
+      </h4>
       {NESTED_TOGGLE_DEFS.map((def) => {
         const enabled = prefs.subagentBucketCanSpawn[def.key] ?? true;
         return (
@@ -495,7 +513,10 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         );
       })}
 
-      <UiGroupLabel label="Nesting" />
+      </section>
+
+      <section class="toolbar-settings-content-group" role="group" aria-label="Limits">
+        <h3 class="toolbar-settings-content-group-title">Limits</h3>
       <SliderRow
         label="Nesting levels"
         value={prefs.subagentMaxDepth}
@@ -504,7 +525,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         step={1}
         formatValue={(v) => (v === 0 ? 'Off' : String(v))}
         ariaLabel="Subagent nesting levels"
-        hint="How many levels subagents may delegate to further subagents (main → L1 → L2 → ...). 0 turns subagents off entirely. Higher values allow more nesting at higher cost."
+        hint="Maximum delegation depth (main → L1 → …); 0 disables subagents. Deeper trees can increase cost."
         onChange={(subagentMaxDepth) => onSetPrefs({ subagentMaxDepth })}
       />
       <SliderRow
@@ -514,13 +535,25 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         max={200}
         step={5}
         ariaLabel="Max subagent sessions across the nested tree"
-        hint="Cap on total subagent sessions spawned across an entire nested tree, so increased nesting can't run away on cost."
+        hint="Total sessions spawned across one nested tree. Caps the cost of deeper delegation."
         onChange={(subagentMaxTreeSessions) => onSetPrefs({ subagentMaxTreeSessions })}
       />
 
-      <UiGroupLabel label="Throughput" />
-      <div class="toolbar-settings-item-hint">
-        Native sibling subagent calls run concurrently. This cap protects providers from bursts; 0 is not allowed.
+      <div class="toolbar-settings-ui-group-label">
+        Throughput
+        <SettingsHelp label="Throughput">
+          Sibling subagent calls run concurrently; the cap protects providers from bursts.<br />
+          Preference: {prefs.subagentMaxInflight} · {concurrencySourceLabel(prefs.subagentMaxInflightSource)}<br />
+          {runtimeConcurrency ? (
+            <>
+              Runtime configured: {runtimeConcurrency.configured.value} · {concurrencySourceLabel(runtimeConcurrency.configured.source)}<br />
+              {appliedRuntimeStatus}{pendingRuntimeStatus}<br />
+              Worker-process scope · {runtimeConcurrency.workerCount} worker{runtimeConcurrency.workerCount === 1 ? '' : 's'}; the cap is shared by sessions in that process, not across all sessions or processes.
+            </>
+          ) : (
+            <>Runtime configured/applied: unavailable<br />Worker-process scope · runtime status unavailable</>
+          )}
+        </SettingsHelp>
       </div>
       <SliderRow
         label="Max active trees"
@@ -529,21 +562,13 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGa
         max={MAX_SUBAGENT_MAX_INFLIGHT}
         step={1}
         ariaLabel="Max concurrent root subagent trees"
-        hint="Per-worker-process cap on independent root subagent trees, shared by that process's sessions—not a cap across all sessions or processes. Sibling calls beyond it wait for a permit. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle."
+        hint="Maximum independent root trees per worker process, shared by its sessions—not across all sessions or processes. Extra sibling calls wait; descendants borrow their root's permit to avoid deadlock."
         onChange={(subagentMaxInflight) => onSetPrefs({ subagentMaxInflight })}
       />
-      <div class="toolbar-settings-item-hint">
-        Preference: {prefs.subagentMaxInflight} · {concurrencySourceLabel(prefs.subagentMaxInflightSource)}<br />
-        {runtimeConcurrency ? (
-          <>
-            Runtime configured: {runtimeConcurrency.configured.value} · {concurrencySourceLabel(runtimeConcurrency.configured.source)}<br />
-            {appliedRuntimeStatus}{pendingRuntimeStatus}<br />
-            Worker-process scope · {runtimeConcurrency.workerCount} worker{runtimeConcurrency.workerCount === 1 ? '' : 's'}
-          </>
-        ) : (
-          <>Runtime configured/applied: unavailable<br />Worker-process scope · runtime status unavailable</>
-        )}
+      <div class="toolbar-settings-runtime-status">
+        {runtimeConcurrency ? `${appliedRuntimeStatus}${pendingRuntimeStatus}` : 'Runtime unavailable'}
       </div>
+      </section>
     </div>
   );
 }

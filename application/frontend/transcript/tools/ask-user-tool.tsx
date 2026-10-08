@@ -225,11 +225,11 @@ function renderAskUserTool({
   if ((toolCall.status === 'completed' || toolCall.status === 'failed') && parsedInput) {
     const parsedResult = typeof toolCall.result !== 'undefined' ? parseAskUserResult(toolCall.result) : null;
     return (
-      <AskUserCompleted
-        toolCall={toolCall}
-        parsedInput={parsedInput}
-        parsedResult={parsedResult}
-        onContextMenu={onContextMenu}
+      <ToolCallCard toolCall={toolCall} prefs={prefs} workingDirectory={workingDirectory} summary={parsedInput.question}
+        onOpenFile={onOpenFile}
+        onContextMenu={(e) => onContextMenu(getToolCallContextType('ask_user'), JSON.stringify(toolCall, null, 2), e)}
+        renderDetails={(resolvedCall) => <AskUserCompleted toolCall={resolvedCall} parsedInput={parsedInput}
+          parsedResult={resolvedCall === toolCall ? parsedResult : parseAskUserResult(resolvedCall.result)} onContextMenu={onContextMenu} />}
       />
     );
   }
@@ -238,7 +238,6 @@ function renderAskUserTool({
   return (
     <ToolCallCard
       toolCall={toolCall}
-      autoExpand={prefs.autoExpandToolCalls}
       activityTailLines={prefs.activityTailLines}
       workingDirectory={workingDirectory}
       prefs={prefs}

@@ -156,7 +156,7 @@ export function runProject(project, signal, runtime, dependencies = {}) {
         const evidence = {
           owner: { pid: process.pid, directory: boundedText(overlay.directory) },
           project: { id: boundedText(project.id), config: boundedText(configPath), compiler: boundedText(project.compiler) },
-          sdkSelection: { sdkPath: boundedText(runtime.sdkPath), artifactDir: boundedText(runtime.artifactDir) },
+          sdkSelection: { sdkPath: boundedText(runtime.sdkPath), artifactDir: boundedText(runtime.artifactDir), identity: boundedText(runtime.identity) },
           childPid: child.pid ?? null,
           gone: false, timedOut: watchdog.timedOut, aborted: watchdog.aborted,
           diagnostics,
@@ -244,8 +244,11 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     let results;
     let teardownUnconfirmed = false;
     try {
-      results = await (dependencies.withVerificationRuntime ?? withVerificationRuntime)(selection, processAbort.signal, (runtime) =>
-        runWithConcurrency(projects, args.concurrency, (project, signal) => runProject(project, signal, runtime, dependencies), processAbort.signal));
+      results = await (dependencies.withVerificationRuntime ?? withVerificationRuntime)(selection, processAbort.signal, async (runtime) => {
+        const tooling = await runtime.getToolingRuntime();
+        const developerRole = { sdkPath: tooling.sdkPath, artifactDir: tooling.artifactDir, identity: tooling.identity };
+        return runWithConcurrency(projects, args.concurrency, (project, signal) => runProject(project, signal, developerRole, dependencies), processAbort.signal);
+      });
     } catch (error) {
       teardownUnconfirmed = error?.teardownUnconfirmed === true;
       throw error;

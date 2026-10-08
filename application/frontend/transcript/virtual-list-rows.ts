@@ -39,6 +39,8 @@ interface BuildTranscriptRowsOptions {
   pendingAssistantModelId?: string;
   /** Selected assistant thinking level known before message_start. */
   pendingAssistantThinkingLevel?: ChatMessage['thinkingLevel'];
+  /** Host-owned start time for the in-flight prepass, never a row-local clock. */
+  prepassStartedAt?: number | null;
 }
 
 type ResultPruningHeaderState = Extract<PruningHeaderState, { kind: 'result' }>;
@@ -165,10 +167,11 @@ function maybeAddPlaceholderAssistant(
   pendingAssistantModelId: string | undefined,
   pendingAssistantThinkingLevel: ChatMessage['thinkingLevel'] | undefined,
   activityState: TurnActivityState | null,
+  prepassStartedAt: number | null | undefined,
 ): void {
   const pendingPruningHeaderState: PruningHeaderState | null = pendingPruning?.state
     ?? (activityState?.phase === 'pruning'
-      ? { kind: 'pending', label: AGENT_ACTIVITY_LABELS.pruning }
+      ? { kind: 'pending', label: activityState.label || AGENT_ACTIVITY_LABELS.pruning, prepassStartedAt }
       : null);
   const placeholderAssistantId = latestUserMessage
     ? `assistant-placeholder:${latestUserMessage.id}`
@@ -224,7 +227,9 @@ function attachActivityState(rows: TranscriptRow[], activityState: TurnActivityS
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index];
     if (row?.kind === 'message' && row.message.role === 'assistant') {
-      rows[index] = { ...row, activityState };
+      // The pending header already owns prepass status and cancellation.
+      // Do not repeat it as an activity banner below the same header.
+      rows[index] = { ...row, activityState: row.pruningHeaderState?.kind === 'pending' && activityState.phase === 'pruning' ? null : activityState };
       return;
     }
   }
@@ -248,6 +253,7 @@ export function buildTranscriptRows({
   activityState = null,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  prepassStartedAt,
 }: BuildTranscriptRowsOptions): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   if (systemPromptCount > 0) {
@@ -273,6 +279,7 @@ export function buildTranscriptRows({
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
     activityState,
+    prepassStartedAt,
   );
 
   if (busy && activityState) {

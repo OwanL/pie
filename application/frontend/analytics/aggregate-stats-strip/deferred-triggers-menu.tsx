@@ -69,12 +69,12 @@ export function DeferredTriggersMenu({
       ref={ref}
       class="block-context-menu deferred-triggers-menu"
       role="menu"
-      aria-label="Pending deferred triggers"
+      aria-label="Pending wakeup timers"
       style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div class="deferred-triggers-menu-title">
-        {triggers.length} pending deferred trigger{triggers.length === 1 ? '' : 's'}
+        {triggers.length} pending wakeup timer{triggers.length === 1 ? '' : 's'}
       </div>
       <div class="deferred-triggers-menu-list">
         {triggers.map((t) => {
@@ -107,8 +107,8 @@ export function DeferredTriggersMenu({
                 class="context-menu-item deferred-triggers-menu-item-cancel"
                 type="button"
                 role="menuitem"
-                aria-label={`Cancel deferred trigger for ${name}`}
-                title="Cancel this deferred trigger"
+                aria-label={`Cancel wakeup timer for ${name}`}
+                title="Cancel this wakeup timer"
                 onClick={() => onCancel(t.sessionPath, t.id)}
               >
                 ×
@@ -186,6 +186,10 @@ function boundedDiagnostic(detail: string): string {
 }
 
 function formatDeliveryState(trigger: DeferredTriggerView): string {
+  if (trigger.deliveryState === 'pending' && trigger.wakeupMode === true
+    && !trigger.timerStartedAt && trigger.triggers.some((spec) => spec.kind === 'timer')) {
+    return 'Waiting for response to finish';
+  }
   if (trigger.deliveryState === 'pending' && trigger.deliveryDetail) {
     return boundedDiagnostic(trigger.deliveryDetail);
   }

@@ -282,6 +282,7 @@ test('message.send retry keeps its operation identity and increments the transpo
       backendGeneration: 7, sessionPath: SESSION, text: 'hello', inputs: [],
       localId: 'local-1', composedText: 'hello', userParts: undefined,
       priorPruningMode: undefined,
+      refreshPruning: undefined,
     },
   ]);
 });

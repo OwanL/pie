@@ -14,7 +14,7 @@ export function CollapsedSummary({
   model: ToolCallHeaderSummaryModel;
   summaryPath?: string;
   parentDepth?: number;
-  onOpenFile: (path: string) => void;
+  onOpenFile?: (path: string) => void;
 }) {
   if (model.kind === 'text') {
     return (

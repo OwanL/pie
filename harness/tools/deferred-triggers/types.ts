@@ -1,5 +1,5 @@
 /**
- * Parameter schema and durable sidecar types for the `defer_trigger` tool.
+ * Parameter schema and durable sidecar types for the `wakeup_timer` tool.
  *
  * Normalized trigger specs come from the shared wake-condition contract so the
  * tool and host use the same periodic-predicate defaults and bounds. The host
@@ -24,6 +24,8 @@ export interface DeferTriggerParams {
   message?: string;
   /** `register`: persisted target session path; omitted means the caller. */
   targetSession?: string;
+  /** `register`: start timer delays after the creator response settles (default true). */
+  wakeupMode?: boolean;
   /** `cancel`: specific trigger id (from `register`); omit to cancel all owned triggers. */
   triggerId?: string;
 }
@@ -31,12 +33,14 @@ export interface DeferTriggerParams {
 /** The op-log shapes written to `triggers.jsonl` (must match the host store). */
 export interface TriggerOp {
   id?: string;
-  op: 'register' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
+  op: 'register' | 'timer-started' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
   /** Creator/owner session path. Legacy records also used this as the target. */
   sessionPath: string;
   /** Delivery target for a new registration; omitted in legacy records. */
   targetSession?: string;
   triggers?: TriggerSpec[];
+  /** register: omitted legacy values replay as false. */
+  wakeupMode?: boolean;
   /** New registrations use message; note is retained for legacy records. */
   message?: string;
   note?: string;
@@ -63,6 +67,8 @@ export interface ActiveTrigger {
   /** Compatibility alias for callers/renderers that still display legacy notes. */
   note: string;
   registeredAt: string;
+  wakeupMode?: boolean;
+  timerStartedAt?: string;
   deliveryState: 'pending' | 'claimed' | 'retryable';
   recoveryState?: 'dead-owner-recovered' | 'acknowledgement-ambiguous';
   deliveryDetail?: string;
@@ -160,6 +166,11 @@ export const deferTriggerSchema = {
       type: 'string',
       minLength: 1,
       description: 'register: target session path; omit to target the calling session. The target must be open for delivery.',
+    },
+    wakeupMode: {
+      type: 'boolean',
+      default: true,
+      description: 'register: timer delays start after the creator response settles; false starts them at registration. Other condition kinds are unaffected.',
     },
     triggerId: {
       type: 'string',

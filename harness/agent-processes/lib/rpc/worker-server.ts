@@ -8,6 +8,7 @@ import {
   BoundedWorkerIpcWriter,
   WORKER_IPC_COORDINATOR_TO_WORKER_FD,
   type WorkerIpcSettlement,
+  type WorkerIpcEnqueueOptions,
   WORKER_IPC_WORKER_TO_COORDINATOR_FD,
   type WorkerIpcWriteTarget,
 } from './worker-frame-io';
@@ -235,9 +236,9 @@ export class WorkerServer {
   /** Send a closed worker frame while the transport supplies exact identity and sequence fields.
    * Runtime catalog reports retain their bounded telemetry admission policy even
    * when a legacy caller still reaches this generic seam. */
-  sendFrame(body: WorkerToCoordinatorFrameBody): boolean {
+  sendFrame(body: WorkerToCoordinatorFrameBody, options?: Pick<WorkerIpcEnqueueOptions, 'replaceableSessionOpened'>): boolean {
     if (body.kind === 'runtime.report') return this.sendRuntimeReportFrame(body.payload);
-    return this.send({ ...this.frameBase, ...body } as WorkerIpcFrameDraft);
+    return this.send({ ...this.frameBase, ...body } as WorkerIpcFrameDraft, undefined, options);
   }
 
   /** Analytics owns a bounded lossy-at-admission lane: a synchronous queue
@@ -697,8 +698,13 @@ export class WorkerServer {
     if (!accepted) this.close(1, failure);
   }
 
-  private send(draft: WorkerIpcFrameDraft, onSettled?: () => void): boolean {
+  private send(
+    draft: WorkerIpcFrameDraft,
+    onSettled?: () => void,
+    options?: Pick<WorkerIpcEnqueueOptions, 'replaceableSessionOpened'>,
+  ): boolean {
     const result = this.writer.enqueue(draft, {
+      ...options,
       onSettled: (settlement) => {
         if (settlement.status === 'sent') onSettled?.();
         else if (settlement.status === 'failed') this.close(1, settlement.error);

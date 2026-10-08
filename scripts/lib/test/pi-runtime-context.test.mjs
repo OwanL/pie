@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { withPiRuntime } from '../pi-runtime-context.mjs';
@@ -46,8 +46,8 @@ function trackCleanup(t, parent) {
   t.after(() => rm(parent, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
 }
 
-function fakeDependencies(t, { onBuild, onVerify } = {}) {
-  const calls = { builds: [], verifications: [], parents: [], outputWasPresent: [] };
+function fakeDependencies(t, { onBuild, onVerify, onVerifyTooling } = {}) {
+  const calls = { builds: [], verifications: [], toolingVerifications: [], parents: [], outputWasPresent: [] };
   return {
     calls,
     dependencies: {
@@ -61,6 +61,15 @@ function fakeDependencies(t, { onBuild, onVerify } = {}) {
         const artifactDir = path.join(args.output, 'pi-runtime');
         await mkdir(artifactDir, { recursive: true });
         return { artifactDir, sdkPath: 'builder-sdk', identity: 'builder-identity' };
+      },
+      async verifyPiRuntimeToolingArtifact(artifactDir) {
+        calls.toolingVerifications.push(artifactDir);
+        if (onVerifyTooling) return onVerifyTooling(artifactDir, calls);
+        return {
+          artifactDir: path.join(artifactDir, '../pi-tooling'),
+          sdkPath: 'verified-tooling-sdk',
+          identity: `tooling-identity-${calls.toolingVerifications.length}`,
+        };
       },
       async verifyPiRuntimeArtifact(artifactDir) {
         calls.verifications.push(artifactDir);
@@ -109,9 +118,10 @@ async function validArtifactFixture(t) {
 function assertFrozenContext(context) {
   assert.equal(Object.isFrozen(context), true);
   assert.deepEqual(Object.keys(context).sort(), [
-    'artifactDir', 'confirmChildCompletion', 'identity', 'sdkPath',
+    'artifactDir', 'confirmChildCompletion', 'getToolingRuntime', 'identity', 'sdkPath',
   ].sort());
   assert.equal(typeof context.confirmChildCompletion, 'function');
+  assert.equal(typeof context.getToolingRuntime, 'function');
 }
 
 test('one acquired runtime is shared by callback children and cleaned after confirmed callback settlement', async (t) => {
@@ -146,6 +156,7 @@ test('one acquired runtime is shared by callback children and cleaned after conf
 
   await confirmed;
   assert.equal(calls.builds.length, 1);
+  assert.deepEqual(calls.toolingVerifications, [], 'unused tooling is never verified');
   assert.deepEqual(calls.builds[0], { output: path.join(acquiredParent, 'build') });
   assert.deepEqual(calls.outputWasPresent, [false], 'builder output must be nonexistent when acquired');
   assert.deepEqual(calls.verifications, [path.join(calls.builds[0].output, 'pi-runtime')]);
@@ -277,4 +288,103 @@ test('real verifier accepts and reuses a valid manifest-backed artifact without 
   assert.deepEqual(result, { identity: verified.identity });
   assert.deepEqual(await verifyPiRuntimeArtifact(artifactDir), verified);
   assert.equal(await exists(artifactDir), true);
+});
+
+test('tooling is verified freshly on demand without changing runtime SDK aliases', async (t) => {
+  const { calls, dependencies } = fakeDependencies(t);
+  await withPiRuntime({}, async (context) => {
+    assert.deepEqual(calls.toolingVerifications, []);
+    const first = await context.getToolingRuntime();
+    const second = await context.getToolingRuntime();
+    assert.equal(first.identity, 'tooling-identity-1');
+    assert.equal(second.identity, 'tooling-identity-2');
+    assert.equal(first.sdkPath, 'verified-tooling-sdk');
+    assert.equal(first.artifactDir, path.join(context.artifactDir, '../pi-tooling'));
+    assert.deepEqual(calls.toolingVerifications, [context.artifactDir, context.artifactDir]);
+    assert.equal(context.identity, 'verified-identity');
+    assert.equal(context.sdkPath, path.join(context.artifactDir, 'verified-sdk'));
+    context.confirmChildCompletion();
+    await assert.rejects(context.getToolingRuntime(), /after child completion/);
+    assert.equal(calls.toolingVerifications.length, 2);
+  }, dependencies);
+});
+
+test('tooling verification failure propagates and retains an unconfirmed owned directory', async (t) => {
+  const { calls, dependencies } = fakeDependencies(t, {
+    onVerifyTooling: async () => { throw new Error('tooling verification failed'); },
+  });
+  await assert.rejects(withPiRuntime({}, async (context) => {
+    await context.getToolingRuntime();
+    assert.fail('invalid tooling must not be returned');
+  }, dependencies), /tooling verification failed/);
+  assert.equal(await exists(calls.parents[0]), true);
+});
+
+test('tooling acquisition checks abort both before and after verification', async (t) => {
+  for (const abortDuringVerification of [false, true]) {
+    const controller = new AbortController();
+    const { calls, dependencies } = fakeDependencies(t, {
+      onVerifyTooling: async () => {
+        controller.abort();
+        return { artifactDir: 'tooling', sdkPath: 'tooling-sdk', identity: 'tooling-id' };
+      },
+    });
+    await withPiRuntime({ signal: controller.signal }, async (context) => {
+      if (!abortDuringVerification) controller.abort();
+      await assert.rejects(context.getToolingRuntime(), { name: 'AbortError' });
+      assert.equal(context.identity, 'verified-identity');
+      context.confirmChildCompletion();
+    }, dependencies);
+    assert.equal(calls.toolingVerifications.length, abortDuringVerification ? 1 : 0);
+    assert.equal(await exists(calls.parents[0]), true);
+  }
+});
+
+test('owned runtime and tooling share cleanup only after confirmation and callback settlement', async (t) => {
+  const { calls, dependencies } = fakeDependencies(t, {
+    onBuild: async ({ output }) => {
+      const artifactDir = path.join(output, 'pi-runtime');
+      await mkdir(artifactDir, { recursive: true });
+      await mkdir(path.join(output, 'pi-tooling'));
+      return { artifactDir };
+    },
+  });
+  let tooling;
+  await withPiRuntime({}, async (context) => {
+    tooling = await context.getToolingRuntime();
+    assert.equal(await exists(tooling.artifactDir), true);
+    context.confirmChildCompletion();
+    await Promise.resolve();
+    assert.equal(await exists(tooling.artifactDir), true);
+    assert.equal(await exists(context.artifactDir), true);
+  }, dependencies);
+  assert.equal(await exists(tooling.artifactDir), false);
+  assert.equal(await exists(calls.parents[0]), false);
+});
+
+test('canonical tooling verifier supports legacy runtime and caller-owned linked tooling without deleting either', async (t) => {
+  const artifactDir = await validArtifactFixture(t);
+  const legacy = await writePiRuntimeManifest(artifactDir, provenance);
+  await withPiRuntime({ artifactDir }, async (context) => {
+    assert.deepEqual(await context.getToolingRuntime(), legacy);
+    context.confirmChildCompletion();
+  });
+  const toolingDir = path.join(artifactDir, '../pi-tooling');
+  await cp(artifactDir, toolingDir, { recursive: true });
+  await put(toolingDir, 'tooling-only.txt', 'tooling payload');
+  const tooling = await writePiRuntimeManifest(toolingDir, provenance);
+  await put(artifactDir, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: tooling.identity,
+  }));
+  const runtime = await writePiRuntimeManifest(artifactDir, provenance);
+  await withPiRuntime({ artifactDir }, async (context) => {
+    assert.equal(context.sdkPath, runtime.sdkPath);
+    assert.equal(context.identity, runtime.identity);
+    assert.deepEqual(await context.getToolingRuntime(), tooling);
+    await put(toolingDir, 'tooling-only.txt', 'tampered after first use');
+    await assert.rejects(context.getToolingRuntime(), /payload hash mismatch/);
+    context.confirmChildCompletion();
+  });
+  assert.equal(await exists(artifactDir), true);
+  assert.equal(await exists(toolingDir), true);
 });

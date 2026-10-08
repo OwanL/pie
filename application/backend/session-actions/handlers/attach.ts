@@ -367,6 +367,8 @@ function finalizeSessionOpening(
   // execution runtime. Omission remains legacy-compatible and means ready.
   if (payload.runtimeReady !== false) {
     deps.state.markSessionRuntimeKnown(sessionPath);
+  } else if (!flags.staleSessionData && !flags.createResolution?.rejected) {
+    deps.state.clearSessionRuntimeKnown(sessionPath);
   }
   deps.state.touchSessionTranscript(sessionPath);
   deps.state.evictInactiveTranscriptWindows();

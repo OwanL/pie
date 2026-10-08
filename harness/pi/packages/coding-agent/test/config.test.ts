@@ -152,7 +152,10 @@ function writeFakeManager(binDir: string, manager: string, responses: { args: st
 					.join("")}exit /b 1\r\n`
 			: `#!/bin/sh\n${responses
 					.map(({ args, output }) => {
-						const checks = [`[ "$#" = "${args.length}" ]`, ...args.map((arg, i) => `[ "$${i + 1}" = ${quoteSh(arg)} ]`)];
+						const checks = [
+							`[ "$#" = "${args.length}" ]`,
+							...args.map((arg, i) => `[ "$${i + 1}" = ${quoteSh(arg)} ]`),
+						];
 						return `if ${checks.join(" && ")}; then\n\tprintf '%s\\n' ${quoteSh(output)}\n\texit 0\nfi\n`;
 					})
 					.join("")}exit 1\n`;

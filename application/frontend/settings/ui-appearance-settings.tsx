@@ -11,6 +11,7 @@ import {
 import { CHAT_PREF_MENU_SECTIONS } from '../shell/chat-prefs';
 import { ChatPrefItem } from './settings-menu-chat-prefs';
 import { SliderRow } from './slider-row';
+import { SettingsHelp } from './settings-help';
 import { DENSITY_OPTIONS, UI_THEME_PRESETS, matchUiThemePreset, uiThemePresetToPrefs } from './settings-menu-helpers';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -137,6 +138,15 @@ export function UiGroupLabel({ label }: UiGroupLabelProps) {
   return <div class="toolbar-settings-ui-group-label">{label}</div>;
 }
 
+function AppearanceLabel({ label, hint }: { label: string; hint: string }) {
+  return (
+    <span>
+      <span class="toolbar-settings-ui-control-label">{label}</span>
+      <SettingsHelp label={label}>{hint}</SettingsHelp>
+    </span>
+  );
+}
+
 function UiSettingsGroup({ label, children }: { label: string; children: ComponentChildren }) {
   return (
     <section class="toolbar-settings-ui-group">
@@ -168,8 +178,8 @@ interface ColorRowProps {
  *  clears the override so the stylesheet default wins. */
 function ColorRow({ label, value, defaultValue, hint, ariaLabel, onChange }: ColorRowProps) {
   return (
-    <div class="toolbar-settings-ui-control">
-      <span class="toolbar-settings-ui-control-label">{label}</span>
+    <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
+      <AppearanceLabel label={label} hint={hint} />
       <div class="toolbar-settings-color-controls">
         <input
           type="color"
@@ -186,7 +196,6 @@ function ColorRow({ label, value, defaultValue, hint, ariaLabel, onChange }: Col
           aria-label={`Reset ${ariaLabel}`}
         >Reset</button>
       </div>
-      <div class="toolbar-settings-item-hint">{hint}</div>
     </div>
   );
 }
@@ -198,8 +207,8 @@ function ColorRow({ label, value, defaultValue, hint, ariaLabel, onChange }: Col
 function ThemeSelect({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
   const active = matchUiThemePreset(prefs);
   return (
-    <div class="toolbar-settings-ui-control">
-      <span class="toolbar-settings-ui-control-label">Theme</span>
+    <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
+      <AppearanceLabel label="Theme" hint="Apply a coordinated palette. Tweak any color below to make it custom." />
       <select
         class="toolbar-settings-select toolbar-settings-ui-font-select"
         value={active}
@@ -215,7 +224,6 @@ function ThemeSelect({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSe
           <option key={p.id} value={p.id}>{p.label}</option>
         ))}
       </select>
-      <div class="toolbar-settings-item-hint">Apply a coordinated palette. Tweak any color below to make it custom.</div>
     </div>
   );
 }
@@ -298,8 +306,8 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         hint="Roundness of cards, buttons, and inputs across the panel."
         onChange={(uiCornerRadius) => onSetPrefs({ uiCornerRadius })}
       />
-      <div class="toolbar-settings-ui-control">
-        <span class="toolbar-settings-ui-control-label">Density</span>
+      <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
+        <AppearanceLabel label="Density" hint="Spacing between elements. Compact tightens, spacious loosens." />
         <select
           class="toolbar-settings-select toolbar-settings-ui-font-select"
           value={prefs.uiDensity}
@@ -310,7 +318,6 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
-        <div class="toolbar-settings-item-hint">Spacing between elements. Compact tightens, spacious loosens.</div>
       </div>
 
       </UiSettingsGroup>
@@ -411,25 +418,23 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
         ariaLabel="Expanded section font size"
         onChange={(expandedSectionFontSize) => onSetPrefs({ expandedSectionFontSize })}
       />
-      <div class="toolbar-settings-ui-control">
-        <span class="toolbar-settings-ui-control-label">Sans font</span>
+      <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
+        <AppearanceLabel label="Sans font" hint={'Body and UI text. "Default" uses the bundled stack.'} />
         <FontSelect
           value={prefs.uiFontSans}
           options={SANS_FONT_OPTIONS}
           ariaLabel="Sans-serif font family"
           onChange={(next) => onSetPrefs({ uiFontSans: next })}
         />
-        <div class="toolbar-settings-item-hint">Body and UI text. "Default" uses the bundled stack.</div>
       </div>
-      <div class="toolbar-settings-ui-control">
-        <span class="toolbar-settings-ui-control-label">Mono font</span>
+      <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
+        <AppearanceLabel label="Mono font" hint={'Code and tool output. "Default" uses the bundled stack.'} />
         <FontSelect
           value={prefs.uiFontMono}
           options={MONO_FONT_OPTIONS}
           ariaLabel="Monospace font family"
           onChange={(next) => onSetPrefs({ uiFontMono: next })}
         />
-        <div class="toolbar-settings-item-hint">Code and tool output. "Default" uses the bundled stack.</div>
       </div>
       </UiSettingsGroup>
 

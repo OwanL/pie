@@ -25,7 +25,7 @@ interface Allocation {
 }
 
 const INITIAL_ALLOCATION: Allocation = { visibleItemKeys: null };
-const OVERFLOW_TRIGGER_WIDTH = 26;
+const FALLBACK_OVERFLOW_TRIGGER_WIDTH = 26;
 const FALLBACK_CONTROL_GAP = 2;
 const FALLBACK_SECTION_GAP = 4;
 
@@ -72,6 +72,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
   const pinnedRef = useRef<HTMLFieldSetElement>(null);
   const indicatorsRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const triggerMeasurementRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const itemElementsRef = useRef(new Map<string, HTMLElement>());
   const itemWidthsRef = useRef(new Map<string, number>());
@@ -109,6 +110,9 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
     });
     const sectionGap = readGap(root, 'columnGap', FALLBACK_SECTION_GAP);
     const controlGap = readGap(controls, 'columnGap', FALLBACK_CONTROL_GAP);
+    // The probe shares the trigger's CSS sizing even before More is needed,
+    // without counting its width in the row or measuring interaction transforms.
+    const overflowTriggerWidth = readWidth(triggerMeasurementRef.current) || FALLBACK_OVERFLOW_TRIGGER_WIDTH;
     const visibleItemKeys = allocateComposerOverflow({
       availableWidth,
       pinnedWidth: pinnedNaturalWidth,
@@ -117,7 +121,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
       controlGap,
       indicatorGap: readGap(indicatorsRef.current, 'columnGap', FALLBACK_CONTROL_GAP),
       sectionGap,
-      overflowTriggerWidth: OVERFLOW_TRIGGER_WIDTH,
+      overflowTriggerWidth,
     });
     if (modelPicker) {
       const modelWidthBudget = allocateComposerModelWidthBudget({
@@ -127,7 +131,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
         actionsWidth: readWidth(actions),
         sectionGap,
         controlGap,
-        overflowTriggerWidth: OVERFLOW_TRIGGER_WIDTH,
+        overflowTriggerWidth,
         hasOverflow: visibleItemKeys.length < itemWidths.length,
       });
       const widthValue = `${Math.round(modelWidthBudget * 100) / 100}px`;
@@ -197,7 +201,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
     const controls = controlsRef.current;
     const root = controls?.parentElement;
     const actions = root?.querySelector<HTMLElement>(':scope > .composer-actions');
-    for (const element of [root, controls, pinnedRef.current, indicatorsRef.current, actions]) {
+    for (const element of [root, controls, pinnedRef.current, indicatorsRef.current, actions, triggerMeasurementRef.current]) {
       if (element) observer?.observe(element);
     }
     for (const element of itemElementsRef.current.values()) observer?.observe(element);
@@ -305,6 +309,16 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
   return (
     <>
       <div ref={controlsRef} class="composer-controls">
+        <span aria-hidden="true" style={{ position: 'fixed', left: '-10000px', top: 0, visibility: 'hidden', pointerEvents: 'none' }}>
+          <button
+            ref={triggerMeasurementRef}
+            type="button"
+            class="system-prompt-toggle-trigger composer-overflow-trigger"
+            data-composer-overflow-measurement=""
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+        </span>
         <fieldset ref={pinnedRef} class="composer-pinned-controls" disabled={!commandsAvailable} aria-disabled={!commandsAvailable}>
           {pinnedControls}
         </fieldset>

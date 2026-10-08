@@ -61,6 +61,8 @@ export interface TooltipProps {
    * landmark. Ignored for plain text content.
    */
   richRole?: 'tooltip' | 'region';
+  /** Return keyboard focus to the trigger when Escape closes an inspector. */
+  returnFocusOnEscape?: boolean;
 }
 
 /**
@@ -90,6 +92,7 @@ export function Tooltip({
   placement = 'bottom',
   freezeWhileVisible = false,
   richRole = 'tooltip',
+  returnFocusOnEscape = false,
   triggerClassName,
 }: TooltipProps): JSX.Element {
   const [isVisible, setIsVisible] = useState(false);
@@ -328,7 +331,12 @@ export function Tooltip({
   useEffect(() => {
     if (!isVisible) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dismissTooltip();
+      if (e.key !== 'Escape') return;
+      if (returnFocusOnEscape && hostRef.current?.contains(document.activeElement)) {
+        // Focus before dismissal so the trigger's focus-open timer is cancelled.
+        triggerRef.current?.querySelector<HTMLElement>('button, [tabindex]')?.focus();
+      }
+      dismissTooltip();
     };
     const handleResize = () => setIsVisible(false);
     const handleScroll = () => {
@@ -348,7 +356,7 @@ export function Tooltip({
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [isVisible, dismissTooltip]);
+  }, [isVisible, dismissTooltip, returnFocusOnEscape]);
 
   const childArray = toChildArray(children);
   const singleChild = childArray.length === 1 ? childArray[0] : null;

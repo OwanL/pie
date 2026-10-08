@@ -32,6 +32,7 @@ import {
 } from './commit-registry';
 import { recordRenderEvidenceTarget } from '../shell/render-error';
 import { ImagePathPreview } from './image-path-preview';
+import { InlineMarkdownImages } from './inline-markdown-images';
 
 // Offscreen evidence is a bounded proof. If the mounted DOM exceeds this
 // bound, do not use a partial scan to claim that a missing leaf is offscreen.
@@ -54,6 +55,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
   busy,
   compacting,
   liveTurnPhase,
+  prepassStartedAt,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -95,6 +97,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
         busy={busy}
         compacting={compacting}
         liveTurnPhase={liveTurnPhase}
+        prepassStartedAt={prepassStartedAt}
         prefs={prefs}
         pruningSettings={pruningSettings}
         systemPrompts={systemPrompts}
@@ -131,6 +134,7 @@ export interface TranscriptHostProps {
   busy: boolean;
   compacting?: boolean;
   liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
+  prepassStartedAt?: number | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   systemPrompts: SystemPromptEntry[];
@@ -176,6 +180,7 @@ export function TranscriptHost({
   busy,
   compacting,
   liveTurnPhase,
+  prepassStartedAt,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -372,6 +377,7 @@ export function TranscriptHost({
           busy={busy}
           compacting={compacting}
           liveTurnPhase={liveTurnPhase}
+          prepassStartedAt={prepassStartedAt}
           prefs={prefs}
           pruningSettings={pruningSettings}
           systemPrompts={systemPrompts}
@@ -393,6 +399,12 @@ export function TranscriptHost({
           onCancelPrepass={onCancelPrepass}
         />
       )}
+      <InlineMarkdownImages
+        rootRef={hostRef}
+        sessionPath={activeSessionPath && openTabPaths.includes(activeSessionPath) ? activeSessionPath : null}
+        workingDirectory={workingDirectory}
+        postMessage={postMessage}
+      />
       <ImagePathPreview
         rootRef={hostRef}
         sessionPath={activeSessionPath}

@@ -20,7 +20,9 @@ export interface SessionOpenedTranscriptResolution {
 function isEphemeralMessage(message: ChatMessage): boolean {
   return message.status === 'streaming'
     || message.status === 'queued'
-    || (message.durableEntryId === undefined && message.id.startsWith('local:'))
+    // A bound optimistic user still survives snapshots preceding its append.
+    || (message.id.startsWith('local:')
+      && (message.role === 'user' || message.durableEntryId === undefined))
     || (message.toolCalls?.some((tc) => tc.status === 'running') ?? false);
 }
 
@@ -194,6 +196,25 @@ function mergeIncomingWithEphemeralLocal(
   for (let localIndex = 0; localIndex < localTranscript.length; localIndex += 1) {
     const localMessage = localTranscript[localIndex];
     if (!localMessage || !isEphemeralMessage(localMessage)) {
+      continue;
+    }
+
+    // Exact durable user identity outranks transport IDs and anchored content.
+    // A bound row omitted by this snapshot stays local; text is not evidence
+    // that another (possibly repeated) user entry is its durable echo.
+    if (localMessage.role === 'user' && localMessage.durableEntryId !== undefined) {
+      // Unlike aggregated assistant turns, durable user rows use the SDK
+      // entry ID as their transport ID even in legacy snapshots.
+      const durableIndex = incomingTranscript.findIndex((message) => message.role === 'user'
+        && !message.id.startsWith('local:')
+        && (message.durableEntryId ?? message.id) === localMessage.durableEntryId);
+      if (durableIndex >= 0) {
+        matchedIncomingUserIndices.add(durableIndex);
+        continue;
+      }
+      indexById.set(localMessage.id, merged.length);
+      merged.push(localMessage);
+      appendedCount += 1;
       continue;
     }
 

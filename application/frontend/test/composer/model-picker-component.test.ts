@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { h } from 'preact';
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
 import renderToString from 'preact-render-to-string';
+
+import { installDom } from '../helpers/dom';
+installDom();
 
 import { ModelPicker } from '../../settings/model-picker';
 import type { ModelPickerEntry } from '../../composer/model-list';
@@ -41,6 +45,47 @@ test('ModelPicker renders trigger with selected label', () => {
   assert.match(html, /GPT-5/);
   assert.match(html, /aria-haspopup="listbox"/);
   assert.match(html, /aria-expanded="false"/);
+});
+
+test('ModelPicker option names describe prices per million tokens and image support', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  act(() => render(h(ModelPicker, {
+    value: 'openai/gpt-5',
+    label: 'GPT-5',
+    ariaLabel: 'Model',
+    title: 'Select model',
+    entries: [
+      entry('gpt-5', {
+        model: { provider: 'openai' } as ModelPickerEntry['model'],
+        label: 'OpenAI: GPT-5', title: 'Pricing diagnostics', tokenInPrice: '$1.25', tokenOutPrice: '$10.00', supportsImages: true,
+      }),
+      entry('local-model', {
+        model: { provider: 'local' } as ModelPickerEntry['model'],
+        label: 'Local: Text Model', supportsImages: false,
+      }),
+    ],
+    onChange: () => {},
+  }), container));
+
+  try {
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Model"]')!.click());
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    assert.equal(options.length, 2);
+    assert.match(options[0].getAttribute('aria-label') ?? '', /OpenAI: GPT-5, openai\/gpt-5/);
+    assert.match(options[0].getAttribute('aria-label') ?? '', /input price \$1\.25 per million tokens/);
+    assert.match(options[0].getAttribute('aria-label') ?? '', /output price \$10\.00 per million tokens/);
+    assert.match(options[0].getAttribute('aria-label') ?? '', /supports images/);
+    assert.match(options[1].getAttribute('aria-label') ?? '', /Local: Text Model, local\/local-model/);
+    assert.match(options[1].getAttribute('aria-label') ?? '', /input price unavailable/);
+    assert.match(options[1].getAttribute('aria-label') ?? '', /text only/);
+    assert.match(options[0].textContent ?? '', /OpenAI: GPT-5/);
+    assert.match(options[0].textContent ?? '', /\$1\.25/);
+    assert.equal(options[0].title, 'Pricing diagnostics', 'native title diagnostics remain available');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
 });
 
 test('ModelPicker renders dropdown with columns when open is simulated', () => {

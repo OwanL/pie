@@ -298,6 +298,133 @@ test('provisional membership refresh does not negate title readiness or block un
   await internal.titleAdmission;
 });
 
+test('background title admission backs off unreadable members without starving later titles and recovers', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'title-admission-backoff-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const badPath = pathMod.join(dir, 'missing.jsonl');
+  const goodPath = await writeSessionFile(dir, 'later.jsonl', 'Later plan');
+  const internal = server as unknown as {
+    readLiveSessionTitleEntry(path: string): Promise<{ sessionPath: string; sessionId: string; title?: string }>;
+    admitOpenedSessionTitle(path: string): Promise<void>;
+    resolveLiveSessionPath(path: string, source: string, action: 'read'): unknown;
+    titleAdmission?: Promise<void>;
+    titleNamespaceRetryTimer?: ReturnType<typeof setTimeout>;
+    pendingLiveTitlePaths: Set<string>;
+    liveSessionTitles: { ready: boolean; assigned(path: string): string | undefined };
+    dispose(): Promise<void>;
+  };
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  let reads = 0;
+  const originalRead = internal.readLiveSessionTitleEntry.bind(server);
+  internal.readLiveSessionTitleEntry = async (sessionPath) => {
+    if (sessionPath === badPath) reads += 1;
+    return originalRead(sessionPath);
+  };
+  const base = [membershipEntry(currentPath), membershipEntry(idlePath)];
+  const refresh = async (includeBad = true) => {
+    applyMembership(server, membership([
+      ...base, ...(includeBad ? [membershipEntry(badPath, { activity: 'running' })] : []), membershipEntry(goodPath),
+    ]));
+    await internal.titleAdmission;
+  };
+  for (let index = 0; index < 100; index += 1) await refresh();
+  assert.equal(reads, 1, 'settled activity snapshots must not retry the unreadable member');
+  assert.equal(internal.liveSessionTitles.assigned(goodPath), 'Later plan');
+  assert.equal(internal.liveSessionTitles.ready, true);
+  assert.equal(internal.liveSessionTitles.assigned(currentPath), 'Current plan');
+  assert.throws(
+    () => internal.resolveLiveSessionPath(badPath, currentPath, 'read'),
+    (error: unknown) => error instanceof BackendError && error.code === 'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
+  );
+
+  now += 1_000;
+  await refresh();
+  assert.equal(reads, 2, 'a later snapshot retries once after the initial cooldown');
+  now += 1_000;
+  for (let index = 0; index < 100; index += 1) await refresh();
+  assert.equal(reads, 2, 'successive failures increase the cooldown');
+
+  await refresh(false);
+  await refresh();
+  assert.equal(reads, 3, 'confirmed retirement discards the old path cooldown');
+  await writeSessionFile(dir, 'missing.jsonl', 'Recovered plan');
+  await internal.admitOpenedSessionTitle(badPath);
+  assert.equal(reads, 4, 'explicit open retries immediately even during cooldown');
+  await refresh();
+  assert.equal(internal.liveSessionTitles.assigned(badPath), 'Recovered plan');
+  assert.equal(internal.pendingLiveTitlePaths.size, 0);
+
+  await refresh(false);
+  await fs.rm(badPath);
+  await refresh();
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    now += 60_000;
+    await refresh();
+  }
+  assert.equal(reads, 12);
+  now += 59_999;
+  await refresh();
+  assert.equal(reads, 12, 'persistent failures retain a capped one-minute cooldown');
+  await writeSessionFile(dir, 'missing.jsonl', 'Repaired plan');
+  now += 1;
+  await refresh();
+  assert.equal(reads, 13, 'a repaired transcript recovers on a later snapshot at the capped deadline');
+  assert.equal(internal.liveSessionTitles.assigned(badPath), 'Repaired plan');
+  assert.equal(internal.pendingLiveTitlePaths.size, 0);
+  assert.equal(internal.titleNamespaceRetryTimer, undefined, 'background admissions schedule no timer');
+  (server as unknown as { workerRuntimeRouter?: unknown }).workerRuntimeRouter =
+    ownedServers.get(server as unknown as BackendServer);
+  await internal.dispose();
+  await refresh();
+  assert.equal(reads, 13, 'disposed coordinator starts no further admission reads');
+});
+
+test('background and explicit title admission share one flight and fence disposed or replaced generations', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'title-admission-fence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const fence of ['dispose', 'generation'] as const) {
+    const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+    const newPath = pathMod.join(dir, `${fence}.jsonl`);
+    const internal = server as unknown as {
+      readLiveSessionTitleEntry(path: string): Promise<{ sessionPath: string; sessionId: string; title: string }>;
+      admitOpenedSessionTitle(path: string): Promise<void>;
+      titleAdmission?: Promise<void>;
+      liveTitleAdmissionRetries: Map<string, unknown>;
+      pendingOpenedTitleAdmissions: Map<string, Promise<void>>;
+      liveSessionTitles: { assigned(path: string): string | undefined };
+      backendGeneration: number;
+      dispose(): Promise<void>;
+    };
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let reads = 0;
+    internal.readLiveSessionTitleEntry = async (sessionPath) => {
+      reads += 1;
+      await blocked;
+      return { sessionPath, sessionId: sessionPath, title: 'Late plan' };
+    };
+    const sessions = [membershipEntry(currentPath), membershipEntry(idlePath), membershipEntry(newPath)];
+    applyMembership(server, membership(sessions));
+    const background = internal.titleAdmission;
+    const explicit = assert.rejects(internal.admitOpenedSessionTitle(newPath),
+      (error: unknown) => error instanceof BackendError && error.code === 'SESSION_GENERATION_ENDED');
+    for (let index = 0; index < 100; index += 1) applyMembership(server, membership(sessions));
+    assert.equal(reads, 1, 'open and background snapshots join the per-path admission');
+    if (fence === 'dispose') {
+      (server as unknown as { workerRuntimeRouter?: unknown }).workerRuntimeRouter =
+        ownedServers.get(server as unknown as BackendServer);
+      await internal.dispose();
+    } else internal.backendGeneration += 1;
+    release();
+    await Promise.all([background, explicit]);
+    assert.equal(internal.liveSessionTitles.assigned(newPath), undefined);
+    assert.equal(internal.pendingOpenedTitleAdmissions.size, 0);
+    if (fence === 'dispose') assert.equal(internal.liveTitleAdmissionRetries.size, 0);
+  }
+});
+
 test('initial title hydration retries a transient failure without a membership change', async () => {
   const server = serverForTests();
   const internal = server as unknown as {

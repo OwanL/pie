@@ -1,3 +1,17 @@
+/* Local Markdown hydration is layout content, but bytes stay renderer-local. */
+.inline-markdown-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  border-radius: var(--panel-radius-md);
+}
+
+.inline-markdown-image-fallback {
+  color: var(--panel-foreground);
+  overflow-wrap: anywhere;
+}
+
 /* Renderer-local image-path hover preview; it overlays the transcript and
    never participates in layout or host snapshots. */
 .image-path-preview {

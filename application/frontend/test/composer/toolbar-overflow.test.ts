@@ -46,6 +46,8 @@ class TestResizeObserver {
 let container: HTMLElement;
 let rowWidth = 480;
 let longModel = false;
+let overflowTriggerWidth = 26;
+let modelNaturalWidth = 0;
 let originalRect: typeof HTMLElement.prototype.getBoundingClientRect;
 let originalObserver: unknown;
 let gapStyles: HTMLStyleElement;
@@ -72,7 +74,8 @@ function installLayout(): void {
       if (key === 'run-status') return rect(42);
       return rect(24);
     }
-    if (this.classList.contains('composer-overflow-trigger')) return rect(26);
+    if (this.classList.contains('model-picker')) return rect(modelNaturalWidth);
+    if (this.classList.contains('composer-overflow-trigger')) return rect(overflowTriggerWidth);
     return originalRect.call(this);
   };
   originalObserver = globalThis.ResizeObserver;
@@ -89,6 +92,8 @@ function cleanupLayout(): void {
 beforeEach(() => {
   rowWidth = 480;
   longModel = false;
+  overflowTriggerWidth = 26;
+  modelNaturalWidth = 0;
   TestResizeObserver.instances = [];
   installLayout();
   container = document.createElement('div');
@@ -216,7 +221,7 @@ async function showModelTooltip(toolbarProps: Parameters<typeof ComposerToolbar>
 }
 
 function openOverflow(): HTMLElement {
-  click(container.querySelector('.composer-overflow-trigger'));
+  click(container.querySelector('.composer-controls > .composer-overflow-trigger'));
   const popover = container.querySelector<HTMLElement>('.composer-toolbar-overflow-popover');
   assert.ok(popover, 'overflow dialog should mount when items do not fit');
   assert.equal(popover!.getAttribute('aria-hidden'), 'false');
@@ -236,6 +241,60 @@ test('model width stays natural until secondary items are all overflowed, then u
   assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: false }), 240);
   assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: true }), 240, 'a long model label keeps its natural width when the remaining budget is sufficient');
   assert.equal(allocateComposerModelWidthBudget({ ...input, availableWidth: 220, hasOverflow: true }), 56, 'the model alone yields room for settings, reasoning, actions, and the overflow trigger');
+});
+
+test('coarse-pointer allocation reserves the measured 44px trigger in item and model budgets', () => {
+  const input = {
+    availableWidth: 320,
+    pinnedWidth: 190,
+    actionsWidth: 54,
+    items: [
+      { key: 'secondary', kind: 'control' as const, width: 100 },
+      { key: 'context-window', kind: 'indicator' as const, width: 40 },
+    ],
+    sectionGap: 4,
+    controlGap: 2,
+    indicatorGap: 2,
+  };
+  assert.deepEqual(allocateComposerOverflow({ ...input, overflowTriggerWidth: 26 }), ['context-window']);
+  assert.deepEqual(allocateComposerOverflow({ ...input, overflowTriggerWidth: 44 }), []);
+  assert.equal(allocateComposerModelWidthBudget({
+    ...input,
+    pinnedNaturalWidth: 314,
+    modelNaturalWidth: 240,
+    overflowTriggerWidth: 44,
+    hasOverflow: true,
+  }), 142);
+});
+
+test('measures the trigger before overflow exists and observes CSS width changes for both budgets', () => {
+  overflowTriggerWidth = 44;
+  modelNaturalWidth = 120;
+  longModel = true;
+  rowWidth = 900;
+  mount();
+  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
+  const probe = container.querySelector<HTMLElement>('[data-composer-overflow-measurement]');
+  assert.ok(probe, 'the absent trigger has an offscreen measurement probe');
+  assert.equal(probe.getAttribute('aria-hidden'), 'true');
+  assert.equal(probe.tabIndex, -1);
+  assert.ok(TestResizeObserver.instances.some((observer) => observer.targets.has(probe)), 'CSS trigger sizing is observed even before overflow');
+
+  rowWidth = 320;
+  act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
+  assert.equal(container.querySelector('.composer-indicators'), null, '44px trigger leaves no room for indicators at this boundary');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'));
+
+  rowWidth = 220;
+  act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
+  const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls');
+  assert.equal(pinned?.style.getPropertyValue('--composer-model-picker-max-width'), '46px', 'the model yields enough room for the actual 44px trigger');
+  overflowTriggerWidth = 26;
+  act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
+  assert.equal(pinned?.style.getPropertyValue('--composer-model-picker-max-width'), '64px', 'desktop CSS restores the 26px width budget');
+  rowWidth = 900;
+  act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
+  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'wide layout still shows every item without a live More button');
 });
 
 test('selected model tooltip identifies the provider-qualified model and display label', async () => {
@@ -350,17 +409,17 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
 
 test('ResizeObserver moves controls back when room returns and reallocates for dynamic indicator labels', () => {
   mount();
-  assert.equal(container.querySelector('.composer-overflow-trigger'), null, 'the initial labels fit at the starting row width');
+  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'the initial labels fit at the starting row width');
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(container.querySelector('.composer-overflow-trigger'), null, 'the overflow trigger disappears when every item fits');
+  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'the overflow trigger disappears when every item fits');
   assert.equal(container.querySelector('.composer-toolbar-overflow-popover'), null);
   assert.equal(container.querySelectorAll('.composer-indicators [data-toolbar-item]').length, 2);
 
   rowWidth = 480;
   const longTime = 'A very long live duration label that changes its measured width';
   rerender(props({ workingTimeIndicator: { label: longTime, ariaLabel: 'Working time', tooltip: 'Working time' } }));
-  assert.ok(container.querySelector('.composer-overflow-trigger'), 'the longer dynamic indicator creates overflow at the same row width');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'the longer dynamic indicator creates overflow at the same row width');
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
@@ -374,7 +433,7 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   rerender(props({
     availableModels: [{ ...model, name: 'A model label long enough to consume the remaining composer width' }],
   }));
-  assert.ok(container.querySelector('.composer-overflow-trigger'), 'a long selected-model label reduces the measured space available to secondary items');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'a long selected-model label reduces the measured space available to secondary items');
 });
 
 test('overflowed callbacks are reused and nested browser popovers stay open until their own Escape', () => {
@@ -424,7 +483,7 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
   click(resizingPopover.querySelector('[aria-label="Browser network access"]'));
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(container.querySelector('.composer-overflow-trigger'), null, 'growing the row moves children out and removes the trigger');
+  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'growing the row moves children out and removes the trigger');
   assert.equal(document.body.querySelector('.browser-server-popover'), null, 'a remounted child cleans up its nested portal');
 
   // Reopen and prove the portaled switch honors host disconnection even though
@@ -448,7 +507,7 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
 test('disconnected toolbar leaves the overflow trigger and status indicators outside disabled control fieldsets', () => {
   rowWidth = 265;
   mount(props({ commandsAvailable: false }));
-  const trigger = container.querySelector<HTMLButtonElement>('.composer-overflow-trigger');
+  const trigger = container.querySelector<HTMLButtonElement>('.composer-controls > .composer-overflow-trigger');
   assert.ok(trigger);
   assert.equal(trigger!.disabled, false, 'the overflow trigger stays enabled when commands are unavailable');
 

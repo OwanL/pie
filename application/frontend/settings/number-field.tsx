@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useEffect, useId, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 function clamp(value: number, min?: number, max?: number): number {
@@ -20,6 +21,8 @@ export interface NumberFieldProps {
   disabled?: boolean;
   ariaLabel?: string;
   title?: string;
+  /** Short visible unit, also associated with the input for assistive tools. */
+  unit?: string;
 }
 
 /** A shared labeled numeric input that clamps finite user input. */
@@ -33,9 +36,17 @@ export function NumberField({
   disabled = false,
   ariaLabel,
   title,
+  unit,
 }: NumberFieldProps) {
+  const [draft, setDraft] = useState(String(value));
+  const unitId = `settings-number-unit-${useId()}`;
+
+  useEffect(() => setDraft(String(value)), [value, disabled]);
+
   const handleChange = (event: JSX.TargetedEvent<HTMLInputElement>) => {
+    if (disabled) return;
     const raw = event.currentTarget.value;
+    setDraft(raw);
     if (raw === '') return;
     const next = Number(raw);
     if (!Number.isFinite(next)) return;
@@ -45,18 +56,23 @@ export function NumberField({
   return (
     <label class="toolbar-settings-item toolbar-settings-mode-row">
       <span class="toolbar-settings-item-label">{label}</span>
-      <input
-        class="toolbar-settings-select toolbar-settings-number-input"
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        aria-label={ariaLabel ?? label}
-        title={title}
-        onChange={handleChange}
-      />
+      <span class="toolbar-settings-number-control">
+        <input
+          class="toolbar-settings-select toolbar-settings-number-input"
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={draft}
+          disabled={disabled}
+          aria-label={ariaLabel ?? label}
+          aria-describedby={unit ? unitId : undefined}
+          title={title}
+          onChange={handleChange}
+          onBlur={() => setDraft(String(value))}
+        />
+        {unit && <span id={unitId} class="toolbar-settings-number-unit">{unit}</span>}
+      </span>
     </label>
   );
 }

@@ -199,6 +199,83 @@ test('checks file metadata concurrently within the fixed scan limit', async () =
   assert.ok(maximumActive <= FILE_SCAN_CONCURRENCY, 'active metadata checks stay within the fixed scan limit');
 }));
 
+test('rolls across nested directories and hashes files while independent metadata is gated', async () => withTempRoot(async (root) => {
+  const { source, contents } = await createValidRuntimeSource(root, 0);
+  for (const relative of ['a-nested/blocked.bin', 'b-nested/ready.bin']) {
+    contents.set(relative, relative);
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), relative);
+  }
+  const blockedPath = path.join(source, 'a-nested', 'blocked.bin');
+  const readyPath = path.join(source, 'b-nested', 'ready.bin');
+  let releaseMetadata!: () => void;
+  const metadataGate = new Promise<void>((resolve) => { releaseMetadata = resolve; });
+  let markBlocked!: () => void;
+  const blocked = new Promise<void>((resolve) => { markBlocked = resolve; });
+  let markReadyHashed!: () => void;
+  const readyHashed = new Promise<void>((resolve) => { markReadyHashed = resolve; });
+  let gateReleased = false;
+  let readyMetadataOverlapped = false;
+  let active = 0;
+  let maximumActive = 0;
+
+  await withLstat(async (args, lstatOriginal) => {
+    const filePath = path.resolve(String(args[0]));
+    if (!isWithinDirectory(source, filePath) || filePath === source) return lstatOriginal(...args);
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      if (filePath === blockedPath && !gateReleased) {
+        markBlocked();
+        await metadataGate;
+      }
+      if (filePath === readyPath && !gateReleased) {
+        await blocked;
+        readyMetadataOverlapped = !gateReleased;
+      }
+      return await lstatOriginal(...args);
+    } finally {
+      active -= 1;
+    }
+  }, async () => withCreateReadStream((args, createOriginal) => {
+    const stream = createOriginal(...args) as ReturnType<typeof fsSync.createReadStream>;
+    const filePath = path.resolve(String(args[0]));
+    if (isWithinDirectory(source, filePath)) {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      stream.once('close', () => {
+        active -= 1;
+        if (filePath === readyPath && !gateReleased) markReadyHashed();
+      });
+    }
+    return stream;
+  }, async () => {
+    const publication = runtime.publishRuntimeGeneration({
+      sourceOutDir: source,
+      extensionDir: path.join(root, 'extension'),
+      identity: IDENTITY,
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await blocked;
+      const overlapped = await Promise.race([
+        readyHashed.then(() => true),
+        new Promise<boolean>((resolve) => { timeout = setTimeout(() => resolve(false), 500); }),
+      ]);
+      assert.ok(readyMetadataOverlapped, 'independent nested directory metadata must proceed before the gate is released');
+      assert.ok(overlapped, 'independent file hashing must finish before the metadata gate is released');
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      gateReleased = true;
+      releaseMetadata();
+      const published = await publication;
+      assert.equal(published.generation, expectedGeneration(contents));
+    }
+  }));
+  assert.equal(active, 0);
+  assert.ok(maximumActive <= FILE_SCAN_CONCURRENCY, 'metadata and file hashes share one global limit');
+}));
+
 test('drains all started metadata checks before rejecting and does not schedule more after failure', async () => withTempRoot(async (root) => {
   const source = path.join(root, 'source');
   await mkdir(source, { recursive: true });

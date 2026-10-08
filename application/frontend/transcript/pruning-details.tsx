@@ -8,7 +8,6 @@ import { pruningTotals } from './pruning';
 import { Collapsible } from '../lib/components/collapsible';
 import { ResizablePre } from '../lib/components/resizable-pre';
 import { highlightToolResultText } from './highlight';
-import { cx } from '../lib/components/cx';
 import { formatTokens } from '../lib/formatting/format-tokens';
 
 interface PruningDiagnosticsProps {
@@ -36,17 +35,16 @@ function modeLabel(mode: PruningDetails['mode']): string {
   }
 }
 
-/** "model · thinking-level · latency" — the prepass provenance line. */
-function prepassLabel(details: PruningDetails): string | null {
+/** Quiet metadata; category headers own the kept/total counts. */
+function prepassLabel(details: PruningDetails, tokensSaved: number, presentation: PruningDiagnosticsProps['presentation']): string {
   const parts: string[] = [];
+  if (presentation === 'inline' && tokensSaved > 0) parts.push(`${formatTokens(tokensSaved)} tokens saved`);
+  if (details.prepassProvider) parts.push(details.prepassProvider);
   if (details.prepassModel) parts.push(details.prepassModel);
-  if (details.prepassThinkingLevel && details.prepassThinkingLevel !== 'off') {
-    parts.push(details.prepassThinkingLevel);
-  }
-  if (details.prepassLatencyMs != null) {
-    parts.push(`${details.prepassLatencyMs}ms`);
-  }
-  return parts.length > 0 ? parts.join(' · ') : null;
+  if (details.prepassThinkingLevel) parts.push(`thinking ${details.prepassThinkingLevel}`);
+  if (details.prepassLatencyMs != null) parts.push(`${details.prepassLatencyMs}ms`);
+  parts.push(`mode ${modeLabel(details.mode)}`);
+  return parts.join(' · ');
 }
 
 /** A labelled raw <pre> block (system/user prompt or raw LLM output). */
@@ -91,10 +89,10 @@ function PruningCategory({ title, kept, total, included, excluded }: CategoryPro
   );
 }
 
-function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle }: Omit<PruningDiagnosticsProps, 'presentation'>) {
+function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle, presentation }: PruningDiagnosticsProps) {
   const failed = !!details.prepassError;
   const totals = pruningTotals(details);
-  const prepass = prepassLabel(details);
+  const prepass = prepassLabel(details, totals.tokensSaved, presentation);
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   const showSkills = totals.skillsTotal > 0 || details.excludedSkills.length > 0;
@@ -109,30 +107,7 @@ function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle }: Omit<P
         </div>
       )}
 
-      <div class="pruning-stat-row">
-        {totals.skillsTotal > 0 && (
-          <div class="pruning-stat-tile">
-            <span class="pruning-stat-value">{`${totals.skillsKept}/${totals.skillsTotal}`}</span>
-            <span class="pruning-stat-label">skills</span>
-          </div>
-        )}
-        {totals.toolsTotal > 0 && (
-          <div class="pruning-stat-tile">
-            <span class="pruning-stat-value">{`${totals.toolsKept}/${totals.toolsTotal}`}</span>
-            <span class="pruning-stat-label">tools</span>
-          </div>
-        )}
-        {totals.tokensSaved > 0 && (
-          <div class="pruning-stat-tile pruning-stat-tile-accent">
-            <span class="pruning-stat-value">{`✂ ${formatTokens(totals.tokensSaved)}`}</span>
-            <span class="pruning-stat-label">tokens saved</span>
-          </div>
-        )}
-        <div class="pruning-meta">
-          {prepass && <div class="pruning-meta-line">{prepass}</div>}
-          <span class={cx('pruning-mode-badge', `pruning-mode-${details.mode}`)}>{modeLabel(details.mode)}</span>
-        </div>
-      </div>
+      <div class="pruning-meta-line">{prepass}</div>
 
       {showSkills && (
         <PruningCategory
@@ -178,12 +153,12 @@ function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle }: Omit<P
       <Collapsible
         open={rawExpanded}
         onToggle={() => onRawToggle()}
-        ariaLabel="Toggle prepass prompts and output"
+        ariaLabel="Diagnostics"
         class="pruning-sub-collapsible"
         headerClass="pruning-sub-header"
         bodyClass="pruning-sub-body"
         closeFooter={false}
-        header={<span>Prepass prompts and output</span>}
+        header={<span>Diagnostics</span>}
       >
         <RawBlock label="System prompt">{diagnosticText(details.prepassSystemPrompt, '∅ No system prompt captured')}</RawBlock>
         <RawBlock label="User prompt">{diagnosticText(details.prepassUserMessage, '∅ No user prompt captured')}</RawBlock>
@@ -201,14 +176,14 @@ export function PruningDiagnostics({ details, rawExpanded, onRawToggle, presenta
         role="region"
         aria-label="Pruning details"
       >
-        <PruningDiagnosticsContent details={details} rawExpanded={rawExpanded} onRawToggle={onRawToggle} />
+        <PruningDiagnosticsContent details={details} rawExpanded={rawExpanded} onRawToggle={onRawToggle} presentation={presentation} />
       </div>
     );
   }
 
   return (
     <div class="pruning-diagnostics-inline">
-      <PruningDiagnosticsContent details={details} rawExpanded={rawExpanded} onRawToggle={onRawToggle} />
+      <PruningDiagnosticsContent details={details} rawExpanded={rawExpanded} onRawToggle={onRawToggle} presentation={presentation} />
     </div>
   );
 }

@@ -26,6 +26,8 @@ interface ModelPickerProps {
   compact?: boolean;
   /** Disable the trigger and prevent the dropdown from opening. */
   disabled?: boolean;
+  /** Existing description ID to reference from the closed trigger. */
+  ariaDescribedBy?: string;
   /** Which direction the dropdown opens. Default 'up'. */
   dropdownDirection?: 'up' | 'down';
 }
@@ -374,6 +376,7 @@ interface ModelPickerTriggerProps {
   label: string;
   open: boolean;
   disabled?: boolean;
+  ariaDescribedBy?: string;
   onClick: () => void;
   onKeyDown: (e: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => void;
 }
@@ -386,6 +389,7 @@ function ModelPickerTrigger({
   label,
   open,
   disabled,
+  ariaDescribedBy,
   onClick,
   onKeyDown,
 }: ModelPickerTriggerProps) {
@@ -402,6 +406,7 @@ function ModelPickerTrigger({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
         disabled={disabled}
         onClick={onClick}
         onKeyDown={onKeyDown}
@@ -442,6 +447,7 @@ function ModelPickerRow({
       class={getRowClass(isSelected, isActive, entry.ineligible)}
       role="option"
       aria-selected={isSelected}
+      aria-label={`${entry.label}, ${entry.model.provider}/${entry.model.id}, input price ${entry.tokenInPrice ? `${entry.tokenInPrice} per million tokens` : 'unavailable'}, output price ${entry.tokenOutPrice ? `${entry.tokenOutPrice} per million tokens` : 'unavailable'}, ${entry.supportsImages ? 'supports images' : 'text only'}`}
       title={entry.title}
       onMouseEnter={onMouseEnter}
       onMouseDown={onMouseDown}
@@ -533,9 +539,9 @@ function ModelPickerDropdown({
       </div>
       <div class="model-picker-header" aria-hidden="true">
         <span class="model-picker-col model-picker-col-name">Model</span>
-        <span class="model-picker-col model-picker-col-price">In</span>
-        <span class="model-picker-col model-picker-col-price">Out</span>
-        <span class="model-picker-col model-picker-col-images">Img</span>
+        <span class="model-picker-col model-picker-col-price" title="Input price per million tokens">In</span>
+        <span class="model-picker-col model-picker-col-price" title="Output price per million tokens">Out</span>
+        <span class="model-picker-col model-picker-col-images" title="Image input capability">Img</span>
       </div>
       <div id={listId} class="model-picker-rows" role="listbox" aria-label={ariaLabel}>
         {entries.length === 0 ? (
@@ -581,6 +587,7 @@ export function ModelPicker({
   onChange,
   compact,
   disabled,
+  ariaDescribedBy,
   dropdownDirection = 'up',
 }: ModelPickerProps) {
   const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
@@ -628,6 +635,7 @@ export function ModelPicker({
         label={label}
         open={state.open}
         disabled={disabled}
+        ariaDescribedBy={ariaDescribedBy}
         onClick={() => {
           if (!disabled) state.setOpen((o) => !o);
         }}

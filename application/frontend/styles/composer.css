@@ -233,6 +233,27 @@
   pointer-events: none;
 }
 
+/* Mobile browsers need readable typing and genuine touch hitboxes. The existing
+   measured toolbar allocator still decides which secondary controls overflow. */
+@media (pointer: coarse) {
+  .composer-input-textarea {
+    font-size: max(16px, var(--panel-composer-font-size, 11px));
+  }
+  .composer-bottom-bar :is(.model-picker-trigger, .panel-chip-toolbar) {
+    height: 44px;
+    min-height: 44px;
+  }
+  .composer-bottom-bar .toolbar-settings-trigger,
+  .composer-overflow-trigger,
+  .composer-actions .composer-action-icon {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .composer-overflow-trigger { flex-basis: 44px; }
+}
+
 @media (max-width: 720px) {
   .composer-area {
     padding-inline: var(--panel-gap-md);

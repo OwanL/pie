@@ -17,6 +17,7 @@ interface ChatDefaultModelAssignmentProps {
   modelEntries: ModelPickerEntry[];
   availableModels: ModelInfo[];
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
+  compactLabels?: boolean;
 }
 
 /** Models-tab mirror of the active session's toolbar model and reasoning controls. */
@@ -27,6 +28,7 @@ export function ChatDefaultModelAssignment({
   modelEntries,
   availableModels,
   onModelChange,
+  compactLabels = false,
 }: ChatDefaultModelAssignmentProps) {
   const selectedModelInfo = availableModels.find((model) =>
     model.id === selectedModel && (!selectedProvider || model.provider === selectedProvider)) ?? null;
@@ -35,6 +37,7 @@ export function ChatDefaultModelAssignment({
   return (
     <ModelAssignmentRow
       label="Chat default"
+      compactLabels={compactLabels}
       entries={modelEntries}
       current={selectedModel ? { provider: resolvedProvider, model: selectedModel } : null}
       emptyLabel="Select model…"

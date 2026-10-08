@@ -10,7 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { acquireDevelopmentReader } from '../../lib/development-runtime/lifetime.mjs';
 import { watchChildProcess, withProcessTreeIsolation } from '../lib/process-watchdog.mjs';
-import { PI_RUNTIME_PACKAGES, writePiRuntimeManifest, verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { PI_RUNTIME_PACKAGES, verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { packPiRuntime } from './pi-runtime-packaging.mjs';
 import { readPinnedPiSourceVersion } from '../lib/sdk-version.mjs';
 import { fingerprintCompiledPiOutputs } from '../../lib/development-runtime/compiled-output.mjs';
 
@@ -435,20 +436,28 @@ export async function buildPiRuntime({ output, refreshLock } = {}) {
   await materializeDeployedNodeModules(path.join(deploy, 'node_modules'), path.join(runtime, 'node_modules'), path.join(SOURCE, 'LICENSE'));
   check(await fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: runtime }) === compilation.compiledSha256,
     'Deployed Pi compiled bytes do not match the selected workspace compilation');
+  const packed = await packPiRuntime({ runtimeDir: runtime, toolingDir: path.join(output, 'pi-tooling'),
+    provenance: { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
+      sourceTreeSha256: inputEvidence.sourceTreeSha256, lockSha256: inputEvidence.lockSha256, target: inputEvidence.target } });
+  // Runtime map-comment packing changes bytes; full tooling must preserve every original compiler output.
+  check(await fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: packed.tooling.artifactDir }) === compilation.compiledSha256,
+    'Packed Pi tooling compiled bytes do not match the selected workspace compilation');
   await smoke(runtime, work, env);
   await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
 
   const afterDeploy = await capturePiRuntimeInputs();
   check(fingerprintPiRuntimeInputs(inputEvidence) === fingerprintPiRuntimeInputs(afterDeploy),
     'Pi source/shared lock/toolchain/target changed during deploy; retain output and retry with stable inputs');
-  const verified = await writePiRuntimeManifest(runtime, { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
-    sourceTreeSha256: inputEvidence.sourceTreeSha256, lockSha256: inputEvidence.lockSha256, target: inputEvidence.target });
-  await verifyPiRuntimeArtifact(runtime);
+  const verified = await verifyPiRuntimeArtifact(runtime);
+  const tooling = await verifyPiRuntimeToolingArtifact(runtime);
+  check(verified.identity === packed.runtime.identity && tooling.identity === packed.tooling.identity,
+    'Packed Pi role identities changed during offline smoke');
   await writeFile(path.join(output, 'build-evidence.json'), jsonText({ identity: verified.identity, sdkPath: verified.sdkPath,
     sourceTreeSha256: inputEvidence.sourceTreeSha256, mainLockSha256: inputEvidence.mainLockSha256,
     lockSha256: inputEvidence.lockSha256, compiledSha256: compilation.compiledSha256,
+    toolingIdentity: tooling.identity, rolePacking: packed.evidence,
     toolchainSha256: inputEvidence.toolchainSha256, node: process.version, pnpm: inputEvidence.pnpmVersion, offlineSmoke: true }));
-  console.log(`[pi-runtime] Verified ${verified.identity}\n${runtime}`);
+  console.log(`[pi-runtime] Verified runtime ${verified.identity}\n${runtime}\nFull tooling ${tooling.identity}\n${tooling.artifactDir}`);
   return verified;
   } catch (error) {
     if (error?.teardownUnconfirmed === true) teardownConfirmed = false;
@@ -460,7 +469,7 @@ export async function buildPiRuntime({ output, refreshLock } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.includes('--help')) console.log('node scripts/build/pi-runtime.mjs --output <new-absolute-private-directory>\nLocked pnpm production deploy/materialize/offline smoke/verify (requires current harness/pi/.cache/build.json evidence; run scripts/build/pi-workspace.mjs first).');
+  if (args.includes('--help')) console.log('node scripts/build/pi-runtime.mjs --output <new-absolute-private-directory>\nLocked pnpm production deploy/materialize/role pack/offline runtime smoke/full verify; outputs pi-runtime/, pi-tooling/, build-evidence.json and work/ beneath fresh OS-temp output (requires current harness/pi/.cache/build.json evidence; run scripts/build/pi-workspace.mjs first).');
   else {
     const outputIndex = args.indexOf('--output');
     check(outputIndex >= 0 && args[outputIndex + 1], 'Required --output <new-absolute-private-directory>');

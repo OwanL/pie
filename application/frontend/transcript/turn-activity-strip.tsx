@@ -73,7 +73,8 @@ export function TurnActivityStrip({
       )}
       data-phase={phase}
       role="status"
-      aria-label={ariaLabel ?? defaultAriaLabel(label, detail)}
+      aria-label={ariaLabel ? (detail && !ariaLabel.includes(detail) ? `${ariaLabel}, ${detail}` : ariaLabel) : defaultAriaLabel(label, detail)}
+      title={detail ? `${label}: ${detail}` : label}
     >
       <span class="turn-activity-strip-label">
         {label}

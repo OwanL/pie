@@ -1105,6 +1105,8 @@ export interface SessionsInterruptedEvent {
  *  (the SDK may have expanded skill/template commands, so it can differ from
  *  what the user typed) and is not used for matching. */
 export interface QueuedDeliveredEvent {
+  /** Identity binding only when present; localId is required and delivery state is unchanged. */
+  durableEntryId?: string;
   kind: 'QueuedDelivered';
   sessionPath: string;
   text: string;

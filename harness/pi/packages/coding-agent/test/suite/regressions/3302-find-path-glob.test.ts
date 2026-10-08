@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { spawn, spawnSync } from "child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
-import { getToolPath } from "../../../src/utils/tools-manager.ts";
 import { DEFAULT_MAX_BYTES } from "../../../src/core/tools/truncate.ts";
+import { getToolPath } from "../../../src/utils/tools-manager.ts";
 
 vi.mock("child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("child_process")>();
@@ -117,7 +117,15 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 	it("path globs preserve native fd smart-case matching", async () => {
 		writeFileSync(join(tempRoot, "UPPER.txt"), "");
 		for (const pattern of ["upper.txt", "Upper.txt"]) {
-			const native = spawnSync(getToolPath("fd")!, ["--glob", "--hidden", "--no-require-git", "--color=never", "--", pattern, tempRoot]);
+			const native = spawnSync(getToolPath("fd")!, [
+				"--glob",
+				"--hidden",
+				"--no-require-git",
+				"--color=never",
+				"--",
+				pattern,
+				tempRoot,
+			]);
 			expect(native.status).toBe(0);
 			const files = native.stdout.toString().trim().split(/\r?\n/).filter(Boolean)
 				.map((filename) => filename.replaceAll("\\", "/").slice(tempRoot.replaceAll("\\", "/").length + 1)).sort();
@@ -129,11 +137,23 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 	it("path globs treat extglob-looking filenames literally like native fd", async () => {
 		writeFileSync(join(tempRoot, "src", "@(literal).ts"), "");
 		writeFileSync(join(tempRoot, "src", "literal.ts"), "");
-		const native = spawnSync(getToolPath("fd")!, ["--glob", "--hidden", "--no-require-git", "--color=never", "--", "@(literal).ts", join(tempRoot, "src")]);
-		expect(native.status).toBe(0);
-		expect(native.stdout.toString().trim().split(/\r?\n/).map((filename) => filename.replaceAll("\\", "/"))).toEqual([
-			join(tempRoot, "src", "@(literal).ts").replaceAll("\\", "/"),
+		const native = spawnSync(getToolPath("fd")!, [
+			"--glob",
+			"--hidden",
+			"--no-require-git",
+			"--color=never",
+			"--",
+			"@(literal).ts",
+			join(tempRoot, "src"),
 		]);
+		expect(native.status).toBe(0);
+		expect(
+			native.stdout
+				.toString()
+				.trim()
+				.split(/\r?\n/)
+				.map((filename) => filename.replaceAll("\\", "/")),
+		).toEqual([join(tempRoot, "src", "@(literal).ts").replaceAll("\\", "/")]);
 		expect(await runFind("src/@(literal).ts")).toEqual(["src/@(literal).ts"]);
 	});
 
@@ -145,11 +165,23 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 			writeFileSync(join(tempRoot, `${prefix}name.txt`), "");
 			writeFileSync(join(tempRoot, "name.txt"), "");
 			// Basename probes avoid Windows fd's full-path separator mismatch.
-			const native = spawnSync(getToolPath("fd")!, ["--glob", "--hidden", "--no-require-git", "--color=never", "--", `${prefix}name.txt`, tempRoot]);
-			expect(native.status).toBe(0);
-			expect(native.stdout.toString().trim().split(/\r?\n/).map((filename) => filename.replaceAll("\\", "/"))).toEqual([
-				join(tempRoot, `${prefix}name.txt`).replaceAll("\\", "/"),
+			const native = spawnSync(getToolPath("fd")!, [
+				"--glob",
+				"--hidden",
+				"--no-require-git",
+				"--color=never",
+				"--",
+				`${prefix}name.txt`,
+				tempRoot,
 			]);
+			expect(native.status).toBe(0);
+			expect(
+				native.stdout
+					.toString()
+					.trim()
+					.split(/\r?\n/)
+					.map((filename) => filename.replaceAll("\\", "/")),
+			).toEqual([join(tempRoot, `${prefix}name.txt`).replaceAll("\\", "/")]);
 			const files = await runFind(`${prefix}src/**`);
 			expect(files.filter((filename) => !filename.endsWith("/"))).toEqual([`${prefix}src/name.txt`]);
 			expect(files.every((filename) => filename.startsWith(`${prefix}src/`))).toBe(true);
@@ -169,7 +201,13 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 		for (let i = 0; i < 250; i++) writeFileSync(join(tempRoot, `nonmatch-${i}.txt`), "");
 		for (let i = 0; i < 20; i++) writeFileSync(join(tempRoot, "src", `match-${i}.spec.ts`), "");
 		const def = createFindToolDefinition(tempRoot);
-		const result = await def.execute("limit", { pattern: "src/**/*.spec.ts", limit: 3 }, undefined, undefined, {} as any);
+		const result = await def.execute(
+			"limit",
+			{ pattern: "src/**/*.spec.ts", limit: 3 },
+			undefined,
+			undefined,
+			{} as any,
+		);
 		const text = result.content[0] as { text: string };
 		expect(text.text.split("\n").filter((line) => line && !line.startsWith("["))).toHaveLength(3);
 		expect(result.details?.resultLimitReached).toBe(3);
@@ -185,10 +223,26 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 	});
 
 	it.skipIf(process.platform !== "win32")("zero-depth native preflight parses without discovering files", () => {
-		const valid = spawnSync(getToolPath("fd")!, ["--glob", "--full-path", "--max-depth", "0", "--", "**/*.spec.ts", tempRoot]);
+		const valid = spawnSync(getToolPath("fd")!, [
+			"--glob",
+			"--full-path",
+			"--max-depth",
+			"0",
+			"--",
+			"**/*.spec.ts",
+			tempRoot,
+		]);
 		expect(valid.status).toBe(0);
 		expect(valid.stdout.toString()).toBe("");
-		const invalid = spawnSync(getToolPath("fd")!, ["--glob", "--full-path", "--max-depth", "0", "--", "src/[invalid", tempRoot]);
+		const invalid = spawnSync(getToolPath("fd")!, [
+			"--glob",
+			"--full-path",
+			"--max-depth",
+			"0",
+			"--",
+			"src/[invalid",
+			tempRoot,
+		]);
 		expect(invalid.status).not.toBe(0);
 		expect(invalid.stderr.toString()).toContain("unclosed character class");
 	});
@@ -204,7 +258,13 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 			expect(native.stdout.length).toBeGreaterThan(DEFAULT_MAX_BYTES);
 			expect(Buffer.byteLength(expected.join("\n"))).toBeLessThan(DEFAULT_MAX_BYTES);
 			const def = createFindToolDefinition(searchRoot);
-			const result = await def.execute("relative", { pattern }, undefined, undefined, {} as Parameters<typeof def.execute>[4]);
+			const result = await def.execute(
+				"relative",
+				{ pattern },
+				undefined,
+				undefined,
+				{} as Parameters<typeof def.execute>[4],
+			);
 			expect((result.content[0] as { text: string }).text.split("\n").sort()).toEqual(expected);
 			expect(result.details).toBeUndefined();
 		});
@@ -214,13 +274,23 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 		const expected = Array.from({ length: 600 }, (_, i) => `src/${"é".repeat(40)}-${String(i).padStart(3, "0")}.txt`);
 		for (const filename of expected) writeFileSync(join(tempRoot, filename), "");
 		const def = createFindToolDefinition(tempRoot);
-		const result = await def.execute("bytes", { pattern: "src/**/*.txt" }, undefined, undefined, {} as Parameters<typeof def.execute>[4]);
+		const result = await def.execute(
+			"bytes",
+			{ pattern: "src/**/*.txt" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof def.execute>[4],
+		);
 		const text = (result.content[0] as { text: string }).text;
 		const files = text.split("\n\n")[0].split("\n");
 		expect(files.length).toBeLessThan(600);
 		expect(files.every((filename) => expected.includes(filename))).toBe(true);
 		expect(text).toContain("[50.0KB limit reached]");
-		expect(result.details?.truncation).toMatchObject({ truncated: true, truncatedBy: "bytes", lastLinePartial: false });
+		expect(result.details?.truncation).toMatchObject({
+			truncated: true,
+			truncatedBy: "bytes",
+			lastLinePartial: false,
+		});
 		expect(result.details?.truncation?.outputBytes).toBe(Buffer.byteLength(files.join("\n")));
 		expect(result.details?.resultLimitReached).toBeUndefined();
 		for (const call of vi.mocked(spawn).mock.results) {
@@ -233,17 +303,30 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 			const actual = await vi.importActual<typeof import("child_process")>("child_process");
 			const candidates = ["é".repeat(12800), "b".repeat(DEFAULT_MAX_BYTES + delta - 25601)];
 			const script = `const root=${JSON.stringify(tempRoot)}; const p=require('node:path'); process.stdout.write([p.join(root,'é'.repeat(12800)),p.join(root,'b'.repeat(${DEFAULT_MAX_BYTES + delta - 25601}))].join('\\n')+'\\n');`;
-			vi.mocked(spawn).mockImplementation((() => actual.spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe"] })) as unknown as typeof spawn);
+			vi.mocked(spawn).mockImplementation((() =>
+				actual.spawn(process.execPath, ["-e", script], {
+					stdio: ["ignore", "pipe", "pipe"],
+				})) as unknown as typeof spawn);
 			try {
 				const def = createFindToolDefinition(tempRoot);
-				const result = await def.execute("boundary", { pattern: "*" }, undefined, undefined, {} as Parameters<typeof def.execute>[4]);
+				const result = await def.execute(
+					"boundary",
+					{ pattern: "*" },
+					undefined,
+					undefined,
+					{} as Parameters<typeof def.execute>[4],
+				);
 				const text = (result.content[0] as { text: string }).text;
 				if (delta <= 0) {
 					expect(text).toBe(candidates.join("\n"));
 					expect(result.details).toBeUndefined();
 				} else {
 					expect(text).toBe(candidates[0] + "\n\n[50.0KB limit reached]");
-					expect(result.details?.truncation).toMatchObject({ totalBytes: DEFAULT_MAX_BYTES + 1, outputLines: 1, lastLinePartial: false });
+					expect(result.details?.truncation).toMatchObject({
+						totalBytes: DEFAULT_MAX_BYTES + 1,
+						outputLines: 1,
+						lastLinePartial: false,
+					});
 				}
 			} finally {
 				vi.mocked(spawn).mockImplementation(actual.spawn);
@@ -255,8 +338,15 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 		const controller = new AbortController();
 		controller.abort();
 		const def = createFindToolDefinition(tempRoot);
-		await expect(def.execute("aborted", { pattern: "src/**/*.spec.ts" }, controller.signal, undefined, {} as Parameters<typeof def.execute>[4]))
-			.rejects.toThrow("Operation aborted");
+		await expect(
+			def.execute(
+				"aborted",
+				{ pattern: "src/**/*.spec.ts" },
+				controller.signal,
+				undefined,
+				{} as Parameters<typeof def.execute>[4],
+			),
+		).rejects.toThrow("Operation aborted");
 		expect(vi.mocked(spawn)).not.toHaveBeenCalled();
 	});
 
@@ -270,8 +360,15 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 		}) as unknown as typeof spawn);
 		try {
 			const def = createFindToolDefinition(tempRoot);
-			await expect(def.execute("spawn-error", { pattern: "src/**/*.spec.ts" }, undefined, undefined, {} as Parameters<typeof def.execute>[4]))
-				.rejects.toThrow("Failed to run fd:");
+			await expect(
+				def.execute(
+					"spawn-error",
+					{ pattern: "src/**/*.spec.ts" },
+					undefined,
+					undefined,
+					{} as Parameters<typeof def.execute>[4],
+				),
+			).rejects.toThrow("Failed to run fd:");
 			expect(closed).toBe(true);
 		} finally {
 			vi.mocked(spawn).mockImplementation(actual.spawn);
@@ -295,8 +392,9 @@ describe.skipIf(!getToolPath("fd"))("issue #3302 find returns no results for pat
 			}) as typeof spawn);
 			try {
 				const def = createFindToolDefinition(tempRoot);
-				await expect(def.execute("abort", { pattern: "src/**/*.spec.ts" }, controller.signal, undefined, {} as any))
-					.rejects.toThrow("Operation aborted");
+				await expect(
+					def.execute("abort", { pattern: "src/**/*.spec.ts" }, controller.signal, undefined, {} as any),
+				).rejects.toThrow("Operation aborted");
 				expect(closed).toBe(true);
 				expect(calls).toBe(phase === "validation" ? 1 : 2);
 			} finally {

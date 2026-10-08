@@ -300,6 +300,106 @@ test('bridge retries a failed send on the next transition and stays silent for u
   assert.deepEqual(ordered.length, before.length); // unchanged membership stays silent
 });
 
+function deferredMembershipRequests() {
+  const requests: {
+    params: Parameters<ConstructorParameters<typeof HostLiveMembershipSync>[1]['request']>[0];
+    resolve(value?: unknown): void;
+    reject(error: Error): void;
+  }[] = [];
+  return {
+    requests,
+    request: (params: Parameters<ConstructorParameters<typeof HostLiveMembershipSync>[1]['request']>[0]) =>
+      new Promise<unknown>((resolve, reject) => requests.push({ params, resolve, reject })),
+  };
+}
+
+test('bridge suppresses identical snapshots while the latest acknowledgement is pending', async () => {
+  const { requests, request } = deferredMembershipRequests();
+  const bridge = new HostLiveMembershipSync(baseState(LIVE), { request, getBackendGeneration: () => 1 });
+  bridge.afterDispatch(baseState(LIVE));
+  bridge.afterDispatch(baseState(LIVE));
+  assert.equal(requests.length, 1);
+  requests[0].resolve();
+  await flush();
+  bridge.afterDispatch(baseState(LIVE));
+  assert.equal(requests.length, 1);
+});
+
+test('bridge publishes A after pending B even when the earlier A was acknowledged', async () => {
+  const { requests, request } = deferredMembershipRequests();
+  const bridge = new HostLiveMembershipSync(baseState(LIVE), { request, getBackendGeneration: () => 1 });
+  requests[0].resolve();
+  await flush();
+  bridge.afterDispatch(baseState(IDLE));
+  bridge.afterDispatch(baseState(LIVE));
+  assert.deepEqual(requests.map(({ params }) => params.sessions[0]?.path), [LIVE, IDLE, LIVE]);
+  assert.ok(requests[0].params.revision < requests[1].params.revision);
+  assert.ok(requests[1].params.revision < requests[2].params.revision);
+  requests[1].reject(new Error('stale failure'));
+  await flush();
+  bridge.afterDispatch(baseState(LIVE));
+  assert.equal(requests.length, 3, 'stale failure must not clear the latest pending snapshot');
+});
+
+for (const completion of ['resolve', 'reject'] as const) {
+  test(`bridge fences old-generation ${completion} while the new generation is pending`, async () => {
+    let generation = 1;
+    const { requests, request } = deferredMembershipRequests();
+    const bridge = new HostLiveMembershipSync(baseState(LIVE), { request, getBackendGeneration: () => generation });
+    generation = 2;
+    bridge.afterDispatch(baseState(IDLE));
+    if (completion === 'resolve') requests[0].resolve();
+    else requests[0].reject(new Error('old generation failed'));
+    await flush();
+    bridge.afterDispatch(baseState(LIVE));
+    assert.equal(requests.length, 3, 'old acknowledgement must not suppress current generation membership');
+    bridge.afterDispatch(baseState(LIVE));
+    assert.equal(requests.length, 3, 'old completion must not invalidate the new pending snapshot');
+    assert.ok(requests[0].params.revision < requests[1].params.revision);
+    assert.ok(requests[1].params.revision < requests[2].params.revision);
+  });
+}
+
+test('bridge publishes changed close state synchronously while acknowledgements are pending', () => {
+  const { requests, request } = deferredMembershipRequests();
+  const ordered: string[] = [];
+  const bridge = new HostLiveMembershipSync(baseState(LIVE), {
+    request: (params) => {
+      ordered.push(`membership:${params.sessions.length}+${params.closing.length}`);
+      return request(params);
+    },
+    getBackendGeneration: () => 1,
+  });
+  const closing: ArchState = {
+    ...baseState(),
+    operations: { close: closeOperation(LIVE) } as never,
+  };
+  bridge.afterDispatch(closing);
+  ordered.push('close-acknowledgement');
+  bridge.afterDispatch(closing);
+  bridge.afterDispatch(baseState());
+  ordered.push('later-mutation');
+  assert.deepEqual(ordered, [
+    'membership:1+0', 'membership:0+1', 'close-acknowledgement',
+    'membership:0+0', 'later-mutation',
+  ]);
+  assert.equal(requests.length, 3);
+  assert.ok(requests[0].params.revision < requests[1].params.revision);
+  assert.ok(requests[1].params.revision < requests[2].params.revision);
+});
+
+test('bridge retries rejected latest membership on the next identical transition', async () => {
+  const { requests, request } = deferredMembershipRequests();
+  const bridge = new HostLiveMembershipSync(baseState(LIVE), { request, getBackendGeneration: () => 1 });
+  requests[0].reject(new Error('transport unavailable'));
+  await flush();
+  bridge.afterDispatch(baseState(LIVE));
+  assert.equal(requests.length, 2);
+  assert.ok(requests[0].params.revision < requests[1].params.revision);
+  bridge.afterDispatch(baseState(LIVE));
+  assert.equal(requests.length, 2);
+});
+
 test('bridge generation change resyncs membership even when the reduced state is unchanged', async () => {
   let generation = 1;
   const revisions: number[] = [];

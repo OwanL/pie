@@ -64,15 +64,20 @@ test('compaction summary renders metrics line with reason, before→after tokens
   };
   act(() => render(h(CompactionSummary, { summary: 'summary text', details }), container));
 
-  const text = container.textContent ?? '';
-  assert.match(text, /Threshold/);
-  assert.match(text, /100,000 → 12,345/);
-  assert.match(text, /-87,655/);
-  assert.match(text, /88%/);
-  assert.match(text, /claude-sonnet-4/);
-  assert.match(text, /medium/);
-  assert.match(text, /anthropic/);
-  assert.match(text, /4\.2s/);
+  const header = container.querySelector('.compaction-summary-header') as HTMLElement;
+  const collapsedText = header.textContent ?? '';
+  assert.match(collapsedText, /Threshold/);
+  assert.match(collapsedText, /100,000 → 12,345/);
+  assert.match(collapsedText, /-87,655/);
+  assert.match(collapsedText, /88%/);
+  assert.doesNotMatch(collapsedText, /claude-sonnet-4|medium|anthropic|4\.2s/);
+  assert.match(header.title, /claude-sonnet-4 · medium · anthropic · 4\.2s/);
+
+  const button = container.querySelector('button') as HTMLButtonElement;
+  act(() => button.click());
+  const expandedText = container.querySelector('.compaction-summary-provenance')?.textContent ?? '';
+  assert.match(expandedText, /100,000 → 12,345.*-87,655.*88%/);
+  assert.match(expandedText, /claude-sonnet-4 · medium · anthropic · 4\.2s/);
 });
 
 test('compaction summary reduction is omitted when only one token side is present', () => {
@@ -83,12 +88,17 @@ test('compaction summary reduction is omitted when only one token side is presen
   };
   act(() => render(h(CompactionSummary, { summary: 'summary text', details }), container));
 
-  const text = container.textContent ?? '';
-  assert.match(text, /Manual/);
-  // before is shown, after is a dash, and no reduction/percentage suffix.
-  assert.match(text, /100,000 → —/);
-  assert.doesNotMatch(text, /%\)/);
-  assert.match(text, /1\.5s/);
+  const header = container.querySelector('.compaction-summary-header') as HTMLElement;
+  const collapsedText = header.textContent ?? '';
+  assert.match(collapsedText, /Manual/);
+  // Before is shown, after is a dash, and no reduction/percentage suffix.
+  assert.match(collapsedText, /100,000 → —/);
+  assert.doesNotMatch(collapsedText, /%\)|1\.5s/);
+  assert.match(header.title, /1\.5s/);
+
+  const button = container.querySelector('button') as HTMLButtonElement;
+  act(() => button.click());
+  assert.match(container.querySelector('.compaction-summary-provenance')?.textContent ?? '', /1\.5s/);
 });
 
 test('compaction summary omits the metrics line entirely when details are absent (legacy)', () => {
@@ -129,13 +139,18 @@ test('compaction summary renders metrics line from a sidecar-mapped transcript r
   } satisfies CompactionSummaryDetails);
 
   act(() => render(h(CompactionSummary, { summary: message.markdown, details: message.customDetails as CompactionSummaryDetails }), container));
-  const text = container.textContent ?? '';
-  assert.match(text, /Overflow/);
-  assert.match(text, /50,000 → 25,000/);
-  assert.match(text, /-25,000/);
-  assert.match(text, /50%/);
-  assert.match(text, /gpt-5/);
-  assert.match(text, /2\.0s/);
+  const header = container.querySelector('.compaction-summary-header') as HTMLElement;
+  const collapsedText = header.textContent ?? '';
+  assert.match(collapsedText, /Overflow/);
+  assert.match(collapsedText, /50,000 → 25,000/);
+  assert.match(collapsedText, /-25,000/);
+  assert.match(collapsedText, /50%/);
+  assert.doesNotMatch(collapsedText, /gpt-5|2\.0s/);
+  assert.match(header.title, /gpt-5 · 2\.0s/);
+
+  const button = container.querySelector('button') as HTMLButtonElement;
+  act(() => button.click());
+  assert.match(container.querySelector('.compaction-summary-provenance')?.textContent ?? '', /gpt-5 · 2\.0s/);
 });
 
 test('compaction summary stays lazy: markdown is not rendered while collapsed even with metrics', () => {

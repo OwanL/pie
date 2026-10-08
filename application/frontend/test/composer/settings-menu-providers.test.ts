@@ -11,8 +11,21 @@ import { validateWebviewToHostMessage } from '../../../lib/validation/protocol-v
 import { initialArchState, reducer } from '../../../backend/conversation-state/reducer';
 import { ProvidersSection } from '../../settings/settings-menu-providers';
 
-test('provider max slider distinguishes a saved request from the live applied value and uses live queue wait', () => {
+async function maxConcurrencyHelp(container: HTMLElement): Promise<string> {
+  const help = container.querySelector<HTMLButtonElement>('[aria-label="About Max concurrent"]');
+  assert.ok(help);
+  await act(async () => {
+    help.focus();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  });
+  const id = help.getAttribute('aria-describedby');
+  assert.ok(id);
+  return document.getElementById(id)?.textContent ?? '';
+}
+
+test('provider max slider distinguishes a saved request from the live applied value and uses live queue wait', async () => {
   const container = document.createElement('div');
+  document.body.appendChild(container);
   const prefs = {
     ...DEFAULT_CHAT_PREFS,
     providerConcurrency: { openai: { maxConcurrentRequests: 5 } },
@@ -38,15 +51,21 @@ test('provider max slider distinguishes a saved request from the live applied va
     assert.equal(max?.value, '5', 'saved preference is the requested slider value');
     assert.equal(max?.getAttribute('aria-valuetext'), '5');
     assert.equal(queue?.value, '45', 'live queue wait is used when no preference override exists');
-    assert.match(container.textContent ?? '', /Configured\/requested: 5 · Saved preference/);
-    assert.match(container.textContent ?? '', /Runtime\/applied: 3 · Environment override/);
+    assert.match(container.textContent ?? '', /Applied: 3/);
+    assert.doesNotMatch(container.textContent ?? '', /Configured\/requested/);
+    const help = await maxConcurrencyHelp(container);
+    assert.match(help, /Configured\/requested: 5 · Saved preference/);
+    assert.match(help, /Runtime\/applied: 3 · Environment override/);
+    assert.equal(max?.value, '5', 'opening help does not change the requested value');
   } finally {
     act(() => render(null, container));
+    container.remove();
   }
 });
 
-test('provider max slider reports unknown without inventing an effective default', () => {
+test('provider max slider reports unknown without inventing an effective default', async () => {
   const container = document.createElement('div');
+  document.body.appendChild(container);
   act(() => render(h(ProvidersSection, {
     providers: ['openai'],
     prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { openai: {} } },
@@ -59,12 +78,15 @@ test('provider max slider reports unknown without inventing an effective default
     const max = container.querySelector<HTMLInputElement>('[aria-label="Max concurrent requests for openai"]');
     assert.equal(max?.disabled, true, 'unknown max is not editable until runtime data or an override exists');
     assert.equal(max?.getAttribute('aria-valuetext'), 'Unavailable');
-    assert.match(container.textContent ?? '', /Configured\/requested: unavailable/);
-    assert.match(container.textContent ?? '', /Runtime\/applied: unavailable/);
-    assert.doesNotMatch(container.textContent ?? '', /Configured default/);
+    assert.match(container.textContent ?? '', /Unavailable/);
+    const help = await maxConcurrencyHelp(container);
+    assert.match(help, /Configured\/requested: unavailable/);
+    assert.match(help, /Runtime\/applied: unavailable/);
+    assert.doesNotMatch(help, /Configured default/);
     assert.doesNotMatch(container.textContent ?? '', /2 active/);
   } finally {
     act(() => render(null, container));
+    container.remove();
   }
 });
 
@@ -84,6 +106,49 @@ test('provider Unlimited applies only to the provider gate, not the subagent tre
     assert.match(max?.title ?? '', /does not bypass the separate subagent tree limit/);
   } finally {
     act(() => render(null, container));
+  }
+});
+
+test('provider expand controls reference stable, unique mounted sections only', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  act(() => render(h(ProvidersSection, {
+    providers: ['openai', 'anthropic'],
+    prefs: {
+      ...DEFAULT_CHAT_PREFS,
+      providerConcurrency: { openai: {}, anthropic: {} },
+    },
+    providerGateStats: EMPTY_PROVIDER_GATE_STATS,
+    onSetPrefs: () => undefined,
+  }), container));
+
+  try {
+    const openai = container.querySelector<HTMLButtonElement>('[aria-label="Expand openai concurrency settings"]');
+    const anthropic = container.querySelector<HTMLButtonElement>('[aria-label="Expand anthropic concurrency settings"]');
+    assert.ok(openai && anthropic);
+    assert.equal(openai.hasAttribute('aria-controls'), false);
+    assert.equal(anthropic.hasAttribute('aria-controls'), false);
+
+    act(() => openai.click());
+    const openaiId = openai.getAttribute('aria-controls');
+    assert.ok(openaiId);
+    assert.ok(document.getElementById(openaiId));
+    assert.equal(openai.getAttribute('aria-expanded'), 'true');
+    assert.equal(anthropic.hasAttribute('aria-controls'), false);
+
+    act(() => openai.click());
+    assert.equal(openai.hasAttribute('aria-controls'), false);
+    assert.equal(document.getElementById(openaiId), null);
+    act(() => openai.click());
+    assert.equal(openai.getAttribute('aria-controls'), openaiId, 'reopening preserves the controls id');
+    act(() => anthropic.click());
+    const anthropicId = anthropic.getAttribute('aria-controls');
+    assert.ok(anthropicId);
+    assert.notEqual(anthropicId, openaiId);
+    assert.ok(document.getElementById(anthropicId));
+  } finally {
+    act(() => render(null, container));
+    container.remove();
   }
 });
 

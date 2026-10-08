@@ -2054,6 +2054,7 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
             text: queued.text,
             inputs: queued.inputs,
             localId: queued.localId,
+            refreshPruning: queued.refreshPruning === true,
           });
         }
       }
@@ -2167,6 +2168,10 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     }
 
     // Move composer inputs
+    if (draft.composer.pruningRefreshPendingBySession[oldPendingPath]) {
+      draft.composer.pruningRefreshPendingBySession[newSessionPath] = true;
+    }
+    delete draft.composer.pruningRefreshPendingBySession[oldPendingPath];
     const oldInputs = draft.composer.pendingComposerInputsBySession[oldPendingPath];
     if (oldInputs) {
       const existingInputs = draft.composer.pendingComposerInputsBySession[newSessionPath] ?? [];

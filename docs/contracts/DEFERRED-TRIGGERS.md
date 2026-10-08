@@ -1,6 +1,6 @@
-# Deferred triggers
+# Wakeup timers
 
-Behavioral contract for the `defer_trigger` tool and its host-side registry. A
+Behavioral contract for the `wakeup_timer` tool and its host-side registry. A
 session can register one or more asynchronous conditions—timer, user input,
 another session finishing, or a periodic command predicate—and a message to
 revisit later. Registration is non-aborting: it persists the trigger and the
@@ -19,7 +19,7 @@ and the webview's status-strip menu displays host-owned trigger state.
 
 ## 1. Public API
 
-`defer_trigger` has three actions:
+`wakeup_timer` has three actions:
 
 - `register` — requires a non-empty `message` and at least one trigger. It
   persists the registration and does **not** end or abort the current turn.
@@ -40,7 +40,10 @@ attempted.
 
 Trigger kinds:
 
-- `timer(ms)` — fires after the normalized delay.
+- `timer(ms)` — fires after the normalized delay. `wakeupMode` defaults to
+  `true`: the delay starts only after the creator finishes its response
+  (including Stop). Set `wakeupMode: false` to count from registration.
+  Other condition kinds are unaffected.
 - `user_input` — is consumed by the next real user message in the target
   session; it does not dispatch a second synthetic message.
 - `session_finished` — fires when a matching session finishes streaming. A
@@ -66,6 +69,7 @@ A new registration has this shape (fields abbreviated):
   "op": "register",
   "sessionPath": "creator-session.jsonl",
   "targetSession": "target-session.jsonl",
+  "wakeupMode": true,
   "triggers": [{ "kind": "timer", "ms": 60000 }],
   "message": "Re-check the report",
   "at": "…"
@@ -77,6 +81,13 @@ session that receives delivery. Older records may omit `targetSession` and use
 `note` instead of `message`; replay normalizes those records to target their
 creator and preserves the note as the delivery message. Legacy records remain
 supported, including legacy cancellation and claim/release/fire operations.
+Registrations without `wakeupMode` retain registration-time timer behavior.
+
+The host appends a creator-scoped `timer-started` operation with the start
+timestamp after completion. Replay retains the first valid start as
+`timerStartedAt`, so reloads and later responses never restart the delay.
+An idle open creator can reconcile a missed completion; a closed creator does
+not prove completion, so an unstarted timer stays waiting.
 
 Cancellation is creator-scoped in both layers: the backend validates ownership
 before appending a targeted cancel, and host replay/registry cancellation
@@ -121,13 +132,17 @@ second dispatch after an ambiguous boundary.
 ## 4. Webview and guidance
 
 `ViewState.deferredTriggers` projects creator, target, condition, message,
-delivery state, and registration time. The status-strip menu shows the target
-(and creator when different) and offers cancellation using the creator path.
+delivery state, registration time, `wakeupMode`, and `timerStartedAt`. The
+menu identifies timers waiting for the creator response separately from
+started timers. Cancellation is admitted through both browser and VS Code
+transports with the creator path and optional trigger id. The status-strip menu
+shows the target (and creator when different) and offers cancellation using
+the creator path.
 Session indicators follow the delivery target.
 
 After a wake, guidance is to re-evaluate the pending task and either complete
-it or call `defer_trigger` with `register` again if another condition is
-needed. Child subagents cannot use `defer_trigger`; the skill pruner protects
+it or call `wakeup_timer` with `register` again if another condition is
+needed. Child subagents cannot use `wakeup_timer`; the skill pruner protects
 it during a deferred-trigger wake but may prune it on an ordinary turn.
 
 ## 5. Configuration

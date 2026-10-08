@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ChatMessage } from '../../../../lib/protocol/index.js';
-import { reasoningSummary } from '../../../transcript/markdown';
+import { reasoningPreview } from '../../../transcript/markdown';
 import {
   decideTranscriptCommit,
   type CommitLeaf,
@@ -384,7 +384,7 @@ test('transcripts above 256 rows still reject real structural and leaf mismatche
 });
 
 test('collapsed reasoning acknowledges its visible summary, never the hidden source', () => {
-  const source = 'A deliberately long reasoning source that has more than eighty visible characters and must not be acknowledged while collapsed.';
+  const source = '**A deliberately long reasoning source** that has more than eighty visible characters and must not be acknowledged while collapsed.';
   const reasoningMessage: ChatMessage = {
     ...message,
     status: 'completed',
@@ -399,7 +399,7 @@ test('collapsed reasoning acknowledges its visible summary, never the hidden sou
   assert.equal(decideTranscriptCommit(reasoningTarget, reasoningLeaves, model([reasoningMessage])).matches, false);
 
   reasoningLeaves.set('reasoning:assistant-1:0', {
-    kind: 'reasoning', messageId: 'assistant-1', partIndex: 0, text: reasoningSummary(source), policy: 'collapsed',
+    kind: 'reasoning', messageId: 'assistant-1', partIndex: 0, text: reasoningPreview(source), policy: 'collapsed',
   });
   assert.equal(decideTranscriptCommit(reasoningTarget, reasoningLeaves, model([reasoningMessage])).matches, true);
 });

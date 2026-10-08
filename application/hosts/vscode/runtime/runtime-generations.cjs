@@ -14,6 +14,8 @@ const LOCK_DIRECTORY = '.lock';
 const LOCK_OWNER_FILE = 'owner.json';
 const RUNTIME_MANIFEST_FILE = 'runtime-manifest.json';
 const RUNTIME_SCHEMA = 1;
+const TOOLING_DIRECTORY = 'pi-tooling';
+const TOOLING_REFERENCE = 'pi-runtime/tooling-reference.json';
 const REQUIRED_RUNTIME_FILES = ['extension.js', 'backend.js', 'worker-entry.js'];
 const BUILD_ID_FILE = 'pie-build-id.txt';
 const RENDERER_DIRECTORY = path.join('webview', 'panel');
@@ -451,97 +453,87 @@ async function hashFile(filePath) {
   return { sha256: hash.digest('hex'), size };
 }
 
-async function collectFileRecords(rootDir) {
+async function collectFileRecords(rootDir, { split = false, omitTooling = false } = {}) {
   const root = path.resolve(rootDir);
   const rootInfo = await fs.lstat(root);
   if (!rootInfo.isDirectory()) throw new Error(`Runtime output is not a directory: ${rootDir}`);
-  const files = [];
-
-  async function visit(directory, relativeDirectory) {
-    const entries = await fs.readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    const candidates = entries.map((entry) => {
-      const relative = relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name;
-      const normalized = normalizeFileRecordPath(relative);
-      return {
-        path: normalized,
-        absolute: safeChildPath(root, normalized, 'runtime output path'),
-      };
-    });
-    const metadata = new Array(candidates.length);
-    let nextCandidateIndex = 0;
-    let failed = false;
-    let firstError;
-
-    async function checkMetadata() {
-      try {
-        while (!failed) {
-          const index = nextCandidateIndex;
-          nextCandidateIndex += 1;
-          if (index >= candidates.length) return;
-          const candidate = candidates[index];
-          const info = await fs.lstat(candidate.absolute);
-          if (info.isSymbolicLink()) {
-            throw new Error(`Runtime output may not contain symlinks: ${candidate.path}`);
-          }
-          if (!info.isDirectory() && !info.isFile()) {
-            throw new Error(`Unsupported runtime output entry: ${candidate.path}`);
-          }
-          metadata[index] = { ...candidate, isDirectory: info.isDirectory() };
-        }
-      } catch (error) {
-        if (!failed) {
-          failed = true;
-          firstError = error;
-        }
-      }
-    }
-
-    const workerCount = Math.min(FILE_SCAN_CONCURRENCY, candidates.length);
-    const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, () => checkMetadata()));
-    if (failed) throw firstError;
-    const rejectedWorker = workerResults.find((result) => result.status === 'rejected');
-    if (rejectedWorker) throw rejectedWorker.reason;
-
-    for (const candidate of metadata) {
-      if (candidate.isDirectory) {
-        await visit(candidate.absolute, candidate.path);
-      } else {
-        files.push({ path: candidate.path, absolute: candidate.absolute });
-      }
-    }
-  }
-
-  await visit(root, '');
-
-  const records = new Array(files.length);
-  let nextFileIndex = 0;
+  const records = [];
+  let sawTooling = false;
+  const pending = [{ path: '', absolute: root, isDirectory: true }];
+  let nextTaskIndex = 0;
+  let active = 0;
   let failed = false;
   let firstError;
-  async function hashFiles() {
-    while (!failed) {
-      const index = nextFileIndex;
-      nextFileIndex += 1;
-      if (index >= files.length) return;
-      const file = files[index];
-      try {
-        const digest = await hashFile(file.absolute);
-        records[index] = { path: file.path, sha256: digest.sha256, size: digest.size };
-      } catch (error) {
-        if (!failed) {
-          failed = true;
-          firstError = error;
-        }
-        return;
-      }
+
+  async function scan(task) {
+    if (task.isDirectory) {
+      const entries = await fs.readdir(task.absolute, { withFileTypes: true });
+      if (failed) return;
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      const candidates = entries.map((entry) => {
+        const relative = task.path ? path.join(task.path, entry.name) : entry.name;
+        const normalized = normalizeFileRecordPath(relative);
+        return {
+          path: normalized,
+          absolute: safeChildPath(root, normalized, 'runtime output path'),
+          isDirectory: false,
+        };
+      });
+      for (const candidate of candidates) pending.push(candidate);
+      return;
+    }
+
+    if (split && task.path.split('/')[0].toLowerCase() === TOOLING_DIRECTORY && task.path.split('/')[0] !== TOOLING_DIRECTORY) throw new Error('Noncanonical tooling directory.');
+    const info = await fs.lstat(task.absolute);
+    if (failed) return;
+    if (split && task.path === TOOLING_DIRECTORY) {
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Tooling output is not an ordinary directory.');
+      sawTooling = true;
+      if (omitTooling) return;
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(`Runtime output may not contain symlinks: ${task.path}`);
+    }
+    if (info.isDirectory()) {
+      pending.push({ ...task, isDirectory: true });
+    } else if (info.isFile()) {
+      // Keep the slot through hashing: directory reads, metadata, and hashes
+      // all share the same global limit, without directory-wide barriers.
+      const digest = await hashFile(task.absolute);
+      records.push({ path: task.path, sha256: digest.sha256, size: digest.size });
+    } else {
+      throw new Error(`Unsupported runtime output entry: ${task.path}`);
     }
   }
 
-  const workerCount = Math.min(FILE_SCAN_CONCURRENCY, files.length);
-  const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, () => hashFiles()));
+  await new Promise((resolve) => {
+    function admit() {
+      while (!failed && active < FILE_SCAN_CONCURRENCY && nextTaskIndex < pending.length) {
+        const task = pending[nextTaskIndex];
+        pending[nextTaskIndex] = undefined;
+        nextTaskIndex += 1;
+        active += 1;
+        scan(task).catch((error) => {
+          if (!failed) {
+            failed = true;
+            firstError = error;
+          }
+        }).finally(() => {
+          active -= 1;
+          admit();
+        });
+      }
+      // Reclaim consumed queue storage while keeping admission constant-time.
+      if (nextTaskIndex === pending.length) {
+        pending.length = 0;
+        nextTaskIndex = 0;
+      }
+      if (active === 0) resolve();
+    }
+    admit();
+  });
   if (failed) throw firstError;
-  const rejectedWorker = workerResults.find((result) => result.status === 'rejected');
-  if (rejectedWorker) throw rejectedWorker.reason;
+  if (split && !sawTooling) throw new Error('Missing tooling directory.');
 
   records.sort((left, right) => left.path.localeCompare(right.path));
   return records;
@@ -751,34 +743,69 @@ async function verifyOutputShape(outDir) {
   return buildIds;
 }
 
+function assertExactKeys(value, keys, label) {
+  if (!isPlainObject(value) || Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`Invalid ${label} fields.`);
+}
+
+// Authorize parsed metadata only against the digest captured by the scan.
+async function readToolingReference(outDir, records) {
+  const record = records.find((entry) => entry.path === TOOLING_REFERENCE);
+  if (!record) throw new Error('Missing runtime tooling reference record.');
+  const bytes = await fs.readFile(path.join(outDir, TOOLING_REFERENCE));
+  if (bytes.length !== record.size || crypto.createHash('sha256').update(bytes).digest('hex') !== record.sha256) throw new Error('Runtime tooling reference checksum mismatch.');
+  const reference = JSON.parse(bytes.toString('utf8'));
+  assertExactKeys(reference, ['schemaVersion', 'artifactDirectory', 'identity'], 'tooling reference');
+  if (reference.schemaVersion !== 1 || reference.artifactDirectory !== '../pi-tooling'
+    || typeof reference.identity !== 'string' || !SHA256_PATTERN.test(reference.identity)) throw new Error('Invalid runtime tooling reference.');
+  return reference;
+}
+
 async function snapshotSource(sourceOutDir) {
   const records = await collectFileRecords(sourceOutDir);
+  let tooling;
+  if (records.some((record) => record.path === TOOLING_REFERENCE)) {
+    const reference = await readToolingReference(sourceOutDir, records);
+    await collectFileRecords(sourceOutDir, { split: true, omitTooling: true });
+    tooling = { path: TOOLING_DIRECTORY, identity: reference.identity,
+      files: records.filter((record) => record.path.startsWith(`${TOOLING_DIRECTORY}/`)) };
+  }
   const buildIds = await verifyOutputShape(sourceOutDir);
   if (!records.some((record) => record.path === 'extension.js')) {
     throw new Error('Runtime output is missing extension.js.');
   }
   return {
     records,
+    tooling,
     generation: hashRecords(records),
     buildId: buildIds.buildId,
     rendererBuildId: buildIds.rendererBuildId,
   };
 }
 
-function runtimeManifestFor({ identity, generation, buildId, rendererBuildId, records }) {
+function runtimeManifestFor({ identity, generation, buildId, rendererBuildId, records, tooling }) {
   return {
-    schema: RUNTIME_SCHEMA,
+    schema: tooling ? 2 : RUNTIME_SCHEMA,
     identity,
     generation,
     buildId,
     rendererBuildId,
-    files: records.map((record) => ({ ...record })),
+    files: records.filter((record) => !tooling || !record.path.startsWith(`${TOOLING_DIRECTORY}/`)).map((record) => ({ ...record })),
+    ...(tooling ? { tooling } : {}),
   };
 }
 
 function validateRuntimeManifest(manifest, generation, identity) {
-  if (!isPlainObject(manifest) || manifest.schema !== RUNTIME_SCHEMA) {
+  if (!isPlainObject(manifest) || ![RUNTIME_SCHEMA, 2].includes(manifest.schema)) {
     throw new Error('Invalid Pie runtime manifest.');
+  }
+  const split = manifest.schema === 2;
+  if (split) {
+    assertExactKeys(manifest, ['schema', 'identity', 'generation', 'buildId', 'rendererBuildId', 'files', 'tooling'], 'runtime manifest');
+    assertExactKeys(manifest.identity, ['publisher', 'name', 'version'], 'runtime identity');
+    assertExactKeys(manifest.tooling, ['path', 'identity', 'files'], 'tooling manifest');
+    if (manifest.tooling.path !== TOOLING_DIRECTORY || typeof manifest.tooling.identity !== 'string'
+      || !SHA256_PATTERN.test(manifest.tooling.identity) || !Array.isArray(manifest.tooling.files)
+      || manifest.tooling.files.length === 0) throw new Error('Invalid tooling manifest.');
   }
   assertGeneration(manifest.generation);
   if (manifest.generation !== generation) throw new Error('Pie runtime manifest generation mismatch.');
@@ -794,23 +821,35 @@ function validateRuntimeManifest(manifest, generation, identity) {
 
   const records = [];
   const seen = new Set();
-  for (const rawRecord of manifest.files) {
+  const toolingRecords = [];
+  const allRecords = [...manifest.files, ...(split ? manifest.tooling.files : [])];
+  for (const [index, rawRecord] of allRecords.entries()) {
     if (!isPlainObject(rawRecord)) throw new Error('Invalid Pie runtime manifest file record.');
     const filePath = normalizeFileRecordPath(rawRecord.path);
+    const toolingRecord = index >= manifest.files.length;
+    if (split) {
+      assertExactKeys(rawRecord, ['path', 'sha256', 'size'], 'runtime file record');
+      if (filePath !== rawRecord.path || filePath.split('/').some((piece) => piece === '' || piece === '.')
+        || rawRecord.path.includes('\\')) throw new Error('Noncanonical runtime file path.');
+      if (toolingRecord ? !filePath.startsWith(`${TOOLING_DIRECTORY}/`)
+        : filePath.split('/')[0].toLowerCase() === TOOLING_DIRECTORY) throw new Error('Runtime/tooling role overlap.');
+    }
     if (seen.has(filePath)) throw new Error(`Duplicate Pie runtime manifest file: ${filePath}`);
     seen.add(filePath);
     if (!SHA256_PATTERN.test(rawRecord.sha256)) throw new Error(`Invalid SHA256 for runtime file: ${filePath}`);
     if (!Number.isSafeInteger(rawRecord.size) || rawRecord.size < 0) throw new Error(`Invalid size for runtime file: ${filePath}`);
-    records.push({ path: filePath, sha256: rawRecord.sha256, size: rawRecord.size });
+    (toolingRecord ? toolingRecords : records).push({ path: filePath, sha256: rawRecord.sha256, size: rawRecord.size });
   }
   records.sort((left, right) => left.path.localeCompare(right.path));
   for (const required of REQUIRED_RUNTIME_FILES) {
     if (!seen.has(required)) throw new Error(`Runtime manifest is missing ${required}.`);
   }
-  return { records, buildId, rendererBuildId };
+  if (split && (!records.some((record) => record.path === TOOLING_REFERENCE)
+    || !toolingRecords.some((record) => record.path === `${TOOLING_DIRECTORY}/manifest.json`))) throw new Error('Missing tooling role metadata.');
+  return { records, toolingRecords, split, toolingIdentity: manifest.tooling?.identity, buildId, rendererBuildId };
 }
 
-async function verifyStoredGeneration(generationDir, generation, identity, timing) {
+async function verifyStoredGeneration(generationDir, generation, identity, timing, fullTooling = false) {
   const startedAt = timing ? monotonicNow() : null;
   const phasesMs = timing ? {
     manifestMs: 0,
@@ -837,7 +876,8 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
     const fileScanStartedAt = timing ? monotonicNow() : null;
     let actualRecords;
     try {
-      actualRecords = await collectFileRecords(outDir);
+      actualRecords = await collectFileRecords(outDir, { split: validated.split, omitTooling: validated.split && !fullTooling });
+      if (validated.split && (await readToolingReference(outDir, actualRecords)).identity !== validated.toolingIdentity) throw new Error('Tooling identity mismatch.');
       if (timing) {
         files = actualRecords.length;
         bytes = actualRecords.reduce((total, record) => total + record.size, 0);
@@ -848,11 +888,12 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
     const comparisonStartedAt = timing ? monotonicNow() : null;
     try {
       const actualByPath = recordsByPath(actualRecords);
-      if (actualByPath.size !== validated.records.length) {
+      const expectedRecords = [...validated.records, ...(fullTooling ? validated.toolingRecords : [])];
+      if (actualByPath.size !== expectedRecords.length) {
         throw new Error('Pie runtime output does not match its manifest file set.');
       }
 
-      for (const expected of validated.records) {
+      for (const expected of expectedRecords) {
         const actual = actualByPath.get(expected.path);
         if (!actual || actual.size !== expected.size || actual.sha256 !== expected.sha256) {
           throw new Error(`Pie runtime file checksum mismatch: ${expected.path}`);
@@ -864,7 +905,7 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
 
     const contentHashStartedAt = timing ? monotonicNow() : null;
     try {
-      const actualGeneration = hashRecords(actualRecords);
+      const actualGeneration = hashRecords([...actualRecords, ...(fullTooling ? [] : validated.toolingRecords)]);
       if (actualGeneration !== generation) throw new Error('Pie runtime content hash mismatch.');
     } finally {
       if (timing) phasesMs.contentHashMs += elapsedMs(contentHashStartedAt);
@@ -1113,7 +1154,7 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
 
     let existingIsValid = false;
     try {
-      await verifyStoredGeneration(generationDir, generation, normalizedIdentity);
+      await verifyStoredGeneration(generationDir, generation, normalizedIdentity, undefined, true);
       existingIsValid = true;
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') {
@@ -1156,10 +1197,11 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
             buildId: stagedBuildIds.buildId,
             rendererBuildId: stagedBuildIds.rendererBuildId,
             records: stagedRecords,
+            tooling: sourceSnapshot.tooling,
           }), null, 2)}\n`,
           { flag: 'wx' },
         );
-        await verifyStoredGeneration(stagingDir, generation, normalizedIdentity);
+        await verifyStoredGeneration(stagingDir, generation, normalizedIdentity, undefined, true);
       } finally {
         recordBuildPhase(buildTiming, 'stagedVerify', stagedVerifyStartedAt);
       }
@@ -1171,7 +1213,7 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
         if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(errorCode(error))) throw error;
         // Another publisher cannot normally win while this lock is held, but
         // never overwrite a directory if an external process did so anyway.
-        await verifyStoredGeneration(generationDir, generation, normalizedIdentity);
+        await verifyStoredGeneration(generationDir, generation, normalizedIdentity, undefined, true);
       }
     }
 
@@ -1184,6 +1226,7 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
     }
     const publishedAt = Math.max(Date.now(), (previousSelections[0]?.publishedAt ?? -1) + 1);
     await beforeSelect?.({ generation, outDir, publishedAt });
+    if (sourceSnapshot.tooling) await verifyStoredGeneration(generationDir, generation, normalizedIdentity, undefined, true);
 
     const markerName = selectionMarkerName(publishedAt, generation);
     const markerPath = path.join(selectionsDir, markerName);
@@ -1247,7 +1290,9 @@ async function acquireRuntimeGeneration({ extensionDir, identity }) {
         fs.mkdir(path.join(root, SELECTIONS_DIRECTORY), { recursive: true }),
         fs.mkdir(path.join(root, LEASES_DIRECTORY), { recursive: true }),
       ]);
-      const verifiedSelectionRecords = await listSelectionRecords(root, normalizedIdentity, { timing, limit: 2 });
+      // Startup verifies only the generation it will lease and load. Retention
+      // verifies current+prior separately during publication or lease release.
+      const verifiedSelectionRecords = await listSelectionRecords(root, normalizedIdentity, { timing, limit: 1 });
       resolved = await resolveRuntimeGenerationUnlocked(extensionDir, normalizedIdentity, timing, verifiedSelectionRecords);
       if (resolved.generation !== null) {
         const token = crypto.randomBytes(16).toString('hex');
@@ -1268,12 +1313,6 @@ async function acquireRuntimeGeneration({ extensionDir, identity }) {
           { flag: 'wx' },
         );
         await fs.rename(leaseStaging, leasePath);
-      }
-      const cleanupStartedAt = monotonicNow();
-      try {
-        await cleanupRuntime(root, normalizedIdentity, timing, verifiedSelectionRecords);
-      } finally {
-        timing.cleanupMs += elapsedMs(cleanupStartedAt);
       }
     } catch (error) {
       if (leasePath) await fs.rm(leasePath, { force: true }).catch(() => undefined);
@@ -1308,6 +1347,7 @@ async function acquireRuntimeGeneration({ extensionDir, identity }) {
 }
 
 module.exports = {
+  SUPPORTED_MANIFEST_SCHEMAS: Object.freeze([1, 2]),
   publishRuntimeGeneration,
   resolveRuntimeGeneration,
   acquireRuntimeGeneration,

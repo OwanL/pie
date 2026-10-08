@@ -100,6 +100,15 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleClearQueue(state, cmd);
     }
 
+    case 'SetPruningRefreshPending': {
+      if (!state.sessions.openTabPaths.includes(cmd.sessionPath)) return { state, effects: [] };
+      return {
+        state: { ...state, composer: { ...state.composer, pruningRefreshPendingBySession: {
+          ...state.composer.pruningRefreshPendingBySession, [cmd.sessionPath]: cmd.pending,
+        } } }, effects: [],
+      };
+    }
+
     case 'Send': {
       return handleSend(state, cmd);
     }
@@ -197,7 +206,13 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
     }
 
     case 'CloseSession': {
-      return handleCloseSession(state, cmd);
+      const result = handleCloseSession(state, cmd);
+      if (result.state.sessions.openTabPaths.includes(cmd.sessionPath)
+        || !Object.prototype.hasOwnProperty.call(result.state.composer.pruningRefreshPendingBySession, cmd.sessionPath)) return result;
+      const { [cmd.sessionPath]: _pending, ...remaining } = result.state.composer.pruningRefreshPendingBySession;
+      return { ...result, state: { ...result.state, composer: {
+        ...result.state.composer, pruningRefreshPendingBySession: remaining,
+      } } };
     }
 
     case 'RestartBackend': {

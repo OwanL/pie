@@ -31,6 +31,7 @@ export interface EffectBase {
 
 export interface SendRpcEffect extends EffectBase {
   kind: 'SendRpc';
+  refreshPruning?: boolean;
   operationId?: string;
   operationAttempt?: number;
   backendGeneration?: number;

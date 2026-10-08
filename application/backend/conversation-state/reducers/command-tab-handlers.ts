@@ -54,11 +54,13 @@ export function handleCloseTab(state: ArchState, cmd: Extract<Command, { kind: '
   // directly by handleSelectionFailure (which emits its own PersistTabs) —
   // normal close flows through the CloseSession Command, whose handler emits
   // PersistTabs.
+  const { [cmd.sessionPath]: _refresh, ...remainingRefresh } = state.composer.pruningRefreshPendingBySession;
   const nextOpenTabPaths = removeFromArray(state.sessions.openTabPaths, cmd.sessionPath);
   const nextPinnedTabPaths = removeFromArray(state.sessions.pinnedTabPaths, cmd.sessionPath);
   return {
     state: {
       ...state,
+      composer: { ...state.composer, pruningRefreshPendingBySession: remainingRefresh },
       sessions: {
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,

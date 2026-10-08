@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Writable } from 'node:stream';
 
@@ -22,6 +23,7 @@ import {
 import { StandaloneHostStorage } from './storage';
 import type { StandaloneDependencyPaths } from './startup';
 import { createBackendStartupPlatform } from '../lib/backend-startup';
+import { readImagePreviewWithFallback } from '../lib/image-preview.js';
 
 const UNSUPPORTED_EDITOR_MESSAGE = 'Opening files in VS Code is unavailable in standalone mode.';
 
@@ -193,6 +195,41 @@ export function createStandaloneHostRuntimePlatform(
     openFileInEditor: async () => {
       throw new Error(UNSUPPORTED_EDITOR_MESSAGE);
     },
+    previewImageFile: async (filePath, previewOptions) => readImagePreviewWithFallback(
+      { path: filePath, ...previewOptions },
+      {
+        exists: async (candidate) => {
+          try {
+            await fs.stat(candidate);
+            return true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+            throw error;
+          }
+        },
+        // Standalone has no indexed workspace finder. Never recursively walk
+        // dependency, runtime-data, or generated trees for a bare name.
+        findFiles: async () => [],
+        readFile: async (candidate, maxBytes) => {
+          const handle = await fs.open(candidate, 'r');
+          try {
+            const stat = await handle.stat();
+            if (!stat.isFile() || stat.size > maxBytes) throw new Error('Preview file exceeds its size bound.');
+            const buffer = Buffer.alloc(maxBytes + 1);
+            let bytesRead = 0;
+            while (bytesRead < buffer.length) {
+              const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+              if (result.bytesRead === 0) break;
+              bytesRead += result.bytesRead;
+              if (bytesRead > maxBytes) throw new Error('Preview file exceeds its size bound.');
+            }
+            return buffer.subarray(0, bytesRead);
+          } finally {
+            await handle.close();
+          }
+        },
+      },
+    ),
   };
 
   return {

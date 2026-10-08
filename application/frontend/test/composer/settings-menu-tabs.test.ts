@@ -7,9 +7,9 @@ installDom();
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
-import { ComposerSettingsMenu } from '../../settings/settings-menu';
+import { ComposerSettingsMenu, type ComposerSettingsMenuProps } from '../../settings/settings-menu';
 import { orderModelsForPicker } from '../../composer/model-list';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_SESSION_TITLES_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS, resolveHistoryCompactionSettings } from '../../../lib/protocol/index.js';
 import type { ExtensionInfo, ModelInfo } from '../../../lib/protocol/index.js';
 
 let container: HTMLElement;
@@ -36,6 +36,7 @@ function mount(
   extensions: ExtensionInfo[] = [],
   models: ModelInfo[] = [],
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: import('../../../lib/protocol/index.js').ThinkingLevel) => void = () => undefined,
+  overrides: Partial<ComposerSettingsMenuProps> = {},
 ) {
   act(() => {
     render(
@@ -60,6 +61,7 @@ function mount(
         onMcpSetServerEnabled: () => undefined,
         onSetPruningSettings: () => undefined,
         onSetToolResultPruningSettings: () => undefined,
+        ...overrides,
       }),
       container,
     );
@@ -107,10 +109,13 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
 
   // Models owns all baseline assignments and the provider section.
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
-  assert.match(body.textContent!, /Model assignments/);
-  assert.match(body.textContent!, /Chat default/);
-  assert.match(body.textContent!, /Title model/);
-  assert.match(body.textContent!, /Summary model/);
+  const assignments = body.querySelectorAll('.toolbar-settings-assignment-group');
+  assert.deepEqual(Array.from(assignments).map((group) => group.getAttribute('aria-label')), ['Chat default', 'Session titles', 'Compaction summary']);
+  for (const group of assignments) {
+    assert.deepEqual(Array.from(group.querySelectorAll('.toolbar-settings-item-label')).map((label) => label.textContent), ['Model', 'Thinking']);
+  }
+  assert.ok(body.querySelector('[aria-label="Session title model"]'));
+  assert.ok(body.querySelector('[aria-label="Summary model"]'));
   assert.match(body.textContent!, /Providers/);
 
   // Switch to Appearance — layout, theme, and status/usage visibility now live
@@ -171,7 +176,7 @@ test('Chat default uses the toolbar model entries and normalizes thinking throug
   assert.deepEqual(calls, [['plain', 'test', 'off']]);
 });
 
-test('extension-backed settings route to Models, Context, and Subagents', () => {
+test('extension-backed settings route to Models, Context, and Subagents', async () => {
   const extensions: ExtensionInfo[] = [
     { id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' },
     { id: 'subagent', label: 'Subagent', description: 'Delegates' },
@@ -187,8 +192,9 @@ test('extension-backed settings route to Models, Context, and Subagents', () => 
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
 
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
-  assert.match(body.textContent!, /Prepass model/);
-  assert.match(body.textContent!, /Low-cost busywork/);
+  assert.ok(body.querySelector('[role="group"][aria-label="Pruning prepass"] [aria-label="Pruning prepass model"]'));
+  assert.ok(body.querySelector('button[aria-label="About Small bucket models"]'));
+  assert.doesNotMatch(body.textContent!, /Low-cost busywork/);
 
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="context"]')); });
   assert.match(body.textContent!, /Skill pruning/);
@@ -201,11 +207,22 @@ test('extension-backed settings route to Models, Context, and Subagents', () => 
   assert.doesNotMatch(body.textContent!, /Low-cost busywork/);
 
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
-  const chevrons = body.querySelectorAll('.toolbar-settings-ext-chevron');
-  act(() => { click(chevrons[0]); });
-  assert.match(body.textContent!, /Settings moved to the Context and Models tabs/);
-  act(() => { click(chevrons[1]); });
-  assert.match(body.textContent!, /Settings moved to the Subagents and Models tabs/);
+  assert.equal(body.querySelectorAll('.toolbar-settings-ext-chevron').length, 0, 'relocated settings do not have empty expanders');
+  assert.doesNotMatch(body.textContent!, /Settings moved/);
+  for (const [label, message] of [
+    ['Skill Pruner', /Settings moved to the Context and Models tabs/],
+    ['Subagent', /Settings moved to the Subagents and Models tabs/],
+  ] as const) {
+    const help = body.querySelector<HTMLButtonElement>(`[aria-label="About ${label}"]`);
+    assert.ok(help);
+    await act(async () => {
+      help.focus();
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    });
+    const id = help.getAttribute('aria-describedby');
+    assert.ok(id);
+    assert.match(document.getElementById(id)?.textContent ?? '', message);
+  }
 });
 
 // The MCP tab is unconditional and carries the global on/off toggle; toggling
@@ -239,7 +256,8 @@ test('MCP tab renders the global toggle and emits mcpEnabled patches', () => {
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="mcp"]')); });
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /MCP enabled/);
-  assert.match(body.textContent!, /mcp\.json/);
+  assert.ok(body.querySelector('button[aria-label="About Server config"]'));
+  assert.doesNotMatch(body.textContent!, /mcp\.json/);
 
   const toggle = body.querySelector('.toolbar-settings-item[role="checkbox"]') as HTMLElement;
   assert.ok(toggle, 'MCP toggle should render');
@@ -351,10 +369,8 @@ test('ask-user settings render inline with an "Include for subagents" toggle', (
   assert.deepEqual(setPrefsCalls, [{ subagentDropTools: ['ask_user'] }]);
 });
 
-// Search replaces the tab strip + body with a flat filtered result list that
-// spans every category, so a setting can be found and toggled without hunting
-// through tabs.
-test('search replaces the tab body with a flat filtered result list across categories', () => {
+// Search keeps navigation available and groups matching settings by category.
+test('search keeps category navigation and groups results across categories', () => {
   mount();
   const menu = openMenu();
 
@@ -366,15 +382,22 @@ test('search replaces the tab body with a flat filtered result list across categ
     input!.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
-  // The tab strip is hidden while searching.
-  assert.ok(!menu.querySelector('.toolbar-settings-tabs'), 'tab strip should hide while searching');
+  assert.ok(menu.querySelector('.toolbar-settings-tabs'), 'category navigation should persist while searching');
+  assert.ok(menu.querySelector('[role="tab"][data-tab="models"]'));
+  assert.equal(menu.querySelector('select[aria-label="Settings category"]'), null);
+  const region = menu.querySelector('[role="region"][aria-label="Settings search results"]');
+  assert.ok(region, 'search is a named region, not an unlabelled tabpanel');
+  assert.equal(region.getAttribute('aria-labelledby'), null);
+  assert.ok(region.querySelector('.toolbar-settings-search-group-title'));
+  assert.match(region.querySelector('.toolbar-settings-search-summary')?.textContent ?? '', /\d+ results/);
 
   const results = menu.querySelectorAll('.toolbar-settings-search-result');
   assert.ok(results.length > 0, 'search should produce results');
 
-  // "chat" matches the Chat category jump and its toggles.
+  // "chat" matches actual settings, not redundant category jump rows.
   const jumpResults = menu.querySelectorAll('.toolbar-settings-search-result-jump');
-  assert.ok(jumpResults.length >= 1, 'Chat category jump should be a search result');
+  assert.ok(jumpResults.length >= 1, 'Chat settings should be searchable');
+  assert.ok([...jumpResults].every((row) => row.querySelector('.toolbar-settings-search-result-label')?.textContent !== 'Chat'));
 
   // Clearing the query restores the tab strip + Chat body.
   act(() => { click(menu.querySelector('.toolbar-settings-search-clear')); });
@@ -412,7 +435,8 @@ test('search routes moved settings to their new tabs', () => {
   const prepass = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')]
     .find((result) => result.textContent?.includes('Prepass model'));
   assert.ok(prepass);
-  assert.match(prepass!.textContent ?? '', /Models/);
+  assert.equal(prepass!.closest('.toolbar-settings-search-group')?.querySelector('h3')?.textContent, 'Models');
+  assert.equal(prepass!.getAttribute('title'), 'Open Prepass model in Models · pruning prepass');
   act(() => { click(prepass!); });
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="models"].active'));
 
@@ -423,7 +447,161 @@ test('search routes moved settings to their new tabs', () => {
   const budget = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')]
     .find((result) => result.textContent?.includes('Tree session budget'));
   assert.ok(budget);
-  assert.match(budget!.textContent ?? '', /Subagents/);
+  assert.equal(budget!.closest('.toolbar-settings-search-group')?.querySelector('h3')?.textContent, 'Subagents');
+});
+
+test('clearing search restores focus after the clear button unmounts', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  act(() => {
+    input.value = 'radius';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const clear = menu.querySelector('.toolbar-settings-search-clear') as HTMLButtonElement;
+  clear.focus();
+  act(() => { click(clear); });
+  assert.equal(document.activeElement, input);
+});
+
+test('search jumps focus the exact destination after commit and deduplicates same-category toggles', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  act(() => {
+    input.value = 'radius';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const result = menu.querySelector('.toolbar-settings-search-result-jump') as HTMLButtonElement;
+  assert.equal(result.querySelector('.toolbar-settings-search-result-context'), null, 'do not repeat the category as source context');
+  result.focus();
+  act(() => { click(result); });
+  assert.equal(document.activeElement, menu.querySelector('input[aria-label="Corner radius"]'));
+  assert.equal(menu.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim(), 'Appearance');
+  assert.equal(menu.querySelector('.toolbar-settings-category-heading'), null, 'do not repeat navigation as a content heading');
+
+  act(() => {
+    input.value = 'proactive automatic compaction';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const matches = menu.querySelectorAll('.toolbar-settings-search-result');
+  assert.equal(matches.length, 1, 'same-tab toggle and jump must not duplicate the setting');
+  assert.equal(matches[0].getAttribute('role'), 'checkbox');
+  assert.equal(matches[0].closest('.toolbar-settings-search-group')?.querySelector('h3')?.textContent, 'Context');
+});
+
+test('jumps to disabled title settings restore focus to search', () => {
+  mount([], [], undefined, {
+    sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS, enabled: false },
+  });
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  for (const label of ['Title timeout', 'Title model', 'Title thinking']) {
+    act(() => {
+      input.value = label;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const result = [...menu.querySelectorAll<HTMLButtonElement>('.toolbar-settings-search-result-jump')]
+      .find((row) => row.querySelector('.toolbar-settings-search-result-label')?.textContent === label);
+    assert.ok(result, `expected ${label}`);
+    act(() => { result.focus(); result.click(); });
+    assert.equal(input.value, '');
+    assert.ok(document.activeElement === input, `${label} should not leave focus on a disabled control`);
+  }
+});
+
+test('Thinking jumps distinguish sources and focus only their own current model assignment', () => {
+  const mutations: string[] = [];
+  mount([
+    { id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' },
+    { id: 'subagent', label: 'Subagent', description: 'Delegates' },
+  ], [{ id: 'reasoning', name: 'Reasoning', provider: 'test', reasoning: true, thinkingLevels: ['off', 'low', 'high'], inputKinds: ['text'] }], () => mutations.push('chat default'), {
+    prefs: { ...DEFAULT_CHAT_PREFS, historyCompaction: { ...resolveHistoryCompactionSettings(DEFAULT_CHAT_PREFS.historyCompaction), summaryModel: { id: 'reasoning', provider: 'test' } } },
+    pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, model: 'reasoning', provider: 'test' },
+    sessionTitlesSettings: { ...DEFAULT_SESSION_TITLES_SETTINGS, enabled: true, model: 'reasoning', provider: 'test' },
+    onSetPrefs: () => mutations.push('compaction summary'),
+    onSetPruningSettings: () => mutations.push('pruning prepass'),
+    onSetSessionTitlesSettings: () => mutations.push('session titles'),
+  });
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  const targets = [
+    ['chat default', 'Chat default thinking level'],
+    ['compaction summary', 'Summary thinking level'],
+    ['pruning prepass', 'Pruning thinking level'],
+    ['session titles', 'Session title thinking level'],
+  ];
+  for (const [section, target] of targets) {
+    act(() => {
+      input.value = 'thinking';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const results = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')];
+    const genericThinking = results.filter((row) => row.querySelector('.toolbar-settings-search-result-label')?.textContent === 'Thinking');
+    assert.deepEqual(genericThinking.map((row) => row.querySelector('.toolbar-settings-search-result-context')?.textContent),
+      ['chat default', 'compaction summary', 'pruning prepass']);
+    const result = results.find((row) => row.querySelector('.toolbar-settings-search-result-context')?.textContent === section);
+    assert.ok(result);
+    assert.match(result.getAttribute('title') ?? '', new RegExp(section));
+    assert.equal(result.closest('.toolbar-settings-search-group')?.querySelector('h3')?.textContent, 'Models');
+    act(() => { click(result); });
+    const destination = document.activeElement as HTMLSelectElement;
+    assert.equal(destination.getAttribute('aria-label'), target);
+    assert.equal(destination.closest('[data-settings-section]')?.getAttribute('data-settings-section'), section);
+    assert.ok(destination.isConnected, 'focus must use the newly mounted assignment');
+    assert.deepEqual([...menu.querySelectorAll('.toolbar-settings-assignment-title')].map((heading) => heading.textContent),
+      ['Chat default', 'Session titles', 'Compaction summary', 'Pruning prepass', 'Subagent model buckets']);
+    assert.equal(mutations.length, 0, 'jumping must not mutate preferences');
+    act(() => {
+      destination.value = 'high';
+      destination.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    assert.deepEqual(mutations, [section], 'only the focused source assignment may change');
+    mutations.length = 0;
+  }
+});
+
+test('a jump whose source disappears restores search focus instead of another Thinking assignment', () => {
+  mount([{ id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' }]);
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  act(() => {
+    input.value = 'thinking';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const prepass = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')]
+    .find((row) => row.querySelector('.toolbar-settings-search-result-context')?.textContent === 'pruning prepass');
+  assert.ok(prepass);
+  act(() => {
+    click(prepass);
+    mount([]);
+  });
+  assert.equal(menu.querySelector('[data-settings-section="pruning prepass"]'), null);
+  assert.equal(document.activeElement, input);
+});
+
+test('visible category tabs and arrow navigation leave search', async () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+  assert.equal(menu.querySelector('.toolbar-settings-category-select'), null);
+  assert.deepEqual(Array.from(menu.querySelectorAll('[role="tab"]')).map((tab) => tab.getAttribute('data-tab')), ['chat', 'models', 'context', 'appearance', 'mcp']);
+  act(() => {
+    input.value = 'radius';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  act(() => { click(menu.querySelector('[data-tab="context"]')); });
+  assert.equal(input.value, '');
+  assert.equal(menu.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim(), 'Context');
+  assert.equal(menu.querySelector('[role="tabpanel"]')?.getAttribute('aria-labelledby'), 'toolbar-settings-tab-context');
+  const contextTab = menu.querySelector('[data-tab="context"]') as HTMLButtonElement;
+  contextTab.focus();
+  act(() => {
+    contextTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  });
+  await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(resolve)); });
+  assert.equal(document.activeElement, menu.querySelector('[data-tab="appearance"]'));
+  assert.equal(menu.querySelector('[role="tab"][aria-selected="true"]')?.getAttribute('data-tab'), 'appearance');
 });
 
 test('a search with no matches shows an empty-state message', () => {
@@ -463,14 +641,14 @@ test('search routes display prefs and the visible Mono font label to Appearance'
   const menu = openMenu();
   const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
 
-  for (const query of ['hide session cost', 'mono font']) {
+  for (const query of ['mono font']) {
     act(() => {
       input.value = query;
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
     const jump = menu.querySelector('.toolbar-settings-search-result-jump');
     assert.ok(jump, `${query} should produce a jump result`);
-    assert.match(jump!.textContent ?? '', /Appearance/);
+    assert.equal(jump!.closest('.toolbar-settings-search-group')?.querySelector('h3')?.textContent, 'Appearance');
   }
 });
 
@@ -486,7 +664,7 @@ test('search finds continuous settings by name and offers a jump to their tab', 
 
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /Corner radius/);
-  // The jump result shows the target category (Appearance) as its meta label.
+  // Category appears once as the result group's heading.
   assert.match(body.textContent!, /Appearance/);
   assert.ok(!/No settings match/.test(body.textContent!), 'radius should match, not show the empty state');
 });

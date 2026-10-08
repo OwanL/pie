@@ -137,7 +137,8 @@ test('records bounded acquisition and per-generation verification phase timings'
     const verifications = acquisition.verification as Array<Record<string, unknown>>;
     assert.equal(verifications.length, 1);
     assert.equal(verifications[0]?.generation, published.generation);
-    assert.equal(verifications[0]?.count, 1, 'selection verification is reused by retention cleanup');
+    assert.equal(verifications[0]?.count, 1, 'the selected generation is verified once before leasing');
+    assert.equal(acquisition.cleanupMs, 0, 'acquisition performs no retention cleanup');
     assert.ok(Number(verifications[0]?.files) > 0);
     assert.ok(Number(verifications[0]?.bytes) > 0);
     const phases = verifications[0]?.phasesMs as Record<string, unknown>;
@@ -154,6 +155,62 @@ test('records bounded acquisition and per-generation verification phase timings'
     assert.equal(leaseWithoutDiagnostics.generation, published.generation);
     await leaseWithoutDiagnostics.release();
   });
+}));
+
+test('acquisition resolves before reading a valid unused prior payload and defers invalid-marker maintenance', async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const sourceA = await createRuntimeSource(root, 'startup-prior');
+  const sourceB = await createRuntimeSource(root, 'startup-selected');
+  const prior = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
+  const selected = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
+  const selectionsDir = path.join(extensionDir, 'pie-runtime', 'selections');
+  const invalidMarker = await addSelectionMarker(extensionDir, selected.generation, selected.publishedAt + 1, 'a');
+  await writeFile(path.join(selectionsDir, invalidMarker), '{torn');
+
+  // Gate the actual payload-hashing seam, not manifest metadata or timing output.
+  const fsSync = require('node:fs') as typeof import('node:fs');
+  const descriptor = Object.getOwnPropertyDescriptor(fsSync, 'createReadStream');
+  assert.ok(descriptor);
+  const original = fsSync.createReadStream;
+  let unblock!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((resolve) => { unblock = resolve; });
+  const priorRead = new Promise<'prior-read'>((resolve) => { reached = () => resolve('prior-read'); });
+  const selectedReads = new Set<string>();
+  Object.defineProperty(fsSync, 'createReadStream', {
+    ...descriptor,
+    value: (...args: unknown[]) => {
+      const filePath = String(args[0]);
+      if (filePath.startsWith(`${selected.outDir}${path.sep}`)) selectedReads.add(path.relative(selected.outDir, filePath).replaceAll('\\', '/'));
+      if (!filePath.startsWith(`${prior.outDir}${path.sep}`)) return Reflect.apply(original, fsSync, args);
+      reached();
+      return (async function* () {
+        await gate;
+        yield* Reflect.apply(original, fsSync, args);
+      })();
+    },
+  });
+  let lease: RuntimeLease | undefined;
+  const acquisition = runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+  try {
+    const winner = await Promise.race([acquisition.then((value) => { lease = value; return 'acquired'; }), priorRead]);
+    assert.equal(winner, 'acquired', 'startup must resolve while unused prior payload reads remain gated');
+    assert.equal(lease?.generation, selected.generation);
+    const manifest = JSON.parse(await readFile(path.join(path.dirname(selected.outDir), 'runtime-manifest.json'), 'utf8')) as { files: Array<{ path: string }> };
+    assert.deepEqual([...selectedReads].sort(), manifest.files.map((file) => file.path).sort(), 'every selected payload file is fully hashed before acquisition resolves');
+    assert.equal(await exists(path.join(selectionsDir, invalidMarker)), true, 'acquisition leaves invalid markers for maintenance');
+    assert.equal(await exists(prior.outDir), true, 'acquisition preserves the valid prior generation');
+  } finally {
+    unblock();
+    try {
+      lease = await acquisition;
+    } finally {
+      Object.defineProperty(fsSync, 'createReadStream', descriptor);
+    }
+    await lease?.release();
+  }
+  assert.equal(await exists(path.join(selectionsDir, invalidMarker)), false, 'release performs deferred marker cleanup');
+  assert.equal(await exists(prior.outDir), true, 'release retains the valid prior generation');
 }));
 
 test('publishes a verified full-output content generation, not just the build ID', async () => withTempRoot(async (root) => {
@@ -347,9 +404,13 @@ test('bounds marker verification to distinct valid generations while honoring le
     assert.equal(summaries.get(newest.generation)?.count, 1, 'duplicate markers do not re-verify a failed generation');
     assert.equal(summaries.get(newest.generation)?.failures, 1);
     assert.equal(summaries.get(prior.generation)?.count, 1, 'the newest duplicate marker represents its generation');
-    assert.equal(summaries.get(older.generation)?.count, 1, 'verification continues until two distinct generations pass');
-    assert.equal(summaries.has(oldest.generation), false, 'older candidates are not scanned after two valid generations');
+    assert.equal(summaries.has(older.generation), false, 'verification stops after one valid fallback');
+    assert.equal(summaries.has(oldest.generation), false, 'older candidates are not scanned after one valid generation');
+    assert.equal(acquisition.cleanupMs, 0);
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'selections', duplicateNewest)), true, 'acquisition leaves damaged markers for maintenance');
 
+    await selectedLease.release();
+    selectedLease = undefined;
     const selectionNames = (await readdir(path.join(extensionDir, 'pie-runtime', 'selections'))).filter((name) => name.endsWith('.json'));
     const priorMarkers = [];
     const retainedMarkerGenerations = new Set<string>();

@@ -7,7 +7,7 @@ import { useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } f
 import { EMPTY_TRANSCRIPT_WINDOW, type ChatMessage, type ToolCall, type TranscriptWindow, type WebviewToHostMessage } from '../../lib/protocol/index.js';
 import { boundedTextIdentity, equalBoundedTextIdentity } from './commit-identity';
 import { assistantPartsFromMessage, getRenderableUserParts } from './parts';
-import { reasoningSummary } from './markdown';
+import { reasoningPreview } from './markdown';
 import { recordRenderEvidenceTarget, recordRenderSurface } from '../shell/render-error';
 
 // Bound for the renderer-owned offscreen-position scan only. Transcript row
@@ -384,7 +384,7 @@ function messageContentMatches(message: ChatMessage, leaves: ReadonlyMap<string,
       } else if (part.kind === 'reasoning') {
         const leaf = leaves.get(`reasoning:${message.id}:${index}`);
         if (leaf?.kind !== 'reasoning') return false;
-        const expectedText = leaf.policy === 'collapsed' ? reasoningSummary(part.text) : part.text;
+        const expectedText = leaf.policy === 'collapsed' ? reasoningPreview(part.text) : part.text;
         if (!sameText(leaf.text, expectedText)) return false;
       }
     }

@@ -275,6 +275,11 @@ async function executeMessageSend(
   }
   const billableActivity = hasBillableSessionActivity(context);
   const conversationActivity = context.activeRequest !== undefined || context.session.isStreaming;
+  // Recheck at execution (the operation ledger defers by a microtask): an
+  // idle admission can race another send. Never downgrade refresh to queueing.
+  if (params.refreshPruning === true && (billableActivity || conversationActivity)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot refresh skill pruning while this session is busy.');
+  }
   if (billableActivity && !conversationActivity) {
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot send while session maintenance or shell activity is running.');
   }
@@ -354,6 +359,7 @@ async function executeMessageSend(
   const thinkingLevel = normalizeThinkingLevel(context.session.thinkingLevel);
   context.activeRequest = {
     id: requestId,
+    userMessageLocalId: params.localId,
     ...(isAgentSessionMessageLocalId(params.localId) ? { agentMessageLocalId: params.localId } : {}),
     ...(coordinatorAttribution ? { coordinatorAttribution } : {}),
     ...(params.operationId ? { operationId: params.operationId } : {}),
@@ -442,6 +448,7 @@ async function executeMessageSend(
     context.session
       .prompt(promptText, {
         source: 'rpc',
+        refreshPruning: params.refreshPruning,
         images: imagePayload,
         preflightResult: (success) => {
           // `session.abort()` can settle while before_agent_start extensions

@@ -123,7 +123,6 @@ function AssistantParts({
             groupId: string;
             start: boolean;
             end: boolean;
-            active: boolean;
           } | undefined> = Array(item.items.length).fill(undefined);
 
           // A run may contain multiple adjacent batches. Only contiguous
@@ -142,17 +141,11 @@ function AssistantParts({
               segmentEnd += 1;
             }
             if (typeof groupId === 'string' && groupId.length > 0 && segmentEnd - segmentStart >= 2) {
-              const active = item.items.slice(segmentStart, segmentEnd).some(
-                ({ part }) => part.toolCall.status === 'drafting'
-                  || part.toolCall.status === 'ready'
-                  || part.toolCall.status === 'running',
-              );
               for (let childIndex = segmentStart; childIndex < segmentEnd; childIndex += 1) {
                 annotations[childIndex] = {
                   groupId,
                   start: childIndex === segmentStart,
                   end: childIndex === segmentEnd - 1,
-                  active,
                 };
               }
             }
@@ -168,7 +161,6 @@ function AssistantParts({
                   annotation && 'tool-call-parallel-child',
                   annotation?.start && 'tool-call-parallel-start',
                   annotation?.end && 'tool-call-parallel-end',
-                  annotation?.active && part.toolCall.status === 'completed' && 'tool-call-parallel-item-done',
                 ].filter(Boolean).join(' ');
                 return (
                   <div

@@ -3,7 +3,9 @@
    Focused on recent (today / this-week) + current (live / open) activity.
    Per-provider breakdowns and all-time context live in each segment's scoped
    custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
-   chips, so the strip itself stays a single thin line. Custom tooltips are used
+   chips. Wide panels keep a single thin line; portrait panels separate the
+   scrollable metrics from always-visible character and session counts.
+   Custom tooltips are used
    instead of native `title` because the strip re-renders ~7×/sec during
    streaming — native `title` tooltips close on every re-render and flicker. Host-owned: a pure projection of ViewState.aggregateStats
    (STATE_CONTRACT § Webview-Local State). */
@@ -38,14 +40,9 @@
   background: var(--vscode-scrollbarSlider-background);
 }
 
-@media (max-width: 520px) {
-  .aggregate-strip {
-    height: 24px;
-    padding-bottom: 3px;
-    scrollbar-gutter: stable;
-  }
-
-  .aggregate-strip::-webkit-scrollbar { height: 5px; }
+/* Flatten the metrics wrapper into the original desktop flex line. */
+.aggregate-strip-metrics {
+  display: contents;
 }
 
 .aggregate-strip--placeholder {
@@ -248,4 +245,70 @@
 .aggregate-strip-sep {
   color: color-mix(in srgb, var(--panel-muted) 50%, transparent);
   flex-shrink: 0;
+}
+
+@media (max-width: 520px) {
+  .aggregate-strip {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    height: 62px;
+    min-width: 0;
+    font-size: 11px;
+    overflow: hidden;
+  }
+
+  /* Only metrics scroll: provider/deferred segments remain reachable without
+     ever pushing the character and working/open counts out of the viewport. */
+  .aggregate-strip-metrics {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 33px;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
+  }
+
+  .aggregate-strip-metrics::-webkit-scrollbar { height: 5px; }
+  .aggregate-strip-metrics::-webkit-scrollbar-track { background: transparent; }
+  .aggregate-strip-metrics::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--vscode-scrollbarSlider-background);
+  }
+
+  .aggregate-strip-metrics > .pie-tooltip-trigger {
+    flex-shrink: 0;
+    max-width: none;
+  }
+
+  .aggregate-strip-status-cluster {
+    display: flex;
+    justify-content: space-between;
+    flex: 0 0 28px;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  .aggregate-strip-status-sep,
+  .aggregate-strip-status-cluster > .aggregate-strip-sep {
+    display: none;
+  }
+
+  .aggregate-strip-seg {
+    min-height: 28px;
+  }
+
+  .aggregate-strip-counts {
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 520px) and (pointer: coarse) {
+  .aggregate-strip {
+    font-size: 12px;
+  }
 }

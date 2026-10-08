@@ -26,6 +26,7 @@ const identity = {
 };
 const mode = process.env.PIE_WORKER_FIXTURE_MODE ?? 'noise';
 let seq = 1;
+let readinessHeld = false;
 const send = (frame, callback) => output.write(`${JSON.stringify({ ...identity, seq: seq++, ...frame })}\n`, callback);
 const sendWithoutDelimiter = (frame, callback) => output.write(JSON.stringify({ ...identity, seq: seq++, ...frame }), callback);
 
@@ -97,6 +98,11 @@ input.on('data', (chunk) => {
         sendWithoutDelimiter({ kind: 'ready', runtimeMetadata: { mode: 'phase2', startedAt: Date.now() } }, () => output.end());
         continue;
       }
+      if (mode === 'gated-ready') {
+        readinessHeld = true;
+        process.stdout.write('READINESS-HELD\n');
+        continue;
+      }
       if (mode === 'noise') {
         process.stdout.write('{"ipcVersion":1,"kind":"fatal"}\npartial-stdout-');
         process.stdout.write('x'.repeat(4096) + 'STDOUT-END');
@@ -118,12 +124,19 @@ input.on('data', (chunk) => {
     if (frame?.kind === 'runtime.promote') {
       send({ kind: 'runtime.ready', requestId: frame.requestId, runtimeMetadata: { mode: 'phase4', startedAt: Date.now() } });
     } else if (frame?.kind === 'runtime.command') {
+      if (mode === 'gated-ready') process.stdout.write('RUNTIME-COMMAND\n');
       send({ kind: 'response', requestId: frame.requestId, ok: true, result: { kind: 'runtime.command', payload: { acceptedOperation: frame.operation } } });
     } else if (frame?.kind === 'sync') {
       send({ kind: 'sync.ack', requestId: frame.requestId, domain: frame.domain, revision: frame.revision });
     } else if (frame?.kind === 'provider.granted') {
       send({ kind: 'runtime.event', event: 'operational-error', payload: { code: 'FIXTURE_LEASE', message: frame.lease.leaseId } });
     } else if (frame?.kind === 'command') {
+      // Release through ordinary correlated control, not a test-only IPC frame.
+      // The coordinator rejects any pong preceding readiness.
+      if (readinessHeld && frame.operation === 'ping') {
+        readinessHeld = false;
+        send({ kind: 'ready', runtimeMetadata: { mode: 'phase2', startedAt: Date.now() } });
+      }
       if (mode === 'stale') {
         output.write(`${JSON.stringify({ ...identity, seq: seq - 1, kind: 'heartbeat', heartbeat: { phase: 'ready', lastEventSeq: 0, lastDetailRevision: 0, eventLoopDelayMs: 0 } })}\n`);
       }

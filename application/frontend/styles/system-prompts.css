@@ -1,0 +1,122 @@
+/* System prompts are compact disclosure rows, not nested transcript cards. */
+.system-prompts {
+  width: 100%;
+  align-self: stretch;
+  min-width: 0;
+  background: transparent;
+  border-bottom: 1px solid var(--panel-border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.system-prompts .system-prompt-card,
+.system-prompts .system-prompt-card:hover,
+.system-prompts .system-prompt-card:active {
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: auto;
+  user-select: text;
+  transition: none;
+  transform: none;
+}
+
+.system-prompts .collapsible-header {
+  min-height: 26px;
+  border-radius: 0;
+  padding: 4px 8px;
+}
+
+.system-prompts .collapsible-header:hover {
+  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
+}
+
+.system-prompts .collapsible-header-content {
+  gap: 6px;
+}
+
+.system-prompts-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--panel-foreground-soft);
+}
+
+.system-prompts-context {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.system-prompts-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--panel-muted);
+}
+
+.system-prompts-tokens::before {
+  content: '·';
+  margin-inline-end: 6px;
+}
+
+.system-prompt-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--panel-foreground-soft);
+}
+
+/* Keep a little context beside long titles; the complete title stays in its tooltip. */
+.system-prompt-title:not(:only-child) { max-width: 65%; }
+
+.system-prompt-summary {
+  /* Give up detail space before shrinking the primary title. */
+  flex: 1 10000 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: var(--panel-muted);
+}
+
+.system-prompts-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 4px 12px;
+}
+
+.system-prompt-card-body {
+  padding: 4px 8px 8px 12px;
+  color: var(--panel-foreground);
+}
+
+/* Each nested body reserves its own 10px side-collapse hitbox. */
+.system-prompts .collapsible-gutter {
+  width: 10px;
+}
+
+@media (forced-colors: active) {
+  .system-prompts {
+    border-bottom-color: ButtonText;
+  }
+}

@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ChatPrefs } from '../../lib/protocol/index.js';
 import { SettingCheckbox } from './setting-checkbox';
+import { SettingsHelp } from './settings-help';
 import { SliderRow } from './slider-row';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -49,20 +50,25 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
 
         {/* Fast path toggle */}
         <SettingCheckbox
-          label="Fast path (no shell for simple commands)"
+          label="Fast path"
+          ariaLabel={BASH_SETTING_LABELS[1]}
+          hint="Runs simple commands without starting a shell."
           checked={fastPathChecked}
           onChange={() => onSetPrefs({ bashFastPath: !prefs.bashFastPath })}
         />
 
         {/* Shell path */}
-        <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control toolbar-settings-ui-inline-control">
           <div class="toolbar-settings-ui-control-head">
             <span class="toolbar-settings-ui-control-label">Shell path</span>
+            <SettingsHelp label="Shell path">
+              Leave blank to auto-detect Git Bash or bash. Used by both the warm pool and the fallback.
+            </SettingsHelp>
           </div>
           <input
             type="text"
             class="toolbar-settings-select"
-            placeholder="auto-detect (Git Bash / bash)"
+            placeholder="Auto-detect"
             value={shellDraft}
             onInput={(e) => setShellDraft((e.target as HTMLInputElement).value)}
             onBlur={commitShell}
@@ -70,9 +76,6 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
             aria-label="Explicit bash shell path"
             spellcheck={false}
           />
-          <div class="toolbar-settings-item-hint">
-            Leave blank to auto-detect. Used by both the warm pool and the fallback.
-          </div>
         </div>
 
         {/* Warmup timeout */}

@@ -41,7 +41,7 @@ import {
 import { clearSessionPruningState } from "../state/session-pruning-state.js";
 
 const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
-const WAKE_TOOL_NAMES = ["defer_trigger"];
+const WAKE_TOOL_NAMES = ["wakeup_timer"];
 
 export default function register(pi: ExtensionAPI) {
 	// Asynchronously pre-warm the cached code version (git SHA) so the first
@@ -87,6 +87,12 @@ export default function register(pi: ExtensionAPI) {
 	// registration. Mark before awaiting the scorer so failures and concurrent
 	// continuations never trigger an unnecessary second prepass.
 	const processedChildSessions = new Set<string>();
+	pi.on("session_shutdown", (_event, ctx) => {
+		const sessionId = getSessionId(ctx);
+		clearSessionPruningState(sessionId);
+		processedChildSessions.delete(sessionId);
+		queuedPrompts.clear();
+	});
 	pi.on("input", (event: InputEvent) => {
 		if (event.streamingBehavior) {
 			queuedPrompts.set(event.text, (queuedPrompts.get(event.text) ?? 0) + 1);
@@ -115,7 +121,8 @@ export default function register(pi: ExtensionAPI) {
 				return undefined;
 			}
 		}
-		const stopIfChildRuntimeDisposed = (): boolean => {
+		const stopIfSessionDisposed = (): boolean => {
+			if (!isChildSession && !state.processedMainSessions.has(sessionId)) return true;
 			if (!childRuntimeOwner || childRuntimeOwner.state === "open") return false;
 			// The owner may begin teardown while the scorer is pending. Cleanup can
 			// still be in flight when this continuation resumes, so fence and clear
@@ -161,7 +168,7 @@ export default function register(pi: ExtensionAPI) {
 			}
 		}
 
-		const reapplyChildSelection = () => {
+		const reapplySelection = () => {
 			const hiddenNames = new Set(getHiddenSkills(sessionId).keys());
 			if (hiddenNames.size === 0) return promptRefreshResult();
 			const skills = (event.systemPromptOptions.skills ?? []) as Skill[];
@@ -179,22 +186,34 @@ export default function register(pi: ExtensionAPI) {
 		if (queuedCount > 0) {
 			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
 			else queuedPrompts.set(event.prompt, queuedCount - 1);
-			return isChildSession && processedChildSessions.has(sessionId)
-				? reapplyChildSelection()
+			return processedChildSessions.has(sessionId) || state.processedMainSessions.has(sessionId)
+				? reapplySelection()
 				: promptRefreshResult();
 		}
 		if (isChildSession && processedChildSessions.has(sessionId)) {
 			// Internal continuation/re-entry: the catalog and active-tool set from
 			// the launch decision are still authoritative. Rebuild only the skills
 			// block from that decision; never issue another prepass or reset recovery.
-			return reapplyChildSelection();
+			return reapplySelection();
 		}
 
 		const activeConfig = getConfig();
 		if (isChildSession) processedChildSessions.add(sessionId);
 		const skipInfo = shouldSkipPruning(event, activeConfig);
+		const mainDisabled = skipInfo.skip && skipInfo.reason !== "too-short";
+		if (!isChildSession && !mainDisabled
+			&& state.processedMainSessions.get(sessionId) === activeConfig.mode
+			&& !activeConfig.followUpEnabled && !event.refreshPruning) {
+			// Preserve the actual live tools, including recoveries and user changes.
+			// Pi rebuilds the skills prompt each request, so only reapply its filter.
+			return reapplySelection();
+		}
+		if (!isChildSession) {
+			if (mainDisabled) state.processedMainSessions.delete(sessionId);
+			else if (!skipInfo.skip) state.processedMainSessions.set(sessionId, activeConfig.mode);
+		}
 		const rootSessionFields = rootSessionAttribution(ctx, sessionId);
-		// A new top-level pruning decision owns a fresh hidden-skill catalog.
+		// A fresh pruning decision owns a new hidden-skill catalog.
 		// Queued continuations returned above intentionally retain the current one.
 		recordHiddenSkills(sessionId, []);
 		const configuredTools = toolSeams.getAllTools();
@@ -314,8 +333,11 @@ export default function register(pi: ExtensionAPI) {
 
 			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
 			const continuationFingerprint = buildPrepassFingerprint(llmInput, activeConfig, false);
-			let cached = getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
-			if (!cached) {
+			// Manual main-session refresh must score even an identical prompt. Child
+			// launch-only behavior and queued continuations remain unchanged.
+			const refreshPruning = !isChildSession && event.refreshPruning === true;
+			let cached = refreshPruning ? null : getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
+			if (!cached && !refreshPruning) {
 				const crossSession = getCachedPrepassCrossSession(event.prompt, fingerprint);
 				if (crossSession) {
 					// Promote the cross-session exact hit to this session's per-session
@@ -338,12 +360,12 @@ export default function register(pi: ExtensionAPI) {
 				} catch (error) {
 					// Unexpected scorer rejection is fenced too; otherwise preserve the
 					// hook's existing error behavior for a still-live child owner.
-					if (stopIfChildRuntimeDisposed()) return undefined;
+					if (stopIfSessionDisposed()) return undefined;
 					throw error;
 				}
 				// Check immediately after either successful or fail-open scorer results,
 				// before caches, selectors, logger state, tool activation, or telemetry.
-				if (!cached && stopIfChildRuntimeDisposed()) return undefined;
+				if (!cached && stopIfSessionDisposed()) return undefined;
 				if (!cached) {
 					cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, prepassResult);
 					cacheSuccessfulPrepassCrossSession(event.prompt, fingerprint, prepassResult);

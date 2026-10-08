@@ -389,7 +389,8 @@ function isLegacyDeferredWaitAbort(message: MessageLike, current: ChatMessage | 
   ))) return false;
 
   const lastTool = current?.toolCalls?.at(-1);
-  if (lastTool?.name !== 'defer_trigger' || lastTool.status !== 'completed') return false;
+  if ((lastTool?.name !== 'defer_trigger' && lastTool?.name !== 'wakeup_timer')
+    || lastTool.status !== 'completed') return false;
   const result = toolResultText(lastTool.result);
   return result.startsWith('Registered deferred trigger ')
     && result.includes('Your turn will end now; you will be resumed automatically when the trigger fires.')

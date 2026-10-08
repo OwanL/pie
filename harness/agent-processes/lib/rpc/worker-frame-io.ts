@@ -47,6 +47,8 @@ export type WorkerIpcSettlement =
   | { status: 'failed'; error: Error; seq?: number };
 
 export interface WorkerIpcEnqueueOptions {
+  /** Internal-only hint for unsolicited HOT rich session.opened refreshes. */
+  replaceableSessionOpened?: boolean;
   onSettled?: (settlement: WorkerIpcSettlement) => void;
 }
 
@@ -66,6 +68,7 @@ export interface BoundedWorkerIpcWriterOptions {
 }
 
 interface PendingFrame {
+  replaceableOpenedKey?: string;
   draft: WorkerIpcFrameDraft;
   kind: WorkerIpcFrameKind;
   lane: WriterLane;
@@ -214,7 +217,11 @@ export class BoundedWorkerIpcWriter {
       lane,
       bytes: wireBytes,
       onSettled: options.onSettled,
+      replaceableOpenedKey: options.replaceableSessionOpened ? replaceableOpenedKey(admitted) : undefined,
     };
+    const replacementIndex = pending.replaceableOpenedKey === undefined ? -1
+      : this.lanes[lane].findIndex((entry) => entry.replaceableOpenedKey === pending.replaceableOpenedKey);
+    const replaced = replacementIndex < 0 ? undefined : this.lanes[lane][replacementIndex];
 
     if (pending.kind === 'heartbeat') {
       // Heartbeats use whichever bounded control reservation laneFor assigned
@@ -244,7 +251,7 @@ export class BoundedWorkerIpcWriter {
     const activeLaneBytes = lane === 'response' && this.active?.pending.lane === lane
       ? this.active.pending.bytes
       : 0;
-    const retainedLaneBytes = activeLaneBytes + this.queuedBytes[lane];
+    const retainedLaneBytes = activeLaneBytes + this.queuedBytes[lane] - (replaced?.bytes ?? 0);
     const nextLaneBytes = retainedLaneBytes + pending.bytes;
     // A single frame may exceed the lane's reserved capacity (it is bounded by
     // the semantic frame limit above), so one frame per lane — the largest
@@ -256,7 +263,7 @@ export class BoundedWorkerIpcWriter {
     // (including a second oversized frame) must still fit the reservation
     // instead of turning valid backpressure into worker death.
     const exceptionalQueuedFrameBytes = this.lanes[lane]
-      .find((entry) => entry.bytes > this.capacities[lane])?.bytes ?? 0;
+      .find((entry) => entry !== replaced && entry.bytes > this.capacities[lane])?.bytes ?? 0;
     const exceptionalPendingBytes = pending.bytes > this.capacities[lane]
       ? pending.bytes
       : 0;
@@ -265,14 +272,22 @@ export class BoundedWorkerIpcWriter {
     if (retainedLaneBytes > 0 && reservedLaneBytes > this.capacities[lane]) {
       return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane], pending));
     }
+    // Admission above is transactional: failed replacement keeps the old
+    // refresh intact. Move successful replacements to the tail so intervening
+    // required lifecycle records keep FIFO order. Active writes never match.
+    if (replaced) {
+      this.lanes[lane].splice(replacementIndex, 1);
+      this.queuedBytes[lane] -= replaced.bytes;
+    }
     this.lanes[lane].push(pending);
     // `queuedBytes` deliberately excludes the descriptor's active write. The
     // active response participates in the admission calculation above, but it
     // must not be persisted into the queued balance or it survives every
     // later dequeue as phantom capacity.
     this.queuedBytes[lane] += pending.bytes;
+    if (replaced) settle(replaced.onSettled, { status: 'coalesced' });
     this.pump();
-    return { accepted: true, coalesced: false };
+    return { accepted: true, coalesced: replaced !== undefined };
   }
 
   /** Notify the writer when its inherited descriptor closes unexpectedly. */
@@ -385,6 +400,24 @@ export class BoundedWorkerIpcWriter {
     }
     observe(() => this.onFatal(error));
   }
+}
+
+function replaceableOpenedKey(frame: WorkerIpcFrame): string | undefined {
+  if (frame.kind !== 'runtime.event' || frame.event !== 'session.opened') return undefined;
+  const payload = frame.payload;
+  const session = payload.session;
+  if (payload.runtimeReady !== true || payload.selectionToken !== undefined
+      || payload.operationId !== undefined || payload.replacesSessionPath !== undefined
+      || payload.snapshotUnavailable !== undefined || payload.transcriptSkipped !== undefined
+      || !Array.isArray(payload.transcript) || !payload.transcriptWindow
+      || !session || typeof session !== 'object' || Array.isArray(session)
+      || typeof session.path !== 'string' || !session.path
+      || (session.sessionId !== undefined && typeof session.sessionId !== 'string')) return undefined;
+  return JSON.stringify([
+    frame.ipcVersion, frame.coordinatorGeneration, frame.workerId, frame.workerGeneration,
+    frame.workerPid, frame.rootSessionPath, frame.leasePath, frame.leaseRevision,
+    frame.sessionPath, session.path, session.sessionId ?? null,
+  ]);
 }
 
 function isWritable(target: WorkerIpcWriteTarget): boolean {

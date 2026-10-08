@@ -1,5 +1,6 @@
 import { deduplicateToolCallResultsForTransport } from '../../session-storage/transcripts/message-parts.js';
 import { findDurableDetail } from '../../session-storage/transcripts/lazy-details';
+import { findToolModelExchange } from '../../session-storage/transcripts/tool-model-exchange';
 import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
 import type { DetailResult } from '../lib/rpc/message-contract.js';
 import type { SessionOpenedPayload, TranscriptPagePayload } from '../lib/rpc/session-events.js';
@@ -161,13 +162,15 @@ export class ColdBrowseHelperRuntime {
         message: 'Live detail is owned by the execution runtime.',
       };
     } else {
-      const found = findDurableDetail(loaded.browse.cache.transcript, payload.ref);
+      const found = payload.ref.kind === 'model-exchange'
+        ? findToolModelExchange(loaded.browse.cache.transcript, loaded.browse.modelExchangeEntries ?? [], payload.ref)
+        : findDurableDetail(loaded.browse.cache.transcript, payload.ref);
       if (found.status === 'unavailable') {
         result = {
           sessionPath: payload.fence.sessionPath,
           key: payload.ref.key,
           status: 'unavailable',
-          message: 'The durable detail is no longer available.',
+          message: 'message' in found ? found.message : 'The durable detail is no longer available.',
         };
       } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
         result = {
@@ -176,7 +179,8 @@ export class ColdBrowseHelperRuntime {
           status: 'unavailable',
           message: 'The detail exceeds the supported retrieval size.',
         };
-      } else if (found.sizeBytes !== payload.ref.sizeBytes) {
+      } else if (found.sizeBytes !== payload.ref.sizeBytes
+        && !(payload.ref.kind === 'model-exchange' && payload.ref.sizeBytes === 0)) {
         result = {
           sessionPath: payload.fence.sessionPath,
           key: payload.ref.key,

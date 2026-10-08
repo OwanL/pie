@@ -1,14 +1,15 @@
 /**
- * Sidecar I/O + replay for the `defer_trigger` tool.
+ * Sidecar I/O + replay for the `wakeup_timer` tool.
  *
  * `PIE_TRIGGERS_DIR` (host→backend env) holds `triggers.jsonl` — an append-only
  * JSONL op log SHARED with the host-side registry (the host appends claim /
  * delivery / cancel ops; this tool appends `register` / `cancel` ops). Both
  * sides replay the log to compute the active set. The format MUST match the host's
- * `extension/src/host/deferred-triggers/store.ts`.
+ * `application/backend/deferred-triggers/store.ts`.
  *
  * Op shapes (one JSON object per line):
- *   register: { id, op:'register', sessionPath, targetSession?, triggers, message?, note?, at }
+ *   register: { id, op:'register', sessionPath, targetSession?, triggers, wakeupMode?, message?, note?, at }
+ *   timer:    { id, op:'timer-started', sessionPath, at }
  *   claim:    { id, op:'claim', sessionPath, claimId, ownerId, ownerPid, reason, at, dispatchStartedAt? }
  *   dispatch: { id, op:'dispatch-started', sessionPath, claimId, ownerId, ownerPid, at }
  *   release:  { id, op:'release', sessionPath, claimId, reason, at, recoveryState? }
@@ -26,7 +27,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { TRIGGERS_DIR_ENV, TRIGGERS_FILE } from './sidecar-contract.js';
-import { validateWakeConditions } from './wake-conditions.js';
+import { isValidTimerStartedAt, validateWakeConditions } from './wake-conditions.js';
 import type { ActiveTrigger, TriggerOp, TriggerSpec } from './types.js';
 
 function getTriggersFilePath(): string | undefined {
@@ -117,6 +118,7 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
         message: normalizedMessage(op),
         note: normalizedMessage(op),
         registeredAt: op.at ?? new Date(0).toISOString(),
+        wakeupMode: op.wakeupMode === true,
         deliveryState: 'pending',
       });
     } else if (op.op === 'cancel') {
@@ -133,7 +135,16 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
     } else if (op.id) {
       const trigger = map.get(op.id);
       if (!trigger) continue;
-      if (op.op === 'claim') {
+      if (op.op === 'timer-started') {
+        if (trigger.sessionPath === op.sessionPath
+          && trigger.wakeupMode === true
+          && trigger.deliveryState === 'pending'
+          && !trigger.timerStartedAt
+          && trigger.triggers.some((spec) => spec.kind === 'timer')
+          && isValidTimerStartedAt(op.at)) {
+          map.set(op.id, { ...trigger, timerStartedAt: op.at });
+        }
+      } else if (op.op === 'claim') {
         if (op.claimId && trigger.deliveryState !== 'claimed') {
           const dispatchStartedAt = op.dispatchStartedAt;
           map.set(op.id, {
@@ -201,7 +212,7 @@ function normalizedMessage(op: Pick<TriggerOp, 'message' | 'note'>): string {
 function normalizeOp(value: unknown): TriggerOp | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
-  if (!['register', 'cancel', 'claim', 'dispatch-started', 'release', 'failed', 'fire'].includes(String(v.op))) return undefined;
+  if (!['register', 'timer-started', 'cancel', 'claim', 'dispatch-started', 'release', 'failed', 'fire'].includes(String(v.op))) return undefined;
   if (typeof v.sessionPath !== 'string') return undefined;
   const op: TriggerOp = { op: v.op as TriggerOp['op'], sessionPath: v.sessionPath };
   if (typeof v.id === 'string') op.id = v.id;
@@ -218,12 +229,14 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
   if (typeof v.dispatchStartedAt === 'string') op.dispatchStartedAt = v.dispatchStartedAt;
   if (v.recoveryState === 'dead-owner-recovered') op.recoveryState = v.recoveryState;
   if (v.op === 'register') {
-    if (!op.id) return undefined;
+    if (!op.id || (v.wakeupMode !== undefined && typeof v.wakeupMode !== 'boolean')) return undefined;
+    if (typeof v.wakeupMode === 'boolean') op.wakeupMode = v.wakeupMode;
     const triggers = normalizeSpecs(v.triggers);
     if (!triggers || triggers.length === 0) return undefined;
     op.triggers = triggers;
   }
   if ((op.op === 'claim' || op.op === 'dispatch-started' || op.op === 'release') && (!op.id || !op.claimId)) return undefined;
+  if (op.op === 'timer-started' && (!op.id || !isValidTimerStartedAt(op.at))) return undefined;
   if ((op.op === 'failed' || op.op === 'fire') && !op.id) return undefined;
   return op;
 }

@@ -69,6 +69,7 @@ export interface TranscriptCommonProps {
    *  thinking/preparing state. */
   compacting?: boolean;
   liveTurnPhase?: LiveTurnPhase | null;
+  prepassStartedAt?: number | null;
   prefs: ChatPrefs;
   /** Current model catalog used for transcript-only cost estimates. */
   availableModels?: ModelInfo[];

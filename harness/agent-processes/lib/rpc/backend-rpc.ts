@@ -71,6 +71,8 @@ export interface SessionTitleGenerateParams {
 }
 
 export interface MessageSendParams {
+  /** One-send skill-pruning refresh request; accepted only while idle. */
+  refreshPruning?: boolean;
   sessionPath: string;
   text: string;
   inputs: ComposerInput[];
@@ -564,11 +566,16 @@ function validateMessageContent(
 export function validateMessageSend(params: unknown): MessageSendParams {
   if (!isObj(params)) fail('message.send', 'expected an object');
   const content = validateMessageContent('message.send', params);
+  const refreshPruning = params['refreshPruning'];
+  if (refreshPruning !== undefined && typeof refreshPruning !== 'boolean') {
+    fail('message.send', 'refreshPruning must be boolean when provided');
+  }
   const operationId = readOperationId('message.send', params);
   const operationAttempt = readOperationAttempt('message.send', params);
   return {
     ...content,
     localId: content.localId,
+    ...(typeof refreshPruning === 'boolean' ? { refreshPruning } : {}),
     ...(operationId ? { operationId } : {}),
     ...(operationAttempt !== undefined ? { operationAttempt } : {}),
   };

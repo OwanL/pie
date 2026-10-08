@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useId } from 'preact/hooks';
 import type { ModelInfo, SessionTitlesSettings } from '../../lib/protocol/index.js';
 import { ModelAssignmentRow } from './model-assignment-row';
 import { NumberField } from './number-field';
@@ -26,6 +27,7 @@ interface SessionTitlesBehaviorProps {
 interface SessionTitlesModelAssignmentProps extends SessionTitlesBehaviorProps {
   modelEntries: ModelPickerEntry[];
   availableModels: ModelInfo[];
+  compactLabels?: boolean;
 }
 
 /** Chat-tab controls for whether titles are generated and their timeout. */
@@ -36,6 +38,7 @@ export function SessionTitlesSection({ settings, onSetSessionTitlesSettings }: S
         label="Generate session titles"
         checked={settings.enabled}
         title="Generate a short LLM title for each new session in its default model context."
+        hint="When disabled, sessions keep the prompt-snippet name and no title model is called."
         onChange={() => onSetSessionTitlesSettings({ enabled: !settings.enabled })}
       />
       <NumberField
@@ -47,19 +50,18 @@ export function SessionTitlesSection({ settings, onSetSessionTitlesSettings }: S
         disabled={!settings.enabled}
         ariaLabel="Session title timeout"
         title="Seconds (1–60)"
+        unit="seconds"
         onChange={(timeoutSec) => {
           if (Number.isInteger(timeoutSec)) onSetSessionTitlesSettings({ timeoutSec });
         }}
       />
-      <div class="toolbar-settings-item toolbar-settings-note" aria-hidden="true">
-        Disabled mode keeps the prompt-snippet name; no title model is called.
-      </div>
     </div>
   );
 }
 
 /** Models-tab assignment used by the optional session-title generator. */
-export function SessionTitlesModelAssignment({ settings, modelEntries, availableModels, onSetSessionTitlesSettings }: SessionTitlesModelAssignmentProps) {
+export function SessionTitlesModelAssignment({ settings, modelEntries, availableModels, onSetSessionTitlesSettings, compactLabels = false }: SessionTitlesModelAssignmentProps) {
+  const disabledReasonId = `session-title-assignment-${useId()}`;
   const selectedModel = availableModels.find((model) =>
     model.id === settings.model
     && (!settings.provider || model.provider === settings.provider),
@@ -69,6 +71,7 @@ export function SessionTitlesModelAssignment({ settings, modelEntries, available
     <div class="toolbar-settings-ext-settings">
       <ModelAssignmentRow
         label="Title model"
+        compactLabels={compactLabels}
         entries={modelEntries}
         current={{ provider: settings.provider, model: settings.model }}
         emptyLabel="Select model…"
@@ -76,6 +79,7 @@ export function SessionTitlesModelAssignment({ settings, modelEntries, available
         modelTitle="Select session title model"
         fallbackModel={selectedModel}
         disabled={!settings.enabled}
+        ariaDescribedBy={!settings.enabled ? disabledReasonId : undefined}
         thinking={{
           value: settings.thinkingLevel,
           label: 'Title thinking',
@@ -99,7 +103,7 @@ export function SessionTitlesModelAssignment({ settings, modelEntries, available
         dropdownDirection="down"
       />
       {!settings.enabled && (
-        <div class="toolbar-settings-item-hint">Enable session titles in Chat to change this assignment.</div>
+        <div id={disabledReasonId} class="toolbar-settings-item-hint">Enable session titles in Chat to change this assignment.</div>
       )}
     </div>
   );

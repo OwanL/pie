@@ -9,7 +9,7 @@ import { createBackendTools } from '../../harness/agent-processes/coordinator/ba
 import { WORKER_IPC_VERSION } from '../../harness/agent-processes/lib/rpc/worker-protocol.js';
 
 const EXPECTED_PIE_TOOLS = [
-  'ask_user', 'bash', 'computer', 'defer_trigger', 'playwright',
+  'ask_user', 'bash', 'computer', 'wakeup_timer', 'playwright',
   'request_capability', 'session_changes', 'session_control', 'subagent',
 ];
 
@@ -39,7 +39,7 @@ test('SDK discovery loads every catalog extension tool once from its stable path
   for (const entry of PIE_TOOLS) {
     if (entry.name === 'ask_user') {
       assert.equal(entry.sourcePath, 'harness/tools/ask-user/index.ts');
-    } else if (entry.name === 'defer_trigger') {
+    } else if (entry.name === 'wakeup_timer') {
       assert.equal(entry.sourcePath, 'harness/tools/deferred-triggers/index.ts');
     } else if (entry.name === 'session_changes') {
       assert.equal(entry.sourcePath, 'harness/tools/session-changes/index.ts');
@@ -150,7 +150,7 @@ test('SDK discovery loads every catalog extension tool once from its stable path
 
 test('inventory mirrors primary eligibility while in-memory children exclude host lifecycle tools', () => {
   assert.deepEqual(pieToolsForContext('inventory'), pieToolsForContext('primary'));
-  assert.deepEqual(unavailablePieToolNames('subagent'), ['defer_trigger', 'session_control']);
+  assert.deepEqual(unavailablePieToolNames('subagent'), ['wakeup_timer', 'session_control']);
   assert.deepEqual(createBackendTools({ kind: 'subagent' }), []);
 });
 

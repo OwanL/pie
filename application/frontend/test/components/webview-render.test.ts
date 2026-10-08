@@ -92,6 +92,12 @@ function loadWebviewModules() {
   return webviewModules;
 }
 
+// Body-specific SSR checks exercise the visual inspector directly. Ordinary
+// cards no longer auto-open; manual disclosure is covered by DOM lifecycle tests.
+function ExpandedToolBody(props: Parameters<typeof toolCallCardModule.ToolCallCard>[0]) {
+  return h(ToolCallBody, { toolCall: props.toolCall, prefs: props.prefs, onOpenFile: props.onOpenFile });
+}
+
 test('rendered MessageItem covers assistant, editable user, and image-user branches', async () => {
   const { MessageItem, ReasoningBlock } = await loadWebviewModules();
   const prefs = {
@@ -120,7 +126,7 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
     requestCreatedAt: '2026-01-01T12:34:56.000Z',
   }));
 
-  assert.match(assistantHtml, /Reasoning/);
+  assert.match(assistantHtml, /reasoning-inline/);
   assert.match(assistantHtml, /rendered-tool/);
   assert.match(assistantHtml, /Hello <strong>world<\/strong>/);
   assert.match(assistantHtml, /Agent is responding/);
@@ -181,7 +187,8 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
     collapsibleKey: 'reasoning:test',
     onContextMenu: noop,
   }));
-  assert.match(reasoningHtml, /Reasoning/);
+  assert.match(reasoningHtml, /reasoning-inline/);
+  assert.doesNotMatch(reasoningHtml, /collapsible-header/);
   assert.match(reasoningHtml, /Collapsed summary text/);
 });
 
@@ -330,8 +337,9 @@ test('tool renderers share one disclosure key behind a stable ToolCallItem lifec
   assert.match(itemSource, /key=\{lifecycleKey\}/);
   assert.match(itemSource, /data-tool-lifecycle-key=\{lifecycleKey\}/);
   assert.match(itemSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandSubagentCalls\)/);
-  assert.match(genericSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), autoExpand && !isProvisional\)/);
-  assert.match(searchSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandToolCalls\)/);
+  assert.match(genericSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), isSubagent && autoExpand\)/);
+  assert.match(searchSource, /<ToolCallCard/);
+  assert.doesNotMatch(searchSource, /useCollapsibleOpen|autoExpandToolCalls/);
   // The subagent detail key must never be a bare `${toolCall.id}` hardcode —
   // the Phase 5 key is index-qualified (`subagent:${toolCall.id}:${index}`)
   // so parallel-group children own distinct key-scoped subscriptions.
@@ -395,7 +403,8 @@ test('ToolCallCard keeps provisional states badge-free while retaining accessibl
   }));
   assert.match(draftingHtml, /data-status="drafting"/);
   assert.match(draftingHtml, /data-provisional="true"/);
-  assert.match(draftingHtml, /command: npm te/);
+  assert.match(draftingHtml, /npm te/);
+  assert.doesNotMatch(draftingHtml, /Generating arguments|tool-call-preview-label/);
   assert.match(draftingHtml, /aria-label="bash tool call, Drafting/);
   assert.doesNotMatch(draftingHtml, /status-chip-neutral|tool-call-draft-cursor|>Drafting<|tool-call-body-terminal|Raw arguments/);
 
@@ -428,9 +437,9 @@ test('provisional raw arguments render as escaped text even when malformed', () 
     }),
     onOpenFile: noop,
   }));
-  assert.match(html, />Input</);
-  assert.match(html, /tool-call-pre tool-call-provisional-input/);
-  assert.match(html, /&lt;img src=x onerror=alert\(1\)>/);
+  assert.doesNotMatch(html, /not executed|tool-call-provisional-notice/);
+  assert.match(html, /tool-call-input-field/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)/);
   assert.doesNotMatch(html, /<img\b/);
   assert.doesNotMatch(html, /dangerouslySetInnerHTML/);
 });
@@ -469,8 +478,8 @@ test('collapsed running non-shell tools own their live result preview inline', (
     onOpenFile: noop,
     onContextMenu: noop,
   }));
-  assert.match(awaitingOutputHtml, /tool-call-live-preview/);
-  assert.match(awaitingOutputHtml, /data-empty="true"/);
+  assert.doesNotMatch(awaitingOutputHtml, /tool-call-live-preview/);
+  assert.match(awaitingOutputHtml, /aria-label="Running"/);
 });
 
 test('rendered tool-call components cover collapsed summaries, expanded bodies, and subagent metadata', async () => {
@@ -493,10 +502,10 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(headerHtml, /title="\/repo\/src\/example.ts"/);
   assert.match(headerHtml, /example\.ts/);
   assert.match(headerHtml, /Failed/);
-  assert.match(headerHtml, /role="button"/);
-  assert.match(headerHtml, /tabindex="0"/);
+  assert.match(headerHtml, /<button[^>]*type="button"[^>]*class="tool-call-toggle"/);
+  assert.match(headerHtml, /aria-expanded="false"/);
   assert.match(headerHtml, /Copy tool-call error detail/);
-  assert.match(headerHtml, /\+3 lines/);
+  assert.doesNotMatch(headerHtml, /\+3 lines/, 'failure takes priority over size in the context column');
   assert.match(headerHtml, /Tool execution time/);
   assert.match(headerHtml, /1\.5s/);
 
@@ -509,10 +518,13 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
     renderToolCall: () => null,
   }));
 
-  assert.match(expandedToolHtml, /tool-call-body/);
-  assert.match(expandedToolHtml, /tool-call-section-label/);
-  assert.match(expandedToolHtml, /Result/);
-  assert.match(expandedToolHtml, /export const value = 1/);
+  assert.doesNotMatch(expandedToolHtml, /tool-call-body-wrap/);
+  assert.match(expandedToolHtml, /aria-expanded="false"/);
+  const visualBody = renderToString(h(ToolCallBody, { toolCall: toolCall(), onOpenFile: noop }));
+  assert.match(visualBody, /File content/);
+  assert.doesNotMatch(visualBody, /tool-call-section-label">(?:Input|Result)</);
+  assert.match(visualBody, />ok</);
+  assert.match(visualBody, /export[\s\S]*const[\s\S]*value/);
 
   const subagentHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -742,7 +754,7 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
     renderToolCall: () => null,
   }));
 
-  assert.match(foreignResultHtml, />bash</);
+  assert.match(foreignResultHtml, /aria-label="bash tool call,/);
   assert.doesNotMatch(foreignResultHtml, /tool-call-subagent|context task only/);
 
   const failedParentHtml = renderToString(h(ToolCallItem, {
@@ -1192,10 +1204,14 @@ test('parallel-group CSS uses one thin shallow spine without connector ticks', a
   const css = await readFile(new URL('../../styles/tool-call.css', import.meta.url), 'utf8');
   assert.match(css, /\.subagent-parallel-group\s*\{[^}]*gap:\s*3px/);
   assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*7px/);
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*1px solid color-mix/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*1px solid var\(--panel-border\)/);
   assert.doesNotMatch(css, /\.subagent-parallel-child::before\s*\{/);
 
-  assert.match(css, /\.tool-call-parallel-child\s*\{[^}]*padding-left:\s*7px/);
+  const groupedRow = css.match(/\.tool-call-parallel-child\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.match(groupedRow, /position:\s*relative/);
+  assert.doesNotMatch(groupedRow, /padding|margin/);
+  assert.match(css, /\.tool-call-parallel-child::before\s*\{[^}]*left:\s*0;[^}]*background:\s*var\(--panel-border\)/);
+  assert.doesNotMatch(css, /tool-call-parallel-item-done|text-decoration:\s*line-through/);
   assert.match(css, /\.tool-call-parallel-child::before\s*\{[^}]*top:\s*-3px[^}]*bottom:\s*-3px[^}]*width:\s*1px/);
   assert.doesNotMatch(css, /\.tool-call-parallel-child::after\s*\{/);
   assert.match(css, /\.tool-call-parallel-start::before\s*\{[^}]*top:\s*0/);
@@ -1232,9 +1248,10 @@ test('rendered SystemPromptMessage covers summary fallbacks, suppressed summarie
 
   const html = renderToString(h(SystemPromptMessage, { prompts }));
 
-  // The collapsed group shows a count and summary, not full markdown content
+  // The collapsed group shows count/token context; prompt titles live inside.
   assert.match(html, /3 system prompts/);
-  assert.match(html, /Harness system prompt/);
+  assert.match(html, />3 entries</);
+  assert.doesNotMatch(html, /Harness system prompt/);
   assert.doesNotMatch(html, /Configured elsewhere\.<\/span>/);
   assert.doesNotMatch(html, />Unavailable<\/span>/);
   assert.match(html, /10 tokens/);
@@ -1307,10 +1324,12 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
 
   const systemPromptHtml = renderToString(h(SystemPromptMessage, { prompts: [prompt] }));
   assert.match(systemPromptHtml, /1 system prompt/);
-  assert.match(systemPromptHtml, /self-stretch.*flex-col.*rounded-xl.*bg-card/);
+  assert.match(systemPromptHtml, /class="collapsible system-prompts"/);
+  assert.doesNotMatch(systemPromptHtml, /rounded-xl|bg-card/);
   assert.match(systemPromptHtml, /data-scroll-anchor-id="system-prompts"/);
-  // Prompt title appears in collapsed summary line
-  assert.match(systemPromptHtml, /Harness system prompt/);
+  // The collapsed group keeps a single label with muted count context.
+  assert.match(systemPromptHtml, />1 entry</);
+  assert.doesNotMatch(systemPromptHtml, /Harness system prompt/);
 
   const hiddenSummaryHtml = renderToString(h(SystemPromptMessage, {
     prompts: [
@@ -1519,7 +1538,8 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
   assert.match(chipHtml, /Kept 3\/14 skills/);
   assert.match(pendingChipHtml, /role="status"/);
   assert.match(pendingChipHtml, /aria-live="polite"/);
-  assert.match(pendingChipHtml, /agent-activity-text">pruning skills\/tools<\/span>/);
+  assert.match(pendingChipHtml, /pruning-header-label">Prepass<\/span>/);
+  assert.doesNotMatch(pendingChipHtml, /Selecting catalog|agent-activity-text/);
   assert.doesNotMatch(pendingChipHtml, /aria-expanded=/);
 
   const panelHtml = renderToString(h(PruningHeaderPanel, {
@@ -1527,15 +1547,16 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
     rawExpanded: true,
     onRawToggle: noop,
   }));
-  assert.match(panelHtml, /Prepass/);
-  assert.match(panelHtml, /gpt-5-mini · minimal · 52ms/);
-  assert.match(panelHtml, /3\/14/);
-  assert.match(panelHtml, /5\/13/);
-  assert.match(panelHtml, /tokens saved/);
+  assert.match(panelHtml, /Diagnostics/);
+  assert.match(panelHtml, /gpt-5-mini · thinking minimal · 52ms/);
+  assert.match(panelHtml, /kept 3 of 14/);
+  assert.match(panelHtml, /kept 5 of 13/);
+  assert.doesNotMatch(panelHtml, /pruning-stat-tile/);
+  assert.doesNotMatch(panelHtml, /tokens saved/);
   assert.match(panelHtml, /Skills/);
   assert.match(panelHtml, /skill-0/);
   assert.match(panelHtml, /Reasoning/);
-  assert.match(panelHtml, /Prepass prompts and output/);
+  assert.match(panelHtml, /aria-label="Diagnostics"/);
   assert.match(panelHtml, /You are a pruner\./);
   // Reasoning lives in a collapsed sub-section by default, so its body text
   // is absent until the section is expanded (unlike the always-open raw
@@ -1567,7 +1588,8 @@ test('rendered MessageItem keeps pruning pending state in the header without an 
 
   assert.match(html, /role="status"/);
   assert.match(html, /gpt-5\.4 xhigh/);
-  assert.match(html, /agent-activity-text">pruning skills\/tools<\/span>/);
+  assert.match(html, /pruning-header-label">Prepass<\/span>/);
+  assert.doesNotMatch(html, /Selecting catalog|agent-activity-text/);
   assert.doesNotMatch(html, /message-typing-indicator/);
 });
 
@@ -1689,7 +1711,7 @@ test('rendered TurnActivityStrip covers all tones, standalone/inline variants, a
 // a ClickablePathButton. Only non-zero codes are surfaced (alert on failure).
 
 test('ToolCallCard terminal footer surfaces exit code, clickable full-log path, and truncation', () => {
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-exit-trunc',
       name: 'bash',
@@ -1720,7 +1742,7 @@ test('ToolCallCard terminal footer surfaces exit code, clickable full-log path, 
 });
 
 test('ToolCallCard terminal footer shows the exit-code badge without a truncation notice when output fits', () => {
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-exit-only',
       name: 'bash',
@@ -1759,7 +1781,7 @@ test('ToolCallCard omits the terminal output row when a bash call has no output'
   ];
 
   for (const emptyCall of cases) {
-    const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+    const html = renderToString(h(ExpandedToolBody, {
       toolCall: emptyCall,
       autoExpand: true,
       workingDirectory: '/repo',
@@ -1774,7 +1796,7 @@ test('ToolCallCard omits the terminal output row when a bash call has no output'
 });
 
 test('ToolCallCard terminal footer is absent for a successful command with no exit signal', () => {
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-success',
       name: 'bash',
@@ -1796,7 +1818,7 @@ test('ToolCallCard terminal footer does not badge a successful command whose out
   // The SDK only surfaces a non-zero exit by throwing (status 'failed') with
   // "Command exited with code N" appended. A completed command whose own
   // output contains that phrase must NOT trigger a false-positive badge.
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-false-positive',
       name: 'bash',
@@ -1816,7 +1838,7 @@ test('ToolCallCard terminal footer does not badge a successful command whose out
 });
 
 test('ToolCallCard terminal footer badges a non-zero exit code carried in a result field', () => {
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-exit-field',
       name: 'bash',
@@ -1835,7 +1857,7 @@ test('ToolCallCard terminal footer badges a non-zero exit code carried in a resu
 });
 
 test('ToolCallCard terminal pane strips ANSI escape sequences from streamed output', () => {
-  const html = renderToString(h(toolCallCardModule.ToolCallCard, {
+  const html = renderToString(h(ExpandedToolBody, {
     toolCall: toolCall({
       id: 'footer-ansi',
       name: 'bash',
@@ -1854,17 +1876,18 @@ test('ToolCallCard terminal pane strips ANSI escape sequences from streamed outp
   assert.ok(!html.includes('\x1b'), 'raw ANSI ESC sequences must not reach the rendered terminal pane');
 });
 
-// ── Reasoning: collapsed size hint + expanded streaming cursor ──────────────
+// ── Reasoning: inline prose + streaming cursor ──────────────────────────────
 
-test('ReasoningBlock shows a line-count hint when collapsed for multi-line reasoning', () => {
+test('ReasoningBlock shows short multi-line reasoning as prose without row chrome', () => {
   const html = renderToString(h(messageItemModule.ReasoningBlock, {
     text: 'first line of reasoning\nsecond line\nthird line',
     autoExpand: false,
     collapsibleKey: 'reasoning:hint-multi',
     onContextMenu: noopContextMenu,
   }));
-  assert.match(html, /Reasoning/);
-  assert.match(html, /3 lines/);
+  assert.match(html, /reasoning-inline/);
+  assert.match(html, /first line of reasoning/);
+  assert.doesNotMatch(html, /collapsible-header|3 lines/);
 });
 
 test('ReasoningBlock omits the size hint for single-line reasoning', () => {

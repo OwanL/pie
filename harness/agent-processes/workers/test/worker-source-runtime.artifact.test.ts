@@ -174,7 +174,6 @@ async function probeWorkerBootstrap(
     sdkRuntime,
     heartbeatIntervalMs: 500,
     missedHeartbeatMs: 5_000,
-    startupTimeoutMs: 15_000,
     env,
     spawn: ((command, args, options) => {
       spawnStartedNs = process.hrtime.bigint();
@@ -377,7 +376,6 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
       sdkRuntime: selected.sdkRuntime,
       heartbeatIntervalMs: 500,
       missedHeartbeatMs: 15_000,
-      startupTimeoutMs: 45_000,
       requestTimeoutMs: 60_000,
       env,
       spawn: sanitizedSpawn(root, env),

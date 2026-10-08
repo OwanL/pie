@@ -27,6 +27,28 @@ describe("AgentSession prompt characterization", () => {
 		}
 	});
 
+	it("carries refreshPruning to each handler for only the selected prompt", async () => {
+		const seen: (boolean | undefined)[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", (event) => {
+						seen.push(event.refreshPruning);
+					});
+					pi.on("before_agent_start", (event) => {
+						seen.push(event.refreshPruning);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok"), fauxAssistantMessage("ok")]);
+		await harness.session.prompt("refresh", { refreshPruning: true });
+		await harness.session.prompt("ordinary");
+		await harness.session.prompt("explicit false", { refreshPruning: false });
+		expect(seen).toEqual([true, true, undefined, undefined, false, false]);
+	});
+
 	it("prompts while idle and records a single text response", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -326,6 +348,10 @@ describe("AgentSession prompt characterization", () => {
 
 		const promptPromise = harness.session.prompt("start");
 		await sawToolStart;
+		await expect(
+			harness.session.prompt("/command", { refreshPruning: true, streamingBehavior: "followUp" }),
+		).rejects.toThrow("Cannot refresh skill pruning");
+		expect(inputEvents).toHaveLength(1);
 		await harness.session.prompt("queued", { streamingBehavior: "followUp" });
 
 		expect(inputEvents.map((event) => event.streamingBehavior)).toEqual([undefined, "followUp"]);

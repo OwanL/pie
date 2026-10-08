@@ -1,431 +1,196 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-
 import { installDom } from '../../helpers/dom';
 installDom();
-
-// Stub DOMPurify before any component imports (matches webview-render.test.ts)
 import DOMPurify from 'dompurify';
 DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
-
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
-
-import { ToolCallCard, TOOL_CALL_CLOSE_GRACE_MS, TOOL_CALL_CLOSE_TRANSITION_MS, TOOL_CALL_EXPAND_MS } from '../../../transcript/tool-call-card.tsx';
+import { ToolCallCard } from '../../../transcript/tool-call-card';
 import { MessageContent } from '../../../transcript/message-item/content';
 import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open';
 import { DEFAULT_CHAT_PREFS, type ToolCall } from '../../../../lib/protocol/index.js';
 
 let container: HTMLElement;
-
-beforeEach(() => {
-  clearCollapsibleCache();
-  container = document.createElement('div');
-  document.body.appendChild(container);
-});
-
-afterEach(() => {
-  render(null, container);
-  container.remove();
-});
-
+beforeEach(() => { clearCollapsibleCache(); container = document.createElement('div'); document.body.appendChild(container); });
+afterEach(() => { render(null, container); container.remove(); });
 const noop = () => undefined;
-const noopContextMenu = (_e: MouseEvent) => undefined;
-
-function bashTool(status: ToolCall['status'], id: string): ToolCall {
-  return {
-    id,
-    name: 'bash',
-    input: { command: 'echo hello' },
-    result: status === 'running' ? undefined : 'hello\n',
-    status,
-    durationMs: status === 'running' ? undefined : 42,
-  };
+function call(name: string, status: ToolCall['status'], id = name): ToolCall {
+  return { id, name, input: name === 'bash' ? { command: 'pnpm test', timeout: 60 } : { path: '/repo/a.ts' }, result: { content: [{ type: 'text', text: 'first\nsecond\nthird\n' }] }, status };
 }
+function paint(toolCall: ToolCall) { act(() => render(h(ToolCallCard, { toolCall, autoExpand: true, activityTailLines: 2, workingDirectory: '/repo', onOpenFile: noop, onContextMenu: noop }), container)); }
+function toggle() { act(() => (container.querySelector('.tool-call-toggle') as HTMLButtonElement).click()); }
 
-function readTool(status: ToolCall['status'], id: string): ToolCall {
-  return {
-    id,
-    name: 'read',
-    input: { path: '/repo/README.md' },
-    result: status === 'running' ? undefined : 'contents',
-    status,
-    durationMs: status === 'running' ? undefined : 12,
-  };
-}
-
-interface FakeTimers {
-  advance: (ms: number) => void;
-  restore: () => void;
-  pendingCount: () => number;
-}
-
-/** Install a virtual clock so the grace/close timers fire deterministically
- *  without real waiting. Each callback is flushed inside `act` so Preact
- *  re-renders synchronously. Mirrors the pattern in test/webview/composer/composer-draft.test.ts. */
-function useFakeTimers(): FakeTimers {
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalClearTimeout = globalThis.clearTimeout;
-
-  type Pending = { fn: () => void; fireAt: number; id: number };
-  let now = 0;
-  let pending: Pending[] = [];
-  let nextId = 1;
-
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
-    const id = nextId++;
-    pending.push({ fn, fireAt: now + (ms ?? 0), id });
-    return id as unknown as ReturnType<typeof setTimeout>;
-  }) as typeof globalThis.setTimeout;
-
-  globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
-    pending = pending.filter((t) => t.id !== (id as unknown as number));
-  }) as typeof globalThis.clearTimeout;
-
-  const advance = (ms: number) => {
-    now += ms;
-    // Fire due timers in schedule order; a callback may schedule new ones.
-    for (;;) {
-      const due = pending
-        .filter((t) => t.fireAt <= now)
-        .sort((a, b) => a.fireAt - b.fireAt);
-      if (due.length === 0) break;
-      const dueIds = new Set(due.map((t) => t.id));
-      pending = pending.filter((t) => !dueIds.has(t.id));
-      for (const t of due) {
-        act(() => t.fn());
-      }
-    }
-  };
-
-  return {
-    advance,
-    pendingCount: () => pending.length,
-    restore: () => {
-      globalThis.setTimeout = originalSetTimeout;
-      globalThis.clearTimeout = originalClearTimeout;
-    },
-  };
-}
-
-function renderCard(toolCall: ToolCall) {
-  act(() => {
-    render(
-      h(ToolCallCard, {
-        toolCall,
-        autoExpand: false,
-        workingDirectory: '/repo',
-        onOpenFile: noop,
-        onContextMenu: noopContextMenu,
-      }),
-      container,
-    );
+for (const name of ['bash', 'read', 'custom_tool']) {
+  test(`${name} stays header-first across running and completion, ignoring the retired auto-expand preference`, () => {
+    paint(call(name, 'running'));
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+    assert.ok(container.querySelector('[aria-label="Running"]'));
+    assert.equal(container.querySelector('.tool-call-live-preview pre')?.textContent, 'second\nthird');
+    paint(call(name, 'completed'));
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+    assert.equal(container.querySelector('.tool-call-live-preview'), null);
+  });
+  test(`${name} manual expansion remains sticky across progress and completion`, () => {
+    paint(call(name, 'running')); toggle();
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+    assert.equal(container.querySelector('.tool-call-live-preview'), null);
+    assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /first[\s\S]*third/);
+    paint(call(name, 'completed'));
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+    assert.equal(container.querySelector('.collapsible-close-footer'), null, 'ordinary tool details have no close footer');
+    const gutter = container.querySelector('.collapsible-gutter') as HTMLButtonElement | null;
+    assert.ok(gutter, 'ordinary tool details keep the collapsible gutter');
+    act(() => gutter!.click());
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+    paint(call(name, 'running'));
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null, 'progress never undoes a manual close');
   });
 }
 
-const BODY_WRAP = '.tool-call-body-wrap';
-const BODY = '.tool-call-body';
-
-test('one stable ToolCallCard owns drafting, ready, and running shell lifecycle', () => {
-  const id = 'bash-provisional-lifecycle';
-  renderCard({
-    id,
-    name: 'bash',
-    input: '{"command":"npm te',
-    argumentsText: '{"command":"npm te',
-    status: 'drafting',
-  });
-  const root = container.querySelector('.tool-call-card');
-  assert.ok(root);
-  assert.equal(root.getAttribute('data-status'), 'drafting');
-  assert.equal(root.getAttribute('data-provisional'), 'true');
-  assert.doesNotMatch(root.textContent ?? '', /Drafting/);
-  assert.equal(root.querySelector('.status-chip-neutral'), null);
-  assert.equal(root.querySelector('.tool-call-draft-cursor'), null);
-  assert.ok(!root.querySelector(BODY_WRAP), 'draft input body is not auto-shown');
-
-  renderCard({
-    id,
-    name: 'bash',
-    input: '{"command":"npm test"}',
-    argumentsText: '{"command":"npm test"}',
-    status: 'ready',
-  });
-  const readyRoot = container.querySelector('.tool-call-card');
-  assert.equal(readyRoot, root, 'stable id keeps the same card DOM node');
-  assert.equal(readyRoot?.getAttribute('data-status'), 'ready');
-  assert.doesNotMatch(readyRoot?.textContent ?? '', /Ready/);
-  assert.equal(readyRoot?.querySelector('.status-chip-neutral'), null);
-  assert.ok(!readyRoot?.querySelector(BODY_WRAP), 'ready input body is not auto-shown');
-  act(() => {
-    (readyRoot?.querySelector('.tool-call-header') as HTMLElement).click();
-  });
-  assert.match(readyRoot?.querySelector(BODY)?.textContent ?? '', /Input[\s\S]*"command":"npm test"/);
-
-  renderCard({
-    id,
-    name: 'bash',
-    input: { command: 'npm test' },
-    result: { content: [{ type: 'text', text: 'running tests' }], details: {} },
-    status: 'running',
-  });
-  const runningRoot = container.querySelector('.tool-call-card');
-  assert.equal(runningRoot, root, 'execution continues in the same card DOM node');
-  assert.equal(runningRoot?.getAttribute('data-status'), 'running');
-  assert.equal(runningRoot?.getAttribute('data-provisional'), null);
-  assert.ok(runningRoot?.querySelector(BODY_WRAP), 'shell terminal appears only once running');
+test('live previews expose their context and omitted-content cue to assistive technology', () => {
+  for (const status of ['running', 'drafting', 'ready'] as const) {
+    const content = 'first\nsecond\nthird';
+    const toolCall: ToolCall = status === 'running'
+      ? call('read', status, `preview-${status}`)
+      : { id: `preview-${status}`, name: 'write', status, input: { content }, argumentsText: JSON.stringify({ content }) };
+    paint(toolCall);
+    const preview = container.querySelector('.tool-call-live-preview')!;
+    assert.equal(preview.getAttribute('role'), 'group');
+    assert.match(preview.getAttribute('aria-label') ?? '', status === 'running' ? /live result preview/ : /draft input preview/);
+    const cue = preview.querySelector('.tool-call-preview-truncation')!;
+    assert.equal(cue.querySelector('[aria-hidden="true"]')?.textContent, '…');
+    assert.equal(cue.querySelector('.sr-only')?.textContent, 'Earlier preview content omitted.');
+    assert.equal(preview.querySelector('pre')?.textContent, 'second\nthird');
+  }
 });
 
-test('completed parallel sibling has no spinner while another sibling remains running', () => {
-  const completed = { ...readTool('completed', 'read-completed'), parallelGroupId: 'batch' };
-  const running = { ...readTool('running', 'read-running'), parallelGroupId: 'batch' };
-  const renderToolCall = (toolCall: ToolCall) => h(ToolCallCard, {
-    toolCall,
-    autoExpand: false,
-    workingDirectory: '/repo',
-    onOpenFile: noop,
-    onContextMenu: noopContextMenu,
-  });
+test('one stable disclosure owns draft arguments, ready input and the execution result', () => {
+  const draft: ToolCall = { id: 'draft', name: 'edit', input: '', argumentsText: '{"path":"/repo/a.ts","edits":[{"oldText":"before","newText":"after', status: 'drafting' };
+  paint(draft);
+  const root = container.querySelector('.tool-call-card');
+  assert.equal(root?.getAttribute('data-provisional'), 'true');
+  assert.equal(container.querySelector('.tool-call-live-preview pre')?.textContent, 'after');
+  assert.doesNotMatch(container.textContent ?? '', /not executed|tool-call-provisional-notice|Generating arguments/);
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+  toggle();
+  assert.match(container.textContent ?? '', /Requested replacement/);
+  assert.doesNotMatch(container.textContent ?? '', /Applied changes|not executed|tool-call-provisional-notice/);
+  const ready = { ...draft, status: 'ready' as const, argumentsText: `${draft.argumentsText}"}]}` };
+  paint(ready);
+  assert.equal(container.querySelector('.tool-call-card'), root);
+  assert.equal(container.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'true');
+  assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /after/);
+  assert.doesNotMatch(container.textContent ?? '', /not executed|tool-call-provisional-notice/);
+  paint({ ...ready, input: { path: '/repo/a.ts', edits: [{ oldText: 'before', newText: 'after' }] }, status: 'completed', result: { details: { diff: '- before\n+ after' } } });
+  assert.equal(container.querySelector('.tool-call-card'), root);
+  assert.match(container.textContent ?? '', /Applied changes/);
+  assert.equal(container.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'true');
+});
 
-  act(() => {
-    render(h(MessageContent, {
-      messageId: 'parallel-message',
-      role: 'assistant',
-      combinedParts: [
-        { kind: 'toolCall', toolCall: completed },
-        { kind: 'toolCall', toolCall: running },
-      ],
-      renderableUserParts: undefined,
-      html: '',
-      isCurrentlyStreaming: true,
-      messageBodyRef: { current: null },
-      workingDirectory: '/repo',
-      onOpenFile: noop,
-      prefs: DEFAULT_CHAT_PREFS,
-      renderToolCall,
-      onContextMenu: () => undefined,
-      getMessageRaw: () => '',
-    }), container);
-  });
+test('drafting and ready inputs stay visible without provisional disclaimers or a generating preview label', () => {
+  for (const status of ['drafting', 'ready'] as const) {
+    const argumentsText = status === 'drafting'
+      ? '{"path":"/repo/draft.txt","content":"npm test'
+      : '{"path":"/repo/draft.txt","content":"npm test"}';
+    paint({ id: `${status}-input`, name: 'write', status, input: argumentsText, argumentsText });
+    assert.equal(container.querySelector('.tool-call-live-preview pre')?.textContent, 'npm test');
+    assert.equal(container.querySelector('.tool-call-preview-label'), null);
+    assert.doesNotMatch(container.textContent ?? '', /not executed|tool-call-provisional-notice|Generating arguments/);
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
 
+    toggle();
+    assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /npm test/);
+    assert.doesNotMatch(container.textContent ?? '', /not executed|tool-call-provisional-notice|Generating arguments/);
+    toggle();
+  }
+
+  const edits = JSON.stringify({ path: '/repo/a.ts', edits: [
+    { oldText: 'before one', newText: 'after one' },
+    { oldText: 'before two', newText: 'after two' },
+  ] });
+  paint({ id: 'multi-edit-draft', name: 'edit', status: 'drafting', input: '', argumentsText: edits });
+  assert.equal(container.querySelector('.tool-call-preview-label')?.textContent, 'replacement 2');
+});
+
+test('arrow-free whole-row disclosure stays a focusable native button with accurate aria wiring', () => {
+  paint(call('read', 'completed'));
+  const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
+  assert.equal(header.tagName, 'BUTTON');
+  assert.equal(header.type, 'button');
+  assert.equal(header.disabled, false);
+  assert.equal(header.tabIndex, 0, 'native button retains keyboard activation semantics');
+  assert.equal(header.querySelector('.tool-call-disclosure'), null);
+  assert.equal(header.getAttribute('aria-expanded'), 'false');
+  header.focus();
+  assert.equal(document.activeElement, header);
+  toggle();
+  assert.equal(header.getAttribute('aria-expanded'), 'true');
+  const bodyId = header.getAttribute('aria-controls');
+  assert.ok(bodyId);
+  assert.equal(document.getElementById(bodyId), container.querySelector('.tool-call-body-wrap'));
+  toggle();
+  assert.equal(header.getAttribute('aria-expanded'), 'false');
+  assert.equal(header.getAttribute('aria-controls'), null);
+});
+
+test('file opening and raw inspection are distinct sibling actions, not children of the toggle', () => {
+  let opened = '';
+  act(() => render(h(ToolCallCard, { toolCall: call('read', 'completed'), workingDirectory: '/repo', onOpenFile: (path) => { opened = path; }, onContextMenu: noop }), container));
+  const expand = container.querySelector('.tool-call-toggle')!;
+  assert.equal(expand.querySelector('button, [role="button"]'), null);
+  act(() => (container.querySelector('[aria-label="Open file /repo/a.ts"]') as HTMLButtonElement).click());
+  assert.equal(opened, '/repo/a.ts');
+  assert.equal(expand.getAttribute('aria-expanded'), 'false');
+  act(() => (container.querySelector('[aria-label="Inspect read model exchange"]') as HTMLButtonElement).click());
+  assert.equal(expand.getAttribute('aria-expanded'), 'false');
+});
+
+test('ordinary tool gutter collapses, returns focus to its header, and exposes an accessible label', () => {
+  paint(call('read', 'completed'));
+  toggle();
+  const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
+  const gutter = container.querySelector('.collapsible-gutter') as HTMLButtonElement;
+  assert.equal(gutter.getAttribute('aria-label'), 'Collapse read details');
+  header.focus();
+  act(() => gutter.click());
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+  assert.equal(document.activeElement, header, 'focus returns to the owning disclosure button');
+});
+
+test('expanded shell details retain options and the header can close them while output streams', () => {
+  paint(call('bash', 'running')); toggle();
+  assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /pnpm test[\s\S]*timeout[\s\S]*60/);
+  assert.equal(container.querySelector('.collapsible-close-footer'), null);
+  toggle();
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+  assert.ok(container.querySelector('.tool-call-live-preview'));
+  paint(call('bash', 'completed'));
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null, 'completion does not undo a manual header close');
+});
+
+test('subagent fallback retains the close footer and collapsible gutter', () => {
+  paint(call('subagent', 'completed'));
+  assert.ok(container.querySelector('.tool-call-body-wrap'), 'auto-expand remains available for subagent fallback');
+  assert.ok(container.querySelector('.collapsible-close-footer'));
+  assert.ok(container.querySelector('.collapsible-gutter'));
+  act(() => (container.querySelector('.collapsible-close-footer') as HTMLButtonElement).click());
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+});
+
+test('completed parallel sibling retains its accessible status without a check or dimming while another sibling runs', () => {
+  const completed = { ...call('read', 'completed', 'done'), parallelGroupId: 'batch' };
+  const running = { ...call('read', 'running', 'active'), parallelGroupId: 'batch' };
+  const renderToolCall = (toolCall: ToolCall) => h(ToolCallCard, { toolCall, workingDirectory: '/repo', onOpenFile: noop, onContextMenu: noop });
+  act(() => render(h(MessageContent, { messageId: 'parallel', role: 'assistant', combinedParts: [{ kind: 'toolCall', toolCall: completed }, { kind: 'toolCall', toolCall: running }], renderableUserParts: undefined, html: '', isCurrentlyStreaming: true, messageBodyRef: { current: null }, workingDirectory: '/repo', onOpenFile: noop, prefs: DEFAULT_CHAT_PREFS, renderToolCall, onContextMenu: noop, getMessageRaw: () => '' }), container));
   const siblings = [...container.querySelectorAll('[data-parallel-group-id="batch"] .tool-call-card')];
   assert.equal(siblings.length, 2);
-  assert.equal(siblings[0]?.getAttribute('data-status'), 'completed');
-  assert.equal(siblings[1]?.getAttribute('data-status'), 'running');
-  assert.equal(siblings[0]?.querySelector('.tool-call-status-spinner'), null);
-  assert.ok(siblings[1]?.querySelector('.tool-call-status-spinner'));
-  assert.ok(siblings[0]?.closest('.tool-call-parallel-item-done'));
-});
-
-test('shell auto-shown body lingers after completion, then animates closed via the fallback timer', () => {
-  const timers = useFakeTimers();
-  try {
-    // Running: body auto-shown (open=false), spinner in header.
-    renderCard(bashTool('running', 'bash-lifecycle'));
-    assert.ok(container.querySelector(BODY_WRAP), 'body shown while running');
-    assert.ok(container.querySelector('.tool-call-status-spinner'), 'spinner while running');
-    assert.ok(!container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'not closing while running');
-
-    // Complete the command.
-    renderCard(bashTool('completed', 'bash-lifecycle'));
-
-    // Immediately after completion: lingering — body still present, NOT closing,
-    // completion pulse visible (no status glyph — success is the default state).
-    assert.ok(container.querySelector(BODY_WRAP), 'body lingers after completion');
-    assert.ok(!container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'not closing during grace');
-    assert.ok(!container.querySelector('.tool-call-status-check'), 'no completed check glyph');
-    assert.ok(!container.querySelector('.tool-call-status-spinner'), 'no spinner once completed');
-    assert.ok(container.querySelector('.tool-call-just-completed'), 'completion pulse class applied');
-
-    // After the grace period: enter the closing state (wrapper gets data-closing).
-    timers.advance(TOOL_CALL_CLOSE_GRACE_MS);
-    assert.ok(container.querySelector(BODY_WRAP), 'body still mounted while closing');
-    assert.ok(container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'wrapper is closing');
-
-    // After the fallback close timer: body unmounts.
-    timers.advance(TOOL_CALL_CLOSE_TRANSITION_MS + 60 + 60);
-    assert.ok(!container.querySelector(BODY_WRAP), 'body unmounted after close');
-    assert.ok(!container.querySelector(BODY), 'inner body unmounted after close');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('transitionend on the wrapper unmounts the closing body', () => {
-  const timers = useFakeTimers();
-  try {
-    renderCard(bashTool('running', 'bash-transitionend'));
-    renderCard(bashTool('completed', 'bash-transitionend'));
-
-    // Enter closing state.
-    timers.advance(TOOL_CALL_CLOSE_GRACE_MS);
-    const wrap = container.querySelector(BODY_WRAP) as HTMLElement;
-    assert.ok(wrap);
-    assert.ok(wrap.getAttribute('data-closing') === 'true');
-
-    // Fire transitionend on the wrapper itself -> unmount.
-    act(() => {
-      wrap.dispatchEvent(new Event('transitionend', { bubbles: true }));
-    });
-    assert.ok(!container.querySelector(BODY_WRAP), 'body unmounted on transitionend');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('manual expand during the grace window cancels the auto-close (sticky)', () => {
-  const timers = useFakeTimers();
-  try {
-    renderCard(bashTool('running', 'bash-manual-open'));
-    renderCard(bashTool('completed', 'bash-manual-open'));
-
-    // Lingering: body present, grace timer pending.
-    assert.ok(container.querySelector(BODY_WRAP));
-    const pendingBefore = timers.pendingCount();
-    assert.ok(pendingBefore > 0, 'grace timer pending');
-
-    // User clicks to expand during the grace window.
-    const card = container.querySelector('[role="button"]') as HTMLElement;
-    act(() => {
-      card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    // Body stays (now sticky via open=true), and the auto-close timer is gone.
-    assert.ok(container.querySelector(BODY_WRAP), 'body stays after manual expand');
-    assert.ok(!container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'not closing after manual expand');
-
-    // Advance well past the grace + close windows: nothing fires, body sticky.
-    timers.advance(5000);
-    assert.ok(container.querySelector(BODY_WRAP), 'body still mounted — manual open is sticky');
-    assert.ok(!container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'still not closing');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('non-shell tools get the completion indicator but never auto-open or auto-close', () => {
-  const timers = useFakeTimers();
-  try {
-    // Running read tool: body NOT auto-shown (non-shell), spinner in header.
-    renderCard(readTool('running', 'read-nonshell'));
-    assert.ok(!container.querySelector(BODY_WRAP), 'non-shell body hidden while running');
-    assert.ok(container.querySelector('.tool-call-status-spinner'), 'spinner while running');
-
-    // Complete: completion pulse appears (no status glyph — success is the default
-    // state), but no body (open=false) and no grace timer.
-    renderCard(readTool('completed', 'read-nonshell'));
-    assert.ok(!container.querySelector('.tool-call-status-check'), 'no completed check glyph');
-    assert.ok(container.querySelector('.tool-call-just-completed'), 'completion pulse applied');
-    assert.ok(!container.querySelector(BODY_WRAP), 'non-shell body never auto-shown');
-
-    // Advancing time must not mount a body (no grace/close for non-shell).
-    timers.advance(2000);
-    assert.ok(!container.querySelector(BODY_WRAP), 'no auto-close animation for non-shell');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('auto-shown shell body gets the expand animation flag, cleared after the animation window', () => {
-  const timers = useFakeTimers();
-  try {
-    renderCard(bashTool('running', 'bash-expand-flag'));
-    const wrap = container.querySelector(BODY_WRAP) as HTMLElement;
-    assert.ok(wrap, 'body auto-shown while running');
-    assert.equal(wrap.getAttribute('data-expand'), 'true', 'expand flag set on auto-show');
-
-    // After the expand animation window (transition + fallback slack) the
-    // flag is cleared so the streaming transition-suppress can re-engage.
-    timers.advance(TOOL_CALL_EXPAND_MS + 60 + 60);
-    const wrapAfter = container.querySelector(BODY_WRAP) as HTMLElement;
-    assert.ok(wrapAfter, 'body still mounted');
-    assert.ok(!wrapAfter.getAttribute('data-expand'), 'expand flag cleared after animation window');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('header command summary hands off into the header as the body begins closing (no post-unmount pop)', () => {
-  const timers = useFakeTimers();
-  try {
-    const SUMMARY = '.transcript-header-summary-command';
-
-    // Running: body auto-shown, summary suppressed (no duplication while visible).
-    renderCard(bashTool('running', 'bash-summary-handoff'));
-    assert.ok(container.querySelector(BODY_WRAP), 'body shown while running');
-    assert.ok(!container.querySelector(SUMMARY), 'summary hidden while body is visible');
-
-    // Complete: lingering — body still present, summary still suppressed.
-    renderCard(bashTool('completed', 'bash-summary-handoff'));
-    assert.ok(container.querySelector(BODY_WRAP), 'body lingers after completion');
-    assert.ok(!container.querySelector(SUMMARY), 'summary still hidden during grace');
-
-    // Grace ends -> body begins closing. The summary is revealed NOW (handoff)
-    // rather than after the body unmounts, so the command never pops in.
-    timers.advance(TOOL_CALL_CLOSE_GRACE_MS);
-    assert.ok(container.querySelector(BODY_WRAP), 'body still mounted while closing');
-    assert.ok(container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'wrapper is closing');
-    assert.ok(container.querySelector(SUMMARY), 'summary revealed as the body begins closing');
-
-    // After the close transition: body unmounts, summary persists (no pop).
-    timers.advance(TOOL_CALL_CLOSE_TRANSITION_MS + 60 + 60);
-    assert.ok(!container.querySelector(BODY_WRAP), 'body unmounted after close');
-    assert.ok(container.querySelector(SUMMARY), 'summary persists after the body unmounts — no pop');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('manual close via the footer animates the body closed then unmounts', () => {
-  const timers = useFakeTimers();
-  try {
-    // Completed read tool, collapsed by default.
-    renderCard(readTool('completed', 'read-manual-footer-close'));
-    assert.ok(!container.querySelector(BODY_WRAP), 'body hidden when collapsed');
-
-    // Manually open via the header toggle.
-    const header = container.querySelector('[role="button"]') as HTMLElement;
-    act(() => { header.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    assert.ok(container.querySelector(BODY_WRAP), 'body shown after manual open');
-    const footer = container.querySelector('.collapsible-close-footer') as HTMLElement;
-    assert.ok(footer, 'close footer present on a manually-opened body');
-
-    // Close via the footer → enter the closing state (data-closing engages).
-    act(() => { footer.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    assert.ok(container.querySelector(BODY_WRAP), 'body still mounted while closing');
-    assert.ok(container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'wrapper is closing');
-
-    // After the fallback close window: body unmounts.
-    timers.advance(TOOL_CALL_CLOSE_TRANSITION_MS + 60 + 60);
-    assert.ok(!container.querySelector(BODY_WRAP), 'body unmounted after close');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('manual close via the header animates the body closed then unmounts', () => {
-  const timers = useFakeTimers();
-  try {
-    renderCard(readTool('completed', 'read-manual-header-close'));
-    const header = container.querySelector('[role="button"]') as HTMLElement;
-    // Open, then close via the same header toggle.
-    act(() => { header.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    assert.ok(container.querySelector(BODY_WRAP), 'body shown after open');
-    act(() => { header.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    assert.ok(container.querySelector(BODY_WRAP), 'body still mounted while closing');
-    assert.ok(container.querySelector(`${BODY_WRAP}[data-closing="true"]`), 'wrapper is closing');
-    timers.advance(TOOL_CALL_CLOSE_TRANSITION_MS + 60 + 60);
-    assert.ok(!container.querySelector(BODY_WRAP), 'body unmounted after close');
-  } finally {
-    timers.restore();
-  }
-});
-
-test('a streaming shell body shows no close footer (close cannot animate while running)', () => {
-  renderCard(bashTool('running', 'bash-no-footer-while-running'));
-  assert.ok(container.querySelector(BODY_WRAP), 'auto-shown body present while running');
-  // The footer is gated on `open` — the running body is auto-shown (!open), so
-  // no close target is offered (it would be a no-op: data-closing can't engage
-  // while showBody is true).
-  assert.ok(!container.querySelector('.collapsible-close-footer'), 'no footer on a streaming body');
+  assert.equal(siblings[0].querySelector('.tool-call-status-spinner'), null);
+  assert.ok(siblings[1].querySelector('.tool-call-status-spinner'));
+  assert.equal(siblings[0].querySelector('.tool-call-status-completed'), null);
+  assert.match(siblings[0].querySelector('.tool-call-toggle')?.getAttribute('aria-label') ?? '', /read tool call, Completed\./);
+  assert.equal(siblings[0].querySelector('.tool-call-state-column'), null);
+  assert.equal(container.querySelector('.tool-call-parallel-item-done'), null);
+  assert.ok(siblings[0].closest('.tool-call-parallel-start'));
+  assert.ok(siblings[1].closest('.tool-call-parallel-end'));
 });

@@ -100,7 +100,10 @@ test('ToolCallCard: header aria-controls references the mounted body-wrap id', (
       container,
     );
   });
-  const header = container.querySelector('.tool-call-header') as HTMLElement;
+  const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
+  assert.ok(header);
+  assert.equal(header.getAttribute('aria-controls'), null, 'collapsed toggle never references an unmounted body');
+  act(() => header.click());
   const body = container.querySelector('.tool-call-body-wrap') as HTMLElement;
   assert.ok(header && body, 'header and body mounted when open');
   const controls = header.getAttribute('aria-controls');

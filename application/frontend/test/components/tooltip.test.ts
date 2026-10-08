@@ -400,3 +400,23 @@ test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', asyn
     restoreTimers();
   }
 });
+
+test('inspectors return focus on Escape without reopening the rich surface', async () => {
+  installFakeTimers();
+  try {
+    act(() => render(h(Tooltip, {
+      contentNode: h('button', null, 'Copy JSON'), richRole: 'region', returnFocusOnEscape: true, delayShow: 0,
+    }, h('button', { 'aria-label': 'Inspect tool' }, 'Inspect')), container));
+    const trigger = container.querySelector('button')!;
+    await act(async () => { trigger.focus(); flushTimers(); });
+    const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+    await act(async () => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true })); });
+    const copy = host.querySelector('button')!;
+    assert.equal(document.activeElement, copy);
+    await act(async () => { copy.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    assert.equal(document.activeElement, trigger);
+    assert.equal(host.style.display, 'none');
+    await act(async () => flushTimers());
+    assert.equal(host.style.display, 'none');
+  } finally { restoreTimers(); }
+});

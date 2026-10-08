@@ -351,6 +351,90 @@ test('an oversized lifecycle frame arriving behind small records is admitted and
   ]);
 });
 
+const refresh = (text: string, extra: WorkerJsonObject = {}): WorkerIpcFrameDraft => ({
+  ...frameBase, kind: 'runtime.event', event: 'session.opened',
+  payload: {
+    session: { path: '/session.jsonl', sessionId: 'session-1' }, runtimeReady: true,
+    transcript: [{ text }], transcriptWindow: { totalCount: 1 }, ...extra,
+  },
+});
+const replaceable = { replaceableSessionOpened: true };
+
+test('queued rich refresh replaces only its predecessor and moves after intervening lifecycle', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedLifecycleBytes: 1024 });
+  const stale: WorkerIpcSettlement[] = [];
+  writer.enqueue(command('active'));
+  writer.enqueue(refresh('old'.repeat(2048)), { ...replaceable, onSettled: (s) => stale.push(s) });
+  writer.enqueue({ ...frameBase, kind: 'runtime.event', event: 'busy.changed', payload: { busy: true } });
+  assert.deepEqual(writer.enqueue(refresh('latest'.repeat(2048)), replaceable), { accepted: true, coalesced: true });
+  assert.deepEqual(stale, [{ status: 'coalesced' }]);
+  assert.equal(writer.getDebugState().nextSeq, 2);
+  while (target.callbacks.length) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((f) => [f.kind === 'runtime.event' ? f.event : f.kind, f.seq]),
+    [['command', 1], ['busy.changed', 2], ['session.opened', 3]]);
+  assert.deepEqual(target.sent[2], { ...refresh('latest'.repeat(2048)), seq: 3 });
+});
+
+test('invalid, oversize and quota-failing refresh replacements leave the old queue untouched', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedLifecycleBytes: 1200 });
+  const stale: WorkerIpcSettlement[] = [];
+  writer.enqueue(command('active'));
+  const old = refresh('old');
+  writer.enqueue(old, { ...replaceable, onSettled: (s) => stale.push(s) });
+  // One unrelated oversized exception plus old fits; growing old must still
+  // consume the reservation, not claim a second exception.
+  writer.enqueue(refresh('x'.repeat(2048), { session: { path: '/other' } }));
+  const before = writer.getDebugState();
+  for (const [draft, reason] of [
+    [{ ...old, unknown: true }, 'invalid'],
+    [refresh('x'.repeat(WORKER_IPC_MAX_FRAME_BYTES)), 'oversize'],
+    [refresh('y'.repeat(2048)), 'capacity'],
+  ] as const) {
+    const result = writer.enqueue(draft as WorkerIpcFrameDraft, replaceable);
+    assert.equal(result.accepted, false);
+    if (!result.accepted) assert.equal(result.reason, reason);
+    assert.deepEqual(writer.getDebugState(), before);
+    assert.deepEqual(stale, []);
+  }
+  while (target.callbacks.length) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent[1], { ...old, seq: 2 });
+});
+
+test('refresh flag cannot merge across exact identity or protectively correlated payloads', () => {
+  const variants = [
+    { workerId: 'other' }, { coordinatorGeneration: 2 }, { workerGeneration: 2 },
+    { workerPid: 4321 }, { rootSessionPath: '/root-2', sessionPath: '/root-2' }, { leasePath: '/lease-2' },
+    { leaseRevision: 2 },
+  ];
+  for (const variant of variants) {
+    const writer = new BoundedWorkerIpcWriter(new FakeSendTarget());
+    writer.enqueue(command('active'));
+    writer.enqueue(refresh('old'), replaceable);
+    assert.deepEqual(writer.enqueue({ ...refresh('new'), ...variant } as WorkerIpcFrameDraft, replaceable),
+      { accepted: true, coalesced: false });
+    assert.equal(writer.getDebugState().queueDepth.lifecycle, 2);
+  }
+  for (const extra of [
+    { session: { path: '/other', sessionId: 'session-1' } },
+    { session: { path: '/session.jsonl', sessionId: 'session-2' } },
+    { selectionToken: 'selection' }, { operationId: 'operation' }, { replacesSessionPath: '/old' },
+    { runtimeReady: false }, { transcriptSkipped: true }, { snapshotUnavailable: { code: 'gap' } },
+  ]) {
+    const writer = new BoundedWorkerIpcWriter(new FakeSendTarget());
+    writer.enqueue(command('active'));
+    writer.enqueue(refresh('old'), replaceable);
+    assert.deepEqual(writer.enqueue(refresh('new', extra), replaceable), { accepted: true, coalesced: false });
+    assert.equal(writer.getDebugState().queueDepth.lifecycle, 2);
+  }
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target);
+  writer.enqueue(refresh('active'), replaceable);
+  assert.deepEqual(writer.enqueue(refresh('queued'), replaceable), { accepted: true, coalesced: false });
+  assert.equal(target.sent.length, 1, 'an active snapshot cannot be replaced');
+});
+
 test('writer rejects invalid, oversize, and over-capacity frames without assigning sequence numbers', () => {
   const target = new FakeSendTarget();
   const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 300 });

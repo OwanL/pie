@@ -36,46 +36,251 @@
   background: var(--panel-warning);
 }
 
-/* ── Tool-call header (expand/collapse hitbox) ──────────────────────── */
-/* The entire header row is the click-to-toggle hitbox: a single role=button
-   spanning the full card width, with a clear hover/focus affordance so the
-   clickable region is obvious, and a compact min-height (set inline) so it
-   is easy to hit without dominating the card.
-
-   Non-sticky: the header used to pin to the top of the transcript viewport so
-   the collapse control stayed reachable inside a tall open body, but the
-   pinned opaque bar read as a detaching strip floating above the body. It now
-   flows with the card content; reachability of the close action is preserved
-   by the `CollapsibleCloseFooter` strip at the bottom of the open body (and
-   the header's trailing chevron on the side). The card root keeps
-   `overflow: clip` so its rounded corners still clip cleanly. */
+/* ── Ordinary tool inspector: target / state / actions ─────────────────── */
+.tool-call-card {
+  min-width: 0;
+  overflow: clip;
+  border-bottom: 1px solid var(--panel-border-subtle);
+  background: transparent;
+}
 
 .tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 1px 4px;
   background: transparent;
-  transition: background var(--panel-transition-fast);
+  container: tool-row / inline-size;
 }
 
-.tool-call-header:hover {
-  background: color-mix(in srgb, var(--panel-foreground) 4%, transparent);
+/* Reclaim target width without shrinking the separate action hitboxes. */
+.tool-call-card:not(.tool-call-subagent) > .tool-call-header { gap: 4px; }
+
+.tool-call-toggle {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 0;
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: var(--panel-foreground);
+  text-align: left;
+  cursor: pointer;
 }
 
-/* Inset outline so keyboard focus remains visible without persistent chrome. */
-.tool-call-header:focus-visible {
+.tool-call-toggle:hover,
+.tool-call-action:hover,
+.tool-call-raw-action:hover {
+  background: var(--panel-control-hover);
+}
+
+.tool-call-toggle:focus-visible,
+.tool-call-action:focus-visible,
+.tool-call-raw-action:focus-visible,
+.tool-call-raw-inspector button:focus-visible,
+.tool-call-raw-inspector pre:focus-visible {
   outline: 1px solid var(--panel-accent);
   outline-offset: -1px;
 }
 
-/* Drafts use the regular tool-call surface and geometry. Muting only their
-   text preserves contrast for the small Input label while execution can take
-   over with no badge, extra chrome, or layout shift. */
-.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-title-mono,
-.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-mono,
-.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-emphasis,
-.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-subtle,
-.tool-call-card[data-provisional="true"] > .tool-call-header .transcript-header-summary-command {
+.tool-call-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
   color: var(--panel-muted);
-  opacity: 1;
 }
+.tool-call-icon-inspector { display: flex; flex: 0 0 auto; }
+.tool-call-raw-action { cursor: help; }
+
+.tool-call-heading-content {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.tool-call-primary-summary {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.tool-call-secondary-detail {
+  flex: 0 3 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--panel-muted);
+}
+
+.tool-call-heading-content .transcript-header-summary-mono,
+.tool-call-heading-content .transcript-header-summary-emphasis,
+.tool-call-heading-content .transcript-header-summary-subtle,
+.tool-call-heading-content .transcript-header-summary-command {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.tool-call-heading-content .transcript-header-summary-emphasis,
+.tool-call-heading-content .transcript-header-summary-command { color: var(--panel-foreground); }
+.tool-call-heading-content .transcript-header-summary-subtle { opacity: 1; }
+/* Filenames and shell commands share regular weight; colour carries hierarchy. */
+.tool-call-heading-content .transcript-header-path-target,
+.tool-call-heading-content .transcript-header-summary-command { font-weight: 400; }
+
+.tool-call-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-font-sans);
+  font-size: 12px;
+  color: var(--panel-foreground-soft);
+}
+
+.tool-call-read-preview {
+  flex: 0 10 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--panel-muted);
+  text-align: left;
+}
+/* Previews use surplus space only. Targets and metadata win on small rows. */
+@container tool-row (max-width: 640px) {
+  .tool-call-read-preview { display: none; }
+  .tool-call-secondary-detail { display: none; }
+}
+
+.tool-call-disclosure { flex: 0 0 auto; color: var(--panel-muted); }
+/* Natural metadata flow. Missing values do not reserve columns or gaps. */
+.tool-call-header-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  color: var(--panel-muted);
+}
+.tool-call-actions { display: flex; flex: 0 0 auto; align-items: center; min-height: 24px; }
+.tool-call-duration,
+.tool-call-size {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tool-call-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: var(--panel-muted);
+  cursor: pointer;
+}
+
+/* File opening is secondary; the left inspection icon always stays visible.
+   Existing file controls keep their hit area on hover; absent ones take no space. */
+@media (hover: hover) and (pointer: fine) {
+  .tool-call-header .tool-call-action { opacity: 0; pointer-events: none; }
+  .tool-call-header:hover .tool-call-action,
+  .tool-call-header:focus-within .tool-call-action { opacity: 1; pointer-events: auto; }
+}
+
+.tool-call-status-draft {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  box-sizing: border-box;
+  border: 1px dashed var(--panel-muted);
+  border-radius: 50%;
+}
+
+@container tool-row (max-width: 480px) {
+  .tool-call-size,
+  .tool-call-header-meta:has(> .tool-call-size:only-child) { display: none; }
+  .tool-call-header-meta { gap: 6px; }
+}
+
+.tool-call-raw-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(480px, calc(100vw - 40px));
+  max-width: 100%;
+  max-height: min(70vh, 500px, calc(100dvh - 40px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--panel-font-sans);
+  user-select: text;
+}
+/* Let the root scroll instead of shrinking headings or clipping sections
+ * whose intrinsic JSON height exceeds the inspector's viewport budget. */
+.tool-call-raw-inspector > * { flex-shrink: 0; min-width: 0; }
+.tool-call-raw-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tool-call-raw-heading > strong { margin-right: auto; }
+.tool-call-raw-note { color: var(--panel-muted); font-size: 11px; }
+.tool-call-raw-refresh,
+.tool-call-raw-copy,
+.tool-call-detail-status button,
+.tool-call-raw-note button {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius-sm);
+  padding: 3px 7px;
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
+  cursor: pointer;
+}
+.tool-call-raw-refresh[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+.tool-call-raw-inspector pre {
+  min-height: 0;
+  max-height: min(40vh, 260px);
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--panel-code-surface);
+  font-family: var(--panel-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.tool-call-raw-inspector code { font-family: inherit; }
 
 /* Ordinary tool statuses remain quiet semantic text. */
 .tool-call-header .status-chip {
@@ -129,48 +334,88 @@
 
 .tool-call-body {
   user-select: text;
-  padding: 0 10px 10px;
+  padding: 0 8px 6px;
+}
+
+/* A reserved collapse rail replaces ordinary full-width footers. It never
+   overlays selectable content or changes shared reasoning/subagent controls. */
+.tool-call-inspector-body { padding-left: 16px; }
+.tool-call-inspector-body > .tool-call-collapse-rail { width: 16px; }
+.tool-call-collapse-rail::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 3px;
+  width: 1px;
+  background: var(--panel-border);
+}
+.tool-call-collapse-rail:hover::before,
+.tool-call-collapse-rail:focus-visible::before { background: var(--panel-accent); }
+.tool-call-body .tool-call-pre {
+  margin-block: 4px;
+  padding-block: 6px;
 }
 
 .tool-call-section-label {
-  font-size: 10px;
-  line-height: 1;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  margin-block: 4px 3px;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
   color: var(--panel-muted);
 }
+
+.tool-call-input-fields { margin: 4px 0; display: flex; flex-direction: column; gap: 3px; }
+.tool-call-input-field { display: grid; grid-template-columns: minmax(60px, 100px) minmax(0, 1fr); gap: 8px; }
+.tool-call-input-field dt { font-family: var(--panel-font-sans); font-size: 11px; color: var(--panel-muted); overflow-wrap: anywhere; }
+.tool-call-input-field dd { margin: 0; min-width: 0; font-family: var(--panel-font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.tool-call-input-field dd > code { white-space: pre-wrap; }
+.tool-call-input-field dd .tool-call-pre { margin: 0; }
+.tool-call-provisional-notice,
+.tool-call-detail-status { padding: 4px 0; font-family: var(--panel-font-sans); font-size: 11px; color: var(--panel-muted); }
+.tool-call-detail-status { padding-inline: 10px; }
+.tool-call-detail-status button { margin-left: 8px; }
+.tool-call-diff-added,
+.tool-call-diff-removed,
+.tool-call-diff-context { display: block; min-width: max-content; }
+.tool-call-diff-added { color: var(--panel-success); background: var(--panel-success-surface); }
+.tool-call-diff-removed { color: var(--panel-danger); background: var(--panel-danger-surface); }
+.tool-call-diff { padding-inline: 0; }
+.tool-call-diff code > span { padding-inline: 10px; }
 
 .tool-call-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .tool-call-section + .tool-call-section {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
-.tool-call-provisional-input {
-  max-height: var(--expanded-section-max-height);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--panel-muted);
-  user-select: text;
-}
-
-/* Collapsed running non-shell tools own their live result preview inline. */
+/* Bounded drafts and output tails never turn into an automatic expansion. */
 .tool-call-live-preview {
-  padding: 5px 9px 6px;
-  border-top: 1px solid var(--panel-border-subtle);
+  position: relative;
+  margin: 0 6px 4px 28px;
+  padding: 3px 6px;
+  border-left: 1px solid var(--panel-border);
   background: var(--panel-code-surface);
   overflow: hidden;
-}
-
-.tool-call-live-preview .turn-activity-tail {
   color: var(--panel-foreground-soft);
 }
+.tool-call-live-preview pre {
+  margin: 0;
+  height: calc(var(--tool-preview-lines, 2) * 16px);
+  font-family: var(--panel-font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-call-preview-label { display: block; margin-bottom: 2px; font-family: var(--panel-font-sans); font-size: 11px; color: var(--panel-muted); }
+.tool-call-preview-truncation { position: absolute; right: 3px; top: 0; padding: 0 3px; background: var(--panel-code-surface); color: var(--panel-muted); }
 
 /* Preserve exact whitespace for tool output preformatted blocks */
 .tool-call-pre {
@@ -182,8 +427,56 @@
    the user drags a resize handle, after which an inline height takes over. */
 .tool-call-pre.tool-call-pre-resizable {
   max-height: var(--expanded-section-max-height);
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
+}
+
+/* The opt-in cue lives outside selectable code and never adds desktop noise. */
+.resizable-scroll-hint { display: none; }
+
+@media (pointer: coarse) {
+  .tool-call-card > .tool-call-header .tool-call-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .tool-call-card > .tool-call-header .tool-call-raw-action,
+  .tool-call-card > .tool-call-header .tool-call-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  /* The control grows, not its existing compact glyph. */
+  .tool-call-card > .tool-call-header .tool-call-kind-icon svg,
+  .tool-call-card > .tool-call-header .tool-call-action svg {
+    max-width: 24px;
+    max-height: 24px;
+  }
+  .tool-call-card .tool-call-heading-content .transcript-header-summary-mono,
+  .tool-call-card .tool-call-heading-content .transcript-header-summary-emphasis,
+  .tool-call-card .tool-call-heading-content .transcript-header-summary-subtle,
+  .tool-call-card .tool-call-heading-content .transcript-header-summary-command,
+  .tool-call-card .tool-call-name {
+    font-size: max(13px, var(--panel-font-size, 11px));
+  }
+  .tool-call-card .tool-call-pre,
+  .tool-call-card .tool-call-terminal-pre,
+  .tool-call-card .tool-call-terminal-command,
+  .tool-call-card .tool-call-raw-inspector pre,
+  .tool-call-card .tool-call-live-preview pre {
+    font-size: max(12px, var(--panel-font-size, 11px));
+  }
+  .tool-call-card .tool-call-live-preview pre {
+    --tool-preview-line-height: max(18px, calc(var(--panel-font-size, 11px) * 1.5));
+    height: calc(var(--tool-preview-lines, 2) * var(--tool-preview-line-height));
+    line-height: var(--tool-preview-line-height);
+  }
+  .tool-call-card .resizable-scroll-hint {
+    display: block;
+    padding: 0 0 4px;
+    color: var(--panel-muted);
+    font-family: var(--panel-font-sans);
+    font-size: max(12px, var(--panel-font-size, 11px));
+    user-select: none;
+  }
 }
 
 /* Placeholder when a tool call has no meaningful input to display */
@@ -406,7 +699,6 @@
 /* Before concrete output arrives, compact previews contain only their useful
    tool/task row. Do not reserve the normal output-row budget for an empty
    placeholder; lifecycle remains visible in the owning card header. */
-.tool-call-live-preview .turn-activity-tail-content[data-empty="true"],
 .subagent-live-preview .turn-activity-tail-content[data-empty="true"] {
   display: none;
   height: 0;
@@ -597,7 +889,7 @@
   gap: 3px;
   padding-left: 7px;
   margin-block: 5px;
-  border-left: 1px solid color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border));
+  border-left: 1px solid var(--panel-border);
 }
 
 .subagent-parallel-child {
@@ -605,11 +897,12 @@
 }
 
 /* Generic batches use per-row slices because mixed runs stay in the ordinary
-   tool list rather than being reparented into a group wrapper. Adjacent slices
-   overlap the list gap to form one continuous vertical line. */
+   tool list rather than being reparented into a group wrapper. The rail sits
+   in the header's existing left inset, not extra grouped-row padding, so all
+   icons and targets keep the same x position. Adjacent slices overlap the list
+   gap to form one continuous neutral line, including completed siblings. */
 .tool-call-parallel-child {
   position: relative;
-  padding-left: 7px;
 }
 
 .tool-call-parallel-start {
@@ -627,7 +920,7 @@
   top: -3px;
   bottom: -3px;
   width: 1px;
-  background: color-mix(in srgb, var(--panel-accent) 22%, var(--panel-border));
+  background: var(--panel-border);
   pointer-events: none;
 }
 
@@ -637,27 +930,6 @@
 
 .tool-call-parallel-end::before {
   bottom: 0;
-}
-
-/* ── Parallel batch: finished-while-block-active marker ──────────────────── */
-/* While a parallel batch is still in flight (at least one sibling `running`),
-   the completed members get a muted, struck-through header so the still-active
-   calls stand out. The mark is transient: once every member finishes the
-   marker class is no longer applied (see content.tsx), so the cards revert to
-   their normal completed styling and "done" reads as implicit. Failed members
-   are never marked here — their failure treatment stays prominent. */
-.tool-call-parallel-item-done .tool-call-header,
-.tool-call-parallel-item-done .subagent-header {
-  opacity: 0.55;
-}
-
-.tool-call-parallel-item-done .tool-call-header .transcript-header-title-mono,
-.tool-call-parallel-item-done .tool-call-header .transcript-header-summary-mono,
-.tool-call-parallel-item-done .tool-call-header .transcript-header-command-preview,
-.tool-call-parallel-item-done .subagent-header .transcript-header-title-mono,
-.tool-call-parallel-item-done .subagent-header .transcript-header-summary-mono {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--panel-muted) 60%, transparent);
 }
 
 /* ── Nested (depth ≥ 2) subagent header ─────────────────────────────────── */
@@ -790,9 +1062,7 @@
 }
 
 /* ── Tool-call terminal output (bash/shell) ──────────────────────────────── */
-/* Live, streaming stdout/stderr rendered as a terminal pane. While the tool
-   is running, non-empty output is shown even when the card is collapsed so
-   execution is visible without rendering an empty placeholder row. */
+/* Full live stdout/stderr is available only on deliberate expansion. */
 
 .tool-call-body-terminal {
   padding: 0;
@@ -802,23 +1072,22 @@
   display: flex;
   align-items: baseline;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 3px 8px;
   font-family: var(--panel-font-mono);
   font-size: 12px;
   color: var(--panel-foreground-soft);
   background: var(--panel-code-surface);
   border-bottom: 1px solid var(--panel-border-subtle);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .tool-call-terminal-command code {
   font-family: inherit;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
+.tool-call-body-terminal > .tool-call-input-fields { padding-inline: 8px; }
 
 .tool-call-terminal-prompt {
   color: var(--panel-accent);
@@ -832,7 +1101,7 @@
 
 .tool-call-terminal-pre {
   margin: 0;
-  padding: 8px 10px;
+  padding: 6px 8px;
   max-height: var(--expanded-section-max-height);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -881,7 +1150,7 @@
   display: flex;
   align-items: baseline;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 3px 8px;
   font-size: 10.5px;
   color: var(--panel-muted);
   border-top: 1px solid var(--panel-border-subtle);
@@ -962,10 +1231,8 @@
    <pre>/container that holds highlighted code. */
 
 /* ── Tool-call status glyph (header) ─────────────────────────────────────── */
-/* Compact running indicator in the header: a spinner (reuses the global
-   panel-loading-wheel-spin keyframe) while the tool is executing. Completed
-   subagents show a "Finished" status chip; failures and interruption retain
-   their semantic treatments (the interactive "Failed" chip). */
+/* The processing wheel shares the pending mark's compact footprint and quiet
+   neutral colour. Shape and motion, rather than accent tint, signal work. */
 
 .tool-call-status-spinner {
   flex: 0 0 auto;
@@ -973,73 +1240,15 @@
   height: 11px;
   box-sizing: border-box;
   border-radius: 999px;
-  border: 1.5px solid color-mix(in srgb, var(--panel-accent) 26%, transparent);
-  border-top-color: var(--panel-accent);
+  border: 1.5px solid color-mix(in srgb, var(--panel-muted) 26%, transparent);
+  border-top-color: var(--panel-muted);
   animation: panel-loading-wheel-spin 0.72s linear infinite;
   will-change: transform;
 }
 
-/* Completion feedback is confined to the tool-name text—no card ring/glow. */
-.tool-call-just-completed .transcript-header-title-mono {
-  animation: tool-call-completed-text 700ms var(--panel-ease-out);
-}
-
-@keyframes tool-call-completed-text {
-  0%, 100% { color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted)); }
-  24% { color: color-mix(in srgb, var(--panel-success) 72%, var(--panel-foreground)); }
-}
-
-/* ── Tool-call body expand/collapse wrapper ──────────────────────────────── */
-/* Wraps ToolCallBody so the auto-shown shell body can animate closed after a
-   post-completion grace period (see tool-call-card.tsx).
-
-   CLOSE animates the grid-template-rows track 1fr→0fr only. The terminal
-   text stays crisp (clipped by the shrinking row) instead of fading —
-   fading monospace output alongside the clip read as twitchy double-motion.
-   Content is stable by close time (streaming has ended), so the track
-   animation is smooth with no height-growth conflict.
-
-   EXPAND is a one-shot @keyframes OPACITY fade-in (`data-expand`), not a
-   grid animation: the expand happens WHILE streaming, and animating the
-   0fr→1fr track against a growing content height (the 1fr reference changes
-   mid-animation) stuttered. Opacity doesn't touch layout, so it composites
-   cleanly over the streaming growth. A keyframes animation is used instead
-   of a transition because `transition: none` is in effect while streaming,
-   and CSS animations are not suppressed by it. Scoped to the AUTO-show path
-   (not manual opens) so it pairs with the auto-close: manual toggles stay
-   instant in both directions, matching prior behaviour. */
-
-.tool-call-body-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  /* 300ms — keep in sync with TOOL_CALL_CLOSE_TRANSITION_MS in tool-call-card.tsx */
-  transition: grid-template-rows 300ms var(--panel-ease-out);
-}
-
-.tool-call-body-wrap[data-closing="true"] {
-  grid-template-rows: 0fr;
-}
-
-/* Suppress transitions while streaming so per-delta height changes don't
-   thrash; only the post-grace close animates. The initial expand uses a
-   @keyframes animation (data-expand) which is unaffected by this. */
-.tool-call-body-wrap[data-streaming="true"] {
-  transition: none;
-}
-
-/* One-shot expand fade-in for the AUTO-shown body (symmetric with the
-   post-grace close). Opacity-only — see the block comment above. `both`
-   fill-mode applies the from-state (opacity 0) on first paint so the body
-   never flashes at full opacity before the fade begins. */
-@keyframes tool-call-body-expand {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.tool-call-body-wrap[data-expand="true"] {
-  /* var(--panel-duration-entrance) — keep in sync with TOOL_CALL_EXPAND_MS in tool-call-card.tsx */
-  animation: tool-call-body-expand var(--panel-duration-entrance) var(--panel-ease-out-expo) both;
-}
+/* Manual disclosure is immediate. No completion timer changes the user's
+   inspector state or briefly mounts a terminal during a fast command. */
+.tool-call-body-wrap { display: grid; grid-template-rows: 1fr; }
 
 .tool-call-body-wrap > .tool-call-body-inner {
   overflow: hidden;

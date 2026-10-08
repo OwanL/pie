@@ -2,17 +2,21 @@
 /** @jsxImportSource preact */
 
 import type { ToolCall } from '../../../lib/protocol/index.js';
-import { cx } from '../../lib/components/cx';
 import { CollapsibleChevron } from '../../lib/components/chevron';
 import { formatDuration } from '../header';
 import { StatusChip } from '../status-chip';
 import { DEFAULT_CHAT_PREFS, type ChatPrefs } from '../../../lib/protocol/index.js';
-
 import { CollapsedSummary } from './collapsed-summary';
 import { ToolCallStatusGlyph } from './status-glyph';
 import { buildToolCallHeaderSummaryModel } from './summary-model';
 import type { ToolCallHeaderSummaryModel } from './types';
 import { ToolResultPruningBadge, type ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
+import { ToolIcon, toolIconKind } from './tool-icon';
+import { RawToolInspector } from './raw-tool-inspector';
+import { splitSummaryPath } from '../../file-changes/file-path';
+import { normalizeToolCallName } from '../tool-call-summary-model';
+import { toolHeaderDetail } from './header-details';
+import { readOutputPreview } from './read-output-preview';
 
 interface ToolCallHeaderProps {
   open: boolean;
@@ -25,86 +29,64 @@ interface ToolCallHeaderProps {
   summaryModel?: ToolCallHeaderSummaryModel;
   sizeHint?: string;
   errorDetail?: string;
-  /** Inline ✂ badge from the tool-result-pruner extension (`result.details.pruningBadge`).
-   *  Rendered before the duration so it's visible even when the card is collapsed. */
   pruningBadge?: ToolResultPruningBadgeData | null;
   durationMs?: number;
-  /** id of the body region this header controls, set as `aria-controls`.
-   *  Only passed when the body is actually mounted (see ToolCallCard) so the
-   *  reference never points at a missing element. */
   ariaControls?: string;
   prefs?: ChatPrefs;
+  toolCall?: ToolCall;
   onOpenFile: (path: string) => void;
-  /** Toggle the card's expanded state. The header is the toggle target so the
-   *  card body stays a plain region (its selectable/copyable content remains
-   *  reachable to AT) instead of being nested inside a button role. */
   onToggle: () => void;
 }
 
-export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, prefs = DEFAULT_CHAT_PREFS, onOpenFile, onToggle }: ToolCallHeaderProps) {
-  const statusTone = status === 'failed' ? 'failed' : null;
-  const statusLabel = status === 'failed' ? 'Failed' : null;
-  const accessibleStatus =
-    status === 'drafting' ? 'Drafting'
-    : status === 'ready' ? 'Ready'
-    : status === 'running' ? 'Running'
-    : status === 'failed' ? 'Failed'
-    : 'Completed';
-  const collapsedSummaryModel = summaryModel ?? buildToolCallHeaderSummaryModel(name, summary, summaryPath);
-  // Hide the header summary while the tool body is already visible (e.g.
-  // shell tools that auto-expand while running). The body renders its own
-  // command line / details, so showing the summary in the header duplicates it.
-  const showSummary = !bodyVisible && !open && !!collapsedSummaryModel;
-  const showSizeHint = !open && !!sizeHint;
-  const durationLabel =
-    status !== 'running' && typeof durationMs === 'number' && durationMs >= 0
-      ? formatDuration(durationMs)
-      : null;
-
-  // The entire header row is one expand/collapse hitbox: a single
-  // role=button spanning the full card width with a clear hover/focus
-  // affordance (see `.tool-call-header` in tool-call.css) and a compact
-  // min-height so it is easy to hit without dominating the card. Its `title`
-  // flips to "Collapse"/"Expand" so the click intent is obvious — this is the
-  // TOP close target; the trailing `CollapsibleChevron` is the SIDE target,
-  // and the `CollapsibleCloseFooter` at the bottom of the body is the BOTTOM
-  // target. The header is non-sticky (it used to pin and read as a detaching
-  // bar); the footer keeps the close reachable in a tall body. The StatusChip
-  // (copy-error) and ClickablePathButton (open file) live *inside* the toggle
-  // but stop propagation, so they keep their own behaviour without collapsing
-  // the card.
+export function ToolCallHeader({ open, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, prefs = DEFAULT_CHAT_PREFS, toolCall, onOpenFile, onToggle }: ToolCallHeaderProps) {
+  const kind = toolIconKind(toolCall?.name ?? name);
+  const accessibleStatus = status === 'drafting' ? 'Drafting' : status === 'ready' ? 'Ready' : status === 'running' ? 'Running' : status === 'failed' ? 'Failed' : 'Completed';
+  const model = summaryModel ?? buildToolCallHeaderSummaryModel(name, summary, summaryPath);
+  const accessibleTarget = model?.kind === 'command' ? model.title : model?.kind === 'path' ? summaryPath ?? model.title ?? model.text : summary;
+  const isSubagent = normalizeToolCallName(toolCall?.name ?? name) === 'subagent';
+  const filenameOnly = model?.kind === 'path' && !isSubagent;
+  const filePath = filenameOnly ? summaryPath ?? model.title ?? model.text : undefined;
+  const duration = (status === 'completed' || status === 'failed') && typeof durationMs === 'number' && durationMs >= 0 ? formatDuration(durationMs) : null;
+  const failureTiming = duration ? `Tool execution time: ${duration}` : undefined;
+  const detail = toolCall && !isSubagent ? toolHeaderDetail(toolCall) : null;
+  const preview = toolCall && !open ? readOutputPreview(toolCall) : null;
+  const active = status === 'drafting' || status === 'ready' || status === 'running';
+  const showSize = status !== 'failed' && !!sizeHint;
+  const showPruning = status !== 'failed' && !!pruningBadge && pruningBadge.tokensSaved > 0;
+  const hasMetadata = showSize || showPruning || duration || active || status === 'failed';
+  const canOpenFile = !!summaryPath && !!splitSummaryPath(summaryPath).fileSection;
   return (
-    <div
-      class="tool-call-header flex w-full min-h-[26px] cursor-pointer select-none items-center gap-1.5 px-2 py-[3px]"
-      role="button"
-      aria-expanded={open}
-      aria-controls={ariaControls}
-      aria-label={`${name} tool call, ${accessibleStatus}. ${open ? 'Collapse' : 'Expand'} details`}
-      title={open ? 'Collapse' : 'Expand'}
-      tabIndex={0}
-      onClick={onToggle}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
-    >
-      <div class={cx('flex min-w-0 flex-1 items-center', (showSummary || showSizeHint) ? 'gap-1.5' : 'gap-2')}>
-        <span class="transcript-header-title-mono min-w-0 flex-[0_1_auto] truncate" title={nameTitle}>{name}</span>
-        {showSummary && collapsedSummaryModel ? (
-          <CollapsedSummary model={collapsedSummaryModel} summaryPath={summaryPath} parentDepth={prefs.uiPathParentDepth} onOpenFile={onOpenFile} />
-        ) : null}
-        {showSizeHint && <span class="ml-auto block min-w-0 max-w-[var(--tool-call-size-column-width)] flex-[0_0_var(--tool-call-size-column-width)] truncate text-right font-mono text-[10px] text-muted/50">{sizeHint}</span>}
-      </div>
-      {pruningBadge && <ToolResultPruningBadge badge={pruningBadge} />}
-      {durationLabel && <span class="ml-auto flex-none whitespace-nowrap font-mono text-[10px] text-muted/60 [font-variant-numeric:tabular-nums]" title="Tool execution time">{durationLabel}</span>}
-      {status !== 'failed' && <ToolCallStatusGlyph status={status} />}
-      {statusTone && statusLabel && (
-        <StatusChip
-          tone={statusTone}
-          label={statusLabel}
-          className="status-chip-fixed"
-          copyText={errorDetail}
-          copyAriaLabel={errorDetail ? 'Copy tool-call error detail' : undefined}
-        />
-      )}
-      <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
+    <div class="tool-call-header">
+      {/* Icon inspection, disclosure and file/error actions are siblings.
+          Never nest another interactive target inside the native toggle. */}
+      {toolCall ? <RawToolInspector toolCall={toolCall} /> : <span class="tool-call-kind-icon"><ToolIcon kind={kind} /></span>}
+      <button type="button" class="tool-call-toggle" aria-expanded={open} aria-controls={ariaControls} data-pie-file-path={status !== 'drafting' && status !== 'ready' ? filePath : undefined}
+        aria-label={`${name} tool call, ${accessibleStatus}.${accessibleTarget ? ` ${accessibleTarget}.` : ''}${detail ? ` ${detail}.` : ''} ${open ? 'Collapse' : 'Expand'} details`}
+        title={`${filePath ?? nameTitle ?? name} · ${open ? 'Collapse' : 'Expand'} details`} onClick={onToggle}>
+        <span class="tool-call-heading-content">
+          {(kind === 'tool' || !model) && <span class="tool-call-name">{name}</span>}
+          {model && (isSubagent
+            ? <CollapsedSummary model={model} summaryPath={summaryPath} parentDepth={prefs.uiPathParentDepth} />
+            : <span class="tool-call-primary-summary"><CollapsedSummary model={model} summaryPath={summaryPath} parentDepth={filenameOnly ? 0 : prefs.uiPathParentDepth} /></span>)}
+          {preview && <span class="tool-call-read-preview" aria-hidden="true">{preview.end ? `${preview.start} … ${preview.end}` : preview.start}</span>}
+          {detail && <span class="tool-call-secondary-detail" title={detail}>{detail}</span>}
+        </span>
+        {isSubagent && <CollapsibleChevron open={open} class="tool-call-disclosure" />}
+      </button>
+      {canOpenFile && <div class="tool-call-actions">
+        <button type="button" class="tool-call-action" aria-label={`Open file ${summaryPath}`} title="Open file" onClick={() => onOpenFile(summaryPath!)}><ToolIcon kind="open" /></button>
+      </div>}
+      {/* Right-edge priority: failure > live/pending state > duration > pruning > size.
+          Keep low-priority metadata first and file actions outside the trailing edge. */}
+      {hasMetadata && <div class="tool-call-header-meta">
+        {showSize && <span class="tool-call-size" title={sizeHint}>{sizeHint}</span>}
+        {showPruning && <ToolResultPruningBadge badge={pruningBadge} compact />}
+        {duration && <span class="tool-call-duration" title="Tool execution time">{duration}</span>}
+        {status === 'failed' && <StatusChip tone="failed" label="Failed" copyText={errorDetail}
+          title={[errorDetail, failureTiming].filter(Boolean).join(' · ') || undefined}
+          copyAriaLabel={errorDetail ? 'Copy tool-call error detail' : undefined} />}
+        {active && <ToolCallStatusGlyph status={status} />}
+      </div>}
     </div>
   );
 }

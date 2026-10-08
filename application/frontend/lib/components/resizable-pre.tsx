@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
+import { useCallback, useLayoutEffect, useState } from 'preact/hooks';
 
 import { cx } from './cx';
 import { ResizeHandle } from './resize-handle';
@@ -14,6 +15,8 @@ interface ResizablePreProps {
   maxHeight?: number;
   onScroll?: () => void;
   onResizeStart?: () => void;
+  /** Quiet touch-only cue, shown only while this pre actually overflows. */
+  scrollHint?: string;
   children: ComponentChildren;
 }
 
@@ -26,7 +29,7 @@ interface ResizablePreProps {
  * Streaming panes (shell terminal, subagent thread) call `useResizableHeight`
  * directly so they can keep their own stick-to-bottom logic + ref.
  */
-export function ResizablePre({ class: className, minHeight, maxHeight, onScroll, onResizeStart, children }: ResizablePreProps) {
+export function ResizablePre({ class: className, minHeight, maxHeight, onScroll, onResizeStart, scrollHint, children }: ResizablePreProps) {
   const {
     scrollRef,
     height,
@@ -37,6 +40,29 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
     resizeBy,
     reset,
   } = useResizableHeight<HTMLPreElement>({ minHeight, maxHeight, onResizeStart });
+  const [overflows, setOverflows] = useState(false);
+  const measureHint = useCallback(() => {
+    const el = scrollRef.current;
+    const next = Boolean(scrollHint && el && (
+      el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
+    ));
+    setOverflows((previous) => previous === next ? previous : next);
+  }, [scrollHint, scrollRef]);
+  // Content and user height/reset changes can change scroll dimensions without
+  // changing the observed box. Measure after render as well as on box resize.
+  useLayoutEffect(() => { if (scrollHint) measureHint(); });
+  useLayoutEffect(() => {
+    if (!scrollHint) { setOverflows(false); return; }
+    const el = scrollRef.current;
+    if (!el) return;
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measureHint) : undefined;
+    observer?.observe(el);
+    if (typeof window !== 'undefined') window.addEventListener('resize', measureHint);
+    return () => {
+      observer?.disconnect();
+      if (typeof window !== 'undefined') window.removeEventListener('resize', measureHint);
+    };
+  }, [scrollHint, scrollRef, measureHint]);
   return (
     <div class="resizable-scroll-area">
       {canResize && (
@@ -58,6 +84,7 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
       >
         {children}
       </pre>
+      {scrollHint && overflows && <div class="resizable-scroll-hint">{scrollHint}</div>}
       {canResize && (
         <ResizeHandle
           edge="bottom"

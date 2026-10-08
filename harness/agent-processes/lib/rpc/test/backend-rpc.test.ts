@@ -5,6 +5,16 @@ import { validateDetailFetch, validateDetailSubscribe, validateDetailUnsubscribe
 import { THINKING_LEVELS } from '../../../../model-providers/catalog/thinking-level.js';
 import { DEFAULT_SUBAGENT_MAX_INFLIGHT } from '../../../../../lib/concurrency-config.js';
 
+test('validateMessageSend validates the per-send refresh hint', () => {
+  const base = { sessionPath: '/workspace/session.jsonl', text: 'hello' };
+  for (const refreshPruning of [true, false]) {
+    assert.equal(validateMessageSend({ ...base, refreshPruning }).refreshPruning, refreshPruning);
+  }
+  for (const refreshPruning of [null, 'true', 1, {}]) {
+    assert.throws(() => validateMessageSend({ ...base, refreshPruning }), /refreshPruning must be boolean/);
+  }
+});
+
 test('validateMessageSend requires an explicit sessionPath', () => {
   assert.throws(
     () => validateMessageSend({ text: 'hello' }),

@@ -10,6 +10,7 @@ import {
   MARKDOWN_FILE_PATH_CLASS,
   MARKDOWN_FILE_PATH_ATTRIBUTE,
 } from './markdown-file-path';
+import { INLINE_IMAGE_ATTRIBUTE, localRasterImageReference } from './inline-markdown-image';
 import { highlightCodeBlock } from './highlight';
 import { LruCache } from '../lib/lru-cache';
 
@@ -28,6 +29,12 @@ function escapeHtml(value: string): string {
 
 marked.use({
   renderer: {
+    image({ href, title, text }) {
+      const reference = localRasterImageReference(href);
+      if (!reference) return false;
+      const titleAttribute = title ? ` title="${escapeMarkdownHtmlAttribute(title)}"` : '';
+      return `<span class="inline-markdown-image" ${INLINE_IMAGE_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(reference)}" data-pie-image-alt="${escapeMarkdownHtmlAttribute(text)}"${titleAttribute}><span class="inline-markdown-image-fallback">${escapeMarkdownHtmlText(text || reference)}</span></span>`;
+    },
     codespan({ text }) {
       const escapedText = escapeMarkdownHtmlText(text);
       if (!isLocalFilePath(text)) {
@@ -233,17 +240,24 @@ export function renderMarkdown(text: string, cache = true, interactiveFilePaths 
     .replace(/<\/table>/g, '</table></div>');
   const proseLinkedHtml = interactiveFilePaths ? linkifyOrdinaryProseHtml(withTableWrappers) : withTableWrappers;
   const sanitizedHtml = DOMPurify.sanitize(proseLinkedHtml, { RETURN_DOM: false });
-  const html = interactiveFilePaths ? sanitizedHtml : stripInteractiveFilePathMarkup(sanitizedHtml);
+  const html = interactiveFilePaths ? sanitizedHtml : stripInteractiveFilePathMarkup(sanitizedHtml)
+    .replace(/\sdata-pie-inline-image="[^"]*"/g, '')
+    .replace(/\sdata-pie-image-alt="[^"]*"/g, '');
   if (cache) markdownCache.set(cacheKey, html);
   return html;
 }
 
-export function reasoningSummary(text: string): string {
-  const stripped = text
+/** Single-line reasoning preview. The row, not a character cap, clips it. */
+export function reasoningPreview(text: string): string {
+  return text
     .replace(/\*\*?(.*?)\*\*?/g, '$1')
     .replace(/`{1,3}[^`]*`{1,3}/g, '')
     .replace(/#{1,6}\s+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function reasoningSummary(text: string): string {
+  const stripped = reasoningPreview(text);
   return stripped.length > 80 ? stripped.slice(0, 80) + '...' : stripped;
 }

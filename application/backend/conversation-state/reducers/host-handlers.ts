@@ -166,6 +166,9 @@ export function handleBackendReadyWatchdogFired(
   const nextState = produce(state, (draft) => {
     for (const entry of allEntries) {
       removeMessage(draft, entry.sessionPath, entry.localId);
+      if (entry.refreshPruning && draft.sessions.openTabPaths.includes(entry.sessionPath)) {
+        draft.composer.pruningRefreshPendingBySession[entry.sessionPath] = true;
+      }
       const operation = entry.operationId ? draft.operations[entry.operationId] : undefined;
       if (operation?.kind === 'message.send' && !operation.terminal) {
         const settled = settleSessionOperationFailed(operation, {

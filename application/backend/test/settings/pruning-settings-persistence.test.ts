@@ -11,6 +11,7 @@ import {
 } from '../../settings/pruning-settings-persistence';
 import type { PruningSettings } from '../../../lib/protocol/index.js';
 import { DEFAULT_PRUNING_SETTINGS } from '../../../lib/protocol/index.js';
+import { readPruningSettings, writePruningSettings } from '../../settings/pruning-settings';
 
 function createStorage(initial?: PruningSettings): PruningSettingsStorage {
   let value: PruningSettings | undefined = initial;
@@ -179,6 +180,45 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
     } else {
       delete process.env.PI_CODING_AGENT_DIR;
     }
+  }
+});
+
+test('follow-up pruning reads legacy defaults and persists updates without disturbing other fields', async () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const tempDir = mkdtempSync(path.join(tmpdir(), 'pie-pruning-follow-up-'));
+  process.env.PI_CODING_AGENT_DIR = tempDir;
+  const settingsPath = path.join(tempDir, 'settings.json');
+  const original = {
+    unrelated: { enabled: true },
+    pruning: {
+      mode: 'shadow', model: 'custom-model', provider: 'custom-provider', thinkingLevel: 'high',
+      mainAgentEnabled: false, subagentEnabled: true, prepassTimeoutSec: 45,
+      prepass: { temperature: 0.2, maxTransportRetries: 3 },
+      skills: { ceiling: 9, pinned: ['diagnose'], alwaysKeep: ['develop-pie'] },
+      tools: { ceiling: 7, dependencies: { edit: ['read'] }, alwaysKeep: ['bash'] },
+      futureField: { keep: 'unchanged' },
+    },
+  };
+  try {
+    assert.equal((await readPruningSettings()).followUpEnabled, false);
+    for (const followUpEnabled of [undefined, 'true', 1, null, false, true]) {
+      writeFileSync(settingsPath, JSON.stringify({ ...original, pruning: { ...original.pruning, followUpEnabled } }));
+      assert.equal((await readPruningSettings()).followUpEnabled, followUpEnabled === true);
+    }
+    writeFileSync(settingsPath, JSON.stringify(original));
+    for (const followUpEnabled of [true, false]) {
+      const updated = await writePruningSettings({ followUpEnabled });
+      assert.equal(updated.followUpEnabled, followUpEnabled);
+      assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), {
+        ...original, pruning: { ...original.pruning, followUpEnabled },
+      });
+      await writePruningSettings({});
+      assert.equal((await readPruningSettings()).followUpEnabled, followUpEnabled);
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+    if (previous !== undefined) process.env.PI_CODING_AGENT_DIR = previous;
+    else delete process.env.PI_CODING_AGENT_DIR;
   }
 });
 

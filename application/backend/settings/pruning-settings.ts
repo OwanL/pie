@@ -94,6 +94,10 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       ? pruning.subagentEnabled
       : DEFAULT_PRUNING_SETTINGS.subagentEnabled;
 
+    const followUpEnabled = typeof pruning.followUpEnabled === 'boolean'
+      ? pruning.followUpEnabled
+      : DEFAULT_PRUNING_SETTINGS.followUpEnabled;
+
     const prepassTimeoutSec = typeof pruning.prepassTimeoutSec === 'number' && Number.isFinite(pruning.prepassTimeoutSec) && pruning.prepassTimeoutSec > 0
       ? pruning.prepassTimeoutSec
       : DEFAULT_PRUNING_SETTINGS.prepassTimeoutSec;
@@ -109,6 +113,7 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       thinkingLevel,
       mainAgentEnabled,
       subagentEnabled,
+      followUpEnabled,
       prepassTimeoutSec,
     };
   } catch {
@@ -175,6 +180,7 @@ export async function writePruningSettings(
     if (updates.thinkingLevel !== undefined) pruning.thinkingLevel = updates.thinkingLevel;
     if (updates.mainAgentEnabled !== undefined) pruning.mainAgentEnabled = updates.mainAgentEnabled;
     if (updates.subagentEnabled !== undefined) pruning.subagentEnabled = updates.subagentEnabled;
+    if (updates.followUpEnabled !== undefined) pruning.followUpEnabled = updates.followUpEnabled;
     if (updates.prepassTimeoutSec !== undefined) pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
 
     return { ...existing, pruning };

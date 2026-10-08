@@ -3,6 +3,7 @@
 
 import type { ComponentChildren } from 'preact';
 import type { JSX } from 'preact';
+import { SettingsHelp } from './settings-help';
 
 export interface SliderRowProps {
   label: string;
@@ -21,10 +22,10 @@ export interface SliderRowProps {
   tooltip?: string;
 }
 
-/** A full-width labeled range control (`toolbar-settings-ui-control` head with
- *  label + formatted value, then a `.toolbar-settings-ui-slider` range input,
- *  then an optional hint). The compact inline `.toolbar-settings-slider` rows
- *  (e.g. the sound volume row) are intentionally not covered by this primitive. */
+/** A compact full-width range control with label/help, native range input, and
+ *  formatted value as three direct children. The compact inline
+ *  `.toolbar-settings-slider` rows (e.g. the sound volume row) are intentionally
+ *  not covered by this primitive. */
 export function SliderRow({
   label,
   value,
@@ -42,11 +43,11 @@ export function SliderRow({
     onChange(Number((event.target as HTMLInputElement).value));
   };
   return (
-    <div class="toolbar-settings-ui-control">
+    <div class="toolbar-settings-ui-control toolbar-settings-slider-row">
       <div class="toolbar-settings-ui-control-head">
-        <span class="toolbar-settings-ui-control-label">{label}</span>
-        <span class="toolbar-settings-ui-control-value">
-          {formatValue ? formatValue(value) : value}
+        <span>
+          <span class="toolbar-settings-ui-control-label">{label}</span>
+          {hint && <SettingsHelp label={label}>{hint}</SettingsHelp>}
         </span>
       </div>
       <input
@@ -62,7 +63,9 @@ export function SliderRow({
         aria-valuetext={formatValue ? formatValue(value) : undefined}
         title={tooltip}
       />
-      {hint && <div class="toolbar-settings-item-hint">{hint}</div>}
+      <span class="toolbar-settings-ui-control-value">
+        {formatValue ? formatValue(value) : value}
+      </span>
     </div>
   );
 }

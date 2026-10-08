@@ -3,12 +3,8 @@
 
 import type { ToolCall } from '../../../lib/protocol/index.js';
 
-/** Compact status indicator shown at the right of the tool-call header: a
- *  spinner while running, nothing once completed. Failed keeps the
- *  interactive "Failed" status chip (with copy-error affordance) rendered by
- *  the header, so it is intentionally absent here. Follows an "alert on
- *  failure, not on success" philosophy — completion is the expected/default
- *  state and gets no glyph. */
+/** Pending and processing marks disappear at completion. Failure keeps the
+ *  header's visible, interactive Failed chip and copy-error affordance. */
 export function ToolCallStatusGlyph({ status }: { status: ToolCall['status'] }) {
   if (status === 'running') {
     return (
@@ -16,8 +12,12 @@ export function ToolCallStatusGlyph({ status }: { status: ToolCall['status'] }) 
         class="tool-call-status-spinner"
         role="img"
         aria-label="Running"
+        title="Running · processing"
       />
     );
+  }
+  if (status === 'drafting' || status === 'ready') {
+    return <span class="tool-call-status-draft" role="img" aria-label={status === 'drafting' ? 'Drafting' : 'Ready'} title={status === 'drafting' ? 'Generating tool arguments' : 'Arguments ready'} />;
   }
   return null;
 }

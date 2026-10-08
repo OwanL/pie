@@ -179,16 +179,20 @@ test('confirmed compiler close preserves ordinary success/failure results withou
 test('CLI reserves exit 125 for uncertainty even when compiler closes successfully', async (t) => {
   const fixture = projectFixture(t, async () => ({ gone: false, diagnostics: ['final census unavailable'] }));
   const target = {};
+  const tooling = { sdkPath: path.join(fixture.directory, 'tooling-sdk'), artifactDir: path.join(fixture.directory, 'tooling-runtime'), identity: 'verified-tooling' };
   let signalDisposed = false;
   const dependencies = {
     ...fixture.dependencies,
     process: target,
     abortOnProcessSignals: () => ({ signal: new AbortController().signal, dispose: () => { signalDisposed = true; } }),
+    spawn: (...args) => {
+      const child = fixture.dependencies.spawn(...args);
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    },
     withVerificationRuntime: async (selection, _signal, run) => {
       assert.equal(selection.artifactDir, fixture.runtime.artifactDir);
-      const pending = run(fixture.runtime);
-      fixture.child.emit('close', 0);
-      return pending;
+      return run({ ...fixture.runtime, getToolingRuntime: async () => tooling });
     },
   };
   await main(['--project', 'extension', '--pi-runtime', fixture.runtime.artifactDir], dependencies);
@@ -196,8 +200,93 @@ test('CLI reserves exit 125 for uncertainty even when compiler closes successful
   assert.equal(signalDisposed, false);
   assert.equal(fixture.disposed, 0);
   assert.equal(existsSync(path.join(fixture.directory, 'teardown.json')), true);
+  const evidence = JSON.parse(readFileSync(path.join(fixture.directory, 'teardown.json'), 'utf8'));
+  assert.deepEqual(evidence.sdkSelection, tooling);
   await main(['--project', 'missing'], dependencies);
   assert.equal(target.exitCode, 1);
+});
+
+test('help and list acquire neither verification runtime nor tooling', async () => {
+  let runtimeCalls = 0;
+  let toolingCalls = 0;
+  const dependencies = {
+    withVerificationRuntime: async (_selection, _signal, run) => {
+      runtimeCalls += 1;
+      return run({ getToolingRuntime: async () => { toolingCalls += 1; } });
+    },
+    abortOnProcessSignals: () => { throw new Error('unused command must not install signals'); },
+  };
+  for (const flag of ['--help', '--list']) await main([flag], dependencies);
+  assert.equal(runtimeCalls, 0);
+  assert.equal(toolingCalls, 0);
+});
+
+test('one awaited tooling verification supplies every project before overlays or compilers', async (t) => {
+  const fixture = projectFixture(t, async () => ({ gone: true }));
+  const tooling = { sdkPath: path.join(fixture.directory, 'tooling-sdk'), artifactDir: path.join(fixture.directory, 'tooling-runtime'), identity: 'verified-tooling' };
+  let release;
+  const verified = new Promise((resolve) => { release = () => resolve(tooling); });
+  let toolingCalls = 0;
+  let overlays = 0;
+  let children = 0;
+  let signalDisposed = false;
+  let completionConfirmed = false;
+  const target = {};
+  const pending = main(['--project', 'extension', '--project', 'analysis'], {
+    ...fixture.dependencies,
+    process: target,
+    abortOnProcessSignals: () => ({ signal: new AbortController().signal, dispose: () => { signalDisposed = true; } }),
+    withVerificationRuntime: async (_selection, _signal, run) => {
+      const result = await run({ ...fixture.runtime, getToolingRuntime: () => { toolingCalls += 1; return verified; } });
+      assert.equal(fixture.disposed, 2, 'confirmed children dispose overlays before runtime completion');
+      completionConfirmed = true;
+      return result;
+    },
+    createTsconfigOverlay: (config, options) => {
+      overlays += 1;
+      assert.equal(options.sdkPath, tooling.sdkPath);
+      return fixture.dependencies.createTsconfigOverlay(config, options);
+    },
+    spawn: () => {
+      children += 1;
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    },
+  });
+  assert.equal(toolingCalls, 1);
+  assert.equal(overlays, 0);
+  assert.equal(children, 0);
+  release();
+  await pending;
+  assert.equal(toolingCalls, 1);
+  assert.equal(overlays, 2);
+  assert.equal(children, 2);
+  assert.equal(completionConfirmed, true);
+  assert.equal(signalDisposed, true);
+  assert.equal(target.exitCode, undefined);
+});
+
+test('failed tooling verification launches no overlay or compiler', async () => {
+  const target = {};
+  const logs = [];
+  let toolingCalls = 0;
+  let signalDisposed = false;
+  await main(['--project', 'extension'], {
+    process: target,
+    console: { error: (line) => logs.push(line) },
+    abortOnProcessSignals: () => ({ signal: new AbortController().signal, dispose: () => { signalDisposed = true; } }),
+    withVerificationRuntime: async (_selection, _signal, run) => run({
+      sdkPath: 'runtime-only',
+      getToolingRuntime: async () => { toolingCalls += 1; throw new Error('tooling verification failed'); },
+    }),
+    createTsconfigOverlay: () => assert.fail('verification must precede overlays'),
+    spawn: () => assert.fail('verification must precede compilers'),
+  });
+  assert.equal(toolingCalls, 1);
+  assert.equal(target.exitCode, 1);
+  assert.deepEqual(logs, ['tooling verification failed']);
+  assert.equal(signalDisposed, true);
 });
 
 test('failed workers join already-launched siblings and propagate later uncertainty', async () => {

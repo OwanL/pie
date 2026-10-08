@@ -17,6 +17,20 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
   return { ...DEFAULT_CHAT_PREFS, ...overrides };
 }
 
+async function focusedTooltip(container: HTMLElement, label: string): Promise<string> {
+  const trigger = container.querySelector(`[aria-label="About ${label}"]`) as HTMLButtonElement | null;
+  assert.ok(trigger, `help button for ${label} exists`);
+  await act(async () => {
+    trigger!.focus();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  });
+  const hostId = trigger!.getAttribute('aria-describedby')?.split(' ').at(-1);
+  const host = hostId ? document.getElementById(hostId) : null;
+  assert.ok(host, `focused ${label} help appears`);
+  assert.equal(host.querySelector('.toolbar-settings-help-button'), null, 'help must expose copy directly, not another tooltip trigger');
+  return host.textContent ?? '';
+}
+
 const AVAILABLE_MODELS: ModelInfo[] = [
   { id: 'haiku', name: 'Haiku', provider: 'anthropic', reasoning: false, thinkingLevels: ['off'], inputKinds: ['text'] },
   { id: 'sonnet', name: 'Sonnet', provider: 'anthropic', reasoning: true, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'], inputKinds: ['text', 'image'] },
@@ -37,14 +51,12 @@ test('SubagentSection renders behavior and nesting controls without model bucket
   assert.match(html, /toolbar-settings-ext-settings/);
   assert.match(html, /Always use parent model</);
   assert.match(html, /Route around busy providers</);
-  assert.match(html, /If capacity is unavailable or every candidate is busy/);
   assert.match(html, /Fallback on provider failure</);
-  assert.match(html, /another model in the same bucket/);
   assert.match(html, /aria-checked="true"[\s\S]*?Fallback on provider failure/);
 
   // Default provider section explains why it has no toggles until buckets are configured.
   assert.match(html, /Default providers</);
-  assert.match(html, /Add models to the buckets in Models to configure provider defaults/);
+  assert.match(html, /No providers configured/);
 
   assert.doesNotMatch(html, /Low-cost busywork/);
   assert.doesNotMatch(html, /Choose model for Small bucket/);
@@ -55,6 +67,118 @@ test('SubagentSection renders behavior and nesting controls without model bucket
   assert.match(html, /Max active trees</);
   assert.doesNotMatch(html, /Max concurrency</);
   assert.doesNotMatch(html, /Max parallel tasks</);
+});
+
+test('SubagentSection groups common controls under accessible content headings', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    act(() => render(h(SubagentBehaviorSection, {
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [],
+          frontier: [],
+        },
+      }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+    }), container));
+
+    const groups = [...container.querySelectorAll('.toolbar-settings-content-group')];
+    const names = ['Model selection & routing', 'Tools', 'Delegation', 'Limits'];
+    assert.deepEqual(groups.map((group) => group.getAttribute('aria-label')), names);
+    for (const [index, group] of groups.entries()) {
+      assert.equal(group.getAttribute('role'), 'group');
+      assert.equal(group.querySelector('h3.toolbar-settings-content-group-title')?.textContent, names[index]);
+    }
+    const expectedCheckboxes = [
+      ['Always use parent model', 'Route around busy providers', 'Fallback on provider failure', 'anthropic'],
+      [],
+      ['Allow Frontier', 'Allow Medium', 'Allow Small', 'Allow Frontier subagents to delegate', 'Allow Medium subagents to delegate', 'Allow Small subagents to delegate'],
+      [],
+    ];
+    const expectedControlCounts = [4, 1, 6, 3];
+    for (const [index, group] of groups.entries()) {
+      assert.deepEqual([...group.querySelectorAll('[role="checkbox"]')].map((control) => control.textContent?.trim()), expectedCheckboxes[index]);
+      const controls = [...group.querySelectorAll('[role="checkbox"], input[type="text"], input[type="range"]')];
+      assert.equal(controls.length, expectedControlCounts[index], `${names[index]} control count`);
+      for (const control of controls) {
+        assert.equal(control.closest('.toolbar-settings-content-group'), group, `${control.getAttribute('aria-label') ?? control.textContent?.trim()} belongs to ${names[index]}`);
+      }
+    }
+    assert.ok(groups[0].textContent?.includes('Default providers'));
+    assert.ok(groups[1].querySelector('[aria-label="Add a tool name to drop for subagents"]'));
+    assert.deepEqual([...groups[2].querySelectorAll('h4')].map((heading) => heading.textContent), ['Nested bucket allowlist', 'Delegation by bucket']);
+    assert.deepEqual([...groups[3].querySelectorAll('input[type="range"]')].map((control) => control.getAttribute('aria-label')), [
+      'Subagent nesting levels', 'Max subagent sessions across the nested tree', 'Max concurrent root subagent trees',
+    ]);
+    assert.equal(container.querySelector('details, [aria-expanded]'), null, 'common controls are not hidden in an accordion');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
+test('Subagent explanations are available in keyboard-focused help tooltips', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    act(() => render(h(SubagentBehaviorSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }], medium: [], frontier: [] } }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      providerGateStats: {
+        enabled: true,
+        providers: [],
+        subagentConcurrency: {
+          scope: 'worker-process',
+          configured: { value: 6, source: 'environment-override' },
+          workerCount: 3,
+          pendingWorkers: 2,
+        },
+      },
+    }), container));
+
+    assert.match(await focusedTooltip(container, 'Route around busy providers'), /immediate ProviderGate slot; if none is available, use normal selection and queue/);
+    assert.match(await focusedTooltip(container, 'Fallback on provider failure'), /before visible output or tool execution\. Work is never replayed/);
+    assert.match(await focusedTooltip(container, 'Default providers'), /per-chat changes override it.*live model list is stale.*Add models to the buckets/);
+    assert.match(await focusedTooltip(container, 'Nested bucket allowlist'), /disallowed requests downgrade to the highest allowed tier/);
+    assert.match(await focusedTooltip(container, 'Delegation by bucket'), /disabled tiers become leaves and subagent-tool calls return an error/);
+    assert.match(await focusedTooltip(container, 'Drop tools for subagents'), /explicit tools: lists and unrestricted agents/);
+    assert.match(await focusedTooltip(container, 'Nesting levels'), /0 disables subagents/);
+    assert.match(await focusedTooltip(container, 'Tree session budget'), /Caps the cost of deeper delegation/);
+    const throughputHelp = await focusedTooltip(container, 'Throughput');
+    assert.match(throughputHelp, /Sibling subagent calls run concurrently/);
+    assert.match(throughputHelp, /Preference: 8 · Configured default/);
+    assert.match(throughputHelp, /Runtime configured: 6 · Environment override/);
+    assert.match(throughputHelp, /Applied: awaiting sync \(2 pending\)/);
+    assert.match(throughputHelp, /Worker-process scope · 3 workers.*shared by sessions in that process/);
+    assert.match(await focusedTooltip(container, 'Max active trees'), /not across all sessions or processes/);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.pie-tooltip-host').forEach((element) => element.remove());
+  }
+});
+
+test('Subagent model bucket explanations are available through focused help', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+    assert.match(await focusedTooltip(container, 'Small bucket models'), /Low-cost busywork.*Empty buckets use the parent model and its reasoning level/);
+    assert.match(await focusedTooltip(container, 'Subagent model buckets'), /balanced random cycle.*Empty buckets fall back to the parent's active model/);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.pie-tooltip-host').forEach((element) => element.remove());
+  }
 });
 
 test('SubagentSection distinguishes saved tree preference from pending worker-process acknowledgement', () => {
@@ -69,6 +193,7 @@ test('SubagentSection distinguishes saved tree preference from pending worker-pr
         subagentConcurrency: {
           scope: 'worker-process',
           configured: { value: 6, source: 'environment-override' },
+          effective: { value: 4, source: 'saved-preference' },
           workerCount: 3,
           pendingWorkers: 2,
         },
@@ -76,11 +201,7 @@ test('SubagentSection distinguishes saved tree preference from pending worker-pr
     }),
   );
 
-  assert.match(html, /Preference: 8 · Saved preference/);
-  assert.match(html, /Runtime configured: 6 · Environment override/);
-  assert.match(html, /Applied: awaiting sync \(2 pending\)/);
-  assert.match(html, /Worker-process scope · 3 workers/);
-  assert.match(html, /not a cap across all sessions or processes/);
+  assert.match(html, /toolbar-settings-runtime-status">Applied: 4 · Saved preference · 2 workers pending sync/);
   assert.match(html, /max="16"/);
 });
 
@@ -93,9 +214,7 @@ test('SubagentSection reports unavailable runtime acknowledgement when metrics a
     }),
   );
 
-  assert.match(html, /Preference: 8 · Configured default/);
-  assert.match(html, /Runtime configured\/applied: unavailable/);
-  assert.match(html, /Worker-process scope · runtime status unavailable/);
+  assert.match(html, /toolbar-settings-runtime-status">Runtime unavailable</);
 });
 
 test('SubagentSection renders the nested-bucket allowlist toggles reflecting prefs', () => {
@@ -107,9 +226,9 @@ test('SubagentSection renders the nested-bucket allowlist toggles reflecting pre
     }),
   );
 
-  // Group label + hint explain the downgrade behaviour.
+  // The help trigger is present beside the subheading; explanation is tested through focusedTooltip.
   assert.match(html, /Nested bucket allowlist</);
-  assert.match(html, /downgraded to the highest allowed tier/);
+  assert.match(html, /About Nested bucket allowlist/);
   // All three tier toggles render, highest tier first.
   assert.match(html, /Allow Frontier/);
   assert.match(html, /Allow Medium/);
@@ -126,7 +245,7 @@ test('SubagentSection renders per-bucket delegation toggles reflecting prefs', (
   );
 
   assert.match(html, /Delegation by bucket</);
-  assert.match(html, /effective subagent tiers may create further subagents/);
+  assert.match(html, /About Delegation by bucket/);
   assert.match(html, /Allow Frontier subagents to delegate/);
   assert.match(html, /Allow Medium subagents to delegate/);
   assert.match(html, /Allow Small subagents to delegate/);
@@ -187,7 +306,7 @@ test('SubagentSection renders default toggles only for providers used by subagen
   );
 
   const defaultsStart = html.indexOf('Default providers');
-  const defaultsEnd = html.indexOf('Dropped tools');
+  const defaultsEnd = html.indexOf('aria-label="Tools"');
   const defaultsHtml = html.slice(defaultsStart, defaultsEnd);
   assert.match(defaultsHtml, />anthropic</);
   assert.match(defaultsHtml, />openai</);
@@ -221,7 +340,7 @@ test('SubagentSection renders selected bucket models as chips labelled with mode
   assert.match(html, /X-High/);
   assert.match(html, /Max/);
   // All buckets populated → no empty-bucket warnings.
-  assert.doesNotMatch(html, /inherits the parent model/);
+  assert.doesNotMatch(html, /Uses parent model/);
 });
 
 test('SubagentSection only offers reasoning levels supported by each model', () => {
@@ -254,8 +373,8 @@ test('SubagentSection add-model selects list only models not already in their bu
   assert.match(html, /aria-label="Choose model for Small bucket"/);
   // The two empty buckets (medium, frontier) each show an empty-bucket warning;
   // the populated small bucket does not.
-  const warnCount = (html.match(/inherits the parent model/g) ?? []).length;
-  assert.equal(warnCount, 2);
+  const inheritCount = (html.match(/Uses parent model/g) ?? []).length;
+  assert.equal(inheritCount, 2);
 });
 
 test('SubagentSection renders an empty-bucket warning per empty bucket', () => {
@@ -272,10 +391,11 @@ test('SubagentSection renders an empty-bucket warning per empty bucket', () => {
   const addCount = (html.match(/Add model…/g) ?? []).length;
   assert.equal(addCount, 3);
   assert.doesNotMatch(html, /toolbar-settings-keep-chips/);
-  // Each of the three empty buckets renders a warning row.
-  const warnCount = (html.match(/toolbar-settings-bucket-warning/g) ?? []).length;
-  assert.equal(warnCount, 3);
-  assert.match(html, /No assignments — inherits the parent model and reasoning/);
+  // Each empty bucket has a concise inheritance state; the full explanation is in focused help.
+  const inheritCount = (html.match(/toolbar-settings-bucket-inherit/g) ?? []).length;
+  assert.equal(inheritCount, 3);
+  assert.match(html, /Uses parent model/);
+  assert.doesNotMatch(html, /No assignments/);
 });
 
 test('SubagentSection does not warn for a bucket that has models', () => {
@@ -294,9 +414,9 @@ test('SubagentSection does not warn for a bucket that has models', () => {
     }),
   );
 
-  // Only the empty frontier bucket warns.
-  const warnCount = (html.match(/inherits the parent model/g) ?? []).length;
-  assert.equal(warnCount, 1);
+  // Only the empty frontier bucket shows inheritance state.
+  const inheritCount = (html.match(/toolbar-settings-bucket-inherit/g) ?? []).length;
+  assert.equal(inheritCount, 1);
 });
 
 test('SubagentSection add-model options exclude disabled-provider models (ComposerSettingsMenu composition)', () => {
@@ -367,6 +487,106 @@ test('SubagentSection selects a default reasoning level and adds with one click'
     container.remove();
     document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
   }
+});
+
+function withPendingBucket(run: (ui: {
+  container: HTMLDivElement;
+  calls: Partial<ChatPrefs>[];
+  rerender: (prefs: ChatPrefs, models?: ModelInfo[], entries?: ReturnType<typeof orderModelsForPicker>) => void;
+  pick: (name: string) => void;
+}) => void) {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  const rerender = (prefs: ChatPrefs, models = AVAILABLE_MODELS, entries?: ReturnType<typeof orderModelsForPicker>) => {
+    render(h(SubagentSection, { prefs, availableModels: models, modelEntries: entries, onSetPrefs: (patch) => calls.push(patch) }), container);
+  };
+  const pick = (name: string) => {
+    act(() => { (container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement).click(); });
+    const row = [...document.querySelectorAll('.model-picker-row')].find((entry) => entry.textContent?.includes(name));
+    assert.ok(row);
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+  };
+  try {
+    act(() => rerender(prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } })));
+    run({ container, calls, rerender, pick });
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+}
+
+const emptyBucketPrefs = () => prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } });
+
+test('pending bucket add cancels when its provider is disabled and restores only usable picker focus', () => {
+  withPendingBucket(({ container, calls, rerender, pick }) => {
+    pick('Sonnet');
+    act(() => {
+      rerender({ ...emptyBucketPrefs(), providerToggles: { anthropic: false } });
+      // Confirm before passive reconciliation runs, bypassing the disabled
+      // button's native click suppression to exercise the handler guard too.
+      container.querySelector('.toolbar-settings-bucket-add-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    assert.equal(calls.length, 0);
+    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    const trigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
+    assert.equal(document.activeElement, trigger);
+    pick('GPT-5');
+    act(() => rerender({ ...emptyBucketPrefs(), providerToggles: { anthropic: false, openai: false } }));
+    const disabledTrigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
+    assert.equal(disabledTrigger.disabled, true);
+    assert.notEqual(document.activeElement, disabledTrigger);
+    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('pending bucket add uses current picker capability metadata and preserves supported user choice', () => {
+  withPendingBucket(({ container, calls, rerender, pick }) => {
+    pick('Sonnet');
+    const high = [...container.querySelectorAll('.toolbar-settings-bucket-level')].find((pill) => pill.textContent === 'High') as HTMLButtonElement;
+    act(() => high.click());
+    act(() => rerender({ ...emptyBucketPrefs(), subagentMaxDepth: 3 }, [...AVAILABLE_MODELS], orderModelsForPicker([...AVAILABLE_MODELS])));
+    assert.equal(container.querySelector('.toolbar-settings-bucket-level.selected')?.textContent, 'High');
+    // The picker snapshot is authoritative, even if the full label catalog is stale.
+    const updated = AVAILABLE_MODELS.map((model) => model.id === 'sonnet' ? { ...model, thinkingLevels: ['low'] as ModelInfo['thinkingLevels'] } : model);
+    act(() => {
+      rerender(emptyBucketPrefs(), AVAILABLE_MODELS, orderModelsForPicker(updated));
+      container.querySelector('.toolbar-settings-bucket-add-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      container.querySelector('.toolbar-settings-bucket-add-row')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    assert.equal(calls.length, 0, 'removed reasoning level cannot be assigned before effects run');
+    assert.equal(container.querySelector('.toolbar-settings-bucket-level.selected')?.textContent, 'Low');
+    act(() => { (container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement).click(); });
+    assert.deepEqual(calls.at(-1)?.subagentBuckets?.small, [{ model: 'anthropic/sonnet', thinkingLevel: 'low' }]);
+  });
+});
+
+for (const spec of ['sonnet', 'anthropic/sonnet']) {
+  test(`pending bucket cancels newly selected duplicate ${spec} using catalog identity semantics`, () => {
+    withPendingBucket(({ container, calls, rerender, pick }) => {
+      pick('Sonnet');
+      act(() => {
+        rerender(prefsWith({ subagentBuckets: { small: [{ model: spec, thinkingLevel: 'high' }], medium: [], frontier: [] } }));
+        container.querySelector('.toolbar-settings-bucket-add-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      assert.equal(calls.length, 0);
+      assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    });
+  });
+}
+
+test('pending bucket preserves provider-disambiguated choice beside an ambiguous legacy id', () => {
+  withPendingBucket(({ container, calls, rerender, pick }) => {
+    const models = [...AVAILABLE_MODELS, { ...AVAILABLE_MODELS[1], provider: 'other', name: 'Other Sonnet' }];
+    act(() => rerender(emptyBucketPrefs(), models));
+    pick('anthropic · Sonnet');
+    act(() => rerender(prefsWith({ subagentBuckets: { small: [{ model: 'sonnet', thinkingLevel: 'high' }], medium: [], frontier: [] } }), models));
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row'));
+    act(() => { (container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement).click(); });
+    assert.ok(calls.at(-1)?.subagentBuckets?.small?.some((entry) => entry.model === 'anthropic/sonnet' && entry.thinkingLevel === 'medium'));
+  });
 });
 
 test('SubagentSection can cancel the pending model with the cancel button', () => {

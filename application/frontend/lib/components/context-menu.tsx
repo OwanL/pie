@@ -143,7 +143,7 @@ export function ContextMenu({
     );
   }
 
-  const prefType: ChatPrefContextType | null = menu.type === 'message' ? null : menu.type;
+  const prefType: ChatPrefContextType | null = menu.type === 'reasoning' || menu.type === 'subagentCalls' ? menu.type : null;
   const checked = prefType ? getChatPrefContextValue(prefs, prefType) : false;
   const expandLabel = prefType ? getChatPrefContextLabel(prefType) : '';
   const expandToggle = prefType ? (

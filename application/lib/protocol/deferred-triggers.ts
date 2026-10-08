@@ -3,7 +3,7 @@
  *
  * The host-side `DeferredTriggerRegistry` (extension host process) owns the
  * live active-trigger set, replayed from the `triggers.jsonl` sidecar. The
- * backend `defer_trigger` tool (backend process) appends `register` / `cancel`
+ * backend `wakeup_timer` tool (backend process) appends `register` / `cancel`
  * ops to that sidecar; the host registry watches the file and re-arms. These
  * types are the serializable projection of an active trigger that the host
  * merges into `ViewState.deferredTriggers` (see `PieExtension.buildViewState`)
@@ -43,6 +43,10 @@ export interface DeferredTriggerView {
   note: string;
   /** ISO timestamp of registration (used to render elapsed "waiting" time). */
   registeredAt: string;
+  /** Timer delays wait for the creator response to settle; legacy records use false. */
+  wakeupMode?: boolean;
+  /** First durable creator-owned timer start, when wakeupMode is true. */
+  timerStartedAt?: string;
   /** Durable delivery state. Claimed triggers remain visible but cannot be
    * dispatched by another host; retryable triggers were not consumed. */
   deliveryState: 'pending' | 'claimed' | 'retryable';

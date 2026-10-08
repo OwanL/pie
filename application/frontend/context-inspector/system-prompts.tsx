@@ -5,7 +5,6 @@ import { useState, useMemo } from 'preact/hooks';
 
 import type { SystemPromptEntry } from '../../lib/protocol/index.js';
 import { renderMarkdown, reasoningSummary } from '../transcript/markdown';
-import { cx } from '../lib/components/cx';
 import { Collapsible } from '../lib/components/collapsible';
 import {
   estimateSystemPromptTokens,
@@ -37,21 +36,22 @@ function SystemPromptCard({ prompt }: SystemPromptCardProps) {
   const [open, setOpen] = useState(false);
   const summary = getCollapsedSummary(prompt);
   const html = useMemo(() => (open ? renderMarkdown(prompt.text, true, false) : ''), [open, prompt.text]);
-  const showSummary = !open && !!summary;
+  const showSummary = !!summary;
 
   return (
     <Collapsible
       open={open}
       onToggle={setOpen}
-      ariaLabel="Toggle system prompt"
+      ariaLabel={`Toggle system prompt: ${prompt.title}`}
       class="system-prompt-card"
-      headerClass="px-2 py-[5px]"
-      bodyClass="px-2.5 pb-2.5 pt-1 leading-relaxed text-foreground"
+      headerClass="system-prompt-card-header"
+      bodyClass="system-prompt-card-body"
+      closeFooter={false}
       header={
         <>
-          <span class="transcript-header-title-mono min-w-0 flex-1 truncate">{prompt.title}</span>
+          <span class="system-prompt-title" title={prompt.title}>{prompt.title}</span>
           {showSummary && (
-            <span class="transcript-header-summary-mono min-w-0 max-w-[var(--tool-call-summary-column-width)] flex-[0_1_auto] truncate">{summary}</span>
+            <span class="system-prompt-summary" title={summary}>{summary}</span>
           )}
         </>
       }
@@ -71,12 +71,11 @@ interface SystemPromptMessageProps {
 export function SystemPromptMessage({ prompts }: SystemPromptMessageProps) {
   // Hide entries the user has toggled off — they're also stripped from the
   // prompt sent to the model, so they shouldn't appear in the transcript.
+  const [groupOpen, setGroupOpen] = useState(false);
   const visiblePrompts = prompts.filter((p) => !p.disabled);
   if (visiblePrompts.length === 0) {
     return null;
   }
-
-  const [groupOpen, setGroupOpen] = useState(false);
 
   const estimatedTokenCount = estimateSystemPromptTokens(visiblePrompts);
   const tokenLabel = estimatedTokenCount > 0
@@ -90,36 +89,23 @@ export function SystemPromptMessage({ prompts }: SystemPromptMessageProps) {
     ? `1 system prompt`
     : `${visiblePrompts.length} system prompts`;
 
-  const collapsedSummary = useMemo(() => {
-    // The provider entry is informational metadata — it describes the system
-    // prompt pi sends rather than being one — so exclude it from the group
-    // preview even when its resolved provider summary now shows on its own card.
-    const available = visiblePrompts.filter((p) => p.source !== 'provider' && getCollapsedSummary(p));
-    if (available.length === 0) return null;
-    if (available.length <= 2) {
-      return available.map((p) => p.title).join(' · ');
-    }
-    return `${available[0].title} + ${available.length - 1} more`;
-  }, [visiblePrompts]);
-
   return (
     <Collapsible
       open={groupOpen}
       onToggle={setGroupOpen}
-      ariaLabel="Toggle system prompts group"
-      class="flex w-auto min-w-0 self-stretch flex-col rounded-xl bg-card shadow-sm forced-colors:border forced-colors:border-[ButtonText]"
-      headerClass={cx('rounded-xl px-3 py-2', groupOpen && 'bg-control/60')}
-      bodyClass="flex flex-col gap-0.5 px-2 pb-2"
+      ariaLabel={`Toggle system prompts group: ${label}${tokenLabel ? `, ${tokenLabel}` : ''}`}
+      class="system-prompts"
+      headerClass="system-prompts-header"
+      bodyClass="system-prompts-body"
+      closeFooter={false}
       dataAttrs={{ 'data-role': 'system', 'data-scroll-anchor-id': 'system-prompts' }}
       header={
         <>
-          <span class="transcript-header-label">{label}</span>
-          {!groupOpen && collapsedSummary && (
-            <span class="transcript-header-summary min-w-0 truncate">{collapsedSummary}</span>
-          )}
-          {tokenLabel && (
-            <span class="ml-auto flex-none whitespace-nowrap font-mono text-[11px] text-muted" title={tokenTitle}>{tokenLabel}</span>
-          )}
+          <span class="system-prompts-label">System prompts</span>
+          <span class="system-prompts-context">
+            <span class="system-prompts-meta" title={label}>{visiblePrompts.length} {visiblePrompts.length === 1 ? 'entry' : 'entries'}</span>
+            {tokenLabel && <span class="system-prompts-meta system-prompts-tokens" title={tokenTitle}>{tokenLabel}</span>}
+          </span>
         </>
       }
     >

@@ -185,6 +185,8 @@ export interface PruningSettings {
   mainAgentEnabled?: boolean;
   /** Enables pruning for subagent turns; defaults to true for legacy settings. */
   subagentEnabled?: boolean;
+  /** Enables follow-up pruning; defaults to false for legacy settings. */
+  followUpEnabled?: boolean;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
 }
@@ -517,6 +519,7 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   thinkingLevel: 'minimal',
   mainAgentEnabled: true,
   subagentEnabled: true,
+  followUpEnabled: false,
   prepassTimeoutSec: null,
 };
 
@@ -631,6 +634,8 @@ export function mergePruningSettings(
       updates.mainAgentEnabled ?? current.mainAgentEnabled ?? DEFAULT_PRUNING_SETTINGS.mainAgentEnabled,
     subagentEnabled:
       updates.subagentEnabled ?? current.subagentEnabled ?? DEFAULT_PRUNING_SETTINGS.subagentEnabled,
+    followUpEnabled:
+      updates.followUpEnabled ?? current.followUpEnabled ?? DEFAULT_PRUNING_SETTINGS.followUpEnabled,
     prepassTimeoutSec:
       updates.prepassTimeoutSec !== undefined ? updates.prepassTimeoutSec : current.prepassTimeoutSec,
   };

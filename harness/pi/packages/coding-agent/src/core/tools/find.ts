@@ -323,7 +323,10 @@ export function createFindToolDefinition(
 						if (useRelativeMatcher) {
 							// fd 10.5 parses before discovery; depth zero validates the legacy
 							// effective glob (and error text) without walking or creating a fixture.
-							const validation = await runFd([...args, "--max-depth", "0", "--", effectivePattern, searchPath], true);
+							const validation = await runFd(
+								[...args, "--max-depth", "0", "--", effectivePattern, searchPath],
+								true,
+							);
 							if (validation.code !== 0) {
 								throw new Error(validation.stderr.trim() || `fd exited with code ${validation.code}`);
 							}

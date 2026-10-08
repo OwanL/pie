@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useId } from 'preact/hooks';
 import {
   DEFAULT_HISTORY_COMPACTION_SETTINGS,
   DEFAULT_HISTORY_COMPACTION_TOKEN_THRESHOLDS,
@@ -17,6 +18,7 @@ import {
 import { ModelAssignmentRow } from './model-assignment-row';
 import { NumberField } from './number-field';
 import { SettingCheckbox } from './setting-checkbox';
+import { SettingsHelp } from './settings-help';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -46,6 +48,7 @@ interface Props {
 }
 
 interface HistoryCompactionModelAssignmentProps {
+  compactLabels?: boolean;
   settings: HistoryCompactionSettings;
   availableModels: ModelInfo[];
   modelEntries: ModelPickerEntry[];
@@ -233,84 +236,88 @@ export function HistoryCompactionSection({
     <div class="toolbar-settings-section" data-settings-section="history-compaction">
       <div class="toolbar-settings-section-label">History compaction</div>
       <div class="toolbar-settings-list">
-        <SettingCheckbox
-          label="Proactive automatic compaction"
-          checked={settings.enabled}
-          onChange={() => update({ ...settings, enabled: !settings.enabled })}
-        />
+        <div class="toolbar-settings-content-group" role="group" aria-label="Triggers & retention">
+          <h3 class="toolbar-settings-content-group-title">Triggers &amp; retention<SettingsHelp label="Triggers & retention">
+            <p>Soft triggers compact after the current run settles. Hard triggers compact between complete agent steps before another model request; reasoning and running tools are never interrupted. Percentage thresholds are percentages of the context window, while token limits are absolute token counts. Recent retention is the number of tokens preserved during compaction; model profiles can override it in token mode. Provider-overflow recovery remains enabled as an emergency fallback.</p>
+            {resolvedSoft !== undefined && <p>Effective soft threshold: about {formatTokens(resolvedSoft)} tokens for this model.</p>}
+            {resolvedHard !== undefined && <p>Effective hard threshold: about {formatTokens(resolvedHard)} tokens for this model.</p>}
+          </SettingsHelp></h3>
+          <SettingCheckbox
+            label="Proactive automatic compaction"
+            checked={settings.enabled}
+            onChange={() => update({ ...settings, enabled: !settings.enabled })}
+          />
 
-        <div class="toolbar-settings-item toolbar-settings-mode-row">
-          <span class="toolbar-settings-item-label">Threshold type</span>
-          <select
-            class="toolbar-settings-select"
-            value={settings.thresholdMode}
+          <div class="toolbar-settings-item toolbar-settings-mode-row">
+            <span class="toolbar-settings-item-label">Threshold type</span>
+            <select
+              class="toolbar-settings-select"
+              value={settings.thresholdMode}
+              disabled={!settings.enabled}
+              aria-label="History compaction threshold type"
+              onChange={(event) => update(convertMode(settings, (event.target as HTMLSelectElement).value as HistoryCompactionThresholdMode, contextWindow))}
+            >
+              <option value="percentage">Percent of context</option>
+              <option value="tokens">Token limits</option>
+            </select>
+          </div>
+
+          <NumberField
+            label="Soft trigger"
+            min={settings.thresholdMode === 'tokens' ? Math.max(minimum, settings.keepRecentTokens + step) : minimum}
+            max={settings.hardThreshold - step}
+            step={step}
+            value={settings.softThreshold}
             disabled={!settings.enabled}
-            aria-label="History compaction threshold type"
-            onChange={(event) => update(convertMode(settings, (event.target as HTMLSelectElement).value as HistoryCompactionThresholdMode, contextWindow))}
-          >
-            <option value="percentage">Percent of context</option>
-            <option value="tokens">Token limits</option>
-          </select>
-        </div>
+            ariaLabel={`Soft compaction trigger${suffix}`}
+            unit={suffix.trim()}
+            onChange={(value) => updateThreshold('softThreshold', String(value))}
+          />
 
-        <NumberField
-          label="Soft trigger"
-          min={settings.thresholdMode === 'tokens' ? Math.max(minimum, settings.keepRecentTokens + step) : minimum}
-          max={settings.hardThreshold - step}
-          step={step}
-          value={settings.softThreshold}
-          disabled={!settings.enabled}
-          ariaLabel={`Soft compaction trigger${suffix}`}
-          onChange={(value) => updateThreshold('softThreshold', String(value))}
-        />
-        <div class="toolbar-settings-item-hint">
-          Compact after the current run settles{resolvedSoft !== undefined ? ` (about ${formatTokens(resolvedSoft)} tokens for this model)` : ''}.
-        </div>
-
-        <NumberField
-          label="Hard trigger"
-          min={settings.softThreshold + step}
-          max={maximum}
-          step={step}
-          value={settings.hardThreshold}
-          disabled={!settings.enabled}
-          ariaLabel={`Hard compaction trigger${suffix}`}
-          onChange={(value) => updateThreshold('hardThreshold', String(value))}
-        />
-        <div class="toolbar-settings-item-hint">
-          Compact between complete agent steps before another model request{resolvedHard !== undefined ? ` (about ${formatTokens(resolvedHard)} tokens for this model)` : ''}. Never interrupts reasoning or a running tool.
-        </div>
-
-        <NumberField
-          label="Recent retention"
-          min={0}
-          max={settings.thresholdMode === 'tokens' ? Math.max(0, settings.softThreshold - step) : 10_000_000}
-          step={step}
-          value={settings.keepRecentTokens}
-          disabled={!settings.enabled}
-          ariaLabel="Recent token retention"
-          onChange={(value) => updateKeepRecentTokens(String(value))}
-        />
-        <div class="toolbar-settings-item-hint">
-          Tokens to preserve when compacting. Profiles can override this in token mode.
-        </div>
-
-        <div class="toolbar-settings-item toolbar-settings-mode-row" style="align-items: flex-start;">
-          <span class="toolbar-settings-item-label" style="padding-top: 6px;">Summary instructions</span>
-          <textarea
-            class="toolbar-settings-select"
-            style="width: 100%; min-height: 60px; resize: vertical; text-align: left; font-variant-numeric: inherit;"
-            rows={3}
-            maxLength={4_000}
-            value={settings.summaryInstructions}
+          <NumberField
+            label="Hard trigger"
+            min={settings.softThreshold + step}
+            max={maximum}
+            step={step}
+            value={settings.hardThreshold}
             disabled={!settings.enabled}
-            aria-label="Summary instructions"
-            onInput={(event) => updateSummaryInstructions((event.target as HTMLTextAreaElement).value)}
+            ariaLabel={`Hard compaction trigger${suffix}`}
+            unit={suffix.trim()}
+            onChange={(value) => updateThreshold('hardThreshold', String(value))}
+          />
+
+          <NumberField
+            label="Recent retention"
+            min={0}
+            max={settings.thresholdMode === 'tokens' ? Math.max(0, settings.softThreshold - step) : 10_000_000}
+            step={step}
+            value={settings.keepRecentTokens}
+            disabled={!settings.enabled}
+            ariaLabel="Recent token retention"
+            unit="tokens"
+            onChange={(value) => updateKeepRecentTokens(String(value))}
           />
         </div>
 
+        <div class="toolbar-settings-content-group" role="group" aria-label="Summary instructions">
+          <h3 class="toolbar-settings-content-group-title">Summary instructions</h3>
+          <div class="toolbar-settings-instructions">
+            <textarea
+              class="toolbar-settings-select"
+              style="width: 100%; min-height: 60px; resize: vertical; text-align: left; font-variant-numeric: inherit;"
+              rows={3}
+              maxLength={4_000}
+              value={settings.summaryInstructions}
+              disabled={!settings.enabled}
+              aria-label="Summary instructions"
+              onInput={(event) => updateSummaryInstructions((event.target as HTMLTextAreaElement).value)}
+            />
+          </div>
+        </div>
+
         {settings.thresholdMode === 'tokens' && activeKey && (
-          <>
+          <div class="toolbar-settings-content-group" role="group" aria-label="Model overrides">
+            <h3 class="toolbar-settings-content-group-title">Model overrides</h3>
             <SettingCheckbox
               label="Custom thresholds for active model"
               checked={!!activeProfile}
@@ -328,6 +335,7 @@ export function HistoryCompactionSection({
                   value={activeProfile.softThreshold}
                   disabled={!settings.enabled}
                   ariaLabel="Active model soft threshold"
+                  unit="tokens"
                   onChange={(value) => updateProfile('softThreshold', String(value))}
                 />
                 <NumberField
@@ -338,6 +346,7 @@ export function HistoryCompactionSection({
                   value={activeProfile.hardThreshold}
                   disabled={!settings.enabled}
                   ariaLabel="Active model hard threshold"
+                  unit="tokens"
                   onChange={(value) => updateProfile('hardThreshold', String(value))}
                 />
                 <NumberField
@@ -348,16 +357,14 @@ export function HistoryCompactionSection({
                   value={activeProfile.keepRecentTokens}
                   disabled={!settings.enabled}
                   ariaLabel="Active model recent retention"
+                  unit="tokens"
                   onChange={(value) => updateProfile('keepRecentTokens', String(value))}
                 />
               </>
             )}
-          </>
+          </div>
         )}
 
-        <div class="toolbar-settings-item-hint">
-          Provider-overflow recovery remains enabled as an emergency fallback.
-        </div>
       </div>
     </div>
   );
@@ -365,12 +372,14 @@ export function HistoryCompactionSection({
 
 /** Models-tab assignment for history-compaction summaries. */
 export function HistoryCompactionModelAssignment({
+  compactLabels = false,
   settings,
   availableModels,
   modelEntries,
   activeModel,
   onSetPrefs,
 }: HistoryCompactionModelAssignmentProps) {
+  const disabledReasonId = `compaction-model-assignment-${useId()}`;
   const activeModelInfo = activeModel
     ? availableModels.find((model) => model.id === activeModel.id
       && (!activeModel.provider || model.provider === activeModel.provider))
@@ -394,6 +403,7 @@ export function HistoryCompactionModelAssignment({
   return (
     <div class="toolbar-settings-ext-settings">
       <ModelAssignmentRow
+        compactLabels={compactLabels}
         label="Summary model"
         entries={modelEntries}
         current={settings.summaryModel
@@ -403,6 +413,7 @@ export function HistoryCompactionModelAssignment({
         fallbackModel={activeModelInfo}
         clearable
         disabled={!settings.enabled}
+        ariaDescribedBy={!settings.enabled ? disabledReasonId : undefined}
         clearLabel="Use active model for summaries"
         clearTitle="Use active model"
         thinking={{
@@ -417,7 +428,7 @@ export function HistoryCompactionModelAssignment({
         dropdownDirection="down"
       />
       {!settings.enabled && (
-        <div class="toolbar-settings-item-hint">Enable history compaction in Context to change this assignment.</div>
+        <div id={disabledReasonId} class="toolbar-settings-item-hint">Enable history compaction in Context to change this assignment.</div>
       )}
     </div>
   );

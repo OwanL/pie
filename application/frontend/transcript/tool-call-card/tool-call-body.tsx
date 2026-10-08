@@ -21,24 +21,45 @@ import { isCommandSummaryTool } from './summary-model';
 import { TerminalOutput } from './terminal-output';
 import { hasImageToolResult, ToolResultContentParts } from './tool-result-content';
 import { SegmentedText, getToolTextSegmentThreshold } from './segmented-text';
+import { isRedundantToolConfirmation, visualToolInput } from './display-model';
+import { EditInputDetails, WriteInputDetails, ToolInputFields } from './visual-tool-input';
+import { isRecord } from '../../../../lib/validation/type-guards';
+import { resolveLocalFilePath } from '../markdown-file-path';
 
 interface ToolCallBodyProps {
   toolCall: ToolCall;
   prefs?: ChatPrefs;
   onOpenFile: (path: string) => void;
+  headerPath?: string;
+  workingDirectory?: string | null;
 }
 
-export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile }: ToolCallBodyProps) {
+export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile, headerPath, workingDirectory = null }: ToolCallBodyProps) {
   const isShell = isCommandSummaryTool(toolCall.name);
   const isRunning = toolCall.status === 'running';
   const isProvisional = toolCall.status === 'drafting' || toolCall.status === 'ready';
+
+  const normalizedName = normalizeToolCallName(toolCall.name);
+  const visualInput = visualToolInput(toolCall);
+  const resultDetails = isRecord(toolCall.result) && isRecord(toolCall.result.details) ? toolCall.result.details : undefined;
+  const resultDiff = toolCall.status === 'completed' && typeof resultDetails?.diff === 'string' ? resultDetails.diff : undefined;
+  const inputPath = isRecord(visualInput) && typeof visualInput.path === 'string' ? visualInput.path : undefined;
+  const resolvedInputPath = inputPath ? resolveLocalFilePath(inputPath, workingDirectory) : null;
+  const resolvedHeaderPath = typeof headerPath === 'string' ? resolveLocalFilePath(headerPath, workingDirectory) : null;
+  const pathsMatch = inputPath === headerPath || (resolvedInputPath !== null && resolvedHeaderPath !== null
+    && resolvedInputPath.replace(/\\/g, '/') === resolvedHeaderPath.replace(/\\/g, '/'));
+  const omitHeaderPath = !isProvisional && typeof headerPath === 'string' && pathsMatch ? ['path'] : [];
+  const renderInput = () => normalizedName === 'edit'
+    ? <EditInputDetails input={visualInput} identity={`${toolCall.id}:input`} resultDiff={resultDiff} omit={omitHeaderPath} />
+    : normalizedName === 'write'
+      ? <WriteInputDetails input={visualInput} identity={`${toolCall.id}:input`} omit={omitHeaderPath} />
+      : <ToolInputFields input={visualInput} identity={`${toolCall.id}:input`} omit={omitHeaderPath} />;
 
   if (isProvisional) {
     return (
       <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
         <div class="tool-call-section">
-          <div class="tool-call-section-label">Input</div>
-          <pre class="tool-call-pre tool-call-provisional-input"><code>{toolCall.argumentsText || '(empty)'}</code></pre>
+          {renderInput()}
         </div>
       </div>
     );
@@ -84,6 +105,8 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
             <code class="hljs language-bash" dangerouslySetInnerHTML={{ __html: highlightToolResultText(command, 'bash') }} />
           </div>
         )}
+        <ToolInputFields input={toolCall.input} identity={`${toolCall.id}:options`} omit={['command']} />
+        {!text && isRunning && <div class="tool-call-empty">Waiting for output…</div>}
         {text && (
           <div class="tool-call-terminal" data-running={isRunning ? 'true' : undefined}>
             <TerminalOutput text={text} running={isRunning} identity={`${toolCall.id}:terminal`} />
@@ -128,7 +151,6 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
   // Infer a highlight language for file-content tools (read/grep/glob/find/cat)
   // from the tool's input path. edit/write results are short confirmations,
   // so they fall through to plain/JSON-detect highlighting.
-  const normalizedName = normalizeToolCallName(toolCall.name);
   const isFileContentTool =
     normalizedName === 'read'
     || normalizedName === 'cat'
@@ -141,23 +163,16 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile 
 
   return (
     <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
-      <div class="tool-call-section">
-        <div class="tool-call-section-label">Input</div>
-        {isEmptyToolCallInput(toolCall.input) ? (
-          <div class="tool-call-empty">(no input)</div>
-        ) : (
-          <pre class="tool-call-pre hljs-scope">
-            <code class="hljs language-yaml" dangerouslySetInnerHTML={{ __html: formatValueAsHighlightedYaml(toolCall.input) }} />
-          </pre>
-        )}
-      </div>
-      {toolCall.result !== undefined && (
+      {!isEmptyToolCallInput(toolCall.input) && <div class="tool-call-section">
+        {renderInput()}
+      </div>}
+      {toolCall.result !== undefined && !isRedundantToolConfirmation(toolCall) && (
         <div class="tool-call-section">
-          <div class="tool-call-section-label">Result</div>
           {hasImage ? (
             <ToolResultContentParts result={toolCall.result} languageHint={resultLanguageHint} />
           ) : resultIsTextOnly && resultText !== undefined ? (
-            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
+            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}
+              scrollHint={normalizedName === 'read' ? 'Swipe to scroll output' : undefined}>
               <SegmentedText
                 text={resultText}
                 identity={`${toolCall.id}:result`}

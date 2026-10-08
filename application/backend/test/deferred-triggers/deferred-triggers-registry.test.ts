@@ -28,6 +28,7 @@ const OTHER = '/repo/other.jsonl';
 let dir: string;
 let savedSessionDirEnv: string | undefined;
 let openTabs: string[];
+let runningPaths: string[];
 let dispatched: Event[];
 let registries: DeferredTriggerRegistry[];
 
@@ -36,6 +37,7 @@ beforeEach(() => {
   savedSessionDirEnv = process.env.PI_CODING_AGENT_SESSION_DIR;
   process.env.PI_CODING_AGENT_SESSION_DIR = path.join(dir, 'sessions');
   openTabs = [WATCHER];
+  runningPaths = [];
   dispatched = [];
   registries = [];
 });
@@ -52,7 +54,7 @@ afterEach(() => {
 });
 
 function fakeArchState(): ArchState {
-  return { sessions: { openTabPaths: openTabs } } as unknown as ArchState;
+  return { sessions: { openTabPaths: openTabs, runningSessionPaths: runningPaths } } as unknown as ArchState;
 }
 
 function newRegistry(overrides: Pick<DeferredTriggerRegistryDeps, 'commandRunner' | 'clock'> = {}): DeferredTriggerRegistry {
@@ -174,6 +176,162 @@ test('user_input: an explicit target consumes the real prompt in that target onl
   assert.equal(r.getActiveTriggers().length, 0);
 });
 
+function timerClock() {
+  let now = Date.parse('2026-10-08T12:00:00.000Z');
+  let sequence = 0;
+  const scheduled = new Map<number, { at: number; run: () => void }>();
+  return {
+    now: () => now,
+    setTimeout: ((run: () => void, ms: number) => {
+      const id = ++sequence;
+      scheduled.set(id, { at: now + ms, run });
+      return id;
+    }) as unknown as typeof setTimeout,
+    clearTimeout: ((id: number) => scheduled.delete(id)) as unknown as typeof clearTimeout,
+    advance(ms: number) {
+      now += ms;
+      for (const [id, task] of [...scheduled]) {
+        if (task.at <= now) {
+          scheduled.delete(id);
+          task.run();
+        }
+      }
+    },
+    scheduled,
+  };
+}
+
+function registerWakeTimer(id: string, clock: ReturnType<typeof timerClock>, wakeupMode = true): void {
+  appendTriggerOp({ id, op: 'register', sessionPath: WATCHER, triggers: [{ kind: 'timer', ms: 1000 }],
+    message: 'check again', wakeupMode, at: new Date(clock.now()).toISOString() });
+}
+
+test('wakeup timer waits for creator response, then counts the full delay once', () => {
+  const clock = timerClock();
+  runningPaths = [WATCHER];
+  registerWakeTimer('wake', clock);
+  const r = newRegistry({ clock });
+  assert.equal(clock.scheduled.size, 0);
+  clock.advance(5000);
+  assert.equal(dispatched.length, 0);
+  assert.equal(r.getActiveTriggers()[0]?.timerStartedAt, undefined);
+  runningPaths = [];
+  r.onSessionFinished(WATCHER);
+  const startedAt = new Date(clock.now()).toISOString();
+  assert.equal(r.getActiveTriggers()[0]?.timerStartedAt, startedAt);
+  clock.advance(500);
+  r.onSessionFinished(WATCHER);
+  r.onUserInput(OTHER, 'unrelated');
+  assert.equal(r.getActiveTriggers()[0]?.timerStartedAt, startedAt);
+  clock.advance(499);
+  assert.equal(dispatched.length, 0);
+  clock.advance(1);
+  assert.equal(dispatched.length, 1);
+});
+
+test('target completion does not start a wakeup timer until its creator finishes', () => {
+  const clock = timerClock();
+  openTabs = [WATCHER, OTHER];
+  runningPaths = [WATCHER];
+  appendTriggerOp({ id: 'targeted-wakeup', op: 'register', sessionPath: WATCHER, targetSession: OTHER,
+    triggers: [{ kind: 'timer', ms: 1000 }], message: 'wake target', wakeupMode: true,
+    at: new Date(clock.now()).toISOString() });
+  const r = newRegistry({ clock });
+  r.onSessionFinished(OTHER);
+  clock.advance(5000);
+  assert.equal(clock.scheduled.size, 0);
+  assert.equal(dispatched.length, 0);
+  runningPaths = [];
+  r.onSessionFinished(WATCHER);
+  clock.advance(1000);
+  assert.equal(dispatched.length, 1);
+  const send = dispatched[0] as { cmd?: { sessionPath?: string } };
+  assert.equal(send.cmd?.sessionPath, OTHER);
+});
+
+test('wakeupMode leaves other OR conditions active while its timer waits', () => {
+  const clock = timerClock();
+  runningPaths = [WATCHER];
+  appendTriggerOp({ id: 'or-wakeup', op: 'register', sessionPath: WATCHER,
+    triggers: [{ kind: 'timer', ms: 1000 }, { kind: 'session_finished', sessionPath: OTHER }],
+    message: 'check other', wakeupMode: true, at: new Date(clock.now()).toISOString() });
+  const r = newRegistry({ clock });
+  assert.equal(clock.scheduled.size, 0);
+  r.onSessionFinished(OTHER);
+  assert.equal(dispatched.length, 1);
+  assert.match(sentTexts()[0], /session finished:/);
+  runningPaths = [];
+  r.onSessionFinished(WATCHER);
+  clock.advance(1000);
+  assert.equal(dispatched.length, 1, 'the OR group is consumed only once');
+});
+
+test('wakeupMode false starts the delay at registration even while creator runs', () => {
+  const clock = timerClock();
+  runningPaths = [WATCHER];
+  registerWakeTimer('ordinary', clock, false);
+  newRegistry({ clock });
+  clock.advance(1000);
+  assert.equal(dispatched.length, 1);
+});
+
+test('creator completion reconciles registrations before the watcher observes them', () => {
+  const clock = timerClock();
+  runningPaths = [WATCHER];
+  const r = newRegistry({ clock });
+  registerWakeTimer('late', clock);
+  clock.advance(5000);
+  runningPaths = [];
+  r.onSessionFinished(WATCHER);
+  assert.equal(r.getActiveTriggers()[0]?.timerStartedAt, new Date(clock.now()).toISOString());
+  clock.advance(999);
+  assert.equal(dispatched.length, 0);
+  clock.advance(1);
+  assert.equal(dispatched.length, 1);
+});
+
+test('wakeup timer reload keeps its persisted deadline without restarting the delay', () => {
+  const clock = timerClock();
+  registerWakeTimer('persisted', clock);
+  const r = newRegistry({ clock });
+  const startedAt = r.getActiveTriggers()[0]?.timerStartedAt;
+  assert.equal(startedAt, new Date(clock.now()).toISOString());
+  clock.advance(400);
+  r.dispose();
+  assert.equal(clock.scheduled.size, 0);
+  const restarted = newRegistry({ clock });
+  assert.equal(restarted.getActiveTriggers()[0]?.timerStartedAt, startedAt);
+  clock.advance(599);
+  assert.equal(dispatched.length, 0);
+  clock.advance(1);
+  assert.equal(dispatched.length, 1);
+});
+
+test('waiting wakeup timer is cancellable and does not arm on later completion', () => {
+  const clock = timerClock();
+  runningPaths = [WATCHER];
+  registerWakeTimer('cancel-waiting', clock);
+  const r = newRegistry({ clock });
+  r.cancel(WATCHER, 'cancel-waiting');
+  runningPaths = [];
+  r.onSessionFinished(WATCHER);
+  clock.advance(5000);
+  assert.equal(r.getActiveTriggers().length, 0);
+  assert.equal(clock.scheduled.size, 0);
+  assert.equal(dispatched.length, 0);
+});
+
+test('unstarted wakeup timer does not infer completion for an unavailable creator', () => {
+  const clock = timerClock();
+  openTabs = [OTHER];
+  registerWakeTimer('closed-creator', clock);
+  const r = newRegistry({ clock });
+  clock.advance(5000);
+  assert.equal(clock.scheduled.size, 0);
+  assert.equal(r.getActiveTriggers()[0]?.timerStartedAt, undefined);
+  assert.equal(dispatched.length, 0);
+});
+
 test('timer: delays beyond Node setTimeout range are scheduled in bounded slices', () => {
   assert.equal(boundedTimerSlice(MAX_TIMER_SLICE_MS + 60_000), MAX_TIMER_SLICE_MS);
   assert.equal(boundedTimerSlice(60_000), 60_000);
@@ -223,7 +381,7 @@ test('command exit 0 uses the host runner and synthetic wake path', async () => 
   assert.equal(calls, 1);
   assert.equal(dispatched.length, 1);
   assert.match(sentTexts()[0] ?? '', /command condition satisfied/);
-  assert.match(sentTexts()[0] ?? '', /`defer_trigger`/);
+  assert.match(sentTexts()[0] ?? '', /`wakeup_timer`/);
 });
 
 test('command exit 1 stays pending with bounded retry diagnostics', async () => {

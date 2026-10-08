@@ -24,6 +24,15 @@ import type { WebviewToHostMessage } from '../../protocol/index.js';
 
 const UUID = '01234567-89ab-4cde-f012-3456789abcde';
 
+test('refresh pending browser command is bounded, authenticated and closed', () => {
+  const message = { type: 'setPruningRefreshPending', sessionPath: '/a', pending: true, clientCommandId: UUID };
+  assert.equal(validateBrowserToHostMessage(message, 1024).ok, true);
+  assert.equal(validateBrowserToHostMessage({ ...message, pending: false }, 1024).ok, true);
+  assert.equal(validateBrowserToHostMessage({ ...message, pending: 'yes' }, 1024).ok, false);
+  assert.equal(validateBrowserToHostMessage({ ...message, clientCommandId: undefined }, 1024).ok, false);
+  assert.equal(validateBrowserToHostMessage({ ...message, refreshPruning: true }, 1024).ok, false);
+});
+
 function base64OfBytes(byteLength: number): string {
   return Buffer.alloc(byteLength, 7).toString('base64');
 }
@@ -84,6 +93,33 @@ test('valid application commands pass with a clientCommandId', () => {
   });
   expectOk({ type: 'dissolvePinnedGroup', sourcePath: '/sessions/a', clientCommandId: UUID });
   expectOk({ type: 'unpinPinnedGroup', sourcePath: '/sessions/a', clientCommandId: UUID });
+});
+
+test('deferred trigger cancellation passes unchanged for one trigger or all creator triggers', () => {
+  for (const target of [{ triggerId: 'trigger-1' }, {}]) {
+    const command = {
+      type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator', ...target,
+      clientCommandId: UUID, viewGeneration: 7,
+    };
+    const result = validateBrowserToHostMessage(command, 1024);
+    assert.equal(result.ok, true, result.ok ? '' : result.reason);
+    if (result.ok) assert.strictEqual(result.value, command);
+  }
+});
+
+test('deferred trigger cancellation rejects malformed fields and missing command identity', () => {
+  const command = {
+    type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator', triggerId: 'trigger-1',
+    clientCommandId: UUID, viewGeneration: 7,
+  };
+  for (const fields of [
+    { sessionPath: null }, { triggerId: 42 }, { extra: true },
+    { clientCommandId: 'invalid' }, { viewGeneration: -1 },
+    { sessionPath: 'p'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1) },
+    { triggerId: 't'.repeat(BROWSER_INGRESS_LIMITS.maxStringUtf8Bytes + 1) },
+  ]) expectRejected({ ...command, ...fields });
+  expectRejected({ type: 'cancelDeferredTrigger', sessionPath: '/sessions/creator' });
+  expectRejected({ type: 'cancelDeferredTrigger', clientCommandId: UUID });
 });
 
 test('producer-generated reasoning and subagent detail refs pass browser ingress', () => {

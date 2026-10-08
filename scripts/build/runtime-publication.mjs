@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import runtime from '../../application/hosts/vscode/runtime/runtime-generations.cjs';
 
@@ -9,6 +10,39 @@ export const { publishRuntimeGeneration, resolveRuntimeGeneration } = runtime;
 // distribution root application/hosts/vscode).
 const bootstrapSource = fileURLToPath(new URL('../../application/hosts/vscode/runtime/', import.meta.url));
 const bootstrapFiles = ['bootstrap.cjs', 'runtime-generations.cjs'];
+const require = createRequire(import.meta.url);
+
+/** Read capabilities only from the selected, content-bound installed helper.
+ * Never execute bootstrap.cjs: it is the activation entrypoint. */
+export async function assertRuntimeBootstrapSupportsSchema({ extensionDir, schema }) {
+  try {
+    const [pkg, sourcePkg] = await Promise.all([
+      readFile(path.join(extensionDir, 'package.json'), 'utf8').then(JSON.parse),
+      readFile(path.join(bootstrapSource, '..', 'package.json'), 'utf8').then(JSON.parse),
+    ]);
+    if (['publisher', 'name', 'version'].some(key => pkg[key] !== sourcePkg[key])) {
+      throw new Error('Installed extension identity does not match the source package.');
+    }
+    if (pkg.pieRuntimeBootstrap !== 1 || typeof pkg.main !== 'string'
+      || !/^\.\/(?:runtime|pie-bootstrap\/[0-9a-f]{64})\/bootstrap\.cjs$/u.test(pkg.main)) {
+      throw new Error('Installed startup loader selection is not canonical.');
+    }
+    let supported = [1];
+    if (pkg.main !== './runtime/bootstrap.cjs') {
+      const directory = path.join(extensionDir, path.dirname(pkg.main));
+      const contents = await Promise.all(bootstrapFiles.map(name => readFile(path.join(directory, name))));
+      const hash = createHash('sha256');
+      bootstrapFiles.forEach((name, index) => hash.update(name).update('\0').update(contents[index]).update('\0'));
+      if (hash.digest('hex') !== path.basename(directory)) throw new Error('Installed startup loader hash mismatch.');
+      supported = require(path.join(directory, 'runtime-generations.cjs')).SUPPORTED_MANIFEST_SCHEMAS ?? [1];
+    }
+    if (!Array.isArray(supported) || !supported.includes(schema)) {
+      throw new Error(`Installed startup loader does not support runtime manifest schema ${schema}.`);
+    }
+  } catch (error) {
+    throw new Error(`${error.message} Use --activate to upgrade the startup loader before publication.`, { cause: error });
+  }
+}
 
 export async function hasRuntimeBootstrap(extensionDir) {
   try {

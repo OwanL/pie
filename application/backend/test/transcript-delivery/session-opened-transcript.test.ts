@@ -872,6 +872,109 @@ test('idle SessionOpened replaces all four optimistic agent cards with their dis
     durable.map(({ formattedModelInput }) => formattedModelInput), 'SDK model input is unchanged');
 });
 
+test('busy SessionOpened reconciles bound initial, deferred, queued and reply-reference users across a partial window', () => {
+  const bodies = ['Initial instruction', 'Wait then continue', 'Queued marker', 'Reply-reference instruction'];
+  const incomingTranscript = mapTranscript(bodies.map((body, index) => durableAgentEntry(`sdk-bound-${index}`, body).entry));
+  let state = createInitialArchState();
+  state.transcript.bySession[AGENT_SESSION_PATH] = [
+    assistantMessage('host-prefix-not-in-window', 'Earlier answer', 'completed'),
+    ...hostAgentRows(bodies.map((text, index) => ({
+      localId: `local:agent-session:bound-${index}`, text, status: index === 2 ? 'queued' : 'completed',
+      timestamp: index, sender: AGENT_SENDER,
+    }))),
+  ];
+  const partialWindow = window({ totalCount: 292, loadedStart: 288, loadedEnd: 292, hasOlder: true, isPartial: true });
+  state.transcript.windowBySession[AGENT_SESSION_PATH] = { ...partialWindow, totalCount: 293, loadedEnd: 293 };
+  for (const [index, row] of incomingTranscript.entries()) {
+    state = reducer(state, {
+      kind: 'QueuedDelivered', sessionPath: AGENT_SESSION_PATH, text: bodies[index],
+      localId: `local:agent-session:bound-${index}`, durableEntryId: row.id,
+    }).state;
+  }
+  const opened = reducer(state, {
+    kind: 'SessionOpened', sessionPath: AGENT_SESSION_PATH,
+    backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    payload: {
+      session: { path: AGENT_SESSION_PATH, name: 'Recipient', cwd: '/workspace', modifiedAt: '', messageCount: 292 },
+      busy: true, transcript: incomingTranscript, transcriptWindow: partialWindow,
+    },
+  }).state;
+  assert.deepEqual(opened.transcript.bySession[AGENT_SESSION_PATH], incomingTranscript);
+  assert.equal(opened.transcript.windowBySession[AGENT_SESSION_PATH]?.totalCount, 292);
+});
+
+test('bound local user survives a busy snapshot that omits its durable row without matching repeated text', () => {
+  const local = { ...userMessage('local:bound', 'repeat'), durableEntryId: 'new-entry' };
+  const result = resolveSessionOpenedTranscript({
+    busy: true, localTranscript: [local],
+    incomingTranscript: [{ ...userMessage('old', 'repeat'), durableEntryId: 'old-entry' }],
+    localTranscriptWindow: completeWindow(1), incomingTranscriptWindow: completeWindow(1),
+  });
+  assert.deepEqual(result.transcript.map((row) => row.id), ['old', 'local:bound']);
+});
+
+test('SessionOpened replaces bound optimistic orphans after a multi-turn partial-window refresh', () => {
+  const firstHandoff = 'Inspect the recipient session';
+  const secondHandoff = 'Summarize the changed files';
+  const handoffs = mapTranscript([
+    durableAgentEntry('sdk-handoff-1', firstHandoff).entry,
+    durableAgentEntry('sdk-handoff-2', secondHandoff).entry,
+  ]);
+  const incomingTranscript = [
+    userMessage('shared-user', 'Earlier prompt'),
+    ...handoffs,
+    { ...userMessage('sdk-deferred', 'Continue after the handoffs'), durableEntryId: 'sdk-deferred' },
+    { ...userMessage('sdk-question', 'where are we at?'), durableEntryId: 'sdk-question' },
+    { ...assistantMessage('sdk-final', 'Final answer remains visible', 'completed'), durableEntryId: 'final-entry' },
+  ];
+  const completedAgentRows = hostAgentRows([
+    { localId: 'local:agent-session:orphan-1', text: firstHandoff, status: 'completed', timestamp: 1, sender: AGENT_SENDER },
+    { localId: 'local:agent-session:orphan-2', text: secondHandoff, status: 'completed', timestamp: 2, sender: AGENT_SENDER },
+  ]);
+  // A previous refresh already appended the unmatched optimistic rows after
+  // newer durable answers. The closest completed prefix uses a host synthetic
+  // id absent from this partial incoming window; the older shared anchor exists.
+  const localTranscript = [
+    ...incomingTranscript.slice(0, -1),
+    assistantMessage('host-final-without-durable-identity', 'Final answer remains visible', 'completed'),
+    ...completedAgentRows,
+    userMessage('local:send:deferred-orphan', 'Continue after the handoffs'),
+    userMessage('local:send:question-orphan', 'where are we at?'),
+  ];
+  const incomingWindow = window({
+    totalCount: 292, loadedStart: 286, loadedEnd: 292, hasOlder: true, isPartial: true,
+  });
+  let state = createInitialArchState();
+  state.transcript.bySession[AGENT_SESSION_PATH] = localTranscript;
+  state.transcript.windowBySession[AGENT_SESSION_PATH] = {
+    ...incomingWindow, totalCount: 296, loadedEnd: 296,
+  };
+  const bindings = [
+    ['local:agent-session:orphan-1', 'sdk-handoff-1'],
+    ['local:agent-session:orphan-2', 'sdk-handoff-2'],
+    ['local:send:deferred-orphan', 'sdk-deferred'],
+    ['local:send:question-orphan', 'sdk-question'],
+  ];
+  for (const [localId, durableEntryId] of bindings) {
+    state = reducer(state, {
+      kind: 'QueuedDelivered', sessionPath: AGENT_SESSION_PATH, text: '', localId, durableEntryId,
+    }).state;
+  }
+
+  const opened = reducer(state, {
+    kind: 'SessionOpened', sessionPath: AGENT_SESSION_PATH,
+    backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    payload: {
+      session: { path: AGENT_SESSION_PATH, name: 'Recipient', cwd: '/workspace', modifiedAt: '', messageCount: 292 },
+      busy: true, transcript: incomingTranscript, transcriptWindow: incomingWindow,
+    },
+  }).state;
+
+  assert.deepEqual(opened.transcript.bySession[AGENT_SESSION_PATH]?.map((row) => row.id),
+    incomingTranscript.map((row) => row.id), 'completed historical cards must not sit below the final answer');
+  assert.equal(opened.transcript.windowBySession[AGENT_SESSION_PATH]?.totalCount, 292);
+});
+
 test('session.opened reconciles identical agent prompts one-to-one without collapsing either send', () => {
   const body = 'Continue with the next item';
   const localMessages = [1, 2].map((sequence) => ({

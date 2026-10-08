@@ -98,6 +98,11 @@ export class SessionServiceState {
     this.knownRuntimeSessionPaths.add(sessionPath);
   }
 
+  /** Forget only the acknowledgement-budget hint, not durable browse state. */
+  clearSessionRuntimeKnown(sessionPath: string): void {
+    this.knownRuntimeSessionPaths.delete(sessionPath);
+  }
+
   isSessionSnapshotKnown(sessionPath: string): boolean {
     return this.knownSnapshotSessionPaths.has(sessionPath);
   }
@@ -491,6 +496,7 @@ export class SessionServiceState {
     notice: string,
     expectedAttempt?: number,
     reason: 'definitive-rejection' | 'backend-generation-ended' = 'definitive-rejection',
+    confirmedMissing = false,
   ): void {
     const request = this.selectionRequests.get(selectionToken);
     const operation = request?.operationId
@@ -507,6 +513,23 @@ export class SessionServiceState {
       return;
     }
     const ownsSelection = this.currentSelectionToken === selectionToken;
+    const archStateBeforeFailure = this.getArchState();
+    // A restored Loading tab was not inserted by this request. Its removal
+    // needs both fresh filesystem evidence and current, idle ownership. The
+    // failed open itself is excluded; every other active operation (including
+    // duplicate source ownership) blocks cleanup.
+    const removeMissingRestoredTab = !!request && request.wasOpenTab && confirmedMissing
+      && reason === 'definitive-rejection'
+      && request.backendGeneration === this.backendGeneration
+      && request.requestEpoch === this.getSessionDataEpoch(request.requestedPath)
+      && archStateBeforeFailure.sessions.openTabPaths.includes(request.requestedPath)
+      && archStateBeforeFailure.sessions.sessions.some((session) =>
+        session.path === request.requestedPath && session.isPlaceholder)
+      && !archStateBeforeFailure.sessions.runningSessionPaths.includes(request.requestedPath)
+      && !archStateBeforeFailure.sessions.intentionallyHiddenRunningPaths.includes(request.requestedPath)
+      && !Object.values(archStateBeforeFailure.operations).some((other) =>
+        other.operationId !== request.operationId && !other.terminal
+        && [other.session.pendingPath, other.session.resolvedPath, other.session.sourcePath].includes(request.requestedPath));
     if (operation && !operation.terminal) {
       const attempt = request?.operationAttempt ?? operation.attempt;
       this.dispatchArch({
@@ -534,12 +557,12 @@ export class SessionServiceState {
     if (request) {
       if (request.pendingPath) {
         this.clearSessionScope(request.pendingPath, true);
-      } else if (!request.wasOpenTab) {
+      } else if (!request.wasOpenTab || removeMissingRestoredTab) {
         this.dispatchArch({
           kind: 'Command',
           cmd: { kind: 'CloseTab', corrId: `close:${Date.now()}`, sessionPath: request.requestedPath },
         });
-        this.clearSessionScope(request.requestedPath, request.insertedPlaceholder);
+        this.clearSessionScope(request.requestedPath, request.insertedPlaceholder || removeMissingRestoredTab);
       }
 
       if (ownsSelection) {

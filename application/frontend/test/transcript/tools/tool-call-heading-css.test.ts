@@ -14,6 +14,53 @@ async function readTranscriptCss() {
   return readFile(new URL('../../../styles/transcript.css', import.meta.url), 'utf8');
 }
 
+test('ordinary inspectors tighten spacing without shrinking control hitboxes or code text', async () => {
+  const css = await readToolCallCss();
+
+  assert.match(css, /\.tool-call-card:not\(\.tool-call-subagent\) > \.tool-call-header\s*\{\s*gap:\s*4px/);
+  assert.match(css, /\.tool-call-action\s*\{[^}]*width:\s*24px;[^}]*height:\s*24px;/);
+  assert.match(css, /\.tool-call-toggle\s*\{[^}]*min-height:\s*26px;/);
+  assert.match(css, /\.tool-call-input-fields\s*\{[^}]*margin:\s*4px 0;[^}]*gap:\s*3px;/);
+  assert.match(css, /\.tool-call-section-label\s*\{[^}]*margin-block:\s*4px 3px;/);
+  assert.match(css, /\.tool-call-section \+ \.tool-call-section\s*\{[^}]*margin-top:\s*4px;/);
+  assert.match(css, /\.tool-call-input-field dd\s*\{[^}]*font-size:\s*12px;/);
+});
+
+test('secondary actions appear on hover or keyboard focus without hiding touch controls', async () => {
+  const css = await readToolCallCss();
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)\s*\{[^}]*\.tool-call-header \.tool-call-action\s*\{\s*opacity:\s*0;\s*pointer-events:\s*none;/);
+  assert.match(css, /\.tool-call-header:hover \.tool-call-action,\s*\.tool-call-header:focus-within \.tool-call-action\s*\{\s*opacity:\s*1;\s*pointer-events:\s*auto;/);
+  assert.match(css, /\.tool-call-heading-content \.transcript-header-path-target,\s*\.tool-call-heading-content \.transcript-header-summary-command\s*\{\s*font-weight:\s*400;/);
+});
+
+test('coarse-pointer tools gain touch hitboxes and font floors without wrapping exact output', async () => {
+  const css = await readToolCallCss();
+  const touch = css.slice(css.indexOf('@media (pointer: coarse)'), css.indexOf('/* Placeholder when'));
+  assert.match(touch, /\.tool-call-card > \.tool-call-header \.tool-call-toggle\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/);
+  assert.match(touch, /\.tool-call-raw-action,[\s\S]*?\.tool-call-action\s*\{\s*min-width:\s*44px;\s*min-height:\s*44px;/);
+  assert.match(touch, /max-width:\s*24px;\s*max-height:\s*24px;/);
+  assert.match(touch, /font-size:\s*max\(13px, var\(--panel-font-size, 11px\)\)/);
+  assert.match(touch, /font-size:\s*max\(12px, var\(--panel-font-size, 11px\)\)/);
+  assert.match(touch, /height:\s*calc\(var\(--tool-preview-lines, 2\) \* var\(--tool-preview-line-height\)\);\s*line-height:\s*var\(--tool-preview-line-height\)/);
+  assert.doesNotMatch(touch, /white-space:|overflow-wrap:|word-break:/);
+  assert.match(css, /\.tool-call-pre\s*\{\s*white-space:\s*pre;/);
+  assert.match(css, /\.tool-call-pre\.tool-call-pre-resizable\s*\{[^}]*overflow:\s*auto;/);
+  assert.match(css, /\.resizable-scroll-hint\s*\{\s*display:\s*none;/);
+  assert.match(touch, /\.tool-call-card \.resizable-scroll-hint\s*\{[^}]*display:\s*block;[^}]*user-select:\s*none;/);
+});
+
+test('ordinary headers omit the disclosure arrow but keep the native toggle and collapse rail', async () => {
+  const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
+  const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {}, onOpenFile: () => {} }));
+  assert.doesNotMatch(html, /tool-call-disclosure/);
+  assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
+  assert.match(html, /Collapse details/);
+  assert.match(html, /tool-call-kind-icon/);
+  const css = await readToolCallCss();
+  assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*16px;/);
+  assert.match(css, /\.tool-call-inspector-body > \.tool-call-collapse-rail\s*\{\s*width:\s*16px;/);
+});
+
 test('collapsed tool-call headers use the shared path hierarchy', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, {
@@ -29,18 +76,19 @@ test('collapsed tool-call headers use the shared path hierarchy', async () => {
     onOpenFile: () => {},
   }));
 
-  assert.match(html, /flex min-w-0 flex-1 items-center/);
-  assert.doesNotMatch(html, /grid-template-columns:/);
-  assert.match(html, /transcript-header-title-mono/);
-  assert.match(html, /transcript-header-summary-link/);
-  assert.match(html, /transcript-header-path-prefix/);
+  assert.match(html, /tool-call-toggle/);
+  assert.match(html, /tool-call-kind-icon/);
+  assert.match(html, /aria-label="read tool call, Completed\. \/repo\/src\/example\.ts\. Expand details"/);
+  assert.doesNotMatch(html, /transcript-header-title-mono/);
+  assert.match(html, /aria-label="Open file \/repo\/src\/example.ts"/);
+  assert.doesNotMatch(html, /transcript-header-path-prefix/);
   assert.match(html, /transcript-header-path-target/);
-  assert.match(html, /transcript-header-summary-link group/);
-  assert.match(html, /flex-\[0_0_var\(--tool-call-size-column-width\)\]/);
-  assert.match(html, /ml-auto/);
+  assert.match(html, /data-pie-file-path="\/repo\/src\/example\.ts"/);
+  assert.match(html, /tool-call-size/);
+  assert.match(html, /tool-call-actions/);
 });
 
-test('collapsed path labels honor depth while retaining the full path tooltip', async () => {
+test('tool-call path labels show filenames regardless of depth while retaining the full path', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, {
     open: false,
@@ -53,10 +101,10 @@ test('collapsed path labels honor depth while retaining the full path tooltip', 
     onOpenFile: () => {},
   }));
 
-  assert.match(html, /dirc\//);
   assert.match(html, />example\.ts</);
-  assert.doesNotMatch(html, />dira\//);
+  assert.doesNotMatch(html, /transcript-header-path-prefix/);
   assert.match(html, /title="\/repo\/dira\/dirb\/dirc\/example\.ts"/);
+  assert.match(html, /data-pie-file-path="\/repo\/dira\/dirb\/dirc\/example\.ts"/);
 });
 
 test('collapsed bash headers emphasize the shell verb over the path context', async () => {
@@ -97,7 +145,7 @@ test('collapsed bash headers keep surrounding quotes separate from the emphasize
   assert.match(html, /transcript-header-path-target[^>]*>file name\.txt</);
 });
 
-test('expanded bash headers suppress the command summary while the terminal body is visible', async () => {
+test('expanded bash headers keep the command target visible for orientation', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, {
     open: false,
@@ -109,9 +157,9 @@ test('expanded bash headers suppress the command summary while the terminal body
     onOpenFile: () => {},
   }));
 
-  assert.match(html, />bash</);
-  assert.doesNotMatch(html, /transcript-header-summary-command/);
-  assert.doesNotMatch(html, />rm</);
+  assert.match(html, /aria-label="bash tool call, Running/);
+  assert.match(html, /transcript-header-summary-command/);
+  assert.match(html, />rm</);
 });
 
 test('transcript scrollbar freezes a broad custom hit area with a quiet visible thumb', async () => {

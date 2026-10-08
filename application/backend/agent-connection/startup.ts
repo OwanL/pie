@@ -23,16 +23,16 @@ import type { SessionHostPlatform } from '../../lib/platform-contracts/session-p
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 
-/** Only classify an explicitly private path as missing when the filesystem
- * confirms ENOENT/ENOTDIR. Sharing violations and other transient stat errors
- * retain the tab; a false negative there must not destroy private state. */
-function isPrivateSessionPathRestorable(sessionPath: string): boolean {
+/** Drop restored paths only when the filesystem confirms they are not files
+ * or are absent (ENOENT/ENOTDIR). Sharing violations and other transient stat
+ * errors retain the tab; an unavailable stat must not destroy session state. */
+function isSessionPathRestorable(sessionPath: string): boolean {
   try {
     return statSync(sessionPath).isFile();
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return false;
-    bootLog('session-startup', 'private.restore.statUnavailable', {
+    bootLog('session-startup', 'restore.statUnavailable', {
       sessionPath,
       error: toErrorMessage(error),
     });
@@ -91,14 +91,12 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
   const storedRawTabs = options.platform.storage.get<unknown[]>('openTabPaths') ?? [];
   const storedPrivate = (options.platform.storage.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
-  const privatePaths = new Set(storedPrivate);
-  // Preserve the non-private tabs across transient restart/file-lock failures,
-  // but classify a private path that is definitively absent before startup as
-  // not restored. This separates preexisting missing markers from a newly
-  // failed open, which is evaluated against post-reducer openTabPaths below.
+  // Filter definitively absent paths for every restored tab, while preserving
+  // tabs across transient restart/file-lock failures. Private cleanup still
+  // receives the original markers and the post-reducer open tabs below.
   const { rawTabs, openTabPaths: restoredTabs, droppedPaths } = filterRestorableStoredTabs(
     storedRawTabs,
-    (sessionPath) => !privatePaths.has(sessionPath) || isPrivateSessionPathRestorable(sessionPath),
+    isSessionPathRestorable,
   );
   const preferredStartupPath = options.platform.storage.get<string>('activeSessionPath') ?? null;
   // Pinned tabs are stored as a path list (no name enrichment). Normalize

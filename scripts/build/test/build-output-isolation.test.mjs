@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { verifyPiRuntimeArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const vscodeDependencies = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -120,6 +120,7 @@ async function makeFixture(t) {
     }
   `);
   write(repo, 'scripts/build/runtime-publication.mjs', `
+    export async function assertRuntimeBootstrapSupportsSchema() { throw new Error('unexpected capability check'); }
     export async function hasRuntimeBootstrap() {
       if (process.env.PIE_TEST_INSTALLED_EXTENSION) return process.env.PIE_TEST_RUNTIME_BOOTSTRAP === '1';
       throw new Error('unexpected runtime publication');
@@ -160,7 +161,7 @@ async function makeFixture(t) {
       const directory = path.resolve(options.directory);
       mkdirSync(directory, { recursive: true });
       const configPath = path.join(directory, 'tsconfig.overlay.json');
-      writeFileSync(configPath, JSON.stringify({ extends: path.resolve(baseConfigPath) }, null, 2) + '\\n');
+      writeFileSync(configPath, JSON.stringify({ extends: path.resolve(baseConfigPath), sdkPath: options.sdkPath }, null, 2) + '\\n');
       return Object.freeze({ configPath, directory, dispose() {} });
     }
     export function createViteAliases() { return []; }
@@ -382,6 +383,58 @@ test('explicit runtime overlap is rejected after one selection verification and 
   assert.equal((await verifyPiRuntimeArtifact(artifactDir)).identity, runtime.identity);
 });
 
+test('split-role output overlap rejects before claiming output or starting compilers, including skipped typecheck', async (t) => {
+  const fixture = await makeFixture(t);
+  const toolingDir = path.join(fixture.directory, 'pi-tooling');
+  // Give tooling a distinct identity so accidental runtime-role reuse is visible.
+  const tooling = await makeRuntimeArtifact(toolingDir);
+  write(toolingDir, 'tooling-only.txt', 'tooling role');
+  const selectedTooling = await writePiRuntimeManifest(toolingDir, tooling.manifest);
+  write(fixture.sourceArtifact, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: selectedTooling.identity,
+  }));
+  const runtime = await writePiRuntimeManifest(fixture.sourceArtifact, fixture.runtime.manifest);
+  for (const skip of [false, true]) {
+    const output = path.join(toolingDir, `new-build-${skip}`);
+    const rejected = runBuild(fixture, ['--pi-runtime', fixture.sourceArtifact, '--output-dir', output,
+      ...(skip ? ['--skip-typecheck'] : [])]);
+    assertBuildRejected(rejected);
+    assert.match(`${rejected.stdout}\n${rejected.stderr}`, /must not overlap/iu);
+    assert.doesNotMatch(rejected.stdout, /Running (TypeScript|Vite)/u);
+    assert.equal(existsSync(output), false, 'no output leaf or cache is claimed before role preflight');
+    assert.equal(existsSync(fixture.acquisitionCount), false, 'explicit selection never compiles the SDK');
+    assert.equal((await verifyPiRuntimeArtifact(fixture.sourceArtifact)).identity, runtime.identity);
+    assert.equal((await verifyPiRuntimeToolingArtifact(fixture.sourceArtifact)).identity, selectedTooling.identity);
+  }
+  const output = path.join(fixture.outputRoot, 'safe-split-output');
+  assertBuildSucceeded(runBuild(fixture, ['--pi-runtime', fixture.sourceArtifact, '--output-dir', output]));
+  const overlay = JSON.parse(readFileSync(path.join(output, '.cache/typecheck/tsconfig.overlay.json'), 'utf8'));
+  assert.equal(overlay.sdkPath, selectedTooling.sdkPath, 'typecheck uses the verified canonical tooling SDK, not the runtime SDK');
+});
+
+test('split-role parent output preserves both original roles before cleanup', async (t) => {
+  const fixture = await makeFixture(t);
+  const output = path.join(fixture.owner, 'out');
+  const artifactDir = path.join(output, 'pi-runtime');
+  const toolingDir = path.join(output, 'pi-tooling');
+  const tooling = await makeRuntimeArtifact(toolingDir);
+  const original = await makeRuntimeArtifact(artifactDir);
+  write(artifactDir, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: tooling.identity,
+  }));
+  const runtime = await writePiRuntimeManifest(artifactDir, original.manifest);
+  write(output, 'preserved.txt', 'do not clean');
+  const rejected = runBuild(fixture, ['--pi-runtime', artifactDir, '--skip-typecheck', '--no-sync']);
+  assertBuildRejected(rejected);
+  assert.match(`${rejected.stdout}\n${rejected.stderr}`, /must not overlap/iu);
+  assert.doesNotMatch(rejected.stdout, /Running (TypeScript|Vite)/u);
+  assert.equal(readFileSync(path.join(output, 'preserved.txt'), 'utf8'), 'do not clean');
+  assert.equal(existsSync(path.join(output, '.cache')), false);
+  assert.equal(existsSync(path.join(output, 'extension.js')), false);
+  assert.equal((await verifyPiRuntimeArtifact(artifactDir)).identity, runtime.identity);
+  assert.equal((await verifyPiRuntimeToolingArtifact(artifactDir)).identity, tooling.identity);
+});
+
 test('installed host status reports the staged runtime without resolving current selection', async (t) => {
   const fixture = await makeFixture(t);
   const installed = path.join(fixture.home, '.vscode', 'extensions', 'pie.fixture-1.0.0');
@@ -434,6 +487,42 @@ test('one-shot build reuses a verified matching runtime and cleans the rest of o
     'the retained payload is fully verified again after the build');
   assert.doesNotMatch(second.stdout, /Materialized verified Pi runtime/u, 'matching output is not recopied');
   assert.equal((await verifyPiRuntimeArtifact(cachedRuntime)).identity, fixture.runtime.identity);
+});
+
+test('split roles are retained only after full verification and damaged retained tooling fails', async (t) => {
+  const fixture = await makeFixture(t);
+  const toolingDir = path.join(fixture.directory, 'pi-tooling');
+  const tooling = await makeRuntimeArtifact(toolingDir);
+  write(fixture.sourceArtifact, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: tooling.identity,
+  }));
+  fixture.runtime = await writePiRuntimeManifest(fixture.sourceArtifact, fixture.runtime.manifest);
+  const args = ['--pi-runtime', fixture.sourceArtifact, '--skip-typecheck', '--no-sync'];
+  assertBuildSucceeded(runBuild(fixture, args));
+  const output = path.join(fixture.owner, 'out');
+  const copiedTooling = path.join(output, 'pi-tooling');
+  const copiedFile = path.join(copiedTooling, 'node_modules/@earendil-works/pi-coding-agent/LICENSE');
+  const oldTime = new Date('2000-01-01T00:00:00.000Z');
+  utimesSync(copiedFile, oldTime, oldTime);
+  write(output, 'stale.txt', 'remove');
+  assertBuildSucceeded(runBuild(fixture, args));
+  assert.equal(statSync(copiedFile).mtimeMs, oldTime.getTime(), 'both verified roles survive output cleanup');
+  assert.equal(existsSync(path.join(output, 'stale.txt')), false);
+  assert.equal((await verifyPiRuntimeToolingArtifact(path.join(output, 'pi-runtime'))).identity, tooling.identity);
+  const mutated = runBuild(fixture, args, { PIE_TEST_MUTATE_RETAINED_RUNTIME: copiedFile });
+  assertBuildRejected(mutated);
+  assert.match(`${mutated.stdout}\n${mutated.stderr}`, /hash mismatch/iu);
+  assertBuildSucceeded(runBuild(fixture, args));
+  assert.equal((await verifyPiRuntimeToolingArtifact(path.join(output, 'pi-runtime'))).identity, tooling.identity,
+    'damaged pre-clean tooling causes the established full reset');
+  rmSync(copiedTooling, { recursive: true });
+  symlinkSync(toolingDir, copiedTooling, process.platform === 'win32' ? 'junction' : 'dir');
+  assertBuildSucceeded(runBuild(fixture, args));
+  assert.equal(lstatSync(copiedTooling).isSymbolicLink(), false);
+  writeFileSync(path.join(toolingDir, 'node_modules/@earendil-works/pi-coding-agent/LICENSE'), 'damaged source tooling');
+  const damaged = runBuild(fixture, args);
+  assertBuildRejected(damaged);
+  assert.match(`${damaged.stdout}\n${damaged.stderr}`, /hash mismatch/iu);
 });
 
 test('one-shot build re-verifies retained runtime after builds before accepting output', async (t) => {

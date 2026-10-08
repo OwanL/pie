@@ -850,7 +850,10 @@ describe("Coding Agent Tools", () => {
 			const testFile = join(testDir, "flags.txt");
 			writeFileSync(testFile, "--ignore-case\n-hello\n--IGNORE-CASE\n-HELLO\n");
 
-			for (const [pattern, line] of [["--ignore-case", 1], ["-hello", 2]] as const) {
+			for (const [pattern, line] of [
+				["--ignore-case", 1],
+				["-hello", 2],
+			] as const) {
 				const result = await grepTool.execute("test-call-grep-flag-match", {
 					pattern,
 					path: testDir,

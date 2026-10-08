@@ -14,9 +14,10 @@ import { findInitialModel } from "./model-resolver.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
-import { getDefaultSessionDir, SessionManager, type ContextMessageOmissionsResolver } from "./session-manager.ts";
+import { type ContextMessageOmissionsResolver, getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
+import { createToolModelExchangeCapture } from "./tool-model-exchange-capture.ts";
 import {
 	createBashTool,
 	createCodingTools,
@@ -98,8 +99,6 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
-export { prepareCompaction } from "./compaction/index.ts";
-export type { CompactionPreparation } from "./compaction/index.ts";
 export type {
 	CompactionHooks,
 	CompactionRequestAuth,
@@ -107,6 +106,8 @@ export type {
 	EstimatedContextOverflowCheck,
 } from "./agent-session.ts";
 export * from "./agent-session-runtime.ts";
+export type { CompactionPreparation } from "./compaction/index.ts";
+export { prepareCompaction } from "./compaction/index.ts";
 export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -341,16 +342,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (headerRunner?.hasHandlers("before_provider_headers")) {
 				headers = await headerRunner.emitBeforeProviderHeaders(headers ?? {});
 			}
-			return streamSimple(model, context, {
-				...options,
-				apiKey: auth.apiKey,
-				env,
-				timeoutMs,
-				websocketConnectTimeoutMs,
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				headers,
-			});
+			const capture = createToolModelExchangeCapture(sessionManager, model, context);
+			return capture.wrapStream(
+				streamSimple(model, context, {
+					...options,
+					onPayload: capture.wrapOnPayload(options?.onPayload),
+					apiKey: auth.apiKey,
+					env,
+					timeoutMs,
+					websocketConnectTimeoutMs,
+					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+					headers,
+				}),
+			);
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;

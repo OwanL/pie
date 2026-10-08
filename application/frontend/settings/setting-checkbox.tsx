@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
+import { SettingsHelp } from './settings-help';
 
 export interface SettingCheckboxProps {
   label: ComponentChildren;
@@ -30,8 +31,7 @@ export function SettingCheckbox({
   hint,
   trailing,
 }: SettingCheckboxProps) {
-  return (
-    <>
+  const control = (
       <button
         class={`toolbar-settings-item${checked ? ' checked' : ''}`}
         type="button"
@@ -49,8 +49,12 @@ export function SettingCheckbox({
         </span>
         <span class="toolbar-settings-item-label">{label}</span>
       </button>
-      {hint && <div class="toolbar-settings-item-hint">{hint}</div>}
-      {trailing}
-    </>
   );
+  return hint ? (
+    <div class="toolbar-settings-checkbox-row">
+      {control}
+      <SettingsHelp label={ariaLabel ?? (typeof label === 'string' ? label : 'this setting')}>{hint}</SettingsHelp>
+      {trailing}
+    </div>
+  ) : <>{control}{trailing}</>;
 }

@@ -100,14 +100,14 @@ export interface ComposerSettingsMenuProps {
  *  inside the menu body; search can jump to any of them. */
 type SettingsTab = 'chat' | 'models' | 'context' | 'subagents' | 'appearance' | 'extensions' | 'mcp';
 
-const TAB_DEFS: { id: SettingsTab; label: string }[] = [
-  { id: 'chat', label: 'Chat' },
-  { id: 'models', label: 'Models' },
-  { id: 'context', label: 'Context' },
-  { id: 'subagents', label: 'Subagents' },
-  { id: 'appearance', label: 'Appearance' },
-  { id: 'extensions', label: 'Extensions' },
-  { id: 'mcp', label: 'MCP' },
+const TAB_DEFS: { id: SettingsTab; label: string; description: string }[] = [
+  { id: 'chat', label: 'Chat', description: 'Transcript behavior, notifications, and session titles.' },
+  { id: 'models', label: 'Models', description: 'Model assignments and provider availability.' },
+  { id: 'context', label: 'Context', description: 'History compaction and pruning controls.' },
+  { id: 'subagents', label: 'Subagents', description: 'Delegation, nesting, and execution limits.' },
+  { id: 'appearance', label: 'Appearance', description: 'Theme, layout, typography, and status visibility.' },
+  { id: 'extensions', label: 'Extensions', description: 'Enable extensions and configure their behavior.' },
+  { id: 'mcp', label: 'MCP', description: 'Manage Model Context Protocol servers and tools.' },
 ];
 
 function getTabLabel(tab: SettingsTab): string {
@@ -199,6 +199,8 @@ interface SearchJumpEntry {
   type: 'jump';
   id: string;
   label: string;
+  /** Source group within the category; also identifies the focus scope. */
+  section: string;
   haystack: string;
   tab: SettingsTab;
   /** Extension id to expand inline after switching to the Extensions tab. */
@@ -207,6 +209,7 @@ interface SearchJumpEntry {
 
 interface SearchToggleEntry {
   type: 'toggle';
+  tab: SettingsTab;
   id: string;
   label: string;
   haystack: string;
@@ -216,7 +219,7 @@ interface SearchToggleEntry {
 
 type SearchEntry = SearchJumpEntry | SearchToggleEntry;
 
-/** Build the searchable index of category jumps, continuous-control jumps,
+/** Build the searchable index of continuous-control jumps,
  *  and boolean toggles that powers the settings search box. Kept as a pure
  *  helper so the component's control flow stays focused on rendering. */
 function buildSettingsSearchIndex(
@@ -233,17 +236,8 @@ function buildSettingsSearchIndex(
   const hasToolResultPruner = extIds.has('tool-result-pruner');
   const hasWarmBash = extIds.has('warm-bash');
 
-  // Category jump entries (one per visible tab).
-  for (const tab of visibleTabs) {
-    entries.push({
-      type: 'jump',
-      id: `cat:${tab.id}`,
-      label: tab.label,
-      haystack: tab.label.toLowerCase(),
-      tab: tab.id,
-    });
-  }
-
+  // Categories stay available in navigation while searching; results list
+  // actual settings instead of repeating the category as a jump row.
   // Section-owned label lists keep search aligned with the controls each
   // section actually renders. The tab routing here is the IA map.
   const pushSettings = (
@@ -257,6 +251,7 @@ function buildSettingsSearchIndex(
         type: 'jump',
         id: `set:${tab}:${section}:${label}`,
         label,
+        section,
         haystack: `${getTabLabel(tab)} ${section} ${label}`.toLowerCase(),
         tab,
         expandExt,
@@ -297,6 +292,7 @@ function buildSettingsSearchIndex(
       const key = item.key as BooleanPrefKey;
       entries.push({
         type: 'toggle',
+        tab: section.id === 'display' ? 'appearance' : 'chat',
         id: `chatpref:${key}`,
         label: item.label,
         haystack: `${section.label ?? ''} ${item.label}`.toLowerCase(),
@@ -309,6 +305,7 @@ function buildSettingsSearchIndex(
   const historyCompaction = resolveHistoryCompactionSettings(prefs.historyCompaction);
   entries.push({
     type: 'toggle',
+    tab: 'context',
     id: 'history-compaction:enabled',
     label: 'Proactive automatic compaction',
     haystack: 'history compaction proactive automatic soft hard trigger',
@@ -325,6 +322,7 @@ function buildSettingsSearchIndex(
   if (hasWarmBash) {
     entries.push({
       type: 'toggle',
+      tab: 'extensions',
       id: 'bash:fastpath',
       label: 'Fast path (no shell for simple commands)',
       haystack: 'bash fast path no shell simple commands'.toLowerCase(),
@@ -338,6 +336,7 @@ function buildSettingsSearchIndex(
     const checked = prefs.extensionToggles[ext.id] !== false;
     entries.push({
       type: 'toggle',
+      tab: 'extensions',
       id: `ext:${ext.id}`,
       label: ext.label,
       haystack: `extensions ${ext.label} ${ext.description ?? ''}`.toLowerCase(),
@@ -350,6 +349,7 @@ function buildSettingsSearchIndex(
   if (hasSkillPruner) {
     entries.push({
       type: 'toggle',
+      tab: 'context',
       id: 'pruning:show',
       label: 'Show pruning summary',
       haystack: 'context skill-pruner show pruning summary'.toLowerCase(),
@@ -362,6 +362,7 @@ function buildSettingsSearchIndex(
   if (hasSubagent) {
     entries.push({
       type: 'toggle',
+      tab: 'subagents',
       id: 'subagent:parentmodel',
       label: 'Always use parent model',
       haystack: 'subagent always use parent model'.toLowerCase(),
@@ -370,6 +371,7 @@ function buildSettingsSearchIndex(
     });
     entries.push({
       type: 'toggle',
+      tab: 'subagents',
       id: 'subagent:route-around-saturated',
       label: 'Route around busy providers',
       haystack: 'subagent route around busy saturated providers capacity concurrency queue'.toLowerCase(),
@@ -378,6 +380,7 @@ function buildSettingsSearchIndex(
     });
     entries.push({
       type: 'toggle',
+      tab: 'subagents',
       id: 'subagent:fallback-provider-failure',
       label: 'Fallback on provider failure',
       haystack: 'subagent fallback failover provider failure timeout connection retries exhausted'.toLowerCase(),
@@ -388,6 +391,7 @@ function buildSettingsSearchIndex(
       const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
       entries.push({
         type: 'toggle',
+        tab: 'subagents',
         id: `subagent:nested:${def.key}`,
         label: `Allow ${def.label}`,
         haystack: `subagent nested bucket allowlist allow ${def.label}`.toLowerCase(),
@@ -397,6 +401,7 @@ function buildSettingsSearchIndex(
       const canSpawn = prefs.subagentBucketCanSpawn[def.key] ?? true;
       entries.push({
         type: 'toggle',
+        tab: 'subagents',
         id: `subagent:delegate:${def.key}`,
         label: `Allow ${def.label} subagents to delegate`,
         haystack: `subagent delegation bucket spawn nested leaf ${def.label}`.toLowerCase(),
@@ -409,6 +414,7 @@ function buildSettingsSearchIndex(
   // MCP global toggle (always present — the tab is unconditional).
   entries.push({
     type: 'toggle',
+    tab: 'mcp',
     id: 'mcp:enabled',
     label: 'MCP enabled',
     haystack: 'mcp model context protocol servers tools enabled'.toLowerCase(),
@@ -421,6 +427,7 @@ function buildSettingsSearchIndex(
     const checked = prefs.providerToggles[provider] !== false;
     entries.push({
       type: 'toggle',
+      tab: 'models',
       id: `provider:${provider}`,
       label: provider,
       haystack: `providers ${provider}`.toLowerCase(),
@@ -429,35 +436,56 @@ function buildSettingsSearchIndex(
     });
   }
 
-  return entries;
+  // Prefer the actionable toggle over an identical jump within its category.
+  const toggleLabels = new Set(entries.filter((entry) => entry.type === 'toggle')
+    .map((entry) => `${entry.tab}:${entry.label}`));
+  for (const entry of entries) {
+    if (entry.type !== 'toggle') continue;
+    const duplicate = entries.find((jump) => jump.type === 'jump' && jump.tab === entry.tab && jump.label === entry.label);
+    entry.haystack = `${getTabLabel(entry.tab)} ${entry.label} ${entry.haystack} ${duplicate?.haystack ?? ''}`.toLowerCase();
+  }
+  return entries.filter((entry) => visibleTabs.some((tab) => tab.id === entry.tab)
+    && (entry.type === 'toggle' || !toggleLabels.has(`${entry.tab}:${entry.label}`)));
 }
 
 interface SettingsSearchResultsProps {
   query: string;
   jumps: SearchJumpEntry[];
   toggles: SearchToggleEntry[];
-  onJump: (tab: SettingsTab, expandExt?: string) => void;
+  onJump: (entry: SearchJumpEntry) => void;
 }
 
-/** Renders the flat search-result list (jumps + toggles + empty state). */
+/** Search results retain the same category order as navigation. */
 function SettingsSearchResults({ query, jumps, toggles, onJump }: SettingsSearchResultsProps) {
   return (
     <div class="toolbar-settings-search-results">
+      <div class="toolbar-settings-search-summary" role="status">{jumps.length + toggles.length} results</div>
       {jumps.length === 0 && toggles.length === 0 && (
         <div class="toolbar-settings-search-empty">No settings match “{query}”.</div>
       )}
-      {jumps.map((entry) => (
+      {TAB_DEFS.map((tab) => {
+        const categoryJumps = jumps.filter((entry) => entry.tab === tab.id);
+        const categoryToggles = toggles.filter((entry) => entry.tab === tab.id);
+        if (!categoryJumps.length && !categoryToggles.length) return null;
+        return (
+          <section key={tab.id} class="toolbar-settings-search-group">
+            <h3 class="toolbar-settings-search-group-title">{tab.label}</h3>
+      {categoryJumps.map((entry) => (
         <button
           key={entry.id}
           class="toolbar-settings-search-result toolbar-settings-search-result-jump"
           type="button"
-          onClick={() => onJump(entry.tab, entry.expandExt)}
+          onClick={() => onJump(entry)}
+          title={`Open ${entry.label} in ${getTabLabel(entry.tab)} · ${entry.section}`}
         >
           <span class="toolbar-settings-search-result-label">{entry.label}</span>
-          <span class="toolbar-settings-search-result-meta">{getTabLabel(entry.tab)}</span>
+          {entry.section.toLowerCase() !== getTabLabel(entry.tab).toLowerCase() && (
+            <small class="toolbar-settings-search-result-context">{entry.section}</small>
+          )}
+          <span class="toolbar-settings-search-result-meta" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m6 3 5 5-5 5" /></svg></span>
         </button>
       ))}
-      {toggles.map((entry) => (
+      {categoryToggles.map((entry) => (
         <button
           key={entry.id}
           class={`toolbar-settings-item toolbar-settings-search-result${entry.checked ? ' checked' : ''}`}
@@ -474,6 +502,9 @@ function SettingsSearchResults({ query, jumps, toggles, onJump }: SettingsSearch
           <span class="toolbar-settings-item-label">{entry.label}</span>
         </button>
       ))}
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -482,15 +513,16 @@ interface SettingsTabListProps {
   visibleTabs: typeof TAB_DEFS;
   effectiveTab: SettingsTab;
   tabpanelId: string;
+  orientation: 'horizontal' | 'vertical';
   tablistRef: { current: HTMLDivElement | null };
   onKeyDown: (event: KeyboardEvent) => void;
   onSelect: (tab: SettingsTab) => void;
 }
 
 /** Renders the vertical tab strip for switching settings categories. */
-function SettingsTabList({ visibleTabs, effectiveTab, tabpanelId, tablistRef, onKeyDown, onSelect }: SettingsTabListProps) {
+function SettingsTabList({ visibleTabs, effectiveTab, tabpanelId, orientation, tablistRef, onKeyDown, onSelect }: SettingsTabListProps) {
   return (
-    <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-orientation="vertical" aria-label="Settings categories" onKeyDown={onKeyDown}>
+    <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-orientation={orientation} aria-label="Settings categories" onKeyDown={onKeyDown}>
       {visibleTabs.map((tab) => {
         const active = tab.id === effectiveTab;
         return (
@@ -502,6 +534,7 @@ function SettingsTabList({ visibleTabs, effectiveTab, tabpanelId, tablistRef, on
             role="tab"
             aria-selected={active}
             aria-controls={tabpanelId}
+            title={tab.description}
             tabindex={active ? 0 : -1}
             data-tab={tab.id}
             onClick={() => onSelect(tab.id)}
@@ -594,35 +627,55 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     <>
       {effectiveTab === 'chat' && (
         <>
-          <div class="toolbar-settings-section">
+          <div class="toolbar-settings-section" data-settings-section="session titles">
             <div class="toolbar-settings-section-label">Session titles</div>
             <SessionTitlesSection settings={sessionTitlesSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
           </div>
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['transcript']} />
-          <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
+          <div data-settings-section="completion notifications">
+            <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
+          </div>
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} sectionIds={['diagnostics']} />
         </>
       )}
       {effectiveTab === 'models' && (
         <>
-          <div class="toolbar-settings-section">
-            <div class="toolbar-settings-section-label">Model assignments</div>
+          <div class="toolbar-settings-section toolbar-settings-model-assignments">
             <div class="toolbar-settings-list">
-              <ChatDefaultModelAssignment
-                selectedModel={selectedModel}
-                selectedProvider={selectedProvider}
-                selectedLevel={selectedLevel}
-                modelEntries={chatModelEntries}
-                availableModels={availableModels}
-                onModelChange={onModelChange}
-              />
-              <SessionTitlesModelAssignment settings={sessionTitlesSettings} modelEntries={modelEntries} availableModels={availableModels} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
-              <HistoryCompactionModelAssignment settings={historySettings} availableModels={availableModels} modelEntries={modelEntries} activeModel={activeModel} onSetPrefs={onSetPrefs} />
-              {hasSkillPruner && <SkillPrunerModelAssignment pruningSettings={pruningSettings} modelEntries={modelEntries} availableModels={availableModels} onSetPruningSettings={onSetPruningSettings} />}
-              {hasSubagent && <SubagentModelAssignments prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />}
+              <div class="toolbar-settings-assignment-group" data-settings-section="chat default" role="group" aria-label="Chat default">
+                <h3 class="toolbar-settings-assignment-title">Chat default</h3>
+                <ChatDefaultModelAssignment
+                  compactLabels
+                  selectedModel={selectedModel}
+                  selectedProvider={selectedProvider}
+                  selectedLevel={selectedLevel}
+                  modelEntries={chatModelEntries}
+                  availableModels={availableModels}
+                  onModelChange={onModelChange}
+                />
+              </div>
+              <div class="toolbar-settings-assignment-group" data-settings-section="session titles" role="group" aria-label="Session titles">
+                <h3 class="toolbar-settings-assignment-title">Session titles</h3>
+                <SessionTitlesModelAssignment compactLabels settings={sessionTitlesSettings} modelEntries={modelEntries} availableModels={availableModels} onSetSessionTitlesSettings={onSetSessionTitlesSettings} />
+              </div>
+              <div class="toolbar-settings-assignment-group" data-settings-section="compaction summary" role="group" aria-label="Compaction summary">
+                <h3 class="toolbar-settings-assignment-title">Compaction summary</h3>
+                <HistoryCompactionModelAssignment compactLabels settings={historySettings} availableModels={availableModels} modelEntries={modelEntries} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+              </div>
+              {hasSkillPruner && (
+                <div class="toolbar-settings-assignment-group" data-settings-section="pruning prepass" role="group" aria-label="Pruning prepass">
+                  <h3 class="toolbar-settings-assignment-title">Pruning prepass</h3>
+                  <SkillPrunerModelAssignment compactLabels pruningSettings={pruningSettings} modelEntries={modelEntries} availableModels={availableModels} onSetPruningSettings={onSetPruningSettings} />
+                </div>
+              )}
+              {hasSubagent && (
+                <div class="toolbar-settings-assignment-group" data-settings-section="subagent model buckets" role="group" aria-label="Subagent model buckets">
+                  <SubagentModelAssignments prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />
+                </div>
+              )}
             </div>
           </div>
-          <div class="toolbar-settings-section">
+          <div class="toolbar-settings-section" data-settings-section="providers">
             <div class="toolbar-settings-section-label">Providers</div>
             <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
           </div>
@@ -630,15 +683,17 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
       )}
       {effectiveTab === 'context' && (
         <>
-          <HistoryCompactionSection settings={historySettings} contextWindow={activeContextWindow} availableModels={availableModels} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+          <div data-settings-section="history compaction">
+            <HistoryCompactionSection settings={historySettings} contextWindow={activeContextWindow} availableModels={availableModels} activeModel={activeModel} onSetPrefs={onSetPrefs} />
+          </div>
           {hasSkillPruner && (
-            <div class="toolbar-settings-section">
+            <div class="toolbar-settings-section" data-settings-section="skill pruning">
               <div class="toolbar-settings-section-label">Skill pruning</div>
               <SkillPrunerSettings prefs={prefs} pruningSettings={pruningSettings} skillCatalog={skillCatalog} toolCatalog={toolCatalog} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} />
             </div>
           )}
           {hasToolResultPruner && (
-            <div class="toolbar-settings-section">
+            <div class="toolbar-settings-section" data-settings-section="tool-result pruning">
               <div class="toolbar-settings-section-label">Tool-result pruning</div>
               <ToolResultPrunerSettings settings={toolResultPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
             </div>
@@ -646,22 +701,30 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
         </>
       )}
       {effectiveTab === 'subagents' && hasSubagent && (
-        <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} providerGateStats={providerGateStats} />
+        <div data-settings-section="subagents">
+          <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} providerGateStats={providerGateStats} />
+        </div>
       )}
       {effectiveTab === 'appearance' && (
-        <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
+        <div data-settings-section="appearance">
+          <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
+        </div>
       )}
       {effectiveTab === 'extensions' && (
-        <ExtensionsSection
-          availableExtensions={availableExtensions}
-          prefs={prefs}
-          onSetPrefs={onSetPrefs}
-          expandedExt={expandedExt}
-          setExpandedExt={setExpandedExt}
-        />
+        <div data-settings-section={expandedExt === 'warm-bash' ? 'warm bash' : expandedExt === 'ask-user' ? 'ask user' : undefined}>
+          <ExtensionsSection
+            availableExtensions={availableExtensions}
+            prefs={prefs}
+            onSetPrefs={onSetPrefs}
+            expandedExt={expandedExt}
+            setExpandedExt={setExpandedExt}
+          />
+        </div>
       )}
       {effectiveTab === 'mcp' && (
-        <McpSection prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
+        <div data-settings-section="mcp">
+          <McpSection prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} />
+        </div>
       )}
     </>
   );
@@ -704,6 +767,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const tablistRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const pendingFocusRef = useRef<SearchJumpEntry | 'search' | null>(null);
   const queryRef = useRef(query);
   queryRef.current = query;
 
@@ -749,7 +813,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
     if (effectiveTab !== activeTab) setActiveTab(effectiveTab);
   }, [effectiveTab, activeTab]);
 
-  // Search index: category jumps + every boolean toggle across all categories,
+  // Search index: every boolean toggle across all categories,
   // plus jump entries for the continuous (slider/select/stepper/text) controls,
   // so a single search box can find any setting without hunting through tabs.
   const searchIndex = useMemo<SearchEntry[]>(
@@ -767,24 +831,62 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
 
   const searching = q.length > 0;
 
-  const jumpTo = (tab: SettingsTab, expandExt?: string) => {
+  const clearSearch = () => {
+    pendingFocusRef.current = 'search';
+    queryRef.current = '';
+    setQuery('');
+  };
+  const selectCategory = (tab: SettingsTab) => {
     setActiveTab(tab);
-    if (expandExt) setExpandedExt(expandExt);
+    if (queryRef.current) clearSearch();
+  };
+  const jumpTo = (entry: SearchJumpEntry) => {
+    setActiveTab(entry.tab);
+    if (entry.expandExt) setExpandedExt(entry.expandExt);
+    pendingFocusRef.current = entry;
+    queryRef.current = '';
     setQuery('');
   };
 
-  // Pin the menu to a fixed height so it stops growing/shrinking as the user
-  // clicks between categories — each tab has a different amount of content, so
-  // a content-driven height made the menu's top edge jump around (the
-  // "resizes too much" problem). The height is generously sized by default and
-  // only shrinks when the viewport can't fit it; the inner
-  // .toolbar-settings-menu-body scrolls any overflow. The menu is
-  // bottom-anchored, so its bottom edge is stable regardless of height, and
-  // since the height no longer depends on content there's no need to
-  // re-measure on tab/search changes.
-  // The menu is portaled to document.body (outside the composer controls row,
-  // which becomes a horizontal scroll container on narrow layouts) and
-  // positioned in viewport coordinates against the trigger.
+  // A result/clear button disappears on commit. Move focus only after its
+  // replacement controls have mounted, never to a detached search result.
+  useLayoutEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!open || searching || !pending) return;
+    pendingFocusRef.current = null;
+    let destination: HTMLElement | null = null;
+    if (pending !== 'search') {
+      const menuBody = settingsMenuRef.current?.querySelector('.toolbar-settings-menu-body');
+      // Repeated labels (especially Thinking) only identify a control within
+      // its source group. A missing group must not focus another assignment.
+      const body = Array.from(menuBody?.querySelectorAll<HTMLElement>('[data-settings-section]') ?? [])
+        .find((section) => section.getAttribute('data-settings-section') === pending.section);
+      const controlSelector = 'button:not(.toolbar-settings-help-button), input, select, textarea';
+      const controls = body?.querySelectorAll<HTMLElement>(controlSelector);
+      destination = Array.from(controls ?? []).find((control) =>
+        control.getAttribute('aria-label') === pending.label) ?? null;
+      if (!destination) {
+        const row = Array.from(body?.querySelectorAll<HTMLElement>('[data-settings-label]') ?? [])
+          .find((element) => element.getAttribute('data-settings-label') === pending.label);
+        destination = row?.querySelector<HTMLElement>(controlSelector) ?? null;
+      }
+      if (!destination) {
+        const label = Array.from(body?.querySelectorAll<HTMLElement>('span, label, div') ?? [])
+          .find((element) => element.textContent?.trim() === pending.label
+            && (element.children.length === 0 || element.matches('.toolbar-settings-ui-control-label, .toolbar-settings-item-label')));
+        const row = label?.closest<HTMLElement>('.toolbar-settings-ui-control, .toolbar-settings-item, .toolbar-settings-ext-row');
+        destination = row?.matches(controlSelector) ? row : row?.querySelector<HTMLElement>(controlSelector) ?? null;
+      }
+    }
+    // Host-projected disabling can make a matched control unfocusable. Never
+    // abandon keyboard focus on the removed result or jump to a sibling setting.
+    if (destination?.matches(':disabled') || destination?.getAttribute('aria-disabled') === 'true') destination = null;
+    (destination ?? searchInputRef.current)?.focus();
+  }, [open, searching, effectiveTab, expandedExt]);
+
+  // The portaled popup has stable category-independent height. Position and
+  // height share one measurement on scroll/resize: prefer above the trigger,
+  // but use below when it fits more, always inside the viewport margins.
   useLayoutEffect(() => {
     if (!open) return;
     const trigger = triggerRef.current;
@@ -797,8 +899,21 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
         Math.max(8, rect.left),
         Math.max(8, window.innerWidth - width - 8),
       );
+      const pad = 8;
+      const gap = 6;
+      const viewportHeight = window.innerHeight;
+      const aboveEnd = Math.min(viewportHeight - pad, Math.max(pad, rect.top - gap));
+      const belowStart = Math.max(pad, Math.min(viewportHeight - pad, rect.bottom + gap));
+      const above = Math.max(0, aboveEnd - pad);
+      const below = Math.max(0, viewportHeight - pad - belowStart);
+      const useAbove = above >= SETTINGS_MENU_HEIGHT || above >= below;
+      const available = useAbove ? above : below;
+      const height = Math.min(SETTINGS_MENU_HEIGHT, available);
       menu.style.left = `${left}px`;
-      menu.style.bottom = `${Math.max(0, window.innerHeight - rect.top + 6)}px`;
+      menu.style.top = `${useAbove ? aboveEnd - height : belowStart}px`;
+      menu.style.bottom = 'auto';
+      menu.style.height = `${height}px`;
+      menu.style.maxHeight = `${available}px`;
     };
     let frame = 0;
     const schedule = () => {
@@ -816,26 +931,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   }, [open]);
 
   useLayoutEffect(() => {
-    const el = settingsMenuRef.current;
-    if (!open || !el) return;
-    const pad = 8;
-    const fit = () => {
-      const rect = el.getBoundingClientRect();
-      const avail = Math.max(180, rect.bottom - pad);
-      const h = Math.min(SETTINGS_MENU_HEIGHT, avail);
-      el.style.height = `${h}px`;
-      el.style.maxHeight = `${avail}px`;
-    };
-    fit();
-    const frame = window.requestAnimationFrame(() => {
-      fit();
-      searchInputRef.current?.focus();
-    });
-    window.addEventListener('resize', fit);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('resize', fit);
-    };
+    if (open) searchInputRef.current?.focus();
   }, [open]);
 
   useEffect(() => {
@@ -855,6 +951,11 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
         if (target instanceof HTMLElement && target.closest('.model-picker-dropdown')) {
           return;
         }
+        // Settings help is portaled too. Selecting its text stays inside this
+        // popup only when a settings trigger describes that exact tooltip.
+        const tooltip = target instanceof HTMLElement ? target.closest('.pie-tooltip-host') : null;
+        if (tooltip?.id && Array.from(settingsMenuRef.current?.querySelectorAll('[aria-describedby]') ?? [])
+          .some((trigger) => trigger.getAttribute('aria-describedby')?.split(/\s+/).includes(tooltip.id))) return;
         closeMenu();
       }
     };
@@ -877,6 +978,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
         // menu even before Preact has committed the cleared search state and
         // refreshed this document listener's closure.
         queryRef.current = '';
+        pendingFocusRef.current = 'search';
         setQuery('');
         return;
       }
@@ -904,7 +1006,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
     else if (event.key === 'End') next = ids[ids.length - 1];
     if (!next) return;
     event.preventDefault();
-    setActiveTab(next);
+    selectCategory(next);
     window.requestAnimationFrame(() => {
       tablistRef.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
     });
@@ -968,7 +1070,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 type="button"
                 class="toolbar-settings-search-clear"
                 aria-label="Clear search"
-                onClick={() => setQuery('')}
+                onClick={clearSearch}
               >
                 <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <line x1="3" y1="3" x2="10" y2="10" />
@@ -979,22 +1081,22 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
           </div>
 
           <div class="toolbar-settings-layout">
-            {!searching && (
               <SettingsTabList
                 visibleTabs={visibleTabs}
                 effectiveTab={effectiveTab}
                 tabpanelId={tabpanelId}
+                orientation="horizontal"
                 tablistRef={tablistRef}
                 onKeyDown={onTablistKeyDown}
-                onSelect={setActiveTab}
+                onSelect={selectCategory}
               />
-            )}
 
             <div
               id={tabpanelId}
               class="toolbar-settings-menu-body"
-              role="tabpanel"
-              aria-labelledby={`toolbar-settings-tab-${effectiveTab}`}
+              role={searching ? 'region' : 'tabpanel'}
+              aria-label={searching ? 'Settings search results' : undefined}
+              aria-labelledby={searching ? undefined : `toolbar-settings-tab-${effectiveTab}`}
             >
             {searching ? (
               <SettingsSearchResults
@@ -1004,6 +1106,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 onJump={jumpTo}
               />
             ) : (
+              <>
               <SettingsTabBody
                 effectiveTab={effectiveTab}
                 expandedExt={expandedExt}
@@ -1036,6 +1139,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 chatModelEntries={chatModelEntries ?? modelEntries}
                 onModelChange={onModelChange ?? (() => undefined)}
               />
+              </>
             )}
           </div>
           </div>

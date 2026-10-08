@@ -23,11 +23,6 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
-import type {
-	SessionOwnershipAdapter,
-	SessionTransferAuthorization,
-	SessionWriteLease,
-} from "./session-ownership.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -35,6 +30,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import type { SessionOwnershipAdapter, SessionTransferAuthorization, SessionWriteLease } from "./session-ownership.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -1897,11 +1893,7 @@ export class SessionManager {
 		return manager;
 	}
 
-	static preparePieBranched(
-		source: SessionManager,
-		leafId: string,
-		adapter: SessionOwnershipAdapter,
-	): SessionManager {
+	static preparePieBranched(source: SessionManager, leafId: string, adapter: SessionOwnershipAdapter): SessionManager {
 		source._assertPieWriteLease("preparePieBranched:source");
 		const branchPath = source.getBranch(leafId);
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);

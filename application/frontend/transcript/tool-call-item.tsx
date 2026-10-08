@@ -7,6 +7,7 @@ import type { ChatMessage, ChatPrefs, ToolCall } from '../../lib/protocol/index.
 import { shouldOpenSubagentContextMenu } from './interactions';
 import { handleTranscriptClick } from './transcript-click-handler';
 import { getToolCallContextType } from '../shell/chat-prefs';
+import { handleDelegatedFilePathContextMenu } from './file-path-interactions';
 import { AskUserContext } from '../lib/hooks/ask-user-context';
 
 import { cx } from '../lib/components/cx';
@@ -583,7 +584,7 @@ function SubagentMessages({
     () => subagentSingleResultToChatMessages(singleResult, `${toolCall.id}-${index}`),
     [singleResult, toolCall.id, index],
   );
-  const nestedCollapsibleDefaultsKey = `${prefs.autoExpandReasoning ? 'r1' : 'r0'}-${prefs.autoExpandToolCalls ? 't1' : 't0'}`;
+  const nestedCollapsibleDefaultsKey = prefs.autoExpandReasoning ? 'r1' : 'r0';
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
   const { handleScroll } = useStickToBottom<HTMLDivElement>(scrollRef, [messages]);
   const noop = () => {};
@@ -1229,16 +1230,18 @@ function ToolCallItemBody({
   }
 
   const contextType = getToolCallContextType(rendererName);
-  const handleContextMenu = (e: MouseEvent) => onContextMenu(
-    contextType,
-    JSON.stringify(renderedToolCall, null, 2),
-    e,
-  );
+  const handleContextMenu = (e: MouseEvent) => {
+    if (handleDelegatedFilePathContextMenu(e, workingDirectory, onContextMenu)) return;
+    onContextMenu(
+      contextType,
+      JSON.stringify(renderedToolCall, null, 2),
+      e,
+    );
+  };
 
   return (
     <ToolCallCard
       toolCall={renderedToolCall}
-      autoExpand={prefs.autoExpandToolCalls}
       activityTailLines={prefs.activityTailLines}
       workingDirectory={workingDirectory}
       prefs={prefs}

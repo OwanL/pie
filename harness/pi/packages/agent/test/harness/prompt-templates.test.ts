@@ -2,12 +2,12 @@ import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import type { ExecutionEnv } from "../../src/harness/types.ts";
 import {
 	formatPromptTemplateInvocation,
 	loadPromptTemplates,
 	loadSourcedPromptTemplates,
 } from "../../src/harness/prompt-templates.ts";
+import type { ExecutionEnv } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
 describe("loadPromptTemplates", () => {

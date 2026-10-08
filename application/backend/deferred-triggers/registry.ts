@@ -155,7 +155,7 @@ export class DeferredTriggerRegistry {
     // the debounced fs.watch callback is still pending. Reconcile synchronously
     // at event boundaries so a newly registered trigger cannot miss its only
     // matching event.
-    this.reload();
+    this.reload(finishedPath);
     for (const [id, t] of [...this.triggers.entries()]) {
       // Never self-wake: a creator finishing its own deferring turn must not
       // trigger a `session_finished` wake for its own registration.
@@ -211,7 +211,7 @@ export class DeferredTriggerRegistry {
   /** Cancel a trigger (or all triggers owned by `sessionPath` when `targetId`
    *  is omitted). Targeted cancellation is creator-owned too: a caller may not
    *  cancel another creator's trigger merely by knowing its id. Mirrors the
-   *  `defer_trigger` tool's `cancel` action and updates memory immediately so
+   *  `wakeup_timer` tool's `cancel` action and updates memory immediately so
    *  the webview need not wait for the debounced sidecar watcher. */
   cancel(sessionPath: string, targetId?: string): void {
     if (targetId) {
@@ -397,7 +397,7 @@ export class DeferredTriggerRegistry {
     const message = (t.message.trim() || t.note.trim()) || '(no message provided)';
     const text =
       `[deferred trigger fired: ${reason}]\n\n` +
-      'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\n' +
+      'A wakeup timer you registered fired. Re-evaluate your pending task and either complete it now or call `wakeup_timer` with action `register` again to keep waiting.\n\n' +
       `Task message:\n${message}`;
     this.deps.dispatchArch({
       kind: 'Command',
@@ -426,7 +426,7 @@ export class DeferredTriggerRegistry {
   }
 
   /** Re-read the sidecar and sync in-memory state (add new, drop gone, keep timers for persistent ids). */
-  private reload(): void {
+  private reload(finishedPath?: string): void {
     try {
       // Only a confirmed-dead process owner whose durable dispatch boundary
       // was never crossed is safe to release. Healthy, unknown/legacy, and
@@ -436,7 +436,29 @@ export class DeferredTriggerRegistry {
       // Recovery is best-effort and fail-closed: the old artifact remains the
       // authority if liveness checking or durable release fails.
     }
-    const next = replayTriggers(this.store.readOps());
+    let next = replayTriggers(this.store.readOps());
+    const sessions = this.deps.getArchState().sessions;
+    let startedTimers = false;
+    for (const trigger of next.values()) {
+      if (trigger.deliveryState !== 'pending' || trigger.wakeupMode !== true
+        || trigger.timerStartedAt || !trigger.triggers.some(isTimerSpec)) continue;
+      // Reconcile a completion that beat watcher debounce. An observed idle,
+      // open creator also covers a missed event; a closed creator is unknown.
+      const creatorFinished = trigger.sessionPath === finishedPath
+        || (sessions.openTabPaths.includes(trigger.sessionPath)
+          && sessions.runningSessionPaths?.includes(trigger.sessionPath) === false);
+      if (!creatorFinished) continue;
+      try {
+        this.store.append({ id: trigger.id, op: 'timer-started', sessionPath: trigger.sessionPath,
+          at: new Date(this.clock.now()).toISOString() });
+        startedTimers = true;
+      } catch {
+        // Do not arm without a durable start. A later reconciliation can retry.
+      }
+    }
+    // First durable start wins across hosts. Re-read rather than adopting our
+    // local timestamp, and respect any cancellation appended concurrently.
+    if (startedTimers) next = replayTriggers(this.store.readOps());
     for (const id of [...this.triggers.keys()]) {
       if (!next.has(id)) {
         this.clearTimer(id);
@@ -477,7 +499,7 @@ export class DeferredTriggerRegistry {
       }
     }
     // Surface sidecar-driven changes (a `register`/`cancel` appended by the
-    // backend `defer_trigger` tool, or a `fire`/`cancel` from another host
+    // backend `wakeup_timer` tool, or a `fire`/`cancel` from another host
     // instance) to the webview. The watcher debounces ~200ms, so this fires
     // once per settled sidecar change.
     this.deps.scheduleRender?.();
@@ -658,8 +680,9 @@ export class DeferredTriggerRegistry {
     // OR semantics across specs: the earliest deadline wins (a trigger with
     // multiple timer specs fires at the shortest delay, not the first listed).
     const spec = timerSpecs.reduce((a, b) => (a.ms <= b.ms ? a : b));
-    const registeredAt = Date.parse(t.registeredAt);
-    const base = Number.isFinite(registeredAt) ? registeredAt : this.clock.now();
+    if (t.wakeupMode === true && !t.timerStartedAt) return;
+    const startedAt = Date.parse(t.wakeupMode === true ? t.timerStartedAt! : t.registeredAt);
+    const base = Number.isFinite(startedAt) ? startedAt : this.clock.now();
     const deadline = base + spec.ms;
     const fire = (): void => this.fire(t.id, `timer elapsed after ${spec.ms}ms`);
     const scheduleNextSlice = (): void => {
@@ -669,7 +692,7 @@ export class DeferredTriggerRegistry {
         fire();
         return;
       }
-      this.timers.set(t.id, setTimeout(scheduleNextSlice, boundedTimerSlice(remaining)));
+      this.timers.set(t.id, this.clock.setTimeout(scheduleNextSlice, boundedTimerSlice(remaining)));
     };
     if (deadline <= this.clock.now()) {
       // Already elapsed (e.g. process was down) — fire on the next turn to
@@ -684,7 +707,7 @@ export class DeferredTriggerRegistry {
   private clearTimer(id: string): void {
     const handle = this.timers.get(id);
     if (handle) {
-      clearTimeout(handle as NodeJS.Timeout);
+      this.clock.clearTimeout(handle as NodeJS.Timeout);
       clearImmediate(handle as NodeJS.Immediate);
       this.timers.delete(id);
     }

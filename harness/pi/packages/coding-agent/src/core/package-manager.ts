@@ -2082,22 +2082,22 @@ export class DefaultPackageManager implements PackageManager {
 		filter: PackageFilter | undefined,
 		metadata: PathMetadata,
 	): boolean {
+		const manifest = this.readPiManifest(packageRoot);
 		if (filter) {
 			for (const resourceType of RESOURCE_TYPES) {
 				const patterns = filter[resourceType];
 				const target = this.getTargetMap(accumulator, resourceType);
 				if (filter.autoload === false) {
-					this.applyPackageDeltaFilter(packageRoot, patterns ?? [], resourceType, target, metadata);
+					this.applyPackageDeltaFilter(packageRoot, patterns ?? [], resourceType, target, metadata, manifest);
 				} else if (patterns !== undefined) {
-					this.applyPackageFilter(packageRoot, patterns, resourceType, target, metadata);
+					this.applyPackageFilter(packageRoot, patterns, resourceType, target, metadata, manifest);
 				} else {
-					this.collectDefaultResources(packageRoot, resourceType, target, metadata);
+					this.collectDefaultResources(packageRoot, resourceType, target, metadata, manifest);
 				}
 			}
 			return true;
 		}
 
-		const manifest = this.readPiManifest(packageRoot);
 		if (manifest) {
 			for (const resourceType of RESOURCE_TYPES) {
 				const entries = manifest[resourceType as keyof PiManifest];
@@ -2132,8 +2132,8 @@ export class DefaultPackageManager implements PackageManager {
 		resourceType: ResourceType,
 		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
 		metadata: PathMetadata,
+		manifest: PiManifest | null,
 	): void {
-		const manifest = this.readPiManifest(packageRoot);
 		const entries = manifest?.[resourceType as keyof PiManifest];
 		if (entries) {
 			this.addManifestEntries(entries, packageRoot, resourceType, target, metadata);
@@ -2155,8 +2155,9 @@ export class DefaultPackageManager implements PackageManager {
 		resourceType: ResourceType,
 		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
 		metadata: PathMetadata,
+		manifest: PiManifest | null,
 	): void {
-		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType);
+		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType, manifest);
 
 		if (userPatterns.length === 0) {
 			// Empty array explicitly disables all resources of this type
@@ -2181,12 +2182,13 @@ export class DefaultPackageManager implements PackageManager {
 		resourceType: ResourceType,
 		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
 		metadata: PathMetadata,
+		manifest: PiManifest | null,
 	): void {
 		if (userPatterns.length === 0) {
 			return;
 		}
 
-		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType);
+		const { allFiles } = this.collectManifestFiles(packageRoot, resourceType, manifest);
 		const enabledByUser = applyAutoloadDisabledPatterns(allFiles, userPatterns, packageRoot);
 		for (const [filePath, enabled] of enabledByUser) {
 			this.addResource(target, filePath, metadata, enabled);
@@ -2201,8 +2203,8 @@ export class DefaultPackageManager implements PackageManager {
 	private collectManifestFiles(
 		packageRoot: string,
 		resourceType: ResourceType,
+		manifest: PiManifest | null,
 	): { allFiles: string[]; enabledByManifest: Set<string> } {
-		const manifest = this.readPiManifest(packageRoot);
 		const entries = manifest?.[resourceType as keyof PiManifest];
 		if (entries && entries.length > 0) {
 			const allFiles = this.collectFilesFromManifestEntries(entries, packageRoot, resourceType);

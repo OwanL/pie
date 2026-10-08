@@ -192,7 +192,7 @@ test('tool detail is absent initially, requested on expansion, and rendered afte
   assert.equal(messages.some((message) => message.type === 'requestDetail'), false);
   assert.equal(container.textContent?.includes('COMPLETE_DETAIL'), false);
 
-  const toggle = container.querySelector('[role="button"]') as HTMLElement | null;
+  const toggle = container.querySelector('.tool-call-toggle') as HTMLElement | null;
   assert.ok(toggle);
   await act(async () => toggle.click());
   assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1);
@@ -251,6 +251,8 @@ test('a lost tool-detail request surfaces a retry action instead of loading fore
         onContextMenu: () => undefined,
       }), container);
     });
+    assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 0);
+    await act(async () => (container.querySelector('.tool-call-toggle') as HTMLButtonElement).click());
     assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1);
     assert.ok(timeoutCallback, 'accepted detail request arms bounded recovery');
 

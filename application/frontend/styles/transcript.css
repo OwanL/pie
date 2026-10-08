@@ -248,12 +248,12 @@
 }
 
 /* ── Jump-to-latest button ───────────────────────────────────────────────── */
-/* Floats above the composer when the user is scrolled away from the bottom */
+/* Floats inside the transcript viewport, never over the composer or footer. */
 
 .transcript-jump-latest {
-  position: fixed;
+  position: absolute;
   left: 50%;
-  bottom: calc(var(--composer-height, 64px) + 8px);
+  bottom: 8px;
   transform: translateX(-50%);
   min-width: 32px;
   height: 32px;
@@ -281,6 +281,10 @@
     transform var(--panel-duration-fast) var(--panel-ease-spring),
     box-shadow var(--panel-transition-normal);
   animation: transcript-jump-latest-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
+}
+
+@media (pointer: coarse) {
+  .transcript-jump-latest { height: 44px; min-width: 44px; }
 }
 
 .transcript-jump-latest-icon {
@@ -650,21 +654,21 @@
   min-width: 0;
   padding: 0;
   overflow: hidden;
-  font-family: var(--panel-font-mono);
-  font-size: 9px;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
   font-weight: 400;
-  line-height: 1.25;
-  letter-spacing: 0.02em;
+  line-height: 1.4;
   white-space: nowrap;
-  color: color-mix(in srgb, var(--panel-foreground) 46%, var(--panel-muted) 54%);
-  opacity: 0.72;
-  /* Allow the bouncing ellipsis to render above the text baseline without being clipped. */
-  overflow: visible;
+  color: color-mix(in srgb, var(--panel-foreground) 72%, var(--panel-muted) 28%);
 }
 
 .turn-activity-strip.standalone { margin: 2px 0; }
 
 .turn-activity-strip-label {
+  color: var(--panel-foreground-soft);
+  font-weight: 500;
+  flex: 0 0 auto;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -683,10 +687,10 @@
 }
 
 .turn-activity-strip.running .turn-activity-strip-label {
-  color: color-mix(in srgb, var(--panel-foreground) 72%, var(--panel-muted));
+  color: var(--panel-foreground-soft);
 }
 
-/* Bouncing trailing ellipsis — mirrors .loading-ellipsis. Animates opacity +
+/* Bouncing trailing ellipsis. Animates opacity +
    transform only, so it runs on the compositor thread and never blocks the
    streaming repaints happening in the same view. */
 .turn-activity-strip-dot {
@@ -710,11 +714,12 @@
 }
 
 .turn-activity-strip-detail {
-  min-width: min(10ch, 40%);
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0.58;
+  color: color-mix(in srgb, var(--panel-foreground-soft) 25%, var(--panel-muted));
   font-weight: 400;
   letter-spacing: normal;
   text-transform: none;
@@ -928,7 +933,9 @@
   50.01%, 100% { opacity: 0; }
 }
 
-/* Tone classes are retained for semantics, but the compact activity line stays deliberately uncolored. */
+/* Keep routine activity quiet; genuine warnings/errors must remain distinct. */
+.turn-activity-strip.warning .turn-activity-strip-label { color: var(--panel-warning); }
+.turn-activity-strip.error .turn-activity-strip-label { color: var(--panel-danger); }
 
 /* ── Inline message activity ─────────────────────────────────────────────── */
 /* Typing indicator rendered inside a message between streaming turns */
@@ -957,8 +964,9 @@
 /* Spinner used for transcript-loading state; animation defined in index.css */
 
 .loading-wheel {
-  width: 22px;
-  height: 22px;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
   box-sizing: border-box;
   border-radius: 999px;
   border: 2px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
@@ -967,17 +975,15 @@
   will-change: transform;
 }
 
-/* ── Loading indicator (wheel + status line) ────────────────────────────── */
-/* Wraps the spinning wheel with a subtle, live status line so the surface    */
-/* reads as actively working instead of frozen. The bouncing trailing ellipsis */
-/* gives continuous motion even while the status text itself is static.       */
+/* ── Loading indicator (spinner + inline status) ───────────────────────── */
 
 .loading-indicator {
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
 }
 
 /* Center the loading affordance within the empty-state column. */
@@ -990,31 +996,18 @@
   display: inline-flex;
   align-items: baseline;
   gap: 2px;
-  color: var(--panel-muted);
+  color: var(--panel-foreground-soft);
+  font-weight: 500;
   font-size: 11px;
   line-height: 1.4;
   letter-spacing: 0.01em;
-  text-align: center;
-  white-space: nowrap;
+  min-width: 0;
+  text-align: start;
 }
 
-.loading-ellipsis {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 1px;
-}
-
-.loading-ellipsis > span {
-  animation: loading-ellipsis-bounce 1.2s ease-in-out infinite;
-  will-change: transform, opacity;
-}
-
-.loading-ellipsis > span:nth-child(2) {
-  animation-delay: 0.18s;
-}
-
-.loading-ellipsis > span:nth-child(3) {
-  animation-delay: 0.36s;
+.loading-status-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 @keyframes loading-ellipsis-bounce {
@@ -1166,6 +1159,36 @@
 .reasoning-block[data-streaming="true"][data-provisional="true"] {
   border-inline-start: 2px solid color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border));
   background: color-mix(in srgb, var(--panel-control-surface) 70%, var(--panel-black));
+}
+
+/* Short reasoning reads as ordinary prose, with no disclosure chrome. */
+.reasoning-block.reasoning-inline {
+  border: 0;
+  background: transparent;
+}
+
+.reasoning-inline .reasoning-scroll {
+  max-height: none;
+  overflow: visible;
+}
+
+.reasoning-block .message-body,
+.reasoning-block .reasoning-preview {
+  color: var(--panel-foreground-soft);
+}
+
+.reasoning-icon {
+  flex: none;
+  color: var(--panel-muted);
+}
+
+.reasoning-preview {
+  flex: 1 1 0%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 
 .reasoning-block .collapsible-header {
@@ -1655,29 +1678,61 @@
 /* ── Compaction summary card ────────────────────────────────────────────── */
 
 .compaction-summary-card {
-  border: 1px dashed var(--panel-border-subtle, var(--panel-border));
-  border-radius: var(--panel-radius-md);
+  border: 0;
+  border-bottom: 1px solid var(--panel-border-subtle);
+  border-radius: 0;
+  background: transparent;
+}
+
+.compaction-summary-card .collapsible-header {
+  min-height: 26px;
+  border-radius: 0;
 }
 
 .compaction-summary-header {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
+  font-family: var(--panel-font-sans);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--panel-muted);
+}
+
+.compaction-summary-label {
+  flex: 0 0 auto;
+  color: var(--panel-foreground-soft);
+  font-weight: 500;
+}
+
+.compaction-summary-provenance {
+  margin-bottom: 6px;
+  color: var(--panel-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .compaction-summary-meta {
   display: flex;
-  flex-wrap: wrap;
   align-items: baseline;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
-  line-height: 1.3;
+  line-height: 1.4;
 }
 
 .compaction-summary-meta-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--panel-muted);
 }
+
+.compaction-summary-reason { flex: 0 0 auto; }
 
 .compaction-summary-meta-item:not(:last-child)::after {
   content: '·';

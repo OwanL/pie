@@ -587,7 +587,8 @@ async function handleSessionLoadDetail(
   if (!candidate
     || typeof candidate.key !== 'string' || candidate.key.length === 0
     || candidate.sessionPath !== sessionPath
-    || (candidate.kind !== 'tool-result' && candidate.kind !== 'reasoning')
+    || (candidate.kind !== 'tool-result' && candidate.kind !== 'reasoning' && candidate.kind !== 'model-exchange')
+    || (candidate.kind === 'model-exchange' && (candidate.source !== 'durable' || typeof candidate.toolCallId !== 'string' || candidate.toolCallId.length === 0))
     || candidate.source !== 'durable'
     || typeof candidate.messageId !== 'string'
     || typeof candidate.summary !== 'string'

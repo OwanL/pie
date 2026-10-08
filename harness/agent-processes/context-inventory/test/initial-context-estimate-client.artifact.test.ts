@@ -19,7 +19,6 @@ import {
   createSourceArtifactTestSdkRuntime,
 } from '../../test/fixtures/sdk-runtime-selection.js';
 import { buildSanitizedRealChildTestEnv } from '../../test/fixtures/sanitized-real-child-env.js';
-import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 
 const testSdkRuntime = () => createSyntheticSourceTestSdkRuntime('/sdk');
 
@@ -71,7 +70,7 @@ async function confirmSpawnedChildrenStopped(children: readonly TrackedChildProc
 function createRespondingChild(
   systemPromptText = 'Complete prompt text.',
   workerTimings?: Record<string, number>,
-  options: { failPreload?: boolean } = {},
+  options: { failPreload?: boolean; holdPreload?: boolean } = {},
 ): any {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -86,6 +85,9 @@ function createRespondingChild(
   child.stdio = [null, stdout, stderr, inbound, outbound];
   child.kill = () => true;
   child.frames = [];
+  let initialized!: () => void;
+  child.initialized = new Promise<void>((resolve) => { initialized = resolve; });
+  child.completePreload = () => inbound.write(`${JSON.stringify({ protocolVersion: 2, kind: 'ready', timings: { sdkImportDurationMs: 45 } })}\n`);
   let pending = '';
   outbound.on('data', (chunk: Buffer | string) => {
     pending += chunk.toString();
@@ -96,10 +98,11 @@ function createRespondingChild(
       pending = pending.slice(newline + 1);
       child.frames.push(frame);
       if (frame.kind === 'initialize') {
+        initialized();
         if (options.failPreload) {
           inbound.end(`${JSON.stringify({ protocolVersion: 2, kind: 'result', ok: false, error: 'preload failed' })}\n`);
-        } else {
-          inbound.write(`${JSON.stringify({ protocolVersion: 2, kind: 'ready', timings: { sdkImportDurationMs: 45 } })}\n`);
+        } else if (!options.holdPreload) {
+          child.completePreload();
         }
       } else if (frame.kind === 'discover') {
         inbound.end(`${JSON.stringify({
@@ -240,6 +243,109 @@ test('inventory IPC preserves complete prompt text beyond the former 256 KiB est
   await client.dispose();
 });
 
+test('replacement preload never delays discovery and the next discovery consumes the fresh spare', { timeout: 5_000 }, async (t) => {
+  const children: any[] = [];
+  const timings: InitialContextEstimateTimingSample[] = [];
+  const client = new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js', sdkPath: '/sdk', sdkRuntime: testSdkRuntime(),
+    spawnProcess: (() => {
+      const child = createRespondingChild('fresh prompt', undefined, { holdPreload: children.length > 0 });
+      children.push(child);
+      return child;
+    }) as any,
+    establishGuardian: async () => ({ terminate: async () => undefined }),
+    onTiming: (sample) => timings.push(sample),
+  });
+  t.after(() => client.dispose());
+  await client.warm();
+  const firstInput = { cwd: '/first', agentDir: '/agent-one', model: { provider: 'mock', id: 'first' } };
+  const secondInput = { cwd: '/second', agentDir: '/agent-two', model: { provider: 'mock', id: 'second' } };
+  assert.ok(await client.discover(firstInput), 'result settles while replacement preload is gated');
+  assert.equal(children.length, 2, 'one replacement starts after confirmed retirement');
+  await children[1].initialized;
+  assert.deepEqual(children[1].frames.map((frame: any) => frame.kind), ['initialize']);
+  assert.deepEqual(Object.keys(children[1].frames[0]).sort(),
+    ['kind', 'parentPid', 'protocolVersion', 'sdkPath', 'sdkRuntime'], 'initialization carries no cwd, agent, model or auth payload');
+  children[1].completePreload();
+  await (client as any).starting;
+  assert.ok(await client.discover(secondInput));
+  assert.equal(timings.filter((sample) => sample.stage === 'discover').every((sample) => sample.prewarmed), true);
+  for (const [index, input] of [firstInput, secondInput].entries()) {
+    assert.deepEqual(children[index].frames.map((frame: any) => frame.kind), ['initialize', 'discover']);
+    assert.deepEqual(children[index].frames[1], {
+      protocolVersion: 2, kind: 'discover', sdkPath: '/sdk', sdkRuntime: testSdkRuntime(), ...input,
+    }, 'each disposable child receives exactly one full fresh request');
+  }
+});
+
+test('queued discoveries drain before one replacement and never overlap live children', async (t) => {
+  const children: any[] = [];
+  let live = 0;
+  let maximumLive = 0;
+  const client = new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js', sdkPath: '/sdk', sdkRuntime: testSdkRuntime(),
+    spawnProcess: (() => {
+      live += 1;
+      maximumLive = Math.max(maximumLive, live);
+      const child = createRespondingChild('prompt', undefined, { holdPreload: children.length === 2 });
+      children.push(child);
+      return child;
+    }) as any,
+    establishGuardian: async () => ({ terminate: async () => { live -= 1; } }),
+  });
+  t.after(() => client.dispose());
+  const input = { cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model' } };
+  const first = client.discover(input);
+  const second = client.discover(input);
+  assert.ok(await first);
+  assert.ok(await second);
+  assert.equal(children.length, 3, 'two queued one-use discoveries followed by exactly one spare');
+  assert.equal(maximumLive, 1);
+  assert.deepEqual(children.slice(0, 2).map((child) => child.frames.map((frame: any) => frame.kind)),
+    [['initialize', 'discover'], ['initialize', 'discover']]);
+});
+
+test('failed replacement preload is cleaned once without automatic retries', async (t) => {
+  let spawnCount = 0;
+  let terminationCount = 0;
+  let failed!: () => void;
+  const failure = new Promise<void>((resolve) => { failed = resolve; });
+  const client = new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js', sdkPath: '/sdk', sdkRuntime: testSdkRuntime(),
+    spawnProcess: (() => createRespondingChild('prompt', undefined, { failPreload: ++spawnCount > 1 })) as any,
+    establishGuardian: async () => ({ terminate: async () => { terminationCount += 1; } }),
+    onDiagnostic: (chunk) => { if (chunk.includes('replacement worker preload failed:')) failed(); },
+  });
+  t.after(() => client.dispose());
+  assert.ok(await client.discover({ cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model' } }));
+  await failure;
+  assert.equal(spawnCount, 2);
+  assert.equal(terminationCount, 2);
+  assert.equal((client as any).active.size, 0);
+  assert.equal((client as any).starting, undefined);
+});
+
+test('disposal during discovery cleanup fences replacement preload', async () => {
+  let beginCleanup!: () => void;
+  const cleaning = new Promise<void>((resolve) => { beginCleanup = resolve; });
+  let finishCleanup!: () => void;
+  const cleaned = new Promise<void>((resolve) => { finishCleanup = resolve; });
+  let spawnCount = 0;
+  const client = new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js', sdkPath: '/sdk', sdkRuntime: testSdkRuntime(),
+    spawnProcess: (() => { spawnCount += 1; return createRespondingChild(); }) as any,
+    establishGuardian: async () => ({ terminate: async () => { beginCleanup(); await cleaned; } }),
+  });
+  const discovery = client.discover({ cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model' } });
+  await cleaning;
+  const disposal = client.dispose();
+  finishCleanup();
+  assert.ok(await discovery);
+  await disposal;
+  assert.equal(spawnCount, 1);
+  assert.equal((client as any).active.size, 0);
+});
+
 test('one prewarmed child serves exactly one request, then the next request gets a fresh child', async () => {
   const children: any[] = [];
   const client = new InitialContextEstimateClient({
@@ -266,7 +372,7 @@ test('one prewarmed child serves exactly one request, then the next request gets
     cwd: '/workspace-one', agentDir: '/agent-one', model: { provider: 'mock', id: 'model-a' },
   });
   assert.ok(first);
-  assert.equal(children.length, 1, 'the public request consumes the warm child rather than spawning again');
+  assert.equal(children.length, 2, 'the public request consumes the warm child, then starts one replacement');
   assert.deepEqual(children[0].frames.map((frame: any) => frame.kind), ['initialize', 'discover']);
   assert.deepEqual(children[0].frames[1].sdkRuntime, children[0].frames[0].sdkRuntime,
     'the request carries the exact runtime route used for preload');
@@ -274,8 +380,8 @@ test('one prewarmed child serves exactly one request, then the next request gets
   assert.equal((await client.discover({
     cwd: '/workspace-two', agentDir: '/agent-two', model: { provider: 'mock', id: 'model-b' },
   }))?.estimate.tokens, 12_345);
-  assert.equal(children.length, 2, 'a consumed process is never reused across requests');
-  assert.deepEqual(children.map((child) => child.frames.map((frame: any) => frame.kind)), [
+  assert.equal(children.length, 3, 'each consumed process is replaced, never reused');
+  assert.deepEqual(children.slice(0, 2).map((child) => child.frames.map((frame: any) => frame.kind)), [
     ['initialize', 'discover'], ['initialize', 'discover'],
   ]);
   await client.dispose();
@@ -300,7 +406,7 @@ test('concurrent discoveries are capped without spawning concurrent workers', as
   });
   assert.equal(await capped, undefined, 'excess concurrent work preserves fail-open semantics');
   assert.equal((await first)?.estimate.tokens, 12_345);
-  assert.equal(spawnCount, 1, 'the queue limit does not multiply child processes');
+  assert.equal(spawnCount, 2, 'one accepted discovery plus one replacement; the capped call spawns nothing');
   await client.dispose();
 });
 
@@ -322,9 +428,8 @@ test('failed prewarm is retired and the next cold request falls back to one on-d
   });
   await assert.rejects(warmup, /invalid protocol frame/);
   const inventory = await discovery;
-  assert.equal(spawnCount, 2, 'a waiting open starts one fallback after failed warmup cleanup');
+  assert.equal(spawnCount, 3, 'one failed warmup, one successful fallback, and one replacement');
   assert.equal(inventory?.estimate.tokens, 12_345);
-  assert.equal(spawnCount, 2, 'fallback starts exactly one normal on-demand worker');
   await client.dispose();
 });
 
@@ -352,7 +457,7 @@ test('a request arriving during idle cleanup waits for retirement before one on-
     cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model-a' },
   });
   assert.equal(inventory?.estimate.tokens, 12_345);
-  assert.equal(spawnCount, 2, 'the retiring spare is confirmed stopped before one fallback spawn');
+  assert.equal(spawnCount, 3, 'confirmed spare retirement permits one fallback and then one replacement');
   assert.equal(terminationCount, 2, 'both one-use worker lifecycles use guardian termination');
   await client.dispose();
 });
@@ -378,7 +483,7 @@ test('an idle child crash retires its guardian before falling back to a fresh wo
     cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model-a' },
   });
   assert.equal(inventory?.estimate.tokens, 12_345);
-  assert.equal(children.length, 2);
+  assert.equal(children.length, 3, 'crashed spare, fallback, then replacement');
   assert.equal(terminationCount, 2, 'the crashed spare and consumed fallback both use guardian cleanup');
   await client.dispose();
 });
@@ -518,6 +623,7 @@ test('late guardian termination failure remains owned and explicit disposal retr
 
 test('guardian failure falls back to process-tree termination and retains failed cleanup for disposal retry', async () => {
   let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  let spawnCount = 0;
   let guardianAttempts = 0;
   let treeAttempts = 0;
   const client = new InitialContextEstimateClient({
@@ -526,6 +632,7 @@ test('guardian failure falls back to process-tree termination and retains failed
     sdkRuntime: testSdkRuntime(),
     spawnProcess: ((_command: string, _args: readonly string[], options: any) => {
       spawnedEnv = options.env;
+      spawnCount += 1;
       return createRespondingChild();
     }) as any,
     establishGuardian: async () => ({
@@ -557,6 +664,7 @@ test('guardian failure falls back to process-tree termination and retains failed
   assert.equal(spawnedEnv?.PI_OFFLINE, '1');
   assert.equal(treeAttempts, 1, 'guardian failure attempts the process-tree fallback');
   assert.equal((client as any).active.size, 1, 'failed cleanup remains tracked');
+  assert.equal(spawnCount, 1, 'uncertain cleanup prevents replacement despite a successful inventory');
 
   await client.dispose();
   assert.equal(guardianAttempts, 2, 'disposal retries guardian termination');
@@ -566,6 +674,8 @@ test('guardian failure falls back to process-tree termination and retains failed
 
 test('real source-artifact child measures cold versus prewarmed open and reads user resources on demand', { timeout: 180_000 }, async (t) => {
 
+  // Artifact verification belongs to this real-child case, not fake-child selections.
+  const { sourceDescriptor } = await import('../../lib/sdk-integration/test/source-fixture.js');
   const repoRoot = path.resolve(__dirname, '../../../../');
   const artifactDir = sourceDescriptor.artifactDir;
   const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);

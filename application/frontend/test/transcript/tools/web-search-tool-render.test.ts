@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import DOMPurify from 'dompurify';
-import renderToString from 'preact-render-to-string';
+import { render as renderDom } from 'preact';
+import { act } from 'preact/test-utils';
+import { installDom } from '../../helpers/dom';
+import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open';
+installDom();
 
 import { DEFAULT_CHAT_PREFS, type ToolCall } from '../../../../lib/protocol/index.js';
 
@@ -29,18 +33,26 @@ function webSearchTool(overrides: Partial<ToolCall> = {}): ToolCall {
   };
 }
 
-function render(toolCall: ToolCall, autoExpand = true): string {
+function render(toolCall: ToolCall, expanded = true): string {
+  clearCollapsibleCache();
   const Renderer = registryModule.getToolRenderer('web_search');
   assert.ok(Renderer, 'web_search renderer should be registered');
   const tree = Renderer({
     toolCall,
-    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandToolCalls: autoExpand },
+    prefs: DEFAULT_CHAT_PREFS,
     workingDirectory: null,
     onOpenFile: noop,
     onContextMenu: noopContextMenu,
     renderToolCall: noopRenderToolCall,
   });
-  return renderToString(tree as Parameters<typeof renderToString>[0]);
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  act(() => renderDom(tree, container));
+  if (expanded) act(() => (container.querySelector('.tool-call-toggle') as HTMLButtonElement).click());
+  const html = container.innerHTML;
+  act(() => renderDom(null, container));
+  container.remove();
+  return html;
 }
 
 test('web_search renderer is registered', () => {
@@ -157,16 +169,19 @@ test('web_search renders a single query without an index and a Query label', () 
 test('web_search falls back to the generic card when input cannot be parsed', () => {
   // Non-object input.
   let html = render(webSearchTool({ id: 'web-search-fallback-1', input: 'not an object' }));
-  assert.match(html, /tool-call-section-label">Input</);
+  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /not an object/);
   assert.doesNotMatch(html, /web-search-queries/);
 
   // Empty queries array / whitespace-only query.
   html = render(webSearchTool({ id: 'web-search-fallback-2', input: { queries: [] } }));
-  assert.match(html, /tool-call-section-label">Input</);
+  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /queries/);
   assert.doesNotMatch(html, /web-search-queries/);
 
   html = render(webSearchTool({ id: 'web-search-fallback-3', input: { query: '   ' } }));
-  assert.match(html, /tool-call-section-label">Input</);
+  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /query/);
   assert.doesNotMatch(html, /web-search-queries/);
 });
 
@@ -190,5 +205,5 @@ test('web_search shows plain streaming text while running and a pending state be
   }));
   assert.match(pending, /web-search-pending/);
   assert.match(pending, /Searching the web…/);
-  assert.match(pending, /tool-call-section-label">Searching/);
+  assert.doesNotMatch(pending, /tool-call-section-label">(?:Searching|Result)</);
 });

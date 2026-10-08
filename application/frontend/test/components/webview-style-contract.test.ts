@@ -71,7 +71,8 @@ test('panel chip styling is centralized instead of embedded in feature component
   assert.match(indexCss, /@import '\.\/panel-chip\.css';/);
   assert.match(panelChipCss, /\.panel-chip-toolbar/);
   assert.match(panelChipCss, /\.panel-chip-pruning/);
-  assert.match(panelChipCss, /\.pruning-stat-tile/);
+  assert.match(panelChipCss, /\.pruning-meta-line/);
+  assert.doesNotMatch(panelChipCss, /\.pruning-stat-tile/);
   assert.match(panelChipComponent, /function PanelChip/);
   assert.match(panelChipComponent, /export function ToolbarIndicatorChip/);
   assert.match(panelChipComponent, /export function PruningHeaderChipControl/);
@@ -349,12 +350,13 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(toolCallCss, /\.tool-call\.tool-call-subagent \.subagent-header\[aria-expanded="false"\]\s*\{[^}]*background:\s*var\(--panel-subagent-header-surface\)/);
   assert.match(toolCallCss, /\.subagent-header \.status-chip,[\s\S]*?background:\s*var\(--panel-control-surface\)/);
   assert.match(toolCallCss, /\.subagent-messages\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
-  assert.match(toolCallCss, /\.tool-call-card\[data-provisional="true"\] > \.tool-call-header \.transcript-header-title-mono,[\s\S]*?color:\s*var\(--panel-muted\);[^}]*opacity:\s*1/);
+  assert.match(toolCallCss, /\.tool-call-status-draft\s*\{[^}]*border:\s*1px dashed var\(--panel-muted\)/);
   assert.doesNotMatch(toolCallCss, /\.tool-call-card\[data-provisional="true"\]\s*\{[^}]*(?:background|border-inline-start)/);
-  assert.match(toolCallCss, /\.tool-call-provisional-input\s*\{[^}]*overflow-y:\s*auto;[^}]*white-space:\s*pre-wrap;[^}]*color:\s*var\(--panel-muted\)/);
+  assert.match(toolCallCss, /\.tool-call-live-preview pre\s*\{[^}]*height:\s*calc\(var\(--tool-preview-lines/);
   assert.doesNotMatch(toolCallCss, /tool-call-provisional-status|tool-call-draft-cursor/);
   assert.match(toolCallCss, /\.tool-call-live-preview\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
-  assert.match(toolCallCss, /\.tool-call-live-preview \.turn-activity-tail-content\[data-empty="true"\],[\s\S]*?display:\s*none;[\s\S]*?height:\s*0/);
+  assert.match(toolCallCss, /\.tool-call-toggle:focus-visible/);
+  assert.match(toolCallCss, /\.tool-call-action:focus-visible/);
   assert.match(toolCallCss, /@media \(forced-colors: active\)[\s\S]*?\.tool-call-card\[data-provisional="true"\]/);
   assert.match(transcriptCss, /\.reasoning-block\[data-streaming="true"\]\[data-provisional="true"\]\s*\{[^}]*border-inline-start:\s*2px/);
   assert.match(transcriptCss, /\.message-item-shell\[data-role="user"\]\[data-queued="true"\] \.status-chip-neutral\s*\{[^}]*color:\s*var\(--panel-user-foreground\);[^}]*opacity:\s*1/);
@@ -362,9 +364,36 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
 
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*thin/);
-  assert.match(aggregateCss, /@media \(max-width: 520px\)[\s\S]*?\.aggregate-strip\s*\{[^}]*height:\s*24px;[^}]*scrollbar-gutter:\s*stable/);
+  // Portrait deliberately uses two rows; desktop retains its original thin line.
+  assert.match(aggregateCss, /\.aggregate-strip-metrics\s*\{[^}]*display:\s*contents/);
   assert.match(tabsCss, /@media \(max-width: 520px\)[\s\S]*?--session-tabs-scrollbar-height:\s*5px/);
   assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
+});
+
+test('portrait aggregate footer scrolls metrics only and keeps readable character and work counts visible', async () => {
+  const css = await readStyleSource('aggregate-stats-strip.css');
+  const narrow = css.slice(css.indexOf('@media (max-width: 520px)'));
+  const strip = narrow.match(/\.aggregate-strip\s*\{([^}]*)\}/)?.[1] ?? '';
+  const metrics = narrow.match(/\.aggregate-strip-metrics\s*\{([^}]*)\}/)?.[1] ?? '';
+  const status = narrow.match(/\.aggregate-strip-status-cluster\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(strip, /flex-direction:\s*column/);
+  assert.match(strip, /height:\s*62px/);
+  assert.match(strip, /font-size:\s*11px/);
+  assert.match(strip, /overflow:\s*hidden/);
+  assert.match(metrics, /display:\s*flex/);
+  assert.match(metrics, /min-width:\s*0/);
+  assert.match(metrics, /overflow-x:\s*auto/);
+  assert.match(metrics, /overflow-y:\s*hidden/);
+  assert.match(metrics, /overscroll-behavior-x:\s*contain/);
+  assert.match(narrow, /\.aggregate-strip-metrics::-webkit-scrollbar\s*\{\s*height:\s*5px/);
+  assert.match(narrow, /\.aggregate-strip-metrics > \.pie-tooltip-trigger\s*\{[^}]*flex-shrink:\s*0;[^}]*max-width:\s*none/);
+  assert.match(status, /justify-content:\s*space-between/);
+  assert.match(status, /margin-left:\s*0/);
+  assert.doesNotMatch(status, /overflow|white-space|text-overflow/);
+  assert.match(narrow, /\.aggregate-strip-seg\s*\{[^}]*min-height:\s*28px/);
+  assert.match(narrow, /@media \(max-width: 520px\) and \(pointer: coarse\)[\s\S]*font-size:\s*12px/);
+  assert.doesNotMatch(narrow, /aggregate-strip-(?:cost|tokens|providers|deferred|user-input|counts)[^{]*\{[^}]*display:\s*none/,
+    'no statistics are hidden in portrait');
 });
 
 test('the session tab context menu is viewport-capped and scrolls tall dynamic group lists', async () => {

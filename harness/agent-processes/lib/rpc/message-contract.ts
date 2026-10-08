@@ -24,7 +24,7 @@ export type {
   ImageBlobComposerInput,
 } from './composer-input.js';
 
-export type LazyDetailKind = 'tool-result' | 'reasoning';
+export type LazyDetailKind = 'tool-result' | 'reasoning' | 'model-exchange';
 
 export interface LazyDetailRef {
   key: string;

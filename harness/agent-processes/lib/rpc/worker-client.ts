@@ -29,6 +29,7 @@ import {
   type WorkerToCoordinatorResponseFrame,
 } from './worker-protocol';
 import type { SdkRuntimeSelection } from '../sdk-integration/sdk-runtime-selection.js';
+import { RUNTIME_INITIALIZATION_TIMEOUT_MS } from './runtime-initialization-timeout.js';
 
 export type WorkerClientStatus = 'new' | 'starting' | 'ready' | 'unresponsive' | 'stopping' | 'failed' | 'exited';
 
@@ -242,7 +243,7 @@ export class WorkerClient {
     if (!Number.isSafeInteger(leaseRevision) || leaseRevision <= 0) throw new Error('leaseRevision must be a positive safe integer.');
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 1_000;
     this.missedHeartbeatMs = options.missedHeartbeatMs ?? Math.max(3_000, this.heartbeatIntervalMs * 3);
-    this.startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? RUNTIME_INITIALIZATION_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
       throw new Error('requestTimeoutMs must be a positive safe integer.');

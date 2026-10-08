@@ -5,6 +5,7 @@ import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
+import type { DeferredTriggerView } from '../../../lib/protocol/index.js';
 import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 import {
   AggregateStatsStrip,
@@ -49,6 +50,34 @@ test('deferred trigger menu exposes safe crash recovery separately from ambiguou
 
   assert.match(html, /owner exited before dispatch; delivery recovered and is retryable/);
   assert.match(html, /delivery may have started; awaiting acknowledgement and automatic retry is blocked/);
+});
+
+test('wakeup timers wait for the creator response only until their timer starts', () => {
+  const common = {
+    id: 'wakeup',
+    sessionPath: '/workspace/creator.jsonl',
+    triggers: [{ kind: 'timer' as const, ms: 60_000 }],
+    note: 'resume work',
+    registeredAt: '2026-09-03T10:00:00.000Z',
+    deliveryState: 'pending' as const,
+    wakeupMode: true,
+  };
+  const scenarios: [string, DeferredTriggerView, boolean][] = [
+    ['unstarted', common, true],
+    ['started', { ...common, timerStartedAt: '2026-09-03T10:01:00.000Z' }, false],
+    ['legacy', { ...common, wakeupMode: false }, false],
+    ['non-timer', { ...common, triggers: [{ kind: 'user_input' as const }] }, false],
+    ['claimed', { ...common, deliveryState: 'claimed' as const }, false],
+  ];
+  for (const [label, trigger, waiting] of scenarios) {
+    const html = renderToString(h(DeferredTriggersMenu, {
+      triggers: [trigger], sessionByPath: new Map(), x: 0, y: 0,
+      onCancel: () => undefined, onClose: () => undefined,
+    }));
+    assert.equal(html.includes('Waiting for response to finish'), waiting, label);
+    assert.match(html, /aria-label="Pending wakeup timers"/);
+    assert.match(html, /1 pending wakeup timer/);
+  }
 });
 
 test('deferred trigger menu renders command predicates and bounds diagnostics', () => {
@@ -125,6 +154,56 @@ test('aggregate stats strip shows muted compact adjusted character volume separa
   }));
   assert.match(html, /aggregate-strip-user-input[^>]*><span[^>]*>1\.4k<\/span> chars<\/span>/);
   assert.match(html, /aggregate-strip-counts">4 open<\/span>/);
+});
+
+test('aggregate strip separates all scrollable metrics from the persistent character and work row', () => {
+  const providers = Array.from({ length: 12 }, (_, index) => ({
+    provider: `long-provider-name-${index}`, activeRequests: index, queuedRequests: 2,
+    maxConcurrentRequests: 20, afterburnSeconds: 0, paused: false,
+    pausedUntilMs: 0, strikeCount: 0,
+  }));
+  const html = renderToString(h(AggregateStatsStrip, {
+    stats: {
+      ...EMPTY_AGGREGATE_STATS,
+      ready: true,
+      todayCost: 0.0123,
+      weekCost: 1.25,
+      runningSessionCount: 12,
+      openTabCount: 123,
+      todayProductivity: {
+        ...EMPTY_AGGREGATE_STATS.todayProductivity,
+        adjustedUserInputChars: 1_450,
+        expectedUserInputCharSampleCount: 1,
+      },
+      lastRun: {
+        cost: 0.0045, durationMs: 2_000,
+        startedAt: null, endedAt: null, modelId: 'model', provider: 'provider',
+        inputTokens: 10, outputTokens: 20, turnSeries: [],
+      },
+      providerGate: { enabled: true, providers },
+    },
+    deferredTriggers: [{
+      id: 'pending', sessionPath: '/workspace/session.jsonl',
+      triggers: [{ kind: 'timer', ms: 1000 }], note: 'resume work',
+      registeredAt: '2026-09-03T10:00:00.000Z', deliveryState: 'pending',
+    }],
+    onOpenDeferredMenu: () => {},
+  }));
+  const metrics = html.match(/<div class="aggregate-strip-metrics">([\s\S]*?)<\/div><span[^>]*class="aggregate-strip-sep aggregate-strip-status-sep"/)?.[1];
+  const status = html.match(/<div class="aggregate-strip-status-cluster">([\s\S]*)/)?.[1];
+  assert.ok(metrics, 'metrics have their own scroll container');
+  assert.ok(status, 'live status is a separate sibling row');
+  for (const segment of ['today', 'wk', 'aggregate-strip-tokens', 'last', 'aggregate-strip-providers', 'aggregate-strip-deferred']) {
+    assert.ok(metrics.includes(segment), `${segment} stays in the reachable metrics row`);
+  }
+  for (const provider of providers) assert.ok(metrics.includes(provider.provider));
+  assert.match(metrics, /\$0\.0123/);
+  assert.match(metrics, /\$0\.0045/);
+  assert.match(metrics, /<button[^>]*aria-label="1 pending wakeup timer/);
+  assert.doesNotMatch(metrics, /aggregate-strip-user-input|aggregate-strip-counts/);
+  assert.match(status, /≥1\.4k<\/span> chars/);
+  assert.match(status, /12 working<\/span> · 123 open/);
+  assert.doesNotMatch(status, /aggregate-strip-cost|aggregate-strip-providers|aggregate-strip-deferred/);
 });
 
 test('provider concurrency uses a compact infinity symbol for unlimited capacity', () => {

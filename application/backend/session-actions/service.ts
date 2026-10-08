@@ -486,8 +486,14 @@ export class SessionService implements HostDisposable {
   /** Effect-side delegate: recover from a failed/timed-out selection by
    *  finishing the request and dispatching the reducer transitions that undo
    *  the optimistic tab setup. */
-  handleSelectionFailure(selectionToken: string, notice: string, expectedAttempt?: number): void {
-    this.state.handleSelectionFailure(selectionToken, notice, expectedAttempt);
+  handleSelectionFailure(
+    selectionToken: string,
+    notice: string,
+    expectedAttempt?: number,
+    reason: 'definitive-rejection' | 'backend-generation-ended' = 'definitive-rejection',
+    confirmedMissing = false,
+  ): void {
+    this.state.handleSelectionFailure(selectionToken, notice, expectedAttempt, reason, confirmedMissing);
   }
 
   isSessionRuntimeReady(sessionPath: string): boolean {
@@ -850,7 +856,7 @@ export class SessionService implements HostDisposable {
   /** Bounded, deduplicated retrieval for details omitted from state snapshots. */
   async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
     const cacheKey = `${sessionPath}\u0000${ref.key}`;
-    const cached = this.detailCache.get(cacheKey);
+    const cached = ref.kind === 'model-exchange' ? undefined : this.detailCache.get(cacheKey);
     if (cached) {
       this.detailCache.delete(cacheKey);
       this.detailCache.set(cacheKey, cached);
@@ -873,8 +879,9 @@ export class SessionService implements HostDisposable {
         // Live detail is a moving view. In particular, fallback subagent refs
         // intentionally keep one stable owner while progress advances, so a
         // retry must re-read current host state instead of replaying the first
-        // expanded snapshot. Durable detail is immutable and remains cached.
-        if (result.status === 'loaded' && ref.source === 'durable') this.cacheDetail(cacheKey, result);
+        // expanded snapshot. Captured exchanges can gain a received sidecar
+        // after produced-only retrieval; other durable detail remains cached.
+        if (result.status === 'loaded' && ref.source === 'durable' && ref.kind !== 'model-exchange') this.cacheDetail(cacheKey, result);
         return result;
       } catch {
         return { sessionPath, key: ref.key, status: 'failure', message: 'Could not load details. Retry to try again.' };

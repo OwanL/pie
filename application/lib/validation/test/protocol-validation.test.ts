@@ -18,6 +18,13 @@ test('validateWebviewToHostMessage validates optional readiness build identities
   assert.equal(validateWebviewToHostMessage({ type: 'requestSnapshot', buildId: false }).ok, false);
 });
 
+test('refresh pending requires explicit session and boolean value', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'setPruningRefreshPending', sessionPath: '/a', pending: true }).ok, true);
+  for (const value of [{ pending: 'true', sessionPath: '/a' }, { pending: false }]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPruningRefreshPending', ...value }).ok, false);
+  }
+});
+
 test('validateWebviewToHostMessage validates retrySend recovery payloads', () => {
   assert.equal(validateWebviewToHostMessage({
     type: 'retrySend', sessionPath: '/session.jsonl', text: 'try again', localId: 'local-1', disablePruning: true,
@@ -874,6 +881,19 @@ test('validateWebviewToHostMessage validates historyCompaction patches', () => {
     false,
     'model profile with soft below minimum is rejected',
   );
+});
+
+test('validateWebviewToHostMessage accepts only boolean follow-up pruning updates', () => {
+  for (const followUpEnabled of [true, false, undefined]) {
+    assert.equal(validateWebviewToHostMessage({
+      type: 'setPruningSettings', settings: { followUpEnabled },
+    }).ok, true);
+  }
+  for (const followUpEnabled of ['true', 1, null, [], {}]) {
+    assert.equal(validateWebviewToHostMessage({
+      type: 'setPruningSettings', settings: { followUpEnabled },
+    }).ok, false);
+  }
 });
 
 test('validateWebviewToHostMessage accepts independent pruning-agent switches', () => {

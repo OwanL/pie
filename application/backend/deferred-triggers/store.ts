@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { getDeferredTriggersDir, TRIGGERS_FILE } from './sidecar-paths.js';
 import type { DeferredTriggerView, TriggerKind, TriggerSpec } from '../../lib/protocol/index.js';
 import {
+  isValidTimerStartedAt,
   validateWakeConditions,
   type CommandTrigger,
 } from '../../../harness/tools/deferred-triggers/wake-conditions';
@@ -23,13 +24,15 @@ export type { CommandTrigger };
  */
 export interface TriggerOp {
   id?: string;
-  op: 'register' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
+  op: 'register' | 'timer-started' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
   /** Creator/owner session path used for list and cancel. Legacy records also
    * used this as the delivery target. */
   sessionPath: string;
   /** Delivery target for a new registration; omitted in legacy records. */
   targetSession?: string;
   triggers?: TriggerSpec[];
+  /** register: omitted legacy values replay as false. */
+  wakeupMode?: boolean;
   /** New registrations use message; note is retained for legacy records. */
   message?: string;
   note?: string;
@@ -371,6 +374,7 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
         message: normalizedMessage(op),
         note: normalizedMessage(op),
         registeredAt: op.at ?? new Date(0).toISOString(),
+        wakeupMode: op.wakeupMode === true,
         deliveryState: 'pending',
       });
       continue;
@@ -394,7 +398,16 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
     const trigger = map.get(op.id);
     if (!trigger) continue;
 
-    if (op.op === 'claim') {
+    if (op.op === 'timer-started') {
+      if (trigger.sessionPath === op.sessionPath
+        && trigger.wakeupMode === true
+        && trigger.deliveryState === 'pending'
+        && !trigger.timerStartedAt
+        && trigger.triggers.some((spec) => spec.kind === 'timer')
+        && isValidTimerStartedAt(op.at)) {
+        map.set(op.id, { ...trigger, timerStartedAt: op.at });
+      }
+    } else if (op.op === 'claim') {
       if (!op.claimId || trigger.deliveryState === 'claimed') continue;
       const dispatchStartedAt = op.dispatchStartedAt;
       map.set(op.id, {
@@ -555,7 +568,7 @@ function normalizedMessage(op: Pick<TriggerOp, 'message' | 'note'>): string {
 function normalizeOp(value: unknown): TriggerOp | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
-  if (!['register', 'cancel', 'claim', 'dispatch-started', 'release', 'failed', 'fire'].includes(String(v.op))) return undefined;
+  if (!['register', 'timer-started', 'cancel', 'claim', 'dispatch-started', 'release', 'failed', 'fire'].includes(String(v.op))) return undefined;
   if (typeof v.sessionPath !== 'string') return undefined;
   const op: TriggerOp = { op: v.op as TriggerOp['op'], sessionPath: v.sessionPath };
   if (typeof v.id === 'string') op.id = v.id;
@@ -572,12 +585,14 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
   if (typeof v.dispatchStartedAt === 'string') op.dispatchStartedAt = v.dispatchStartedAt;
   if (v.recoveryState === 'dead-owner-recovered') op.recoveryState = v.recoveryState;
   if (op.op === 'register') {
-    if (!op.id) return undefined;
+    if (!op.id || (v.wakeupMode !== undefined && typeof v.wakeupMode !== 'boolean')) return undefined;
+    if (typeof v.wakeupMode === 'boolean') op.wakeupMode = v.wakeupMode;
     const triggers = normalizeSpecs(v.triggers);
     if (!triggers || triggers.length === 0) return undefined;
     op.triggers = triggers;
   }
   if ((op.op === 'claim' || op.op === 'dispatch-started' || op.op === 'release') && (!op.id || !op.claimId)) return undefined;
+  if (op.op === 'timer-started' && (!op.id || !isValidTimerStartedAt(op.at))) return undefined;
   if ((op.op === 'failed' || op.op === 'fire') && !op.id) return undefined;
   return op;
 }

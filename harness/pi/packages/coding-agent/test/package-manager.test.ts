@@ -8,6 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
+
 function createDirectoryAlias(target: string, alias: string): void {
 	// Junctions preserve physical-path aliasing without Windows symlink privileges.
 	symlinkSync(resolve(target), alias, process.platform === "win32" ? "junction" : "dir");
@@ -79,8 +84,7 @@ process.exit(23);
 				cwd: options?.cwd,
 				stdio: "ignore",
 			});
-		},
-	);
+		});
 	return { spawnSpy, recordPath };
 }
 
@@ -1124,13 +1128,7 @@ Content`,
 
 			// Unit coverage of failed-install progress, not real registry integration.
 			const source = "npm:nonexistent-package@1.0.0";
-			const args = [
-				"install",
-				"nonexistent-package@1.0.0",
-				"--prefix",
-				join(agentDir, "npm"),
-				"--legacy-peer-deps",
-			];
+			const args = ["install", "nonexistent-package@1.0.0", "--prefix", join(agentDir, "npm"), "--legacy-peer-deps"];
 			const { spawnSpy, recordPath } = interceptFailedInstall(packageManager, tempDir, "npm", args);
 			const errorMessage = `npm ${args.join(" ")} failed with code 23`;
 
@@ -1141,9 +1139,7 @@ Content`,
 				{ type: "error", action: "install", source, message: errorMessage },
 			]);
 			expect(spawnSpy).toHaveBeenCalledExactlyOnceWith("npm", args, undefined);
-			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([
-				{ args, cwd: realpathSync(process.cwd()) },
-			]);
+			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([{ args, cwd: realpathSync(process.cwd()) }]);
 		});
 
 		it("should recognize github URLs without git: prefix", async () => {
@@ -1162,9 +1158,7 @@ Content`,
 				{ type: "error", action: "install", source, message: errorMessage },
 			]);
 			expect(spawnSpy).toHaveBeenCalledExactlyOnceWith("git", args, undefined);
-			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([
-				{ args, cwd: realpathSync(process.cwd()) },
-			]);
+			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([{ args, cwd: realpathSync(process.cwd()) }]);
 		});
 
 		it("should parse package source types from docs examples", () => {
@@ -1589,6 +1583,88 @@ Content`,
 	});
 
 	describe("pattern filtering in package filters", () => {
+		it.each(["mixed", "filtered", "delta"] as const)(
+			"should read the manifest once per %s collection and pick up fresh edits",
+			async (mode) => {
+				const pkgDir = join(tempDir, "fresh-manifest-pkg");
+				mkdirSync(join(pkgDir, "extensions"), { recursive: true });
+				const first = join(pkgDir, "extensions", "first.ts");
+				const second = join(pkgDir, "extensions", "second.ts");
+				writeFileSync(first, "export default function() {}");
+				writeFileSync(second, "export default function() {}");
+				const manifestPath = join(pkgDir, "package.json");
+				const writeManifest = (extensions: string[]) =>
+					writeFileSync(manifestPath, JSON.stringify({ pi: { extensions } }));
+				writeManifest(["extensions/first.ts"]);
+				settingsManager.setPackages([
+					mode === "mixed"
+						? { source: pkgDir, prompts: [] }
+						: {
+								source: pkgDir,
+								autoload: mode === "delta" ? false : undefined,
+								extensions: mode === "delta" ? ["extensions/*.ts", "-extensions/first.ts"] : ["!**/first.ts"],
+								skills: ["**/*.md"],
+								prompts: [],
+								themes: ["**/*.json"],
+							},
+				]);
+				const readSpy = vi.mocked(readFileSync);
+				readSpy.mockClear();
+				const manifestReads = () => readSpy.mock.calls.filter(([path]) => path === manifestPath).length;
+				const states = (resources: ResolvedResource[]) => resources.map(({ path, enabled }) => ({ path, enabled }));
+
+				const initial = await packageManager.resolve();
+				expect(manifestReads()).toBe(1);
+				expect(states(initial.extensions)).toEqual([{ path: first, enabled: mode === "mixed" }]);
+
+				writeManifest(["extensions/second.ts", "extensions/first.ts"]);
+				readSpy.mockClear();
+				const updated = await packageManager.resolve();
+				expect(manifestReads()).toBe(1);
+				expect(states(updated.extensions)).toEqual([
+					{ path: second, enabled: true },
+					{ path: first, enabled: mode === "mixed" },
+				]);
+			},
+		);
+
+		it.each([
+			{ name: "missing", content: undefined, hasManifest: false },
+			{ name: "malformed", content: "{", hasManifest: false },
+			{ name: "absent pi", content: "{}", hasManifest: false },
+			{ name: "absent field", content: '{"pi":{}}', hasManifest: true },
+			{ name: "empty field", content: '{"pi":{"extensions":[]}}', hasManifest: true },
+		])("should preserve $name manifest fallback and per-field semantics", async ({ name, content, hasManifest }) => {
+			const pkgDir = join(tempDir, "fallback-pkg");
+			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
+			const extension = join(pkgDir, "extensions", "conventional.ts");
+			writeFileSync(extension, "export default function() {}");
+			const manifestPath = join(pkgDir, "package.json");
+			if (content !== undefined) writeFileSync(manifestPath, content);
+			const readSpy = vi.mocked(readFileSync);
+			const states = (resources: ResolvedResource[]) => resources.map(({ path, enabled }) => ({ path, enabled }));
+
+			for (const mode of ["unfiltered", "default", "filtered"] as const) {
+				settingsManager.setPackages([
+					mode === "unfiltered"
+						? pkgDir
+						: mode === "default"
+							? { source: pkgDir, prompts: [] }
+							: { source: pkgDir, extensions: [] },
+				]);
+				readSpy.mockClear();
+				const result = await packageManager.resolve();
+				expect(readSpy.mock.calls.filter(([path]) => path === manifestPath)).toHaveLength(
+					content === undefined ? 0 : 1,
+				);
+				expect(states(result.extensions)).toEqual(
+					(mode === "unfiltered" && hasManifest) || (mode === "default" && name === "empty field")
+						? []
+						: [{ path: extension, enabled: mode !== "filtered" }],
+				);
+			}
+		});
+
 		it("should apply user filters on top of manifest filters (not replace)", async () => {
 			// Manifest excludes baz.ts, user excludes bar.ts
 			// Result should exclude BOTH

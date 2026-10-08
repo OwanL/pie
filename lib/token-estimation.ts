@@ -29,6 +29,8 @@ export function estimateTextTokens(text: string): number {
   // Real BPE count (cl100k_base); approximate for the active model but far
   // closer than the chars/4 heuristic. Exact attribution comes from provider
   // usage (see harness/session-storage/transcripts/context-usage.ts), so these rows stay "estimated".
-  return bpeCountTokens(trimmed);
+  // These are literal content estimates, not chat-control token parsing. The
+  // tokenizer's default rejects reserved spellings in otherwise ordinary text.
+  return bpeCountTokens(trimmed, { disallowedSpecial: new Set<string>() });
 }
 

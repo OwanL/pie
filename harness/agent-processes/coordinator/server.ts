@@ -204,6 +204,8 @@ const AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES = 64 * 1024;
 const LIVE_TITLE_NAMESPACE_RETRY_BASE_DELAY_MS = 100;
 const LIVE_TITLE_NAMESPACE_RETRY_MAX_DELAY_MS = 5_000;
 const LIVE_TITLE_NAMESPACE_RETRY_LIMIT = 5;
+const LIVE_TITLE_ADMISSION_RETRY_BASE_DELAY_MS = 1_000;
+const LIVE_TITLE_ADMISSION_RETRY_MAX_DELAY_MS = 60_000;
 
 /** Coordinator-side state for one outgoing host close request. `accepted`
  *  resolves once the host has taken ownership of the close; `settled` resolves
@@ -666,6 +668,11 @@ export class BackendServer {
   private titleNamespaceRetryAttempt = 0;
   private titleAdmission?: Promise<void>;
   private readonly pendingLiveTitlePaths = new Set<string>();
+  /** Process-local background failure backoff, retried only by later snapshots.
+   *  Explicit opens still use the per-path single-flight gate without waiting. */
+  private readonly liveTitleAdmissionRetries = new Map<string, {
+    generation: number; failures: number; retryAfter: number;
+  }>();
   private readonly newCreatePublicationPaths = new Set<string>();
   private readonly pendingOpenedTitleAdmissions = new Map<string, Promise<void>>();
   /** Live+closing path union of the last snapshot applied after the namespace
@@ -3261,11 +3268,22 @@ export class BackendServer {
     }
     let admission = this.pendingOpenedTitleAdmissions.get(key);
     if (!admission) {
+      const generation = this.backendGeneration;
+      const assertCurrent = () => {
+        if (this.disposed || generation !== this.backendGeneration) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The live title admission generation is no longer available.');
+        }
+      };
       admission = (async () => {
+        assertCurrent();
         if (!this.liveSessionTitles.assigned(sessionPath)) {
           const entry = await this.readLiveSessionTitleEntry(sessionPath);
-          await this.liveSessionTitles.admit([entry],
-            (path, title, expected) => this.persistAssignedSessionTitle(path, title, 'live-title-open', expected));
+          assertCurrent();
+          await this.liveSessionTitles.admit([entry], async (path, title, expected) => {
+            assertCurrent();
+            await this.persistAssignedSessionTitle(path, title, 'live-title-open', expected);
+            assertCurrent();
+          });
         }
       })();
       this.pendingOpenedTitleAdmissions.set(key, admission);
@@ -3274,6 +3292,7 @@ export class BackendServer {
       }).catch(() => undefined);
     }
     await admission;
+    this.liveTitleAdmissionRetries.delete(key);
   }
 
   /** Initial namespace establishment from the first complete restored
@@ -3310,6 +3329,7 @@ export class BackendServer {
       this.liveSessionTitles.retireLive(publicPath);
       this.newCreatePublicationPaths.delete(key);
       this.pendingLiveTitlePaths.delete(key);
+      this.liveTitleAdmissionRetries.delete(key);
       this.authoritativeLiveTitlePaths.delete(key);
     }
     for (const [key, { entry }] of this.hostMembershipSessions.sessions) this.authoritativeLiveTitlePaths.set(key, entry.path);
@@ -3324,18 +3344,46 @@ export class BackendServer {
     // Refresh each path through the same per-path admission gate as an open
     // operation. A host snapshot that overtakes duplicate/reopen publication
     // joins its in-flight persistence rather than allocating a second suffix.
+    const generation = this.backendGeneration;
     let changed: boolean;
     do {
+      if (this.disposed || generation !== this.backendGeneration) return;
       const snapshot = this.hostMembershipSessions;
       for (const [key, { entry }] of snapshot.sessions) {
+        if (this.disposed || generation !== this.backendGeneration) return;
         if (snapshot !== this.hostMembershipSessions) break;
         if (!this.liveSessionTitles.assigned(entry.path)) {
-          await this.admitOpenedSessionTitle(entry.path);
+          let retry = this.liveTitleAdmissionRetries.get(key);
+          if (retry?.generation !== generation) retry = undefined;
+          if (retry && Date.now() < retry.retryAfter) continue;
+          retry ??= { generation, failures: 0, retryAfter: 0 };
+          this.liveTitleAdmissionRetries.set(key, retry);
+          try {
+            await this.admitOpenedSessionTitle(entry.path);
+          } catch (error) {
+            // A retired/re-added path or disposed generation must not inherit
+            // this attempt's failure. Keep failed live targets pending, but
+            // continue admitting later healthy members of the same snapshot.
+            if (this.disposed || generation !== this.backendGeneration) return;
+            if (this.liveTitleAdmissionRetries.get(key) === retry) {
+              retry.failures = Math.min(retry.failures + 1, 7);
+              retry.retryAfter = Date.now() + Math.min(
+                LIVE_TITLE_ADMISSION_RETRY_BASE_DELAY_MS * (2 ** (retry.failures - 1)),
+                LIVE_TITLE_ADMISSION_RETRY_MAX_DELAY_MS,
+              );
+              backendWarn('backend-live-titles', 'live title admission refresh failed', {
+                error: toErrorMessage(error),
+              });
+            }
+            continue;
+          }
         }
+        if (this.disposed || generation !== this.backendGeneration) return;
         if (!this.hostMembershipSessions.sessions.has(key)
           && !this.hostMembershipClosing.has(key)) {
           this.liveSessionTitles.retireLive(entry.path);
         }
+        this.liveTitleAdmissionRetries.delete(key);
         this.pendingLiveTitlePaths.delete(key);
       }
       changed = snapshot !== this.hostMembershipSessions;
@@ -5359,6 +5407,7 @@ export class BackendServer {
     });
     this.disposed = true;
     this.clearLiveTitleNamespaceRetry();
+    this.liveTitleAdmissionRetries.clear();
     for (const [requestId, entry] of this.hostSessionSettingsRequests) {
       clearTimeout(entry.timer);
       this.hostSessionSettingsRequests.delete(requestId);

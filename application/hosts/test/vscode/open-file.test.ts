@@ -6,8 +6,19 @@ import { MAX_IMAGE_PREVIEW_BYTES } from '../../../lib/protocol/image-preview.js'
 import {
   openFileWithFallback,
   readImagePreviewWithFallback,
+  resolveFilePathWithFallback,
   type OpenFileAdapter,
 } from '../../vscode/editor-integration/open-file.js';
+
+import {
+  readImagePreviewWithFallback as sharedReadImagePreview,
+  resolveFilePathWithFallback as sharedResolveFilePath,
+} from '../../lib/image-preview.js';
+
+test('VS Code compatibility exports reuse the shared node-only image reader and resolver', () => {
+  assert.equal(readImagePreviewWithFallback, sharedReadImagePreview);
+  assert.equal(resolveFilePathWithFallback, sharedResolveFilePath);
+});
 
 interface Recorder {
   opened: string[];

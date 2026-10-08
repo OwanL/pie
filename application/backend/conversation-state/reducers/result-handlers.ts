@@ -565,6 +565,9 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     // re-send them (no data loss). Inputs were cleared at send time (handleSend);
     // the pre-ack failure must hand them back. Mirrors the post-ack
     // `handlePreflightFailed` restore from `pending.promoted[corrId].inputs`.
+    if (pending.refreshPruning && draft.sessions.openTabPaths.includes(pending.sessionPath)) {
+      draft.composer.pruningRefreshPendingBySession[pending.sessionPath] = true;
+    }
     draft.composer.draftTextBySession[pending.sessionPath] = restoredDraftText;
     if (restoredInputs.length > 0) {
       draft.composer.pendingComposerInputsBySession[pending.sessionPath] = restoredInputs;
@@ -772,6 +775,9 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     // Restore composer inputs from the promoted snapshot so a retry can re-send
     // them (no data loss). The webview-side restore consumes `sendRejected.inputs`.
     if (snapshot.kind === 'send') {
+      if (snapshot.refreshPruning && draft.sessions.openTabPaths.includes(snapshot.sessionPath)) {
+        draft.composer.pruningRefreshPendingBySession[snapshot.sessionPath] = true;
+      }
       draft.composer.draftTextBySession[snapshot.sessionPath] = restoredDraftText;
     }
     if (restoredInputs.length > 0) {

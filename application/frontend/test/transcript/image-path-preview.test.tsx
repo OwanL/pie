@@ -1,3 +1,6 @@
+/** @jsxRuntime automatic */
+/** @jsxImportSource preact */
+
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 

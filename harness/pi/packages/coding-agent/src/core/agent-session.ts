@@ -224,13 +224,9 @@ export interface CompactionRequestAuth {
 /** Optional policy hooks around the source-owned compaction lifecycle. */
 export interface CompactionHooks {
 	/** True triggers and false suppresses proactive thresholds; undefined delegates. Provider errors retain native recovery/threshold policy. */
-	shouldCompact?: (
-		check: CompactionThresholdCheck,
-	) => boolean | undefined | Promise<boolean | undefined>;
+	shouldCompact?: (check: CompactionThresholdCheck) => boolean | undefined | Promise<boolean | undefined>;
 	/** Recognize an estimated overflow not covered by the provider's direct usage/error signal. */
-	isEstimatedContextOverflow?: (
-		check: EstimatedContextOverflowCheck,
-	) => boolean | Promise<boolean>;
+	isEstimatedContextOverflow?: (check: EstimatedContextOverflowCheck) => boolean | Promise<boolean>;
 	/** Final customization after extension handlers; an extension cancel/result always takes precedence. */
 	beforeCompact?: (
 		event: SessionBeforeCompactEvent,
@@ -249,6 +245,8 @@ export interface ExtensionBindings {
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
+	/** One-prompt skill-pruning refresh hint for before_agent_start; rejected while streaming. */
+	refreshPruning?: boolean;
 	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
 	/** Image attachments */
@@ -1186,6 +1184,12 @@ export class AgentSession {
 		let messages: AgentMessage[] | undefined;
 
 		try {
+			if (options?.refreshPruning !== undefined && typeof options.refreshPruning !== "boolean") {
+				throw new Error("refreshPruning must be boolean when provided.");
+			}
+			if (options?.refreshPruning === true && this.isStreaming) {
+				throw new Error("Cannot refresh skill pruning while the agent is processing.");
+			}
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via pi.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
@@ -1226,6 +1230,11 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
+				// Input handlers can await: do not silently queue a refresh if a
+				// different prompt started streaming while they were running.
+				if (options?.refreshPruning === true) {
+					throw new Error("Cannot refresh skill pruning while the agent is processing.");
+				}
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -1293,6 +1302,7 @@ export class AgentSession {
 				currentImages,
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
+				options?.refreshPruning,
 			);
 			// Add all custom messages from extensions
 			if (result?.messages) {

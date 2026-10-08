@@ -53,3 +53,9 @@ export function verifyPiRuntimeArtifact(
   artifactDir: string,
   options?: { target?: PiRuntimeTarget },
 ): Promise<VerifiedPiRuntimeArtifact>;
+
+/** Independently verify referenced sibling tooling, or return the verified legacy SDK. */
+export function verifyPiRuntimeToolingArtifact(
+  artifactDir: string,
+  options?: { target?: PiRuntimeTarget },
+): Promise<VerifiedPiRuntimeArtifact>;

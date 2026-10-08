@@ -22,7 +22,6 @@ import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../../agent-instructions/agent-discovery/agents.js";
 import { SubagentParams, prepareSubagentArguments } from "./schema.js";
 import { renderSubagentCall, renderSubagentResult } from "./render.js";
-import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "./types.js";
 import { registerSubagentAnalyticsProviderHook } from "./analytics-provider-hook.js";
 
@@ -102,6 +101,9 @@ export default function (pi: ExtensionAPI) {
 
 	const isDisabledFn = isDisabled(pi);
 	const disabled = isDisabledFn();
+	// Registration exposes metadata only. Share the first implementation load
+	// between sibling calls while keeping each registration's Pi API closure fresh.
+	let executionModule: Promise<typeof import("./execute.js")> | undefined;
 
 	pi.registerTool({
 		name: "subagent",
@@ -115,6 +117,7 @@ export default function (pi: ExtensionAPI) {
 		prepareArguments: prepareSubagentArguments,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const { execute } = await (executionModule ??= import("./execute.js"));
 			return execute(_toolCallId, params, signal, onUpdate as OnUpdateCallback, ctx, pi, isDisabledFn);
 		},
 

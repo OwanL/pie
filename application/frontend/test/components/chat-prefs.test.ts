@@ -111,7 +111,7 @@ test('chat pref menu sections expose transcript, display, notifications, and dia
   assert.equal(CHAT_PREF_MENU_SECTIONS[0]?.id, 'transcript');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[0]?.items.map((item) => item.key),
-    ['autoExpandReasoning', 'autoExpandToolCalls', 'autoExpandSubagentCalls'],
+    ['autoExpandReasoning', 'autoExpandSubagentCalls'],
   );
   assert.equal(CHAT_PREF_MENU_SECTIONS[1]?.id, 'display');
   assert.deepEqual(
@@ -132,13 +132,13 @@ test('chat pref menu sections expose transcript, display, notifications, and dia
 
 test('context helpers map transcript block types to the right pref metadata', () => {
   assert.equal(getChatPrefContextKey('reasoning'), 'autoExpandReasoning');
-  assert.equal(getChatPrefContextKey('toolCalls'), 'autoExpandToolCalls');
+  assert.equal(getChatPrefContextKey('toolCalls'), null);
   assert.equal(getChatPrefContextKey('subagentCalls'), 'autoExpandSubagentCalls');
   assert.equal(getChatPrefContextLabel('reasoning'), 'Auto-expand reasoning');
-  assert.equal(getChatPrefContextLabel('toolCalls'), 'Auto-expand tool calls');
+  assert.equal(getChatPrefContextLabel('toolCalls'), '');
   assert.equal(getChatPrefContextLabel('subagentCalls'), 'Auto-expand sub-agent calls');
   assert.equal(getChatPrefContextValue(prefs, 'reasoning'), false);
-  assert.equal(getChatPrefContextValue(prefs, 'toolCalls'), true);
+  assert.equal(getChatPrefContextValue(prefs, 'toolCalls'), false, 'legacy persisted values cannot re-enable ordinary auto-expansion');
   assert.equal(getChatPrefContextValue(prefs, 'subagentCalls'), false);
   assert.equal(getToolCallContextType('read'), 'toolCalls');
   assert.equal(getToolCallContextType('subagent'), 'subagentCalls');
@@ -156,7 +156,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
   assert.deepEqual(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure'), {
     subagentFallbackOnProviderFailure: false,
   });
-  assert.deepEqual(toggleChatPrefForContext(prefs, 'toolCalls'), { autoExpandToolCalls: false });
+  assert.deepEqual(toggleChatPrefForContext(prefs, 'toolCalls'), {});
   assert.deepEqual(toggleChatPrefForContext(prefs, 'subagentCalls'), { autoExpandSubagentCalls: true });
   assert.deepEqual(prefs, {
     autoExpandReasoning: false,

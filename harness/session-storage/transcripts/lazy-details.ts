@@ -609,6 +609,9 @@ export function findDurableDetail(
   transcript: readonly ChatMessage[],
   ref: LazyDetailRef,
 ): { status: 'loaded'; value: unknown; sizeBytes: number } | { status: 'unavailable' } {
+  // Captured exchanges have a separate authority; never treat display results
+  // as a substitute for missing SDK capture evidence.
+  if (ref.kind === 'model-exchange') return { status: 'unavailable' };
   const message = transcript.find((candidate) => candidate.id === ref.messageId);
   if (!message) return { status: 'unavailable' };
   if (ref.kind === 'reasoning') {

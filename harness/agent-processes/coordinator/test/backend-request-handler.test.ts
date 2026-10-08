@@ -836,6 +836,30 @@ test('concurrent cold message.send requests share one promotion', async () => {
   assert.ok((first as { queued?: boolean }).queued || (second as { queued?: boolean }).queued);
 });
 
+test('refresh send threads the hint and rejects a busy race without queue side effects', async () => {
+  let prompts = 0;
+  let queued = 0;
+  const harness = createHarness({ sessionOverrides: {
+    prompt: async (_text: string, options?: { refreshPruning?: boolean }) => {
+      assert.equal(options?.refreshPruning, true);
+      prompts += 1;
+    },
+    steer: async () => { queued += 1; },
+    followUp: async () => { queued += 1; },
+  } });
+  const send = (id: string) => handleBackendRequest(harness.deps, {
+    id, method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: 'refresh', refreshPruning: true, operationId: id, operationAttempt: 1 },
+  });
+  await send('refresh-first');
+  const active = harness.context.activeRequest;
+  await assert.rejects(send('refresh-race'), /Cannot refresh skill pruning/);
+  assert.equal(harness.context.activeRequest, active);
+  assert.equal(prompts, 1);
+  assert.equal(queued, 0);
+  assert.equal(harness.context.queuedLocalIds?.length ?? 0, 0);
+});
+
 test('idle user message.send retains the normal pruning prepass', async () => {
   let promptCalls = 0;
   const harness = createHarness({

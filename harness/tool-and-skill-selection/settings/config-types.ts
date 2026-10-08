@@ -72,6 +72,8 @@ export interface PruningConfig {
 	mainAgentEnabled?: boolean;
 	/** Enable launch pruning for subagents. Omitted values default to true. */
 	subagentEnabled?: boolean;
+	/** Enable follow-up pruning. Omitted values default to false. */
+	followUpEnabled?: boolean;
 	skills: SkillPruningConfig;
 	tools?: ToolPruningConfig;
 	prepass?: PrepassConfig;

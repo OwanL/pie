@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { buildPiRuntime } from '../build/pi-runtime.mjs';
-import { verifyPiRuntimeArtifact } from './pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from './pi-runtime-artifact.mjs';
 
 /**
  * One invocation's immutable Pi selection, shared explicitly with its children.
@@ -23,13 +23,20 @@ import { verifyPiRuntimeArtifact } from './pi-runtime-artifact.mjs';
  * the callback has already confirmed completion. A pre-aborted signal acquires
  * nothing; abort during acquisition is checked before invoking the callback.
  *
+ * Tooling is verified only on demand, freshly on every getToolingRuntime() call.
+ * The context's SDK path and identity always describe the runtime role. Tooling
+ * acquisition is forbidden after child completion is confirmed; both roles
+ * share the same owned-directory lifetime and cancellation checks.
+ *
  * The third argument is a test seam, not a second builder/verification owner.
  * @template T
  * @param {{artifactDir?: string, signal?: AbortSignal}} options
  * @param {(context: Readonly<{artifactDir: string, sdkPath: string, identity: string,
+ *   getToolingRuntime: () => Promise<import('../../lib/pi-runtime/artifact.mjs').VerifiedPiRuntimeArtifact>,
  *   confirmChildCompletion: () => void}>) => T | Promise<T>} run
  * @param {{buildPiRuntime?: typeof buildPiRuntime,
- *   verifyPiRuntimeArtifact?: typeof verifyPiRuntimeArtifact}} [dependencies]
+ *   verifyPiRuntimeArtifact?: typeof verifyPiRuntimeArtifact,
+ *   verifyPiRuntimeToolingArtifact?: typeof verifyPiRuntimeToolingArtifact}} [dependencies]
  * @returns {Promise<T>}
  */
 export async function withPiRuntime({ artifactDir, signal } = {}, run, dependencies = {}) {
@@ -40,6 +47,7 @@ export async function withPiRuntime({ artifactDir, signal } = {}, run, dependenc
   signal?.throwIfAborted();
   const build = dependencies.buildPiRuntime ?? buildPiRuntime;
   const verify = dependencies.verifyPiRuntimeArtifact ?? verifyPiRuntimeArtifact;
+  const verifyTooling = dependencies.verifyPiRuntimeToolingArtifact ?? verifyPiRuntimeToolingArtifact;
   let ownedDirectory;
   let childCompletionConfirmed = false;
   try {
@@ -56,6 +64,13 @@ export async function withPiRuntime({ artifactDir, signal } = {}, run, dependenc
       artifactDir: verified.artifactDir,
       sdkPath: verified.sdkPath,
       identity: verified.identity,
+      async getToolingRuntime() {
+        signal?.throwIfAborted();
+        if (childCompletionConfirmed) throw new Error('Cannot acquire tooling after child completion is confirmed');
+        const tooling = await verifyTooling(verified.artifactDir);
+        signal?.throwIfAborted();
+        return tooling;
+      },
       confirmChildCompletion() { childCompletionConfirmed = true; },
     });
     return await run(context);

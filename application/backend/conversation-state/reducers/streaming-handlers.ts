@@ -483,11 +483,33 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
   }
 }
 
-/** Steering: the agent loop injected the next queued user message into the
- * current turn. Promote the earliest optimistic queued message (the SDK drains
- * the steering queue in FIFO order) and drop its rollback snapshot. */
+/** Durable bindings update only user identity. Legacy delivery observations
+ * promote the correlated queued row (FIFO only without localId). */
 export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { kind: 'QueuedDelivered' }>): ReducerResult {
   const list = state.transcript.bySession[event.sessionPath];
+  if (event.durableEntryId !== undefined) {
+    // Binding is not delivery/commit evidence. Never fall through to legacy
+    // queue promotion or operation settlement, even for malformed observations.
+    if (typeof event.durableEntryId !== 'string' || !event.durableEntryId
+      || typeof event.localId !== 'string' || !event.localId) return { state, effects: [] };
+    const index = list?.findIndex((message) => message.role === 'user' && message.id === event.localId) ?? -1;
+    if (!list || index < 0) return { state, effects: [] };
+    const local = list[index];
+    if (local.durableEntryId !== undefined && local.durableEntryId !== event.durableEntryId) {
+      return { state, effects: [] };
+    }
+    const canonical = list.find((message) => message.role === 'user'
+      && message.id !== local.id && !message.id.startsWith('local:')
+      && (message.durableEntryId ?? message.id) === event.durableEntryId);
+    if (!canonical && local.durableEntryId === event.durableEntryId) return { state, effects: [] };
+    return {
+      state: produce(state, (draft) => {
+        if (canonical) removeMessage(draft, event.sessionPath, local.id);
+        else draft.transcript.bySession[event.sessionPath][index].durableEntryId = event.durableEntryId;
+      }),
+      effects: [],
+    };
+  }
   if (!list) {
     if (!event.operationId) return { state, effects: [] };
     const operation = state.operations[event.operationId];

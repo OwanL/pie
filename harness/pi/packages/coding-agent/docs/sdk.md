@@ -187,6 +187,7 @@ unsubscribe = session.subscribe(() => {});
 
 ```typescript
 interface PromptOptions {
+  refreshPruning?: boolean;
   expandPromptTemplates?: boolean;
   images?: ImageContent[];
   streamingBehavior?: "steer" | "followUp";
@@ -194,6 +195,8 @@ interface PromptOptions {
   preflightResult?: (success: boolean) => void;
 }
 ```
+
+`refreshPruning: true` requests a one-prompt skill-pruning refresh through `before_agent_start`; it does not change global pruning settings. It is rejected while streaming, even with `streamingBehavior`, before command/input handling. If streaming starts during input handling, it is rejected rather than queued. Queued steer/follow-up messages and empty continuation do not emit this refresh hint.
 
 `preflightResult` is called once per `prompt()` invocation:
 

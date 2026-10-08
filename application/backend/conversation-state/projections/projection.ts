@@ -754,6 +754,7 @@ function projectViewState(state: ArchState): ViewState {
     sessionUsage: activeSessionUsage,
     transcriptLoaded: activeTranscriptLoaded,
     pendingComposerInputs: activePendingComposerInputs,
+    pruningRefreshPending: activePath ? composer.pruningRefreshPendingBySession[activePath] === true : false,
     activeRunSummary,
     runSummariesBySession: composer.activeRunSummaryBySession,
     // Placeholder: the live per-session rates are measured host-side by

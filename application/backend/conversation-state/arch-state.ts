@@ -285,6 +285,8 @@ export interface SettingsState {
 export interface ComposerState {
   /** Pending file/image inputs per session, awaiting send. */
   pendingComposerInputsBySession: Record<string, ComposerInput[]>;
+  /** Ephemeral host-owned one-shot pruning refresh per open tab. */
+  pruningRefreshPendingBySession: Record<string, boolean>;
   /** Active run summary per session (for analytics export). */
   activeRunSummaryBySession: Record<string, ActiveRunSummary | null>;
   /** Draft composer text per session, persisted across reloads and session switches. */
@@ -322,6 +324,7 @@ export interface FileChangesState {
 /** Tracks an in-flight optimistic send or edit for rollback on failure. */
 export interface PendingOp {
   kind: 'send' | 'edit';
+  refreshPruning?: boolean;
   /** Stable mutation identity for sends; edit migration remains separate. */
   operationId?: string;
   /** Latest transport attempt that owns this rollback snapshot. */
@@ -464,6 +467,7 @@ export interface CurrentTurn {
  */
 export interface PendingSendQueueEntry {
   corrId: string;
+  refreshPruning?: boolean;
   operationId?: string;
   operationAttempt?: number;
   operationSource?: SessionOperationSource;
@@ -499,6 +503,7 @@ export interface PendingSendQueueEntry {
  */
 export interface BackendReadyQueueEntry {
   sessionPath: string;
+  refreshPruning?: boolean;
   corrId: string;
   operationId?: string;
   operationAttempt?: number;
@@ -653,6 +658,7 @@ export function createInitialArchState(): ArchState {
     },
     composer: {
       pendingComposerInputsBySession: {},
+      pruningRefreshPendingBySession: {},
       activeRunSummaryBySession: {},
       draftTextBySession: {},
     },

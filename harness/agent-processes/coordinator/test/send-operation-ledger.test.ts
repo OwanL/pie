@@ -16,6 +16,16 @@ const intent: { sessionPath: string; text: string; inputs: ComposerInput[]; loca
   localId: 'local-1',
 };
 
+test('send intent normalizes the refresh hint and binds true to operation identity', async () => {
+  const ordinary = canonicalSendIntentFingerprint(intent);
+  assert.equal(ordinary, canonicalSendIntentFingerprint({ ...intent, refreshPruning: false }));
+  const refresh = canonicalSendIntentFingerprint({ ...intent, refreshPruning: true });
+  assert.notEqual(ordinary, refresh);
+  const ledger = new SendOperationLedger();
+  await ledger.run('refresh-op', refresh, async () => ({ operationId: 'refresh-op' }));
+  assert.throws(() => ledger.run('refresh-op', ordinary, async () => ({ operationId: 'refresh-op' })), /different message mutation intent/);
+});
+
 test('send ledger joins an in-flight retry and replays one acceptance', async () => {
   const ledger = new SendOperationLedger();
   const fingerprint = canonicalSendIntentFingerprint(intent);

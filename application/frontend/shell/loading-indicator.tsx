@@ -5,8 +5,8 @@ import { cx } from '../lib/components/cx';
 
 export interface LoadingIndicatorProps {
   /**
-   * Short status line rendered beneath the wheel (e.g. "Starting pi", "Loading
-   * conversation"). Omit for a bare wheel. When provided, the visible text also
+   * Short status line rendered beside the spinner (e.g. "Starting pi", "Loading
+   * conversation"). Omit for a bare spinner. When provided, the visible text also
    * serves as the accessible name for the live region.
    */
   status?: string;
@@ -18,10 +18,9 @@ export interface LoadingIndicatorProps {
 
 /**
  * Single source of truth for loading affordances: the animated `.loading-wheel`
- * (keyframe lives in `index.css`) paired with an optional, subtle status line
- * whose trailing ellipsis bounces so the surface reads as actively working
- * rather than frozen. Used by the boot, session-recovery, and transcript-
- * hydrating surfaces.
+ * (keyframe lives in `index.css`) paired with an optional, subtle inline label.
+ * The spinner carries the only motion. Used by the boot, session-recovery,
+ * and transcript-hydrating surfaces.
  */
 export function LoadingIndicator({ status, ariaLabel, class: className }: LoadingIndicatorProps) {
   return (
@@ -34,9 +33,6 @@ export function LoadingIndicator({ status, ariaLabel, class: className }: Loadin
       {status && (
         <div class="loading-status">
           <span class="loading-status-text">{status}</span>
-          <span class="loading-ellipsis" aria-hidden="true">
-            <span>.</span><span>.</span><span>.</span>
-          </span>
         </div>
       )}
     </div>

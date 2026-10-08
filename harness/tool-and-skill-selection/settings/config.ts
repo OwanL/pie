@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG: PruningConfig = {
 	thinkingLevel: "minimal",
 	mainAgentEnabled: true,
 	subagentEnabled: true,
+	followUpEnabled: false,
 	skills: {
 		strategy: "discretion",
 		ceiling: 8,
@@ -48,6 +49,7 @@ function cloneDefault(): PruningConfig {
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
 		mainAgentEnabled: DEFAULT_CONFIG.mainAgentEnabled,
 		subagentEnabled: DEFAULT_CONFIG.subagentEnabled,
+		followUpEnabled: DEFAULT_CONFIG.followUpEnabled,
 		skills: {
 			strategy: DEFAULT_CONFIG.skills.strategy,
 			ceiling: DEFAULT_CONFIG.skills.ceiling,
@@ -215,6 +217,7 @@ export function loadConfig(
 	// Parse top-level fields
 	assignBooleanValue(raw.mainAgentEnabled, (value) => { config.mainAgentEnabled = value; }, "invalid pruning.mainAgentEnabled; must be a boolean; using default");
 	assignBooleanValue(raw.subagentEnabled, (value) => { config.subagentEnabled = value; }, "invalid pruning.subagentEnabled; must be a boolean; using default");
+	assignBooleanValue(raw.followUpEnabled, (value) => { config.followUpEnabled = value; }, "invalid pruning.followUpEnabled; must be a boolean; using default");
 
 	assignEnumValue(
 		raw.mode,

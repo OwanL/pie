@@ -1526,7 +1526,7 @@ test('message.send acknowledgement timeout reconciles through operation.status w
   assert.deepEqual(calls.find((call) => call.kind === 'request' && call.method === 'message.send'), {
     kind: 'request', method: 'message.send', params: {
       sessionPath: '/a', operationId: 'op-stable', operationAttempt: 2,
-      text: 'hello', inputs: [], localId: 'local-stable',
+      text: 'hello', refreshPruning: false, inputs: [], localId: 'local-stable',
     },
   });
   runner.run(reconciliationEffect({

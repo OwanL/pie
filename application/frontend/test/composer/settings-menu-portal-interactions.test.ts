@@ -69,6 +69,47 @@ function mount() {
   return { setPruningCalls };
 }
 
+test('popup geometry recomputes its height on scroll and resize within viewport margins', async () => {
+  mount();
+  const trigger = container.querySelector('.toolbar-settings-trigger') as HTMLButtonElement;
+  let top = 100;
+  trigger.getBoundingClientRect = () => ({ left: 20, right: 40, top, bottom: top + 20, width: 20, height: 20, x: 20, y: top, toJSON() {} });
+  const originalHeight = window.innerHeight;
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 300 });
+  try {
+    act(() => { click(trigger); });
+    const menu = document.querySelector('.toolbar-settings-menu') as HTMLElement;
+    const fits = () => {
+      const y = Number.parseFloat(menu.style.top);
+      const height = Number.parseFloat(menu.style.height);
+      assert.ok(y >= 8 && y + height <= window.innerHeight - 8, `popup ${y}+${height} must fit viewport`);
+    };
+    fits();
+    assert.equal(menu.style.top, '126px', 'use below when it has more available space');
+    assert.equal(menu.style.height, '166px');
+    top = 250;
+    window.dispatchEvent(new Event('scroll'));
+    await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(resolve)); });
+    fits();
+    assert.equal(menu.style.height, '236px');
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 150 });
+    top = 100;
+    window.dispatchEvent(new Event('resize'));
+    await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(resolve)); });
+    fits();
+    assert.equal(menu.style.height, '86px');
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 1000 });
+    top = 800;
+    window.dispatchEvent(new Event('resize'));
+    await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(resolve)); });
+    fits();
+    assert.equal(menu.style.top, '294px', 'prefer above when the full height fits');
+    assert.equal(menu.style.height, '500px', 'cap roomy viewports to stable category-independent height');
+  } finally {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight });
+  }
+});
+
 // Shared setup: open the settings menu's Models tab and open the pruning
 // prepass ModelPicker. Returns the portaled dropdown element.
 function openPrepassPicker(): HTMLElement {

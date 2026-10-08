@@ -5,7 +5,7 @@ import { pruningTotals } from '../../lib/transcript/pruning-totals.js';
 export { pruningTotals };
 
 export type PruningHeaderState =
-  | { kind: 'pending'; label: string }
+  | { kind: 'pending'; label: string; prepassStartedAt?: number | null }
   | { kind: 'result'; details: PruningDetails; fallbackText?: string };
 
 import { isRecord } from '../../../lib/validation/type-guards';

@@ -10,6 +10,8 @@
  * re-entrantly.
  */
 
+import { stat } from 'node:fs/promises';
+import { BackendRpcError } from '../../agent-connection/client';
 import type {
   Effect,
   ReplaceQueueRpcEffect,
@@ -213,6 +215,7 @@ export interface SessionServiceLike {
     notice: string,
     expectedAttempt?: number,
     reason?: 'definitive-rejection' | 'backend-generation-ended',
+    confirmedMissing?: boolean,
   ): void;
   /** Retain a timed-out create/duplicate operation instead of rolling back. */
   handleCreateOperationDelayed?(selectionToken: string, operationId: string, notice: string, expectedAttempt?: number): void;
@@ -1346,6 +1349,7 @@ export class EffectRunner {
               operationSource: entry.operationSource,
               backendGeneration: entry.backendGeneration,
               sessionPath: resolvedSessionPath,
+              refreshPruning: entry.refreshPruning,
               text: entry.text,
               inputs: entry.inputs,
               composedText: entry.composedText,
@@ -1389,6 +1393,7 @@ export class EffectRunner {
               operationSource: entry.operationSource,
               backendGeneration: entry.backendGeneration,
               sessionPath: entry.sessionPath,
+              refreshPruning: entry.refreshPruning,
               text: entry.text,
               inputs: entry.inputs,
               composedText: entry.composedText,
@@ -1693,7 +1698,22 @@ export class EffectRunner {
           });
           const ambiguous = err instanceof RequestTimeoutError;
           if (!ambiguous) {
-            service.handleSelectionFailure(effect.selectionToken, `Failed to open session: ${toErrorMessage(err)}`);
+            // RPC codes alone are not filesystem evidence: SESSION_NOT_FOUND
+            // also means "being forgotten". Transport failures and permission
+            // errors must retain restored tabs. Confirm absence freshly on the
+            // host, then let failure state re-check ownership after this await.
+            let confirmedMissing = false;
+            if (err instanceof BackendRpcError && err.method === 'session.open'
+              && err.code !== 'EACCES' && err.code !== 'EPERM') {
+              try {
+                await stat(effect.sessionPath);
+              } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                confirmedMissing = code === 'ENOENT' || code === 'ENOTDIR';
+              }
+            }
+            service.handleSelectionFailure(effect.selectionToken, `Failed to open session: ${toErrorMessage(err)}`,
+              effect.operationAttempt, 'definitive-rejection', confirmedMissing);
           }
           dispatch({
             kind: 'OpenSessionResult',

@@ -35,7 +35,7 @@ export type TriggerSpec =
   | UserInputTrigger
   | CommandTrigger;
 
-/** The input form accepted by `defer_trigger` before normalization. */
+/** The input form accepted by `wakeup_timer` before normalization. */
 export type TriggerSpecInput =
   | SessionFinishedTrigger
   | TimerTrigger
@@ -45,6 +45,17 @@ export type TriggerSpecInput =
       intervalMs?: number;
       timeoutMs?: number;
     });
+
+/** Durable start ops require an ISO timestamp, not Date.parse's loose date syntax. */
+export function isValidTimerStartedAt(value: unknown): value is string {
+  if (typeof value !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
+  const date = new Date(value);
+  const local = new Date(`${value.slice(0, 19)}.000Z`);
+  return Number.isFinite(date.getTime())
+    && Number.isFinite(local.getTime())
+    && local.toISOString().slice(0, 19) === value.slice(0, 19);
+}
 
 export const DEFAULT_COMMAND_INTERVAL_MS = 30_000;
 export const MIN_COMMAND_INTERVAL_MS = 1_000;

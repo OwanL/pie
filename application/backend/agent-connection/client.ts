@@ -501,7 +501,7 @@ export class BackendClient implements Disposable {
     // The retired review directory remains available only for one-way setting
     // migration and private-session artifact scrubbing.
     // Deferred-trigger sidecar (sibling of sessions dir). The host registry
-    // (reader/fire-writer) and the `defer_trigger` tool (register/cancel
+    // (reader/fire-writer) and the `wakeup_timer` tool (register/cancel
     // writer) agree on the location through the shared session path resolver;
     // the backend tool reads `PIE_TRIGGERS_DIR` set here.
     const backendEnv: NodeJS.ProcessEnv = {

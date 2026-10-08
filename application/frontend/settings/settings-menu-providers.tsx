@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useState } from 'preact/hooks';
+import { useId, useState } from 'preact/hooks';
 import type { ChatPrefs, ProviderGateStats, ProviderGateProviderMetrics } from '../../lib/protocol/index.js';
 import {
   PROVIDER_MAX_CONCURRENT_REQUESTS,
@@ -39,11 +39,13 @@ function ProviderConcurrencyControls({
   prefs,
   onSetPrefs,
   metrics,
+  id,
 }: {
   provider: string;
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
   metrics?: ProviderGateProviderMetrics;
+  id: string;
 }) {
   const overrides = prefs.providerConcurrency[provider] ?? {};
   const hasRequestedMax = overrides.maxConcurrentRequests !== undefined || metrics !== undefined;
@@ -79,7 +81,7 @@ function ProviderConcurrencyControls({
   };
 
   return (
-    <div class="toolbar-settings-ext-settings toolbar-settings-indent">
+    <div id={id} class="toolbar-settings-ext-settings toolbar-settings-indent">
       <div class="toolbar-settings-list">
         {/* Max concurrent requests */}
         <SliderRow
@@ -93,19 +95,24 @@ function ProviderConcurrencyControls({
             : value === PROVIDER_UNLIMITED_SLIDER_VALUE ? 'Unlimited' : `${value}`}
           ariaLabel={`Max concurrent requests for ${provider}`}
           tooltip="Provider-wide in-flight request cap. Unlimited disables this provider's concurrency and afterburn capacity throttling while retaining circuit breakers and network safety deadlines. It does not bypass the separate subagent tree limit."
-          hint="Max in-flight LLM requests to this provider. Move to the rightmost position for Unlimited."
+          hint={<>
+            <div>Max in-flight LLM requests to this provider. Move to the rightmost position for Unlimited.</div>
+            <div>{requestedMaxDetail}</div>
+            <div>{metrics
+              ? `Runtime/applied: ${runtimeMaxConcurrentLabel} · ${concurrencySourceLabel(metrics.maxConcurrentRequestsSource)}`
+              : 'Runtime/applied: unavailable'}</div>
+          </>}
           disabled={!hasRequestedMax}
           onChange={(value) => setOverride(
             'maxConcurrentRequests',
             value === PROVIDER_UNLIMITED_SLIDER_VALUE ? PROVIDER_UNLIMITED_CONCURRENCY : value,
           )}
         />
-        <div class="toolbar-settings-item-hint" style="margin-top: -8px;">
-          {requestedMaxDetail}<br />
-          {metrics
-            ? `Runtime/applied: ${runtimeMaxConcurrentLabel} · ${concurrencySourceLabel(metrics.maxConcurrentRequestsSource)}`
-            : 'Runtime/applied: unavailable'}
-        </div>
+        {overrides.maxConcurrentRequests !== undefined && (!metrics || overrides.maxConcurrentRequests !== metrics.maxConcurrentRequests) && (
+          <div class="toolbar-settings-runtime-status">
+            {metrics ? `Applied: ${runtimeMaxConcurrentLabel}` : 'Runtime unavailable'}
+          </div>
+        )}
 
         {/* Afterburn sticky-slot window */}
         <SliderRow
@@ -165,6 +172,7 @@ function ProviderConcurrencyControls({
 function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggleExpand }: ProviderItemProps) {
   const checked = prefs.providerToggles[provider] !== false;
   const hasConcurrency = !!metrics || provider in prefs.providerConcurrency;
+  const controlsId = `provider-concurrency-${useId()}`;
   return (
     <div class="toolbar-settings-ext-group">
       <div class="toolbar-settings-ext-row">
@@ -178,6 +186,7 @@ function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggle
               type="button"
               aria-label={`${expanded ? 'Collapse' : 'Expand'} ${provider} concurrency settings`}
               aria-expanded={expanded}
+              aria-controls={expanded && hasConcurrency ? controlsId : undefined}
               onClick={onToggleExpand}
             >
               <CollapsibleChevron open={expanded} size={12} />
@@ -186,7 +195,7 @@ function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggle
         />
       </div>
       {expanded && hasConcurrency && (
-        <ProviderConcurrencyControls provider={provider} prefs={prefs} onSetPrefs={onSetPrefs} metrics={metrics} />
+        <ProviderConcurrencyControls id={controlsId} provider={provider} prefs={prefs} onSetPrefs={onSetPrefs} metrics={metrics} />
       )}
     </div>
   );

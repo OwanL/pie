@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -272,12 +272,13 @@ function piePrompt(skills: Skill[], toolNames: string[], customPrompt?: string):
 	return `${base}${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16\nCurrent working directory: /repo`;
 }
 
-async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1"): Promise<BeforeAgentStartReturn> {
+async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1", refreshPruning = false): Promise<BeforeAgentStartReturn> {
 	const handler = handlers.get("before_agent_start");
 	assert.ok(handler, "before_agent_start handler registered");
 	return await handler({
 		type: "before_agent_start",
 		prompt,
+		refreshPruning,
 		systemPrompt: overrideSystemPrompt ?? systemPrompt(skills),
 		systemPromptOptions: {
 			cwd: "/repo",
@@ -463,12 +464,60 @@ const mockToolInfo = [
 	{ name: "bash", description: "Execute a bash command", parameters: { type: "object", properties: {} } },
 	{ name: "subagent", description: "Delegate tasks to specialized subagents", parameters: { type: "object", properties: {} } },
 	{ name: "web_search", description: "Search the web for information", parameters: { type: "object", properties: {} } },
-	{ name: "defer_trigger", description: "Register an external condition without ending the current turn", parameters: { type: "object", properties: {} } },
+	{ name: "wakeup_timer", description: "Register a timer without ending the current turn", parameters: { type: "object", properties: {} } },
 ];
 
 // ---------------------------------------------------------------------------
 // LLM-based pruning tests (prune-list schema)
 // ---------------------------------------------------------------------------
+
+test("before_agent_start treats reserved token spellings in prompts and tool descriptions as literal text", async () => {
+	const { tokenizerAvailable } = require("../../../lib/tokenization.ts") as typeof import("../../../lib/tokenization.js");
+	assert.equal(tokenizerAvailable(), true, "exercise real BPE counting, not the fallback");
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-literal-tokens-"));
+	try {
+		for (const source of ["prompt", "tool-description"] as const) {
+			const logPath = path.join(dir, `${source}.jsonl`);
+			const tools = mockToolInfo.map((tool) => ({
+				...tool,
+				description: source === "tool-description"
+					? `${tool.description} including literal <|im_start|> and <|im_end|>`
+					: tool.description,
+			}));
+			__setCompleteFn(mockCompleteFn({ pruneSkills: ["frontend-design"], pruneTools: ["web_search"] }));
+			const { handlers } = register(config({}, "auto", { ceiling: 10 }), logPath);
+			let activeTools = tools.map((tool) => tool.name);
+			__setToolSeams({
+				getAllTools: () => tools as ToolInfo[],
+				getActiveTools: () => activeTools,
+				setActiveTools: (names) => { activeTools = names; },
+			});
+			const prompt = source === "prompt"
+				? "Refactor parsing of literal <|im_start|> and <|im_end|> markers"
+				: "Refactor the parser for clarity";
+			const result = await runBeforeAgentStart(handlers, prompt, realisticSkills);
+			assert.ok(result?.systemPrompt);
+			assert.doesNotMatch(result.systemPrompt, /<name>frontend-design<\/name>/);
+			assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
+			assert.equal(activeTools.includes("web_search"), false);
+			assert.equal(result.message?.customType, "pruning-result");
+			assert.ok(!result.message.details.error);
+			await flushLog();
+			const decision = JSON.parse(readFileSync(logPath, "utf-8").trim());
+			assert.deepEqual(decision.excluded, ["frontend-design"]);
+			assert.deepEqual(decision.toolExcluded, ["web_search"]);
+			assert.ok(decision.prepassInputEstimateTokens > 0);
+			assert.ok(decision.toolBlockTokens > 0);
+		}
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		await flushLog();
+		setLogPathForTesting(null);
+		clearPruningTrackingForTesting();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 test("discretion mode: LLM prunes a subset → only those skills removed", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
@@ -603,12 +652,12 @@ test("alwaysKeep skills and tools protected even when the LLM prunes them", asyn
 	}
 });
 
-test("wake turns keep defer_trigger available even when the prepass tries to prune it", async () => {
+test("wake turns keep wakeup_timer available even when the prepass tries to prune it", async () => {
 	const setActiveToolsCalls: string[][] = [];
 	let prepassRequest = "";
 	__setCompleteFn(async (_model, context) => {
 		prepassRequest = JSON.stringify(context);
-		return { text: '{"pruneSkills":[],"pruneTools":["defer_trigger","web_search"]}' };
+		return { text: '{"pruneSkills":[],"pruneTools":["wakeup_timer","web_search"]}' };
 	});
 	try {
 		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
@@ -620,24 +669,24 @@ test("wake turns keep defer_trigger available even when the prepass tries to pru
 
 		const result = await runBeforeAgentStart(
 			handlers,
-			"[deferred trigger fired: session finished: abc]\n\nA deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.",
+			"[deferred trigger fired: timer elapsed after 30000ms]\n\nA wake-up timer you registered fired. Re-evaluate your pending task and either complete it now or call `wakeup_timer` with action `register` again to keep waiting.",
 			realisticSkills,
 		);
 
-		assert.doesNotMatch(prepassRequest, /- defer_trigger:/, "defer_trigger is protected from pruning candidates");
-		assert.ok(setActiveToolsCalls.at(-1)?.includes("defer_trigger"));
+		assert.doesNotMatch(prepassRequest, /- wakeup_timer:/, "wakeup_timer is protected from pruning candidates");
+		assert.ok(setActiveToolsCalls.at(-1)?.includes("wakeup_timer"));
 		assert.ok(!setActiveToolsCalls.at(-1)?.includes("web_search"));
-		assert.ok(result?.message?.details.includedTools.includes("defer_trigger"));
-		assert.ok(!result?.message?.details.excludedTools.includes("defer_trigger"));
+		assert.ok(result?.message?.details.includedTools.includes("wakeup_timer"));
+		assert.ok(!result?.message?.details.excludedTools.includes("wakeup_timer"));
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });
 
-test("ordinary turns may still prune the deferred trigger tool", async () => {
+test("ordinary turns may still prune the wake-up timer tool", async () => {
 	const setActiveToolsCalls: string[][] = [];
-	__setCompleteFn(mockCompleteFn({ pruneTools: ["defer_trigger"] }));
+	__setCompleteFn(mockCompleteFn({ pruneTools: ["wakeup_timer"] }));
 	try {
 		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
 		__setToolSeams({
@@ -648,8 +697,8 @@ test("ordinary turns may still prune the deferred trigger tool", async () => {
 
 		const result = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
 
-		assert.ok(!setActiveToolsCalls.at(-1)?.includes("defer_trigger"));
-		assert.ok(result?.message?.details.excludedTools.includes("defer_trigger"));
+		assert.ok(!setActiveToolsCalls.at(-1)?.includes("wakeup_timer"));
+		assert.ok(result?.message?.details.excludedTools.includes("wakeup_timer"));
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
@@ -1720,6 +1769,175 @@ test("UI feedback message is returned when skills are pruned", async () => {
 	}
 });
 
+test("main sessions prune once, preserve recoveries and reapply skills without feedback", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":["web_search"]}' };
+	});
+	try {
+		const { handlers, registeredTools } = register(config({}, "auto", { ceiling: 10 }));
+		let active = mockToolInfo.map((tool) => tool.name);
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as ToolInfo[],
+			getActiveTools: () => active,
+			setActiveTools: (names) => { active = names; },
+		});
+		const first = await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		assert.equal(calls, 1);
+		assert.ok(first?.message);
+		assert.ok(!active.includes("web_search"));
+		await registeredTools.get("request_capability")!.execute("recover", {
+			capabilityType: "tool", capabilityName: "web_search",
+		}, undefined, undefined, { sessionManager: { getSessionId: () => "session-1" } });
+		selectorState.recordLoadedSkill("session-1", "frontend-design");
+		active = active.filter((name) => name !== "edit"); // user-owned change
+		for (const prompt of ["Now build a UI", "x", "Refactor the backend code"]) {
+			const next = await runBeforeAgentStart(handlers, prompt, realisticSkills);
+			assert.equal(calls, 1);
+			assert.equal(next?.message, undefined);
+			assert.doesNotMatch(next!.systemPrompt!, /<name>frontend-design<\/name>/);
+			assert.ok(active.includes("web_search"), "recovered tool stays active");
+			assert.ok(!active.includes("edit"), "reuse does not restore user-disabled tools");
+			assert.ok(selectorState.getLoadedSkills("session-1").has("frontend-design"));
+		}
+		await handlers.get("input")!({ type: "input", text: "Queued correction", streamingBehavior: "followUp" }, {});
+		const queued = await runBeforeAgentStart(handlers, "Queued correction", realisticSkills, undefined, "session-1", true);
+		assert.equal(calls, 1, "queued continuations ignore even manual refresh");
+		assert.equal(queued?.message, undefined);
+		assert.doesNotMatch(queued!.systemPrompt!, /<name>frontend-design<\/name>/);
+		await runBeforeAgentStart(handlers, "A different independent session task", realisticSkills, undefined, "session-2");
+		assert.equal(calls, 2, "processed state is session-scoped");
+		await handlers.get("session_shutdown")!({}, { sessionManager: { getSessionId: () => "session-1" } });
+		assert.equal(selectorState.state.processedMainSessions.has("session-1"), false);
+		assert.equal(getHiddenSkills("session-1").size, 0);
+		assert.equal(selectorState.state.processedMainSessions.has("session-2"), true);
+		await runBeforeAgentStart(handlers, "New task after cleanup", realisticSkills);
+		assert.equal(calls, 3);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("follow-up opt-in scores task changes; manual refresh bypasses both caches", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register({ ...config(), followUpEnabled: true });
+		await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		await runBeforeAgentStart(handlers, "Build a new user interface", realisticSkills);
+		assert.equal(calls, 2);
+		setConfigForTesting(config());
+		const refresh = await runBeforeAgentStart(handlers, "Build a new user interface", realisticSkills, undefined, "session-1", true);
+		assert.equal(calls, 3, "identical manual refresh must not use either cache");
+		assert.notEqual(refresh?.message?.details.cacheHit, true);
+		await runBeforeAgentStart(handlers, "Build a new user interface", realisticSkills, undefined, "session-1", true);
+		assert.equal(calls, 4);
+		const reused = await runBeforeAgentStart(handlers, "Another task", realisticSkills);
+		assert.equal(calls, 4);
+		assert.equal(reused?.message, undefined);
+	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("short initial requests do not consume the main session decision; fail-open outcomes do", async () => {
+	try {
+		const { handlers } = register(config());
+		__setCompleteFn(false);
+		assert.equal(await runBeforeAgentStart(handlers, "x", realisticSkills), undefined);
+		assert.equal(selectorState.state.processedMainSessions.has("session-1"), false);
+		const first = await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		assert.match(first?.message?.details.prepassError, /No completion/);
+		__setCompleteFn(async () => { throw new Error("sticky reuse must not call scorer"); });
+		const followUp = await runBeforeAgentStart(handlers, "Now build a new UI", realisticSkills);
+		assert.equal(followUp, undefined, "keep-all failure outcome remains sticky");
+	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("main shutdown fences a pending scorer result", async () => {
+	let resolve!: (value: { text: string }) => void;
+	let started!: () => void;
+	const ready = new Promise<void>((done) => { started = done; });
+	const pending = new Promise<{ text: string }>((done) => { resolve = done; });
+	try {
+		const { handlers } = register(config());
+		__setCompleteFn(async () => { started(); return pending; });
+		const hook = runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		await ready;
+		await handlers.get("session_shutdown")!({}, { sessionManager: { getSessionId: () => "session-1" } });
+		resolve({ text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' });
+		assert.equal(await hook, undefined);
+		assert.equal(getHiddenSkills("session-1").size, 0);
+		assert.equal(selectorState.state.processedMainSessions.has("session-1"), false);
+	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("autonomous guard still removes ask_user on sticky main follow-ups", async () => {
+	let calls = 0;
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const catalog = [...mockToolInfo, { name: "ask_user", description: "Ask user", parameters: {} }];
+		let active = catalog.map((tool) => tool.name);
+		__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":[],"pruneTools":[]}' }; });
+		__setToolSeams({ getAllTools: () => catalog as ToolInfo[], getActiveTools: () => active,
+			setActiveTools: (names) => { active = names; } });
+		await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		assert.ok(active.includes("ask_user"));
+		process.env.PIE_AUTONOMOUS_MODE = "1";
+		const next = await runBeforeAgentStart(handlers, "Now build a UI", realisticSkills);
+		assert.equal(calls, 1);
+		assert.ok(!active.includes("ask_user"));
+		assert.equal(next?.message, undefined);
+	} finally {
+		delete process.env.PIE_AUTONOMOUS_MODE;
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("main pruning disable paths restore owned tools and skills even on manual refresh", async () => {
+	for (const disable of ["off", "main", "toggle"] as const) {
+		let calls = 0;
+		__setCompleteFn(async () => {
+			calls++;
+			return { text: '{"pruneSkills":["frontend-design"],"pruneTools":["web_search"]}' };
+		});
+		try {
+			const cfg = config({}, "auto", { ceiling: 10 });
+			const { handlers } = register(cfg);
+			let active = mockToolInfo.filter((tool) => tool.name !== "edit").map((tool) => tool.name);
+			__setToolSeams({
+				getAllTools: () => mockToolInfo as ToolInfo[], getActiveTools: () => active,
+				setActiveTools: (names) => { active = names; },
+			});
+			await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+			if (disable === "off") setConfigForTesting({ ...cfg, mode: "off" });
+			if (disable === "main") setConfigForTesting({ ...cfg, mainAgentEnabled: false });
+			if (disable === "toggle") process.env.PIE_EXTENSION_TOGGLES_JSON = '{"skill-pruner":false}';
+			const result = await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills, undefined, "session-1", true);
+			assert.equal(calls, 1);
+			assert.equal(result?.message, undefined);
+			assert.equal(getHiddenSkills("session-1").size, 0);
+			assert.ok(active.includes("web_search"));
+			assert.ok(!active.includes("edit"));
+			assert.equal(selectorState.state.processedMainSessions.has("session-1"), false);
+		} finally {
+			delete process.env.PIE_EXTENSION_TOGGLES_JSON;
+			__setCompleteFn(null);
+			__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		}
+	}
+});
+
 test("identical second prompt reuses prepass and marks feedback plus JSONL as cached", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-"));
 	const logPath = path.join(dir, "pruning.jsonl");
@@ -1729,7 +1947,7 @@ test("identical second prompt reuses prepass and marks feedback plus JSONL as ca
 		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
 	});
 	try {
-		const { handlers } = register(config(), logPath);
+		const { handlers } = register({ ...config(), followUpEnabled: true }, logPath);
 		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
 		const secondResult = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
 		assert.equal(calls, 1);

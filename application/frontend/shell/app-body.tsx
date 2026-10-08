@@ -287,6 +287,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         busy={transcriptBusy}
         compacting={viewState.compactingSessionPaths.includes(derived.activeSessionPath ?? '')}
         liveTurnPhase={viewState.liveTurnPhase}
+        prepassStartedAt={viewState.prepassStartedAt}
         prefs={viewState.prefs}
         pruningSettings={viewState.pruningSettings}
         systemPrompts={viewState.systemPrompts}

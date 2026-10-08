@@ -74,97 +74,99 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
       role="status"
       aria-label={ariaLabel(stats)}
     >
-      <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
-        <span
-          class="aggregate-strip-seg aggregate-strip-seg--primary"
-          tabIndex={0}
-          aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
-        >
-          today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-        </span>
-      </Tooltip>
-      <Sep />
-      <Tooltip contentNode={weekCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
-        <span
-          class="aggregate-strip-seg"
-          tabIndex={0}
-          aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
-        >
-          wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-        </span>
-      </Tooltip>
-      <Sep />
-      <Tooltip contentNode={tokensTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
-        <span
-          class="aggregate-strip-seg aggregate-strip-tokens"
-          tabIndex={0}
-          aria-label={`Today's tokens: ${formatCompactTokens(todayInputTokens)} input and ${formatCompactTokens(todayOutputTokens)} output${(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; known subtotal with incomplete invocation usage' : ''}. Focus for token chart and provider details.`}
-        >
-          <span class="aggregate-strip-tok-down">↓<Num value={todayInputTokens} format={formatCompactTokens} width={5} /></span>
-          {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
-        </span>
-      </Tooltip>
-      {lastRun && (
-        <>
-          <Sep />
-          <Tooltip contentNode={lastRunTooltipNode(lastRun)} placement="top" freezeWhileVisible richRole="region">
-            <span
-              class="aggregate-strip-seg"
-              tabIndex={0}
-              aria-label={`Latest completed run across all sessions: cost ${formatLastRunCost(lastRun.cost)}, duration ${formatLastRunDuration(lastRun.durationMs)}. Focus for model, token, and timing details.`}
-            >
-              last <span class="aggregate-strip-num aggregate-strip-cost">{formatLastRunCost(lastRun.cost)}</span>
-              <span class="aggregate-strip-num aggregate-strip-dur">{formatLastRunDuration(lastRun.durationMs)}</span>
-            </span>
-          </Tooltip>
-        </>
-      )}
-      {stats.providerGate.enabled && stats.providerGate.providers.length > 0 && (
-        <>
-          <Sep />
-          <Tooltip contentNode={providerGateTooltipNode(stats.providerGate)} placement="top" freezeWhileVisible richRole="region">
-            <span
-              class="aggregate-strip-seg aggregate-strip-providers"
-              tabIndex={0}
-              aria-label={`Provider concurrency: ${stats.providerGate.providers.map((p) => `${p.provider} ${p.activeRequests} of ${providerLimitLabel(p.maxConcurrentRequests)} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
-            >
-              {stats.providerGate.providers.map((p, i) => (
-                <span
-                  key={p.provider}
-                  class={cx(
-                    'aggregate-strip-provider',
-                    p.paused && 'aggregate-strip-provider--paused',
-                    !p.paused && p.queuedRequests > 0 && 'aggregate-strip-provider--queued',
-                  )}
-                >
-                  {i > 0 && ' '}
-                  <span class="aggregate-strip-provider-name">{p.provider}</span>{' '}
-                  <span class="aggregate-strip-provider-counts">{p.activeRequests}/{providerLimitLabel(p.maxConcurrentRequests)}</span>
-                  {p.queuedRequests > 0 && <span class="aggregate-strip-provider-queued">+{p.queuedRequests}</span>}
-                </span>
-              ))}
-            </span>
-          </Tooltip>
-        </>
-      )}
-      {deferredTriggers.length > 0 && (
-        <>
-          <Sep />
-          <Tooltip contentNode={deferredTooltipNode(deferredTriggers)} placement="top" freezeWhileVisible richRole="region">
-            <button
-              type="button"
-              class="aggregate-strip-seg aggregate-strip-deferred"
-              title={`Pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'} — click to cancel`}
-              aria-label={`${deferredTriggers.length} pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'}. Click to open cancel menu.`}
-              onClick={(e) => onOpenDeferredMenu(e.clientX, e.clientY, e.currentTarget as HTMLElement)}
-            >
-              <span class="aggregate-strip-deferred-icon" aria-hidden="true">⏳</span>
-              <span class="aggregate-strip-deferred-count">{deferredTriggers.length} deferred</span>
-            </button>
-          </Tooltip>
-        </>
-      )}
-      <Sep />
+      <div class="aggregate-strip-metrics">
+        <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+          <span
+            class="aggregate-strip-seg aggregate-strip-seg--primary"
+            tabIndex={0}
+            aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
+          >
+            today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          </span>
+        </Tooltip>
+        <Sep />
+        <Tooltip contentNode={weekCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+          <span
+            class="aggregate-strip-seg"
+            tabIndex={0}
+            aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
+          >
+            wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+          </span>
+        </Tooltip>
+        <Sep />
+        <Tooltip contentNode={tokensTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+          <span
+            class="aggregate-strip-seg aggregate-strip-tokens"
+            tabIndex={0}
+            aria-label={`Today's tokens: ${formatCompactTokens(todayInputTokens)} input and ${formatCompactTokens(todayOutputTokens)} output${(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; known subtotal with incomplete invocation usage' : ''}. Focus for token chart and provider details.`}
+          >
+            <span class="aggregate-strip-tok-down">↓<Num value={todayInputTokens} format={formatCompactTokens} width={5} /></span>
+            {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
+          </span>
+        </Tooltip>
+        {lastRun && (
+          <>
+            <Sep />
+            <Tooltip contentNode={lastRunTooltipNode(lastRun)} placement="top" freezeWhileVisible richRole="region">
+              <span
+                class="aggregate-strip-seg"
+                tabIndex={0}
+                aria-label={`Latest completed run across all sessions: cost ${formatLastRunCost(lastRun.cost)}, duration ${formatLastRunDuration(lastRun.durationMs)}. Focus for model, token, and timing details.`}
+              >
+                last <span class="aggregate-strip-num aggregate-strip-cost">{formatLastRunCost(lastRun.cost)}</span>
+                <span class="aggregate-strip-num aggregate-strip-dur">{formatLastRunDuration(lastRun.durationMs)}</span>
+              </span>
+            </Tooltip>
+          </>
+        )}
+        {stats.providerGate.enabled && stats.providerGate.providers.length > 0 && (
+          <>
+            <Sep />
+            <Tooltip contentNode={providerGateTooltipNode(stats.providerGate)} placement="top" freezeWhileVisible richRole="region">
+              <span
+                class="aggregate-strip-seg aggregate-strip-providers"
+                tabIndex={0}
+                aria-label={`Provider concurrency: ${stats.providerGate.providers.map((p) => `${p.provider} ${p.activeRequests} of ${providerLimitLabel(p.maxConcurrentRequests)} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
+              >
+                {stats.providerGate.providers.map((p, i) => (
+                  <span
+                    key={p.provider}
+                    class={cx(
+                      'aggregate-strip-provider',
+                      p.paused && 'aggregate-strip-provider--paused',
+                      !p.paused && p.queuedRequests > 0 && 'aggregate-strip-provider--queued',
+                    )}
+                  >
+                    {i > 0 && ' '}
+                    <span class="aggregate-strip-provider-name">{p.provider}</span>{' '}
+                    <span class="aggregate-strip-provider-counts">{p.activeRequests}/{providerLimitLabel(p.maxConcurrentRequests)}</span>
+                    {p.queuedRequests > 0 && <span class="aggregate-strip-provider-queued">+{p.queuedRequests}</span>}
+                  </span>
+                ))}
+              </span>
+            </Tooltip>
+          </>
+        )}
+        {deferredTriggers.length > 0 && (
+          <>
+            <Sep />
+            <Tooltip contentNode={deferredTooltipNode(deferredTriggers)} placement="top" freezeWhileVisible richRole="region">
+              <button
+                type="button"
+                class="aggregate-strip-seg aggregate-strip-deferred"
+                title={`Pending wakeup timer${deferredTriggers.length === 1 ? '' : 's'} — click to cancel`}
+                aria-label={`${deferredTriggers.length} pending wakeup timer${deferredTriggers.length === 1 ? '' : 's'}. Click to open cancel menu.`}
+                onClick={(e) => onOpenDeferredMenu(e.clientX, e.clientY, e.currentTarget as HTMLElement)}
+              >
+                <span class="aggregate-strip-deferred-icon" aria-hidden="true">⏳</span>
+                <span class="aggregate-strip-deferred-count">{deferredTriggers.length} wakeup</span>
+              </button>
+            </Tooltip>
+          </>
+        )}
+      </div>
+      <span class="aggregate-strip-sep aggregate-strip-status-sep" aria-hidden="true">·</span>
       <div class="aggregate-strip-status-cluster">
         <Tooltip contentNode={userInputTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
           <span
@@ -221,7 +223,7 @@ function arePropsEqual(
  *  strip skips re-render when the set is unchanged across a fresh host-serialised
  *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
 function deferredSignature(t: DeferredTriggerView[]): string {
-  return t.map((x) => `${x.id}:${x.sessionPath}:${x.targetSession ?? x.sessionPath}:${x.message?.trim() || x.note}:${x.deliveryState}:${x.recoveryState ?? ''}:${x.deliveryDetail ?? ''}`).sort().join(',');
+  return t.map((x) => `${x.id}:${x.sessionPath}:${x.targetSession ?? x.sessionPath}:${x.message?.trim() || x.note}:${x.deliveryState}:${x.recoveryState ?? ''}:${x.deliveryDetail ?? ''}:${x.wakeupMode ?? false}:${x.timerStartedAt ?? ''}`).sort().join(',');
 }
 
 function seriesSignature(series: AggregateSeriesPoint[]): string {
@@ -807,13 +809,16 @@ function deferredTooltipNode(triggers: DeferredTriggerView[]): JSX.Element {
   for (const t of triggers) {
     const targetPath = t.targetSession ?? t.sessionPath;
     const message = (t.message?.trim() || t.note.trim()) || '(no message)';
+    const waitingForResponse = t.deliveryState === 'pending' && t.wakeupMode === true
+      && !t.timerStartedAt && t.triggers.some((spec) => spec.kind === 'timer');
     const status = t.deliveryState === 'pending' ? '' : ` [${t.deliveryState}]`;
+    if (waitingForResponse) lines.push('Waiting for response to finish');
     const head = `${targetPath.split(/[\\/]/).pop() ?? targetPath}${status}: ${message}`;
     lines.push(head.length > 80 ? `${head.slice(0, 77)}…` : head);
   }
   return (
     <div class="rich-tooltip">
-      <div class="rich-tooltip-head"><span>Deferred triggers</span><span class="rich-tooltip-head-value">{triggers.length}</span></div>
+      <div class="rich-tooltip-head"><span>Wakeup timers</span><span class="rich-tooltip-head-value">{triggers.length}</span></div>
       <div class="rich-tooltip-sub">{lines.join('\n')}</div>
     </div>
   );

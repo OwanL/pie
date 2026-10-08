@@ -1,0 +1,141 @@
+/* Settings keep visible categories and bounded feature groups. Controls share
+   one compact rhythm; nested groups use separators, not cards inside cards. */
+.toolbar-settings-menu { padding: 8px; border-radius: var(--panel-radius-md); font-family: var(--panel-font-sans); }
+.toolbar-settings-header { min-height: 26px; padding-bottom: 6px; }
+.toolbar-settings-title { font-size: 13px; font-weight: 500; }
+.toolbar-settings-close { width: 24px; height: 24px; }
+.toolbar-settings-search { margin-bottom: 6px; }
+.toolbar-settings-search-input { min-height: 30px; font-size: 12px; border-radius: var(--panel-radius-sm); }
+.toolbar-settings-search-clear { width: 24px; height: 24px; }
+.toolbar-settings-layout { flex-direction: column; gap: 6px; }
+.toolbar-settings-tabs { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; width: 100%; gap: 2px 6px; padding: 0 0 4px; border-right: 0; border-bottom: 1px solid var(--panel-border-subtle); overflow: visible; }
+.toolbar-settings-tab { flex: 0 0 auto; width: auto; min-height: 28px; padding: 5px 8px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; font-size: 11px; justify-content: center; }
+.toolbar-settings-tab-icon { display: none; }
+.toolbar-settings-tab:hover { background: transparent; color: var(--panel-foreground); }
+.toolbar-settings-tab.active { font-weight: 500; color: var(--panel-foreground); background: transparent; border-bottom-color: var(--panel-accent); box-shadow: none; }
+.toolbar-settings-menu-body { gap: 6px; padding: 0 4px 4px 0; scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent; scrollbar-gutter: stable; }
+.toolbar-settings-menu-body::-webkit-scrollbar,
+.toolbar-settings-tabs::-webkit-scrollbar { width: 6px; }
+.toolbar-settings-menu-body::-webkit-scrollbar-thumb,
+.toolbar-settings-tabs::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
+
+.toolbar-settings-menu .toolbar-settings-section,
+.toolbar-settings-menu .toolbar-settings-ui-group,
+.toolbar-settings-assignment-group,
+.toolbar-settings-content-group {
+  min-width: 0;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-md);
+  background: color-mix(in srgb, var(--panel-control-surface) 35%, transparent);
+}
+.toolbar-settings-menu .toolbar-settings-section + .toolbar-settings-section,
+.toolbar-settings-menu .toolbar-settings-ui-group + .toolbar-settings-ui-group { padding-top: 6px; margin-top: 0; }
+.toolbar-settings-menu .toolbar-settings-section-label,
+.toolbar-settings-menu .toolbar-settings-ui-group > .toolbar-settings-ui-group-label,
+.toolbar-settings-assignment-title,
+.toolbar-settings-content-group-title {
+  margin: 0 0 4px;
+  padding: 0 3px;
+  color: var(--panel-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.toolbar-settings-menu .toolbar-settings-ui-group-label { margin: 6px 0 3px; padding: 0 3px; font-size: 11px; font-weight: 500; letter-spacing: normal; text-transform: none; color: var(--panel-foreground-soft); }
+.toolbar-settings-menu .toolbar-settings-ext-settings { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.toolbar-settings-menu-body > .toolbar-settings-ext-settings { display: flex; flex-direction: column; gap: 6px; }
+.toolbar-settings-menu .toolbar-settings-ext-group > .toolbar-settings-ext-settings { margin: 4px 0 6px 7px; padding-left: 8px; border-left: 1px solid var(--panel-border-subtle); }
+.toolbar-settings-menu .toolbar-settings-section .toolbar-settings-content-group { border: 0; padding: 2px 0; background: transparent; }
+.toolbar-settings-menu .toolbar-settings-section .toolbar-settings-content-group + .toolbar-settings-content-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--panel-border-subtle); border-radius: 0; }
+.toolbar-settings-menu .toolbar-settings-section .toolbar-settings-content-group-title { font-size: 11px; color: var(--panel-foreground-soft); }
+.toolbar-settings-menu .toolbar-settings-model-assignments { padding: 0; border: 0; background: transparent; }
+.toolbar-settings-model-assignments > .toolbar-settings-list { gap: 6px; }
+.toolbar-settings-ui-group-content { gap: 2px; }
+.toolbar-settings-menu .toolbar-settings-item { min-height: 24px; padding: 1px 3px; border-radius: var(--panel-radius-sm); font-size: 11px; line-height: 1.4; }
+.toolbar-settings-menu .toolbar-settings-item-label { min-width: 0; overflow-wrap: anywhere; }
+.toolbar-settings-menu .toolbar-settings-mode-row,
+.toolbar-settings-menu .toolbar-settings-stepper-row { gap: 10px; }
+.toolbar-settings-menu .toolbar-settings-mode-row .toolbar-settings-item-label,
+.toolbar-settings-menu .toolbar-settings-stepper-row .toolbar-settings-item-label { flex: 1 1 auto; min-width: 0; white-space: normal; }
+.toolbar-settings-menu .toolbar-settings-inline-actions { flex: 0 1 64%; min-width: 0; }
+.toolbar-settings-menu .toolbar-settings-inline-actions > .model-picker { min-width: 0; max-width: 100%; }
+.toolbar-settings-menu .model-picker-trigger { max-width: 100%; min-width: 0; min-height: 22px; padding-top: 2px; padding-bottom: 2px; }
+.toolbar-settings-menu .toolbar-settings-select { min-height: 22px; padding: 2px 6px; font-size: 11px; }
+.toolbar-settings-menu .toolbar-settings-number-input { width: 88px; max-width: none; flex: 0 0 88px; }
+.toolbar-settings-menu .toolbar-settings-number-control { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.toolbar-settings-menu .toolbar-settings-number-unit { flex: 0 0 44px; color: var(--panel-muted); font-size: 11px; line-height: 1.3; }
+.toolbar-settings-instructions { padding: 0 3px; }
+.toolbar-settings-menu .toolbar-settings-instructions .toolbar-settings-select { width: 100%; max-width: 100%; box-sizing: border-box; }
+.toolbar-settings-menu .toolbar-settings-note,
+.toolbar-settings-menu .toolbar-settings-item-hint { min-height: 0; padding: 3px; font-size: 11px; line-height: 1.45; }
+.toolbar-settings-menu .toolbar-settings-bucket-warning { font-size: 11px; }
+.toolbar-settings-menu .toolbar-settings-keep-picker { padding: 2px 3px; }
+.toolbar-settings-menu .toolbar-settings-bucket-inherit,
+.toolbar-settings-menu .toolbar-settings-runtime-status { padding: 2px 3px; font-size: 11px; line-height: 1.4; color: var(--panel-muted); }
+.toolbar-settings-menu .toolbar-settings-ui-inline-control { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; padding: 1px 3px; }
+.toolbar-settings-menu .toolbar-settings-ui-inline-control > .toolbar-settings-select { flex: 0 1 60%; width: 60%; min-width: 0; max-width: 260px; }
+.toolbar-settings-menu .toolbar-settings-slider-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(60px, 1fr) auto; align-items: center; gap: 8px; min-height: 26px; padding: 1px 3px; }
+.toolbar-settings-menu .toolbar-settings-slider-row .toolbar-settings-ui-control-head { min-width: 0; }
+.toolbar-settings-menu .toolbar-settings-slider-row .toolbar-settings-ui-control-value { white-space: nowrap; text-align: right; }
+.toolbar-settings-menu .toolbar-settings-slider { height: 20px; }
+.toolbar-settings-menu .toolbar-settings-slider-row > input { min-width: 0; width: 100%; margin: 0; }
+.toolbar-settings-menu .toolbar-settings-color-controls { flex: 0 0 auto; }
+.toolbar-settings-menu .toolbar-settings-ext-chevron { width: 24px; height: 24px; }
+.toolbar-settings-menu .toolbar-settings-item:disabled { cursor: default; opacity: 0.5; }
+.toolbar-settings-help { display: inline-flex; vertical-align: middle; margin-inline-start: 4px; flex: 0 0 auto; }
+.toolbar-settings-help-button { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; color: var(--panel-muted); background: transparent; cursor: help; }
+.toolbar-settings-help-button:hover { color: var(--panel-foreground); }
+.toolbar-settings-help-button:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 1px; }
+.toolbar-settings-checkbox-row { display: flex; align-items: center; width: 100%; min-width: 0; }
+.toolbar-settings-checkbox-row > .toolbar-settings-item { flex: 1 1 auto; min-width: 0; }
+
+/* Reserve the icon's space, but show it only for the row being used. Keeping
+   it focusable preserves keyboard access; non-hover devices retain the icon. */
+@media (hover: hover) {
+  .toolbar-settings-menu .toolbar-settings-help { opacity: 0; }
+  .toolbar-settings-menu :is(
+    .toolbar-settings-checkbox-row,
+    .toolbar-settings-ui-inline-control,
+    .toolbar-settings-slider-row,
+    .toolbar-settings-ui-control-head,
+    .toolbar-settings-keep-picker,
+    .toolbar-settings-content-group-title,
+    .toolbar-settings-assignment-title,
+    .toolbar-settings-ui-group-label
+  ):is(:hover, :focus-within) .toolbar-settings-help,
+  .toolbar-settings-menu .toolbar-settings-help:is(:hover, :focus-within),
+  .toolbar-settings-menu .toolbar-settings-help:has(> button[aria-describedby]) { opacity: 1; }
+}
+
+.toolbar-settings-search-summary { padding: 2px 3px 6px; color: var(--panel-muted); font-size: 11px; }
+.toolbar-settings-search-results { gap: 6px; }
+.toolbar-settings-search-group { min-width: 0; padding: 6px; border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-md); }
+.toolbar-settings-search-group-title { margin: 0 0 4px; padding: 0 3px; font-size: 12px; font-weight: 500; color: var(--panel-foreground); }
+.toolbar-settings-search-result { min-height: 24px; padding: 2px 3px; gap: 8px; border-radius: var(--panel-radius-sm); }
+.toolbar-settings-search-result-jump .toolbar-settings-search-result-label { white-space: normal; overflow-wrap: anywhere; }
+.toolbar-settings-search-result-context { flex: 0 1 auto; min-width: 0; margin-left: auto; color: var(--panel-muted); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+.toolbar-settings-search-result-meta { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.toolbar-settings-search-result-jump .toolbar-settings-search-result-meta { margin-left: 0; }
+.toolbar-settings-search-empty { padding: 6px 3px; }
+
+@media (max-width: 520px) {
+  .toolbar-settings-menu { padding: 8px; }
+  .toolbar-settings-tabs { gap: 2px 4px; }
+  .toolbar-settings-tab { min-width: 0; padding: 4px 7px; }
+  .toolbar-settings-tab-label { overflow: visible; text-overflow: clip; }
+  .toolbar-settings-menu-body { padding-right: 2px; }
+  .toolbar-settings-menu .toolbar-settings-inline-actions { flex-basis: 62%; }
+  .toolbar-settings-menu .toolbar-settings-indent { padding-left: 12px; }
+}
+@media (forced-colors: active) {
+  .toolbar-settings-menu,
+  .toolbar-settings-content-group,
+  .toolbar-settings-assignment-group,
+  .toolbar-settings-menu .toolbar-settings-section,
+  .toolbar-settings-menu .toolbar-settings-ui-group { border-color: ButtonText; }
+  .toolbar-settings-tab.active { outline: 1px solid Highlight; }
+}

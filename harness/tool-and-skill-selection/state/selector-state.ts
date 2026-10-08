@@ -49,6 +49,9 @@ export const state = {
 	 * keep-all/off/shadow paths can restore only pruner-owned changes. */
 	prunedTools: new Map<string, Set<string>>(),
 
+	/** Main sessions with an eligible decision, including fail-open outcomes. */
+	processedMainSessions: new Map<string, PruningConfig["mode"]>(),
+
 	/** Initial per-child-session tool permission ceiling for scoped recovery. */
 	allowedChildTools: new Map<string, Set<string>>(),
 };
@@ -101,6 +104,7 @@ export function getLoadedSkills(sessionId: string): Set<string> {
 
 /** Drop every selector decision owned by a completed session. */
 export function clearSessionSelectorState(sessionId: string): void {
+	state.processedMainSessions.delete(sessionId);
 	state.hiddenSkills.delete(sessionId);
 	state.loadedSkills.delete(sessionId);
 	state.prunedTools.delete(sessionId);
@@ -109,10 +113,12 @@ export function clearSessionSelectorState(sessionId: string): void {
 
 export function clearCapabilityStateForTesting(sessionId?: string): void {
 	if (sessionId) {
+		state.processedMainSessions.delete(sessionId);
 		state.hiddenSkills.delete(sessionId);
 		state.loadedSkills.delete(sessionId);
 		state.allowedChildTools.delete(sessionId);
 	} else {
+		state.processedMainSessions.clear();
 		state.hiddenSkills.clear();
 		state.loadedSkills.clear();
 		state.allowedChildTools.clear();

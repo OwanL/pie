@@ -35,6 +35,7 @@ export interface PanelMainProps {
   /** True while the active session runs a history-compaction LLM call. */
   compacting: boolean;
   liveTurnPhase: ViewState['liveTurnPhase'];
+  prepassStartedAt?: ViewState['prepassStartedAt'];
   prefs: ViewState['prefs'];
   pruningSettings: ViewState['pruningSettings'];
   systemPrompts: ViewState['systemPrompts'];
@@ -118,6 +119,7 @@ export const PanelMain = memo(function PanelMain({
   busy,
   compacting,
   liveTurnPhase,
+  prepassStartedAt,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -176,6 +178,7 @@ export const PanelMain = memo(function PanelMain({
           busy={busy}
           compacting={compacting}
           liveTurnPhase={liveTurnPhase}
+          prepassStartedAt={prepassStartedAt}
           prefs={prefs}
           pruningSettings={pruningSettings}
           systemPrompts={systemPrompts}

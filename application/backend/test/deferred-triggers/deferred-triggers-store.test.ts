@@ -16,7 +16,7 @@ import {
  * deferred-triggers store: sidecar append/read + pure replay semantics.
  *
  * The replay is the load-bearing logic (shared conceptually with the
- * `defer_trigger` tool's own `list` action), so it gets the bulk of the tests:
+ * `wakeup_timer` tool's own `list` action), so it gets the bulk of the tests:
  * register sets, fire deletes, cancel-with-targetId deletes one, cancel-all
  * deletes every trigger for a session, and a fire-then-reregister cycle
  * re-arms correctly.

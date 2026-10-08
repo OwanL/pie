@@ -9,7 +9,7 @@ import registerDiscoveryShim from '../../../../extensions/deferred-triggers/inde
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
 
-type Tool = { name: string; description: string; promptGuidelines: string[]; execute: (...args: unknown[]) => Promise<unknown> };
+type Tool = { name: string; label: string; description: string; promptGuidelines: string[]; execute: (...args: unknown[]) => Promise<unknown> };
 type ToolResult = { isError: boolean; content: Array<{ text: string }>; details?: any };
 
 let tempDir: string;
@@ -35,7 +35,8 @@ function setup(): { tools: Record<string, Tool>; defs: Record<string, Tool> } {
       tools[tool.name] = tool;
     },
   } as never);
-  assert.ok(tools.defer_trigger);
+  assert.deepEqual(Object.keys(tools), ['wakeup_timer']);
+  assert.equal(tools.wakeup_timer.label, 'Wakeup timer');
   return { tools, defs: tools };
 }
 
@@ -57,12 +58,12 @@ test('deferred-triggers discovery shim preserves the implementation registrar', 
   assert.equal(registerDiscoveryShim, registerDeferredTriggers);
   const registered: string[] = [];
   registerDiscoveryShim({ registerTool: (tool: { name: string }) => registered.push(tool.name) } as never);
-  assert.deepEqual(registered, ['defer_trigger']);
+  assert.deepEqual(registered, ['wakeup_timer']);
 });
 
-test('defer_trigger tool surface explains the persisted-session prerequisite concisely', () => {
+test('wakeup_timer tool surface explains the persisted-session prerequisite concisely', () => {
   const { defs } = setup();
-  const def = defs.defer_trigger;
+  const def = defs.wakeup_timer;
   // First sentence stays a concise relevance summary (permanent prompt budget).
   const firstSentence = def.description.split('. ')[0];
   assert.ok(firstSentence.length <= 180, `first description sentence must stay within 180 characters (got ${firstSentence.length})`);
@@ -71,16 +72,16 @@ test('defer_trigger tool surface explains the persisted-session prerequisite con
   assert.match(def.description, /persisted JSONL path/);
   assert.match(def.description, /in-memory subagent sessions/);
   assert.ok(def.promptGuidelines.some((guideline) => (
-    guideline.startsWith('Every defer_trigger action')
+    guideline.startsWith('Every wakeup_timer action')
     && guideline.includes('persisted JSONL path')
     && guideline.includes('in-memory subagent sessions')
   )));
 });
 
-test('defer_trigger registers a normalized wake without aborting the current turn', async () => {
+test('wakeup_timer registers a normalized wake without aborting the current turn', async () => {
   const { tools } = setup();
   const registrationCwd = path.join(tempDir, 'project');
-  const result = await tools.defer_trigger.execute(
+  const result = await tools.wakeup_timer.execute(
     'defer-call',
     {
       action: 'register',
@@ -93,10 +94,11 @@ test('defer_trigger registers a normalized wake without aborting the current tur
   ) as ToolResult;
 
   assert.equal(result.isError, false);
-  assert.match(result.content[0].text, /Registered deferred trigger/);
+  assert.match(result.content[0].text, /Registered wakeup timer/);
 
   const [op] = readSidecar();
   assert.equal(op.op, 'register');
+  assert.equal(op.wakeupMode, true);
   assert.equal(op.message, 'resume later');
   assert.equal(op.sessionPath, path.join(tempDir, 'caller.jsonl'));
   assert.equal(op.targetSession, path.join(tempDir, 'caller.jsonl'));
@@ -105,9 +107,35 @@ test('defer_trigger registers a normalized wake without aborting the current tur
   assert.equal(op.triggers[0].timeoutMs, 10_000);
 });
 
+test('wakeup_timer persists default and explicit timer modes, rejecting invalid flags', async () => {
+  const { tools } = setup();
+  for (const wakeupMode of [undefined, false, true]) {
+    const result = await tools.wakeup_timer.execute('call', {
+      action: 'register', message: 'wake', triggers: [{ kind: 'timer', ms: 1000 }], wakeupMode,
+    }, undefined, undefined, context()) as ToolResult;
+    assert.equal(result.isError, false);
+    assert.equal(readSidecar().at(-1).wakeupMode, wakeupMode ?? true);
+  }
+  for (const wakeupMode of [null, 0, 1, 'false', {}, []]) {
+    const result = await tools.wakeup_timer.execute('call', {
+      action: 'register', message: 'wake', triggers: [{ kind: 'timer', ms: 1000 }], wakeupMode,
+    }, undefined, undefined, context()) as ToolResult;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /wakeupMode must be a boolean/);
+  }
+  assert.equal(readSidecar().length, 3);
+});
+
+test('timer-mode guidance is concise and distinguishes other conditions', () => {
+  const { defs } = setup();
+  assert.ok(defs.wakeup_timer.promptGuidelines.some((line) =>
+    line.includes('creator response settles') && line.includes('wakeupMode false')
+    && line.includes('Other condition kinds are unaffected')));
+});
+
 test('register requires a message and never writes a partial registration', async () => {
   const { tools } = setup();
-  const result = await tools.defer_trigger.execute(
+  const result = await tools.wakeup_timer.execute(
     'defer-call',
     { action: 'register', triggers: [{ kind: 'timer', ms: 1_000 }] },
     undefined,
@@ -123,7 +151,7 @@ test('register requires a message and never writes a partial registration', asyn
 test('all actions require persisted creator ownership and rejected inputs never write operations', async () => {
   const { tools } = setup();
   for (const action of ['register', 'list', 'cancel']) {
-    const result = await tools.defer_trigger.execute(
+    const result = await tools.wakeup_timer.execute(
       'no-session', { action }, undefined, undefined,
       { sessionManager: { getSessionFile: () => undefined } },
     ) as ToolResult;
@@ -136,7 +164,7 @@ test('all actions require persisted creator ownership and rejected inputs never 
     [{ action: 'register', message: 'wake', targetSession: '', triggers: [{ kind: 'user_input' }] }, /targetSession must be/],
     [{ action: 'register', message: 'wake', triggers: [] }, /non-empty array/],
   ] as const) {
-    const result = await tools.defer_trigger.execute('bad-input', params, undefined, undefined, context()) as ToolResult;
+    const result = await tools.wakeup_timer.execute('bad-input', params, undefined, undefined, context()) as ToolResult;
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, expected);
   }
@@ -145,7 +173,7 @@ test('all actions require persisted creator ownership and rejected inputs never 
 
 test('cancel all consumes only creator-owned wakes and lists normalized OR conditions', async () => {
   const { tools } = setup();
-  const execute = async (params: unknown, session: string) => tools.defer_trigger.execute(
+  const execute = async (params: unknown, session: string) => tools.wakeup_timer.execute(
     'call', params, undefined, undefined, context(session),
   ) as Promise<ToolResult>;
   const registered = await execute({
@@ -168,7 +196,7 @@ test('cancel all consumes only creator-owned wakes and lists normalized OR condi
 
 test('register persists an explicit target session without changing creator ownership', async () => {
   const { tools } = setup();
-  const result = await tools.defer_trigger.execute(
+  const result = await tools.wakeup_timer.execute(
     'defer-call',
     {
       action: 'register',
@@ -189,7 +217,7 @@ test('register persists an explicit target session without changing creator owne
 
 test('command predicates are denied by safeguard before a wake is persisted', async () => {
   const { tools } = setup();
-  const result = await tools.defer_trigger.execute(
+  const result = await tools.wakeup_timer.execute(
     'defer-call',
     { action: 'register', triggers: [{ kind: 'command', command: 'rm -rf /' }], message: 'unsafe' },
     undefined,
@@ -204,7 +232,7 @@ test('command predicates are denied by safeguard before a wake is persisted', as
 
 test('list and targeted cancel are restricted to the creator session', async () => {
   const { tools } = setup();
-  const registered = await tools.defer_trigger.execute(
+  const registered = await tools.wakeup_timer.execute(
     'defer-call',
     { action: 'register', triggers: [{ kind: 'user_input' }], message: 'owned wake' },
     undefined,
@@ -213,7 +241,7 @@ test('list and targeted cancel are restricted to the creator session', async () 
   ) as ToolResult;
   const id = registered.details.id as string;
 
-  const foreignCancel = await tools.defer_trigger.execute(
+  const foreignCancel = await tools.wakeup_timer.execute(
     'cancel-call',
     { action: 'cancel', triggerId: id },
     undefined,
@@ -222,7 +250,7 @@ test('list and targeted cancel are restricted to the creator session', async () 
   ) as ToolResult;
   assert.equal(foreignCancel.isError, true);
 
-  const listed = await tools.defer_trigger.execute(
+  const listed = await tools.wakeup_timer.execute(
     'list-call',
     { action: 'list' },
     undefined,
@@ -231,7 +259,7 @@ test('list and targeted cancel are restricted to the creator session', async () 
   ) as ToolResult;
   assert.match(listed.content[0].text, new RegExp(id));
 
-  const cancelled = await tools.defer_trigger.execute(
+  const cancelled = await tools.wakeup_timer.execute(
     'cancel-call',
     { action: 'cancel', triggerId: id },
     undefined,
@@ -239,12 +267,12 @@ test('list and targeted cancel are restricted to the creator session', async () 
     context('creator.jsonl'),
   ) as ToolResult;
   assert.equal(cancelled.isError, false);
-  const after = await tools.defer_trigger.execute(
+  const after = await tools.wakeup_timer.execute(
     'list-call',
     { action: 'list' },
     undefined,
     undefined,
     context('creator.jsonl'),
   ) as ToolResult;
-  assert.match(after.content[0].text, /No pending deferred triggers/);
+  assert.match(after.content[0].text, /No pending wakeup timers/);
 });

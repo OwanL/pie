@@ -20,16 +20,18 @@ export interface ToolResultPruningBadgeData {
 
 interface ToolResultPruningBadgeProps {
   badge?: ToolResultPruningBadgeData | null;
+  /** Icon-only metadata column; savings remain in the title/accessibility label. */
+  compact?: boolean;
 }
 
-export function ToolResultPruningBadge({ badge }: ToolResultPruningBadgeProps) {
+export function ToolResultPruningBadge({ badge, compact = false }: ToolResultPruningBadgeProps) {
   if (!badge || badge.tokensSaved <= 0) return null;
   const label = `${badge.tokensSaved} tokens pruned`;
   const title = `Tool-result pruning saved ${badge.tokensSaved} tokens`;
   return (
-    <span class="tool-result-pruning-badge" title={title} aria-label={title}>
+    <span class="tool-result-pruning-badge" role="img" title={title} aria-label={title}>
       <span class="tool-result-pruning-badge-text">
-        ✂ {label}
+        {compact ? '✂' : `✂ ${label}`}
       </span>
     </span>
   );

@@ -86,8 +86,8 @@ function modelLine(details: CompactionSummaryDetails): string | null {
  *
  * When durable metrics are available (scanned from the `pie.compaction-metrics`
  * sidecar), the collapsed header surfaces a compact one-line summary: reason,
- * before→after tokens (with absolute + percentage reduction when computable),
- * model/thinking provenance, and duration. The full replacement-context
+ * before→after tokens (with absolute + percentage reduction when computable).
+ * Model/thinking provenance and duration stay in expanded metadata. The full replacement-context
  * markdown stays lazy — `renderMarkdown` only runs when the card is expanded.
  */
 export function CompactionSummary({ summary, details }: CompactionSummaryProps) {
@@ -98,7 +98,9 @@ export function CompactionSummary({ summary, details }: CompactionSummaryProps) 
   const tokens = details ? tokenRange(details) : null;
   const model = details ? modelLine(details) : null;
   const duration = details?.durationMs !== undefined ? formatDuration(details.durationMs) : null;
-  const metaParts = [reason, tokens, model, duration].filter((value): value is string => Boolean(value));
+  const metaParts = [reason, !open ? tokens : null].filter((value): value is string => Boolean(value));
+  const expandedMeta = [tokens ? `Tokens ${tokens}` : null, model, duration].filter((value): value is string => Boolean(value));
+  const tooltip = [reason, tokens, model, duration].filter(Boolean).join(' · ');
   const hasMeta = metaParts.length > 0;
 
   return (
@@ -107,21 +109,27 @@ export function CompactionSummary({ summary, details }: CompactionSummaryProps) 
       onToggle={setOpen}
       ariaLabel="Toggle compaction summary"
       class="compaction-summary-card"
+      closeFooter={false}
       headerClass="px-2 py-[5px]"
       bodyClass="px-2.5 pb-2.5 pt-1 leading-relaxed text-foreground"
       header={
-        <div class="compaction-summary-header">
-          <span class="transcript-header-label">Compaction summary</span>
+        <div class="compaction-summary-header" title={tooltip || undefined}>
+          <span class="compaction-summary-label">Compaction summary</span>
           {hasMeta && (
             <span class="compaction-summary-meta">
               {metaParts.map((part, index) => (
-                <span key={index} class="compaction-summary-meta-item">{part}</span>
+                <span key={index} class={`compaction-summary-meta-item${index === 0 && reason ? ' compaction-summary-reason' : ''}`}>{part}</span>
               ))}
             </span>
           )}
         </div>
       }
     >
+      {expandedMeta.length > 0 && (
+        <div class="compaction-summary-provenance">
+          {expandedMeta.join(' · ')}
+        </div>
+      )}
       <div class="message-body" dangerouslySetInnerHTML={{ __html: html }} />
     </Collapsible>
   );

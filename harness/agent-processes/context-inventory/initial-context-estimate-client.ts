@@ -185,12 +185,26 @@ export class InitialContextEstimateClient {
       return Promise.resolve(undefined);
     }
     this.queuedDiscoveries += 1;
+    let succeeded = false;
     const result = this.discoveryQueue.then(async () => {
       if (this.disposed) return undefined;
-      return await this.discoverOne(input);
+      const inventory = await this.discoverOne(input);
+      succeeded = inventory !== undefined;
+      return inventory;
     });
     this.discoveryQueue = result.then(() => undefined, () => undefined);
-    return result.finally(() => { this.queuedDiscoveries -= 1; });
+    return result.finally(() => {
+      this.queuedDiscoveries -= 1;
+      // Replenish only after the last request has retired its one-use child.
+      // Unconfirmed cleanup retains ownership and blocks this optional spawn.
+      // Do not await preload on the discovery result or retry a failed warmup.
+      if (succeeded && this.queuedDiscoveries === 0 && !this.disposed
+        && this.active.size === 0 && !this.starting) {
+        void this.warm().catch((error) => {
+          this.recordDiagnostic(`replacement worker preload failed: ${toErrorMessage(error)}`);
+        });
+      }
+    });
   }
 
   dispose(): Promise<void> {

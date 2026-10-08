@@ -11,11 +11,12 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createRequire } from 'node:module';
 
 import { BackendClient } from '../../agent-connection/client';
 import { startSessionBackend } from '../../agent-connection/startup';
 import { SessionService } from '../../session-actions/service';
-import { SessionServiceState } from '../../session-actions/state';
+import { PRIVATE_SESSION_PATHS_STORAGE_KEY, SessionServiceState } from '../../session-actions/state';
 import { selectRuntimeSetting, type SessionHostPlatform } from '../../../lib/platform-contracts/session-platform.js';
 import { createBackendStartupPlatform } from '../../../hosts/lib/backend-startup';
 import { PI_RUNTIME_PACKAGES, PI_RUNTIME_SDK_RELATIVE_PATH } from '../../../../lib/pi-runtime/artifact.mjs';
@@ -192,8 +193,10 @@ async function attemptStartupWithFakeBackend(fixture: PlatformFixture): Promise<
   dispatched: Event[];
   startArgs?: { nodePath: string; sdkPath: string; sourceArtifactDescriptor?: unknown };
 }> {
-  fixture.storage.update('openTabPaths', ['/test-workspace/session-a.jsonl']);
-  fixture.storage.update('activeSessionPath', '/test-workspace/session-a.jsonl');
+  const sessionPath = path.join(fixture.platform.getRuntimeOutputDirectory(), 'session-a.jsonl');
+  fs.writeFileSync(sessionPath, 'fixture session\n');
+  fixture.storage.update('openTabPaths', [sessionPath]);
+  fixture.storage.update('activeSessionPath', sessionPath);
   const { dispatched, dispatchArch, getArchState } = makeDispatch(createInitialArchState());
   const scheduleRender = (): void => undefined;
   const calls: string[] = [];
@@ -231,6 +234,106 @@ async function attemptStartupWithFakeBackend(fixture: PlatformFixture): Promise<
   return { calls, dispatched, startArgs };
 }
 
+async function restoreStoredTabs(fixture: PlatformFixture) {
+  const { dispatched, dispatchArch, getArchState } = makeDispatch(createInitialArchState());
+  const opened: string[] = [];
+  const cleanup: { privatePaths: readonly string[]; openPaths: readonly string[] }[] = [];
+  const backend = {
+    request: async () => [],
+    start: async () => undefined,
+    stop: async () => undefined,
+    getGeneration: () => 1,
+  } as unknown as BackendClient;
+  await startSessionBackend({
+    platform: fixture.platform,
+    backend,
+    scheduleRender: () => undefined,
+    events: { attach: () => undefined, detach: () => undefined } as never,
+    state: new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0),
+    service: {
+      loadPruningSettings: async () => undefined,
+      loadToolResultPruningSettings: async () => undefined,
+      loadSessionTitlesSettings: async () => undefined,
+      schedulePrivateSessionCleanup: (privatePaths, openPaths) => { cleanup.push({ privatePaths, openPaths }); },
+    },
+    openSession: (sessionPath) => { opened.push(sessionPath); },
+    getArchState,
+    dispatchArch,
+  });
+  return { state: getArchState(), dispatched, opened, cleanup };
+}
+
+function createRestorePlatformFixture(): PlatformFixture {
+  return createPlatformFixture({
+    backendStartup: {
+      prepareDevelopmentEnvironment: () => undefined,
+      prepareBackendEnvironment: () => undefined,
+      resolveBackendLaunchPaths: async () => ({ nodePath: process.execPath, sdkPath: '/unused-fake-backend-sdk' }),
+    },
+  });
+}
+
+test('startup filters missing ordinary restored tabs, selects a healthy fallback and persists reconciled tabs', async (t) => {
+  const root = createTempRoot(t);
+  const missing = path.join(root, 'missing-parent', 'missing.jsonl');
+  const missingPrivate = path.join(root, 'missing-parent', 'private.jsonl');
+  const healthy = path.join(root, 'healthy.jsonl');
+  const other = path.join(root, 'other.jsonl');
+  fs.writeFileSync(healthy, 'healthy fixture\n');
+  fs.writeFileSync(other, 'other fixture\n');
+  const notDirectory = path.join(healthy, 'child.jsonl');
+  const fixture = createRestorePlatformFixture();
+  const healthyTab = { path: healthy, name: 'Healthy' };
+  await fixture.storage.update('openTabPaths', [missing, notDirectory, healthyTab, other, missingPrivate]);
+  await fixture.storage.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, [missingPrivate, other]);
+  await fixture.storage.update('activeSessionPath', missing);
+  await fixture.storage.update('pinnedTabPaths', [missing, healthy, other]);
+  await fixture.storage.update('pinnedTabGroups', [[missing, healthy, other]]);
+
+  const restored = await restoreStoredTabs(fixture);
+
+  assert.deepEqual(restored.state.sessions.openTabPaths, [healthy, other]);
+  assert.equal(restored.state.sessions.activeSessionPath, healthy);
+  assert.deepEqual(restored.opened, [healthy]);
+  assert.deepEqual(fixture.storage.get('openTabPaths'), [healthyTab, other]);
+  assert.equal(fixture.storage.get('activeSessionPath'), healthy);
+  assert.deepEqual(fixture.storage.get('pinnedTabPaths'), [healthy, other]);
+  assert.deepEqual(fixture.storage.get('pinnedTabGroups'), [[healthy, other]]);
+  assert.deepEqual(fixture.storage.get(PRIVATE_SESSION_PATHS_STORAGE_KEY), [missingPrivate, other]);
+  assert.deepEqual(restored.cleanup, [{ privatePaths: [missingPrivate, other], openPaths: [healthy, other] }]);
+  assert.ok(restored.dispatched.some((event) => event.kind === 'Command'
+    && event.cmd.kind === 'SetPrivacyMode' && event.cmd.sessionPath === other
+    && event.cmd.enabled && event.cmd.persist === false));
+  assert.equal(fs.readFileSync(healthy, 'utf8'), 'healthy fixture\n');
+  assert.equal(fs.readFileSync(other, 'utf8'), 'other fixture\n');
+});
+
+for (const code of ['EACCES', 'EBUSY', 'EIO']) {
+  test(`startup retains ordinary restored tabs on ${code} stat errors`, async (t) => {
+    const root = createTempRoot(t);
+    const unavailable = path.join(root, 'unavailable.jsonl');
+    fs.writeFileSync(unavailable, 'retained fixture\n');
+    const fixture = createRestorePlatformFixture();
+    await fixture.storage.update('openTabPaths', [unavailable]);
+    await fixture.storage.update('activeSessionPath', unavailable);
+    const nodeFs = createRequire(path.join(process.cwd(), 'package.json'))('node:fs') as typeof fs;
+    const originalStat = nodeFs.statSync;
+    const statMock = t.mock.method(nodeFs, 'statSync', (file: fs.PathLike, ...args: unknown[]) => {
+      if (file === unavailable) throw Object.assign(new Error(`fixture ${code}`), { code });
+      return Reflect.apply(originalStat, nodeFs, [file, ...args]);
+    });
+
+    const restored = await restoreStoredTabs(fixture);
+
+    assert.deepEqual(restored.state.sessions.openTabPaths, [unavailable]);
+    assert.deepEqual(restored.opened, [unavailable]);
+    assert.equal(restored.state.sessions.activeSessionPath, unavailable);
+    assert.deepEqual(fixture.storage.get('openTabPaths'), [unavailable]);
+    assert.equal(fs.readFileSync(unavailable, 'utf8'), 'retained fixture\n');
+    assert.ok(statMock.mock.calls.some((call) => call.arguments[0] === unavailable));
+  });
+}
+
 test('selectRuntimeSetting preserves the exact pie → piAssistant trimmed fallback', () => {
   assert.equal(selectRuntimeSetting(' /sdk ', '/legacy/sdk'), '/sdk');
   assert.equal(selectRuntimeSetting(undefined, '/legacy/sdk'), '/legacy/sdk');
@@ -250,8 +353,10 @@ test('startSessionBackend uses the generation artifact, attaches before spawn, t
   const fixture = createPlatformFixture({ getRuntimeOutputDirectory: () => runtimeOutDir });
   fixture.pieSettings.set('sdkPath', '/ignored/configured-sdk');
   fixture.pieSettings.set('nodePath', nodePath);
-  fixture.storage.update('openTabPaths', ['/test-workspace/session-a.jsonl']);
-  fixture.storage.update('activeSessionPath', '/test-workspace/session-a.jsonl');
+  const sessionPath = path.join(tempRoot, 'session-a.jsonl');
+  fs.writeFileSync(sessionPath, 'fixture session\n');
+  fixture.storage.update('openTabPaths', [sessionPath]);
+  fixture.storage.update('activeSessionPath', sessionPath);
 
   const { dispatched, dispatchArch, getArchState } = makeDispatch(createInitialArchState());
   const scheduleRender = (): void => undefined;
@@ -339,12 +444,12 @@ test('startSessionBackend uses the generation artifact, attaches before spawn, t
     | { openTabPaths: string[]; pinnedTabPaths: string[] }
     | undefined;
   assert.ok(restoreEvent, 'restore plan must read persisted tabs through platform.storage');
-  assert.deepEqual(restoreEvent.openTabPaths, ['/test-workspace/session-a.jsonl']);
+  assert.deepEqual(restoreEvent.openTabPaths, [sessionPath]);
   assert.equal(
     dispatched.find((event) => event.kind === 'BackendReadyChanged') !== undefined,
     true,
   );
-  assert.deepEqual(openedSessionPaths, ['/test-workspace/session-a.jsonl']);
+  assert.deepEqual(openedSessionPaths, [sessionPath]);
   // The generation artifact is re-verified on every start and is never cached.
   assert.equal(fixture.storage.get('resolvedSdkPath'), undefined);
 });

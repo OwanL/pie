@@ -216,9 +216,11 @@ export function canonicalSendIntentFingerprint(input: {
   inputs: ComposerInput[];
   localId?: string;
   coordinatorAttribution?: SessionControlSender;
+  refreshPruning?: boolean;
 }): string {
   return canonicalFingerprint({
     kind: 'message.send',
+    refreshPruning: input.refreshPruning === true,
     sessionPath: input.sessionPath,
     text: input.text,
     inputs: input.inputs,

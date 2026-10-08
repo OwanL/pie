@@ -11,10 +11,34 @@ import { ComposerSettingsMenu } from '../../settings/settings-menu';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
 
 let container: HTMLElement;
+let frames: Map<number, FrameRequestCallback>;
+let nextFrameId: number;
+const originalRequestAnimationFrame = window.requestAnimationFrame;
+const originalCancelAnimationFrame = window.cancelAnimationFrame;
+const originalInnerHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+
+function setViewportHeight(height: number): void {
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+}
+
+function flushAnimationFrames(): void {
+  const pending = [...frames.values()];
+  frames.clear();
+  for (const callback of pending) callback(0);
+}
 
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
+  frames = new Map();
+  nextFrameId = 1;
+  window.requestAnimationFrame = (callback) => {
+    const id = nextFrameId++;
+    frames.set(id, callback);
+    return id;
+  };
+  window.cancelAnimationFrame = (id) => { frames.delete(id); };
+  setViewportHeight(800);
 });
 
 afterEach(() => {
@@ -24,6 +48,9 @@ afterEach(() => {
   // instance so tests cannot observe a previous test's menu.
   document.querySelectorAll('.toolbar-settings-menu').forEach((el) => el.remove());
   document.querySelectorAll('.model-picker-dropdown').forEach((el) => el.remove());
+  window.requestAnimationFrame = originalRequestAnimationFrame;
+  window.cancelAnimationFrame = originalCancelAnimationFrame;
+  if (originalInnerHeight) Object.defineProperty(window, 'innerHeight', originalInnerHeight);
 });
 
 function click(el: Element | null): void {
@@ -31,11 +58,7 @@ function click(el: Element | null): void {
   el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
-// Regression: the settings menu used max-height: calc(100vh - 32px),
-// which ignores the toolbar height and lets a tall menu run off the top of the
-// screen. It must now be capped to the transcript vertical space (menu bottom →
-// viewport top) so it fills the room and its inner body scrolls.
-test('settings menu caps its height to the transcript vertical space', () => {
+function renderMenu(): void {
   act(() => {
     render(
       h(ComposerSettingsMenu, {
@@ -58,78 +81,57 @@ test('settings menu caps its height to the transcript vertical space', () => {
       container,
     );
   });
+}
 
-  act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
-
+function openWithTriggerRect(top: number, bottom: number): HTMLElement {
+  const trigger = container.querySelector('.toolbar-settings-trigger') as HTMLElement;
+  trigger.getBoundingClientRect = () => ({
+    bottom, right: 300, top, left: 0, width: 300, height: bottom - top,
+    x: 0, y: top, toJSON() {},
+  }) as DOMRect;
+  act(() => { click(trigger); });
   const menu = document.body.querySelector('.toolbar-settings-menu') as HTMLElement;
   assert.ok(menu, 'settings menu should be open');
+  return menu;
+}
 
-  menu.getBoundingClientRect = () => ({
-    bottom: 600, right: 300, top: 100, left: 0, width: 300, height: 500,
-    x: 0, y: 100, toJSON() {},
-  }) as DOMRect;
+// The trigger geometry, not the menu's own rect, determines the stable popup
+// height and the available viewport cap.
+test('settings menu keeps its stable height when space allows and tabs change', () => {
+  renderMenu();
+  const menu = openWithTriggerRect(700, 720);
 
-  act(() => { window.dispatchEvent(new Event('resize')); });
-
-  assert.equal(
-    menu.style.maxHeight,
-    '592px',
-    'menu max-height should be the transcript space (menu bottom - pad), not 100vh',
-  );
-});
-
-// Regression: the menu used to grow/shrink as the user clicked between
-// categories (each tab has a different content height), making its top edge
-// jump around. It must now keep a fixed height across tab switches; only the
-// inner body scrolls.
-test('settings menu keeps a fixed height when switching tabs', () => {
-  act(() => {
-    render(
-      h(ComposerSettingsMenu, {
-        prefs: DEFAULT_CHAT_PREFS,
-        pruningSettings: DEFAULT_PRUNING_SETTINGS,
-        pruningCatalog: { skills: [], tools: [] },
-        pruningResult: null,
-        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-        availableExtensions: [],
-        availableModels: [],
-        providerGateStats: EMPTY_PROVIDER_GATE_STATS,
-        onSetPrefs: () => undefined,
-        mcpServers: [],
-        mcpPendingApply: false,
-        onMcpListRequested: () => undefined,
-        onMcpSetServerEnabled: () => undefined,
-        onSetPruningSettings: () => undefined,
-        onSetToolResultPruningSettings: () => undefined,
-      }),
-      container,
-    );
-  });
-
-  act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
-
-  const menu = document.body.querySelector('.toolbar-settings-menu') as HTMLElement;
-  assert.ok(menu, 'settings menu should be open');
-
-  // Generous available space so the fixed height isn't clamped by the viewport.
-  menu.getBoundingClientRect = () => ({
-    bottom: 700, right: 600, top: 100, left: 0, width: 600, height: 600,
-    x: 0, y: 100, toJSON() {},
-  }) as DOMRect;
-
-  act(() => { window.dispatchEvent(new Event('resize')); });
+  assert.equal(menu.style.height, '500px', 'menu uses the compact stable design height when space allows');
+  assert.equal(menu.style.maxHeight, '686px', 'above-trigger space includes viewport padding and trigger gap');
+  assert.equal(menu.style.top, '194px');
 
   const fixedHeight = menu.style.height;
-  assert.equal(fixedHeight, '500px', 'menu uses the compact stable design height when space allows');
-  assert.equal(menu.style.maxHeight, '692px', 'max-height still tracks the viewport cap');
-
-  // Switching tabs must not change the height (the original resize complaint).
   for (const tab of ['appearance', 'chat']) {
     act(() => { click(menu.querySelector(`.toolbar-settings-tab[data-tab="${tab}"]`)); });
-    assert.equal(
-      menu.style.height,
-      fixedHeight,
-      `height should not change when switching to the ${tab} tab`,
-    );
+    assert.equal(menu.style.height, fixedHeight, `height should not change when switching to the ${tab} tab`);
   }
+});
+
+test('resize and scroll recompute capped geometry when the trigger is offscreen', () => {
+  renderMenu();
+  const menu = openWithTriggerRect(-100, -80);
+  assert.equal(menu.style.height, '500px');
+
+  // Scrolling the trigger above the viewport clamps the menu to the lower
+  // viewport edge; resizing then applies the smaller available space.
+  act(() => {
+    window.dispatchEvent(new Event('scroll'));
+    flushAnimationFrames();
+  });
+  assert.equal(menu.style.top, '8px');
+  assert.equal(menu.style.maxHeight, '784px');
+
+  setViewportHeight(300);
+  act(() => {
+    window.dispatchEvent(new Event('resize'));
+    flushAnimationFrames();
+  });
+  assert.equal(menu.style.height, '284px');
+  assert.equal(menu.style.maxHeight, '284px');
+  assert.equal(menu.style.top, '8px');
 });

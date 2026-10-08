@@ -270,6 +270,7 @@ function sendIntentFingerprint(cmd: Extract<Command, { kind: 'Send' }>): string 
     text: cmd.text,
     inputs: cmd.inputs,
     localId: cmd.localId,
+    refreshPruning: cmd.refreshPruning === true,
   });
 }
 
@@ -284,6 +285,13 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       operationSource: cmd.operationSource ?? { kind: 'host' },
       backendGeneration: cmd.backendGeneration ?? 0,
     });
+  }
+  // Capture once, including host queues. Replays carry the original normalized intent.
+  if (!state.operations[cmd.operationId] && cmd.refreshPruning === undefined) {
+    return handleSend(state, { ...cmd, refreshPruning: cmd.composerSend === true
+      && !!(cmd.text.trim() || cmd.inputs.length)
+      && !state.sessions.runningSessionPaths.includes(cmd.sessionPath)
+      && state.composer.pruningRefreshPendingBySession[cmd.sessionPath] === true });
   }
   const attempt = cmd.operationAttempt ?? 1;
   const intentFingerprint = sendIntentFingerprint(cmd);
@@ -352,6 +360,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
             sessionPath: cmd.sessionPath, text: cmd.text, inputs: cmd.inputs,
             localId: cmd.localId, composedText: cmd.composedText, userParts: cmd.userParts,
             priorPruningMode: cmd.priorPruningMode,
+            refreshPruning: cmd.refreshPruning,
           },
         ],
       };
@@ -386,6 +395,12 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     };
   }
 
+  if (!existingOperation && cmd.refreshPruning) {
+    state = produce(state, (draft) => {
+      delete draft.composer.pruningRefreshPendingBySession[cmd.sessionPath];
+    });
+  }
+
   // If the target session is still a pending tab (backend `session.create`
   // in flight), queue the send into ArchState instead of emitting `SendRpc`.
   // The optimistic user message is still inserted immediately (the user sees
@@ -411,6 +426,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           composedText: cmd.composedText,
           localId: cmd.localId,
           userParts: cmd.userParts,
+          refreshPruning: cmd.refreshPruning,
           // null — the name derivation already happened via SessionNameDerived;
           // by drain time the session has a real summary from session.opened.
           previousSummary: null,
@@ -449,6 +465,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           composedText: cmd.composedText,
           localId: cmd.localId,
           userParts: cmd.userParts,
+          refreshPruning: cmd.refreshPruning,
           previousSummary: null,
           timestamp: cmd.timestamp,
           priorPruningMode: cmd.priorPruningMode,
@@ -501,6 +518,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
       draft.operations[cmd.operationId!]!.delivery = 'queued';
       draft.pending.ops[cmd.corrId] = {
         kind: 'send',
+        refreshPruning: cmd.refreshPruning,
         operationId: cmd.operationId,
         operationAttempt: attempt,
         sessionPath: cmd.sessionPath,
@@ -530,6 +548,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           localId: cmd.localId,
           composedText: cmd.composedText,
           userParts: cmd.userParts,
+          refreshPruning: cmd.refreshPruning,
           priorPruningMode: cmd.priorPruningMode,
         },
       ],
@@ -551,6 +570,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     draft.operations[cmd.operationId!]!.delivery = 'direct';
     draft.pending.ops[cmd.corrId] = {
       kind: 'send',
+      refreshPruning: cmd.refreshPruning,
       operationId: cmd.operationId,
       operationAttempt: attempt,
       sessionPath: cmd.sessionPath,
@@ -593,6 +613,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         localId: cmd.localId,
         composedText: cmd.composedText,
         userParts: cmd.userParts,
+        refreshPruning: cmd.refreshPruning,
         priorPruningMode: cmd.priorPruningMode,
       },
     ],

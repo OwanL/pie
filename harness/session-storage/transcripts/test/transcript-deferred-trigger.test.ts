@@ -7,7 +7,7 @@ import { mapTranscript, type SessionEntryLike } from '../transcript';
 function wakeUpText(reason: string, message = 'do the thing'): string {
   return (
     `[deferred trigger fired: ${reason}]\n\n` +
-    'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\n' +
+    'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `wakeup_timer` with action `register` again to keep waiting.\n\n' +
     `Task message:\n${message}`
   );
 }
@@ -21,7 +21,11 @@ function userEntry(id: string, text: string): SessionEntryLike {
   };
 }
 
-function legacyDeferredWaitEntries(resultText: string, isError = false): SessionEntryLike[] {
+function legacyDeferredWaitEntries(
+  resultText: string,
+  isError = false,
+  toolName = 'wakeup_timer',
+): SessionEntryLike[] {
   return [
     {
       id: 'assistant-tool',
@@ -33,7 +37,7 @@ function legacyDeferredWaitEntries(resultText: string, isError = false): Session
         content: [{
           type: 'toolCall',
           id: 'defer-call',
-          name: 'defer_trigger',
+          name: toolName,
           arguments: { action: 'register' },
         }],
       },
@@ -45,7 +49,7 @@ function legacyDeferredWaitEntries(resultText: string, isError = false): Session
       message: {
         role: 'toolResult',
         toolCallId: 'defer-call',
-        toolName: 'defer_trigger',
+        toolName,
         isError,
         content: [{ type: 'text', text: resultText }],
       },
@@ -98,38 +102,41 @@ test('mapTranscript does not mis-tag a message that merely mentions the prefix m
   assert.equal(msg.customType, undefined);
 });
 
-test('mapTranscript repairs the intentional abort persisted by legacy deferred waits', () => {
-  const result = [
-    'Registered deferred trigger trigger-1:',
-    '',
-    'Your turn will end now; you will be resumed automatically when the trigger fires.',
-  ].join('\n');
-  const [message] = mapTranscript(legacyDeferredWaitEntries(result));
+for (const toolName of ['defer_trigger', 'wakeup_timer']) {
+  test(`mapTranscript repairs the intentional abort persisted by legacy waits (${toolName})`, () => {
+    const result = [
+      'Registered deferred trigger trigger-1:',
+      '',
+      'Your turn will end now; you will be resumed automatically when the trigger fires.',
+    ].join('\n');
+    const [message] = mapTranscript(legacyDeferredWaitEntries(result, false, toolName));
 
-  assert.equal(message.role, 'assistant');
-  assert.equal(message.status, 'completed');
-  assert.equal(message.errorDetail, undefined);
-  assert.equal(message.toolCalls?.[0]?.name, 'defer_trigger');
-  assert.equal(message.toolCalls?.[0]?.status, 'completed');
-});
+    assert.equal(message.role, 'assistant');
+    assert.equal(message.status, 'completed');
+    assert.equal(message.errorDetail, undefined);
+    assert.equal(message.toolCalls?.[0]?.name, toolName);
+    assert.equal(message.toolCalls?.[0]?.status, 'completed');
+  });
 
-test('mapTranscript does not repair a new non-aborting registration result', () => {
-  const result = [
-    'Registered deferred trigger trigger-1:',
-    '  target: target.jsonl',
-    '  message: Your turn will end now; you will be resumed automatically when the trigger fires.',
-  ].join('\n');
-  const [message] = mapTranscript(legacyDeferredWaitEntries(result));
-  assert.equal(message.status, 'interrupted');
-});
+  test(`mapTranscript does not repair a new non-aborting registration result (${toolName})`, () => {
+    const result = [
+      'Registered deferred trigger trigger-1:',
+      '  target: target.jsonl',
+      '  message: Your turn will end now; you will be resumed automatically when the trigger fires.',
+    ].join('\n');
+    const [message] = mapTranscript(legacyDeferredWaitEntries(result, false, toolName));
+    assert.equal(message.status, 'interrupted');
+  });
 
-test('mapTranscript preserves genuine and failed deferred-trigger aborts as interrupted', () => {
-  const successfulButUnrelated = mapTranscript(legacyDeferredWaitEntries('Registered something else'))[0];
-  assert.equal(successfulButUnrelated.status, 'interrupted');
+  test(`mapTranscript preserves genuine and failed timer aborts as interrupted (${toolName})`, () => {
+    const successfulButUnrelated = mapTranscript(legacyDeferredWaitEntries('Registered something else', false, toolName))[0];
+    assert.equal(successfulButUnrelated.status, 'interrupted');
 
-  const matchingFailure = mapTranscript(legacyDeferredWaitEntries(
-    'Registered deferred trigger trigger-1:\n\nYour turn will end now; you will be resumed automatically when the trigger fires.',
-    true,
-  ))[0];
-  assert.equal(matchingFailure.status, 'interrupted');
-});
+    const matchingFailure = mapTranscript(legacyDeferredWaitEntries(
+      'Registered deferred trigger trigger-1:\n\nYour turn will end now; you will be resumed automatically when the trigger fires.',
+      true,
+      toolName,
+    ))[0];
+    assert.equal(matchingFailure.status, 'interrupted');
+  });
+}

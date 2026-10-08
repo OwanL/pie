@@ -518,6 +518,9 @@ export function isQueuedDeliveredPayload(value: unknown): value is QueuedDeliver
     && (value.operationAttempt === undefined
       || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
     && isOptionalString(value.localId)
+    && (value.durableEntryId === undefined
+      || (isString(value.durableEntryId) && value.durableEntryId.length > 0
+        && isString(value.localId) && value.localId.length > 0))
   );
 }
 
