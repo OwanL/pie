@@ -28,7 +28,7 @@ function opened(sessionPath: string) {
   };
 }
 
-test('cold promotion omits an oversized transcript at the actual worker protocol seam', async () => {
+test('cold promotion sends only metadata even for large byte-valid transcripts', async () => {
   const sessionPath = `${process.cwd()}/router-oversized.jsonl`;
   const sdkPath = resolve('/sdk');
   const sdkRuntime = createSyntheticSourceTestSdkRuntime(sdkPath);
@@ -96,12 +96,12 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
   assert.equal(oversizedMeasurement.ok, true);
   if (oversizedMeasurement.ok) {
     assert.ok(oversizedMeasurement.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES,
-      'the reproduced promotion payload is structurally oversized, not byte oversized');
+      'the large promotion fixture remains below the wire byte limit');
   }
-  assert.match(
-    validateWorkerIpcFrameDraft(oversizedPromotionFrame) ?? '',
-    /too structurally complex/,
-    'the unbounded handoff reproduces the validator failure without raising its limit',
+  assert.equal(
+    validateWorkerIpcFrameDraft(oversizedPromotionFrame),
+    undefined,
+    'large valid handoffs have no JSON-value-count cap; promotion still sends only metadata',
   );
   let promotedFrame: any;
   const runtimeCommands: any[] = [];

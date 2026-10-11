@@ -813,6 +813,17 @@ export function validateWebviewToHostMessage(
       if (!isOptionalString(value.interactionId)) return fail('closeSession: invalid `interactionId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'snoozeSession':
+      if (!isString(value.sessionPath) || !value.sessionPath.length) return fail('snoozeSession: missing string `sessionPath`');
+      if (value.durationHours !== 'monday' && ![4, 8, 12, 24, 48].includes(value.durationHours as number)) {
+        return fail('snoozeSession: invalid `durationHours`');
+      }
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'restoreSnoozedSession':
+      if (!isString(value.sessionPath) || !value.sessionPath.length) return fail('restoreSnoozedSession: missing string `sessionPath`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'openSession':
     case 'duplicateSession':
     case 'togglePinTab':

@@ -1172,9 +1172,11 @@
   overflow: visible;
 }
 
+/* Keep reasoning, including inherited headings and emphasis, quieter than
+   completion prose in both inline and disclosure layouts. */
 .reasoning-block .message-body,
 .reasoning-block .reasoning-preview {
-  color: var(--panel-foreground-soft);
+  color: var(--panel-muted);
 }
 
 .reasoning-icon {

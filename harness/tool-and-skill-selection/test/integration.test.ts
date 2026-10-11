@@ -465,7 +465,16 @@ const mockToolInfo = [
 	{ name: "subagent", description: "Delegate tasks to specialized subagents", parameters: { type: "object", properties: {} } },
 	{ name: "web_search", description: "Search the web for information", parameters: { type: "object", properties: {} } },
 	{ name: "wakeup_timer", description: "Register a timer without ending the current turn", parameters: { type: "object", properties: {} } },
-];
+].map((tool) => ({
+	...tool,
+	sourceInfo: {
+		path: "/repo/extensions/test-tools.ts",
+		source: "test",
+		scope: "temporary",
+		origin: "top-level",
+		baseDir: "/repo/extensions",
+	} satisfies ToolInfo["sourceInfo"],
+}));
 
 // ---------------------------------------------------------------------------
 // LLM-based pruning tests (prune-list schema)
@@ -1814,6 +1823,99 @@ test("main sessions prune once, preserve recoveries and reapply skills without f
 		assert.equal(selectorState.state.processedMainSessions.has("session-2"), true);
 		await runBeforeAgentStart(handlers, "New task after cleanup", realisticSkills);
 		assert.equal(calls, 3);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("sticky follow-ups reconcile new protections without scoring or restoring user-disabled catalogs", async () => {
+	let calls = 0;
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const catalog = [...mockToolInfo, { name: "wakeup_timer", description: "Wake", parameters: {} },
+			{ name: "ask_user", description: "Ask", parameters: {} }];
+		let active = catalog.map((tool) => tool.name);
+		__setToolSeams({ getAllTools: () => catalog as ToolInfo[], getActiveTools: () => active,
+			setActiveTools: (names) => { active = names; } });
+		__setCompleteFn(async () => { calls++; return { text: JSON.stringify({
+			pruneSkills: ["frontend-design", "duckdb-query-optimization"],
+			pruneTools: ["web_search", "wakeup_timer", "ask_user"],
+		}) }; });
+		await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		assert.ok(getHiddenSkills("session-1").has("frontend-design"));
+		assert.ok(!active.includes("web_search"));
+		selectorState.recordLoadedSkill("session-1", "duckdb-query-optimization");
+		active = active.filter((name) => name !== "edit");
+		setConfigForTesting(config({ pinned: ["frontend-design"], alwaysKeep: ["duckdb-query-optimization"] }, "auto", {
+			alwaysKeep: ["web_search", "ask_user", "edit"], dependencies: { web_search: ["wakeup_timer"] },
+		}));
+		process.env.PIE_AUTONOMOUS_MODE = "1";
+		// Disabled prompt groups must stay disabled even when their hidden entries
+		// have acquired new protection. Keep ownership until the groups return.
+		active = [];
+		const disabled = await handlers.get("before_agent_start")!({
+			type: "before_agent_start", prompt: "Keep going", systemPrompt: "Base prompt",
+			systemPromptOptions: { skills: [], selectedTools: [] },
+		}, { sessionManager: { getSessionId: () => "session-1" } }) as BeforeAgentStartReturn;
+		assert.equal(disabled, undefined);
+		assert.deepEqual(active, []);
+		assert.ok(getHiddenSkills("session-1").has("frontend-design"));
+		active = ["read", "bash", "subagent"];
+		const next = await runBeforeAgentStart(handlers, "Now build a UI", realisticSkills);
+		assert.match(next?.systemPrompt ?? systemPrompt(realisticSkills), /<name>frontend-design<\/name>/);
+		assert.equal(getHiddenSkills("session-1").has("frontend-design"), false);
+		assert.equal(getHiddenSkills("session-1").has("duckdb-query-optimization"), false);
+		assert.ok(active.includes("web_search"), "new alwaysKeep tool must be live immediately");
+		assert.ok(active.includes("wakeup_timer"), "protected tool dependencies must be live");
+		assert.ok(!active.includes("edit"), "protection does not own user-disabled tools");
+		assert.ok(!active.includes("ask_user"), "autonomous block overrides protection");
+		assert.ok(selectorState.getLoadedSkills("session-1").has("duckdb-query-optimization"));
+		assert.equal(calls, 1, "follow-ups must make zero new provider calls");
+		assert.equal(next?.message, undefined);
+	} finally {
+		delete process.env.PIE_AUTONOMOUS_MODE;
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("sticky queued reuse honors disabled skill visibility even when newly pinned", async () => {
+	let calls = 0;
+	try {
+		const { handlers } = register(config());
+		__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' }; });
+		await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		setConfigForTesting(config({ pinned: ["frontend-design"] }));
+		const skills = realisticSkills.map((entry) => entry.name === "frontend-design"
+			? { ...entry, disableModelInvocation: true } : entry);
+		await handlers.get("input")!({ type: "input", text: "Queued correction", streamingBehavior: "followUp" }, {});
+		const next = await runBeforeAgentStart(handlers, "Queued correction", skills, undefined, "session-1", true);
+		assert.doesNotMatch(next?.systemPrompt ?? systemPrompt(skills), /<name>frontend-design<\/name>/);
+		assert.ok(getHiddenSkills("session-1").has("frontend-design"), "disabled pin cannot release hidden ownership");
+		assert.equal(calls, 1);
+		assert.equal(next?.message, undefined);
+	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("sticky deferred wakes protect wakeup_timer without a new prepass", async () => {
+	let calls = 0;
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const catalog = [...mockToolInfo, { name: "wakeup_timer", description: "Wake", parameters: {} }];
+		let active = catalog.map((tool) => tool.name);
+		__setToolSeams({ getAllTools: () => catalog as ToolInfo[], getActiveTools: () => active,
+			setActiveTools: (names) => { active = names; } });
+		__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":[],"pruneTools":["wakeup_timer"]}' }; });
+		await runBeforeAgentStart(handlers, "Refactor the backend code", realisticSkills);
+		assert.ok(!active.includes("wakeup_timer"));
+		const next = await runBeforeAgentStart(handlers, "[deferred trigger fired: timer elapsed]\nContinue waiting", realisticSkills);
+		assert.ok(active.includes("wakeup_timer"));
+		assert.equal(selectorState.getPrunedTools("session-1").has("wakeup_timer"), false);
+		assert.equal(calls, 1);
+		assert.equal(next?.message, undefined);
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });

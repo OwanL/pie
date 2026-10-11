@@ -210,6 +210,8 @@ export class WorkerRuntimeHost {
   private runtimeReady = false;
   private disposed = false;
   private commandTail = Promise.resolve();
+  private pendingCommands = 0;
+  private snoozeReservation?: { reservationId: string; wakeAt: number };
   private extensionIncidentSequence = 0;
   private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
   private openedPayload?: SessionOpenedPayload;
@@ -319,6 +321,23 @@ export class WorkerRuntimeHost {
   }
 
   command(operation: WorkerRuntimeOperation, payload: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
+    const snoozeParams = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params)) ? payload.params : payload;
+    if (this.snoozeReservation && this.snoozeReservation.wakeAt <= Date.now()) this.snoozeReservation = undefined;
+    if (operation === 'session.snoozeRelease') {
+      if (this.snoozeReservation?.reservationId === snoozeParams.reservationId) this.snoozeReservation = undefined;
+      return Promise.resolve(asWorkerJson({ released: true }));
+    }
+    if (operation === 'session.snoozeReserve') {
+      // Control lane: do not wait behind a provider call. Count includes commands
+      // already accepted into the FIFO whose SDK activity has not started yet.
+      if (!this.context || this.pendingCommands > 0 || hasBillableSessionActivity(this.context)
+        || this.context.uiBridge?.hasPendingRequests() || this.snoozeReservation
+        || typeof snoozeParams.reservationId !== 'string' || typeof snoozeParams.wakeAt !== 'number'
+        || snoozeParams.wakeAt <= Date.now()) return Promise.reject(new Error('SESSION_NOT_IDLE'));
+      this.snoozeReservation = { reservationId: snoozeParams.reservationId, wakeAt: snoozeParams.wakeAt };
+      return Promise.resolve(asWorkerJson({ reserved: true }));
+    }
+    if (this.snoozeReservation && operation !== 'session.managerFence') return Promise.reject(new Error('SESSION_SNOOZED'));
     if (operation === 'session.managerFence') {
       // This is a control-plane fence, not a session command. Revoke before
       // joining the ordinary FIFO so a long provider command cannot keep new
@@ -346,6 +365,7 @@ export class WorkerRuntimeHost {
         return this.commandLiveTurnCheckpoint(params, publicRequestId);
       }
     }
+    this.pendingCommands++;
     const owned = this.commandTail.then(async () => {
       if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
       const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
@@ -459,8 +479,9 @@ export class WorkerRuntimeHost {
         params,
       } as RequestEnvelope));
     });
-    this.commandTail = owned.then(() => undefined, () => undefined);
-    return owned;
+    const settled = owned.finally(() => { this.pendingCommands--; });
+    this.commandTail = settled.then(() => undefined, () => undefined);
+    return settled;
   }
 
   private async commandLiveTurnCheckpoint(params: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
@@ -1477,7 +1498,7 @@ export class WorkerRuntimeHost {
     )) {
       // A normal session.opened refresh includes a bounded transcript window,
       // but individual rows may still contain a detail graph over the IPC
-      // structural-node limit. Preserve the existing host transcript and let
+      // nesting-depth limit. Preserve the existing host transcript and let
       // it page durable rows/details rather than failing the worker generation.
       body = asWorkerJsonObject(sessionOpenedUnavailableForWorkerIpc(body as unknown as SessionOpenedPayload));
     }
@@ -1615,7 +1636,7 @@ export class WorkerRuntimeHost {
     const found = ref.kind === 'model-exchange'
       ? findToolModelExchange(transcript, captureModelExchangeEntries(context.session.sessionManager.getBranch()), ref)
       : findDurableDetail(transcript, ref);
-    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'message' in found ? found.message : 'The durable detail is no longer available.' };
+    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'message' in found && typeof found.message === 'string' ? found.message : 'The durable detail is no longer available.' };
     if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
     if (found.sizeBytes !== ref.sizeBytes && !(ref.kind === 'model-exchange' && ref.sizeBytes === 0)) return { sessionPath: context.sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh and retry.' };
     return { sessionPath: context.sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
@@ -2233,8 +2254,7 @@ function runtimeEventPayloadExceedsStructureLimit(
     event,
     payload,
   });
-  return validation === 'runtime.event.payload is too structurally complex.'
-    || validation === 'runtime.event.payload exceeds the maximum nesting depth.';
+  return validation === 'runtime.event.payload exceeds the maximum nesting depth.';
 }
 
 function boundLiveSemanticPayload(payload: unknown): unknown {

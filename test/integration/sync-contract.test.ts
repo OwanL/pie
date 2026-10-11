@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { assertProtocolVersion, PROTOCOL_VERSION } from '../../harness/agent-processes/lib/rpc/wire.js';
 import {
   DEFAULT_CHAT_PREFS,
+  DEFAULT_PRUNING_SETTINGS,
   DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   resolveChatPrefs,
@@ -27,6 +28,72 @@ import {
 // Protocol contract: PROTOCOL_VERSION is a positive integer that the host and
 // backend must agree on. Bumps require a coordinated change.
 // ---------------------------------------------------------------------------
+
+test('capability refresh is host-owned one-shot intent and follow-up pruning defaults off', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /`pruning.followUpEnabled` defaults to `false`/u);
+  assert.match(contract, /Definitive pre-commit rejection restores the flag, while acknowledgement uncertainty never rearms it/u);
+  assert.match(contract, /Agent-originated sends, busy queued messages, and empty Continue do not consume it/u);
+  assert.equal(DEFAULT_PRUNING_SETTINGS.followUpEnabled, false);
+  const { validateBrowserToHostMessage } = await import('../../application/lib/validation/browser-ingress.js');
+  const { initialArchState, reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const sessionPath = '/refresh-contract.jsonl';
+  const command = { type: 'setPruningRefreshPending', sessionPath, pending: true,
+    clientCommandId: '123e4567-e89b-42d3-a456-426614174000', viewGeneration: 1 };
+  const validated = validateBrowserToHostMessage(command, Buffer.byteLength(JSON.stringify(command)));
+  assert.equal(validated.ok, true, validated.ok ? '' : validated.reason);
+  const base = { ...initialArchState,
+    settings: { ...initialArchState.settings, backendReady: true },
+    sessions: { ...initialArchState.sessions, activeSessionPath: sessionPath, openTabPaths: [sessionPath] } };
+  const armed = reducer(base, { kind: 'Command', cmd: {
+    kind: 'SetPruningRefreshPending', corrId: 'arm', sessionPath, pending: true,
+  } }).state;
+  assert.equal(selectViewState(armed).pruningRefreshPending, true);
+  const admitted = reducer(armed, { kind: 'Command', cmd: {
+    kind: 'Send', corrId: 'send', operationId: 'refresh-op', operationAttempt: 1,
+    operationSource: { kind: 'host' }, backendGeneration: 1, composerSend: true,
+    sessionPath, text: 'Investigate the next task', inputs: [], composedText: 'Investigate the next task',
+    localId: 'refresh-local', previousSummary: null, timestamp: 1,
+  } });
+  assert.equal(selectViewState(admitted.state).pruningRefreshPending, false);
+  assert.equal(admitted.effects.find((effect) => effect.kind === 'SendRpc')?.refreshPruning, true);
+  assert.equal(admitted.state.pending.ops.send.refreshPruning, true);
+  const rejected = reducer(admitted.state, { kind: 'SendResult', corrId: 'send', ok: false, error: 'rejected' });
+  assert.equal(selectViewState(rejected.state).pruningRefreshPending, true);
+});
+
+test('session snooze hides live membership and restores expired tabs without selecting them', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Snooze is idle-only/u);
+  assert.match(contract, /Snoozes survive host restarts, including private sessions/u);
+  const { validateBrowserToHostMessage } = await import('../../application/lib/validation/browser-ingress.js');
+  const { createInitialArchState } = await import('../../application/backend/conversation-state/arch-state.js');
+  const { reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const { projectHostLiveMembership } = await import('../../application/backend/agent-connection/live-session-membership.js');
+  const sessionPath = '/snooze-contract.jsonl';
+  const command = { type: 'snoozeSession', sessionPath, durationHours: 4,
+    clientCommandId: '123e4567-e89b-42d3-a456-426614174000', viewGeneration: 1 };
+  const validated = validateBrowserToHostMessage(command, Buffer.byteLength(JSON.stringify(command)));
+  assert.equal(validated.ok, true, validated.ok ? '' : validated.reason);
+  const initial = createInitialArchState();
+  const base = { ...initial, sessions: { ...initial.sessions, activeSessionPath: sessionPath,
+    openTabPaths: [sessionPath], sessions: [{ path: sessionPath, name: 'Friday work', cwd: '/work', modifiedAt: '', messageCount: 0 }] } };
+  const requested = reducer(base, { kind: 'SessionSnoozeRequested', sessionPath, now: 1000, wakeAt: 2000, deferredTarget: false });
+  assert.deepEqual(requested.state.sessions.openTabPaths, [sessionPath], 'tab stays visible until idle reservation confirmed');
+  const reservationId = requested.state.sessions.pendingSnoozes[sessionPath]!.reservationId;
+  const hidden = reducer(requested.state, { kind: 'SessionSnoozeReservationResult', sessionPath, reservationId, ok: true, now: 1001 }).state;
+  assert.deepEqual(selectViewState(hidden).sessions, []);
+  assert.deepEqual(selectViewState(hidden).openTabPaths, []);
+  assert.equal(projectHostLiveMembership(hidden, {}).sessions.length, 0);
+  assert.deepEqual(selectViewState(hidden).snoozedSessions, [{ path: sessionPath, name: 'Friday work', wakeAt: 2000 }]);
+  const awake = reducer(hidden, { kind: 'SessionSnoozeTimerFired', now: 2000 }).state;
+  assert.deepEqual(awake.sessions.openTabPaths, [sessionPath]);
+  assert.equal(awake.sessions.activeSessionPath, null);
+  assert.equal(projectHostLiveMembership(awake, {}).sessions.length, 1);
+  assert.deepEqual(awake.sessions.snoozedBySession, {});
+});
 
 test('tool inspection retrieves captured model exchange without substituting display records', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
@@ -144,7 +211,7 @@ test('agent session-control docs track current selectors, outcomes, provenance, 
   assert.match(agentContract, /`replyTo` resolves that stable sender identity only while its original session is live/u);
   assert.match(agentContract, /MCP inheritance, inspection, and update are deferred/u);
   assert.match(agentContract, /Queued steering\/follow-up delivery keeps the active tool\/skill selection without another skill-pruning prepass, regardless of whether the message came from a user or an agent/u);
-  assert.match(agentContract, /bounded.*view of live membership.*Closed history is not listed/u);
+  assert.match(agentContract, /bounded.*view of live membership.*Closed history and snoozed sessions are not listed/u);
   assert.match(titleContract, /model output is never published or written as a final name by the generation seam/u);
   assert.match(titleContract, /1–25 characters after trimming; automatic collision suffixes are additional/u);
 });

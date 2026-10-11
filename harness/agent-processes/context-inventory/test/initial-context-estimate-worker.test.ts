@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 
 import { buildPieSystemPrompt } from '../../../agent-instructions/prompt-assembly/pie-harness-prompt.js';
 import {
@@ -7,10 +9,111 @@ import {
   installInventoryProviderDenyBoundary,
   isInitialization,
   isInput,
+  preloadVerifiedInventoryModules,
 } from '../initial-context-estimate-worker.js';
 import { INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION } from '../initial-context-estimate-protocol.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation.js';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function drainMicrotasks() {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
+test('verification barrier and independent loaders block publication until both succeed', async () => {
+  const verification = deferred<string>();
+  const full = deferred<object>();
+  const prompt = deferred<object>();
+  const starts: string[] = [];
+  const frames: string[] = [];
+  const sdk = {};
+  const systemPrompt = {};
+  const result = preloadVerifiedInventoryModules(
+    () => verification.promise,
+    (mode) => { starts.push(`full:${mode}`); return full.promise; },
+    (mode) => { starts.push(`prompt:${mode}`); return prompt.promise; },
+  ).then((modules) => { frames.push('ready', 'result'); return modules; });
+  await drainMicrotasks();
+  assert.deepEqual(starts, []);
+  verification.resolve('selected');
+  await drainMicrotasks();
+  assert.deepEqual(starts, ['full:selected', 'prompt:selected']);
+  assert.deepEqual(frames, []);
+  full.resolve(sdk);
+  await drainMicrotasks();
+  assert.deepEqual(frames, [], 'delayed prompt blocks readiness and result');
+  prompt.resolve(systemPrompt);
+  assert.deepEqual(await result, [sdk, systemPrompt]);
+  assert.deepEqual(frames, ['ready', 'result']);
+});
+
+test('initial verification rejection prevents either loader starting', async () => {
+  const reason = {};
+  let starts = 0;
+  await assert.rejects(preloadVerifiedInventoryModules(
+    async () => { throw reason; },
+    async () => { starts += 1; },
+    async () => { starts += 1; },
+  ), (error) => error === reason);
+  assert.equal(starts, 0);
+});
+
+for (const failing of ['full', 'prompt', 'both'] as const) {
+  test(`preload drains both loaders on ${failing} rejection and preserves primary reason`, async () => {
+    const full = deferred<object>();
+    const prompt = deferred<object>();
+    const fullReason = { loader: 'full' };
+    const promptReason = { loader: 'prompt' };
+    let settled = false;
+    const starts: string[] = [];
+    const result = preloadVerifiedInventoryModules(
+      async () => 'selected',
+      () => { starts.push('full'); return full.promise; },
+      () => { starts.push('prompt'); return prompt.promise; },
+    );
+    const checked = assert.rejects(result, (error) => {
+      settled = true;
+      return error === (failing === 'prompt' ? promptReason : fullReason);
+    });
+    await drainMicrotasks();
+    assert.deepEqual(starts, ['full', 'prompt']);
+    if (failing === 'prompt') prompt.reject(promptReason);
+    else full.reject(fullReason);
+    await drainMicrotasks();
+    assert.equal(settled, false, 'failure cannot reach teardown while the peer is pending');
+    if (failing === 'prompt') full.resolve({});
+    else if (failing === 'both') prompt.reject(promptReason);
+    else prompt.resolve({});
+    await checked;
+    assert.equal(settled, true);
+  });
+}
+
+test('worker retains guarded preload, ready ordering, and separate fresh discovery frame', () => {
+  const source = readFileSync(path.resolve(__dirname, '../initial-context-estimate-worker.ts'), 'utf8');
+  const main = source.slice(source.indexOf('async function main()'));
+  const preload = main.indexOf('[sdk, systemPromptModule] = await preloadVerifiedInventoryModules(');
+  const initialVerify = main.indexOf('await verifySdkRuntimeSelection(initialization.sdkPath, sdkRuntime)');
+  const mode = main.indexOf("sdkRuntimeLoadMode(verifiedRuntime, 'full')");
+  const full = main.indexOf('loadSdk(initialization.sdkPath, selectedMode)');
+  const prompt = main.indexOf('loadSdkInternalModule<SdkSystemPromptModule>(');
+  const ready = main.indexOf("kind: 'ready'");
+  const request = main.indexOf('const input = await readFrame(inputStream, isInput,');
+  const agreement = main.indexOf('assertSdkRuntimeAgreement(input.sdkPath, sdkRuntime, input.sdkRuntime)');
+  const reverify = main.indexOf('await verifySdkRuntimeSelection(input.sdkPath, sdkRuntime)');
+  const discovery = main.indexOf('await collectInitialContextInventory(');
+  assert.ok(preload >= 0 && initialVerify > preload && mode > initialVerify);
+  assert.ok(full > mode && prompt > full && ready > prompt);
+  assert.ok(request > ready && agreement > request && reverify > agreement && discovery > reverify);
+  assert.equal((main.match(/await readFrame\(/g) ?? []).length, 2);
+  assert.equal((main.match(/await collectInitialContextInventory\(/g) ?? []).length, 1);
+});
 
 test('inventory frames reject missing, mixed, unknown, and legacy-discriminator runtime routes', () => {
   const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');

@@ -208,8 +208,7 @@ test('session_control forwards cancellation and rejects an invalid uncursoried p
   assert.equal('isError' in invalid && invalid.isError, true);
 });
 
-// Move regression: the relocated tool module keeps its public identity, schema,
-// and prompt guidance intact so the relocation stays behavior-neutral.
+// Guard the tool's public identity, schema, and operational guidance.
 test('session_control rejects action-inapplicable inputs instead of silently discarding agent intent', async () => {
   const calls: unknown[] = [];
   const tool = createSessionControlTool(async (body) => { calls.push(body); return response({}); });
@@ -228,7 +227,7 @@ test('session_control rejects action-inapplicable inputs instead of silently dis
   assert.deepEqual(calls, []);
 });
 
-test('session_control relocation preserves tool identity, schema, and guidance', () => {
+test('session_control exposes its identity, schema, and collaboration guidance', () => {
   const tool = createSessionControlTool(async () => response({ ok: true }));
 
   assert.equal(tool.name, 'session_control');
@@ -236,6 +235,8 @@ test('session_control relocation preserves tool identity, schema, and guidance',
   assert.equal(tool.executionMode, 'sequential');
   assert.equal(tool.parameters, SessionControlParameters);
   assert.deepEqual(tool.promptGuidelines, [
+    'Create new sessions for substantial tasks that can run in parallel with other work and benefit from independent context and ongoing coordination. Use subagents for smaller, bounded tasks that return a result directly.',
+    'Include the task, ownership boundaries, and expected handoff in the initial prompt. Send session messages when another agent needs a result, finding, decision, or scope change to proceed correctly. Omit routine acknowledgements and progress chatter. Reply only when it advances the work; receiving a message does not itself require a reply.',
     'list exposes live sessions with their assigned titles (field `title`) and provisional `name` labels; only assigned titles address existing sessions.',
     "read, settings, and close require an explicit target: set `self` for the caller's own session or `title` for another live session; message may instead use replyTo.",
     "create requires a 1-25-character title (trimmed), inherits the creator's saved model/reasoning, system-prompt toggles, and execution settings, and configures them before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
@@ -243,7 +244,8 @@ test('session_control relocation preserves tool identity, schema, and guidance',
     'Use read direction latest for the first page, then pass the returned cursor with direction older or newer. Tool bodies are bounded previews; renderer diagnostics and image bytes are omitted.',
     "message uses ordinary send semantics: an idle target wakes and a busy target receives Pie's normal queued-send behavior. replyTo resolves only while the original sender is live.",
     "settings.get captures the target's saved model, reasoning, system-prompt toggles, and execution preferences; settings.set persists only the supplied patch through its owning settings paths.",
-    "close stops active and queued work, removes the tab, and runs host-owned lifecycle cleanup; it does not merely hide a running tab.",
+    'Close sessions you created once their results are collected and no further work is needed. Before completing the parent task, check for any you left open. Keep sessions open if the user requests it or has taken them over. Use ordinary close, not deletion.',
+    "close stops active and queued work, removes the tab, and runs host-owned lifecycle cleanup; collect needed results first. It does not merely hide a running tab.",
     "A self-close returns after the host accepts responsibility (close requested), which is not a completed-close result; closing another session waits for the hosted stop/cleanup confirmation, or reports explicitly unknown when the acknowledgement is missing.",
     'pass delete:true only when the existing privacy/deletion lifecycle is intended; deletion is committed by the host and can never be undone.',
   ]);

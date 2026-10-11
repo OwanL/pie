@@ -509,6 +509,39 @@ test('protocol rejects exact extra fields, malformed correlated unions, and unsa
   }, expected).status, 'invalid');
 });
 
+test('worker IPC accepts shallow payloads above 100,000 JSON values in both directions', () => {
+  const payload = { values: Array.from({ length: 100_001 }, () => 0) };
+  const event = { ...base, kind: 'runtime.event', event: 'session.opened', payload };
+  const command = {
+    ...base, kind: 'runtime.command', requestId: 'many-values', operation: 'session.open',
+    payload: { params: payload, publicRequestId: 'public-many-values' },
+  };
+  for (const frame of [event, command]) {
+    const { seq: _seq, ...draft } = frame;
+    assert.equal(validateWorkerIpcFrameDraft(draft), undefined);
+  }
+  assert.equal(parseWorkerToCoordinatorFrame(event, expected).status, 'accepted');
+  assert.equal(parseCoordinatorToWorkerFrame(command, expected).status, 'accepted');
+
+  payload.values[0] = Number.NaN;
+  const { seq: _seq, ...invalidDraft } = event;
+  assert.match(validateWorkerIpcFrameDraft(invalidDraft) ?? '', /non-finite number/,
+    'all values are still validated, including one reached after the old count cap');
+});
+
+test('worker IPC retains its nesting-depth limit without a JSON-value-count cap', () => {
+  let payload: Record<string, unknown> = { value: 0 };
+  for (let depth = 0; depth < 63; depth += 1) payload = { child: payload };
+  const frame = { ...base, kind: 'runtime.event', event: 'session.opened', payload };
+  const { seq: _seq, ...draft } = frame;
+  assert.equal(validateWorkerIpcFrameDraft(draft), undefined, 'depth 64 remains valid');
+  assert.equal(parseWorkerToCoordinatorFrame(frame, expected).status, 'accepted');
+
+  const tooDeep = { child: payload };
+  assert.match(validateWorkerIpcFrameDraft({ ...draft, payload: tooDeep }) ?? '', /maximum nesting depth/);
+  assert.equal(parseWorkerToCoordinatorFrame({ ...frame, payload: tooDeep }, expected).status, 'invalid');
+});
+
 test('generation and sequence fences distinguish stale frames from invalid current/future frames', () => {
   const ready = { ...base, kind: 'ready', runtimeMetadata: { mode: 'phase2', startedAt: 1 } };
 

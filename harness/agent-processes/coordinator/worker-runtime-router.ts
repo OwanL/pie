@@ -344,6 +344,8 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
 /** Coordinator owner for cold→promoting→hot→retiring routing. */
 export class WorkerRuntimeRouter {
   private readonly roots = new Map<string, WorkerRuntimeRouteState>();
+  private readonly snoozeReservations = new Map<string, { reservationId: string; wakeAt: number }>();
+  private readonly pendingRuntimeCommands = new Map<string, number>();
   private readonly currentPaths = new Map<string, HotWorkerRoute>();
   private readonly workersById = new Map<string, HotWorkerRoute>();
   /** Per-path cancellation generation for commands waiting on a runtime
@@ -527,11 +529,85 @@ export class WorkerRuntimeRouter {
     request: RequestEnvelope,
     expectedCancellationGeneration?: number,
   ): Promise<WorkerJsonValue> {
-    return await this.routeCommand(request, true, expectedCancellationGeneration);
+    return await this.trackRuntimeCommand(request, true, expectedCancellationGeneration);
   }
 
   async routeExisting(request: RequestEnvelope): Promise<WorkerJsonValue> {
-    return await this.routeCommand(request, false);
+    return await this.trackRuntimeCommand(request, false);
+  }
+
+  beginAgentOperation(sessionPath: string): () => void {
+    this.assertSessionAdmissionOpen(sessionPath);
+    this.assertExecutionAdmissionOpen(sessionPath);
+    const key = routeKey(sessionPath);
+    this.pendingRuntimeCommands.set(key, (this.pendingRuntimeCommands.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = (this.pendingRuntimeCommands.get(key) ?? 1) - 1;
+      if (count) this.pendingRuntimeCommands.set(key, count); else this.pendingRuntimeCommands.delete(key);
+    };
+  }
+
+  private async trackRuntimeCommand(request: RequestEnvelope, promote: boolean, generation?: number): Promise<WorkerJsonValue> {
+    const key = routeKey(readSessionPath(request.params));
+    this.pendingRuntimeCommands.set(key, (this.pendingRuntimeCommands.get(key) ?? 0) + 1);
+    try { return await this.routeCommand(request, promote, generation); }
+    finally {
+      const count = (this.pendingRuntimeCommands.get(key) ?? 1) - 1;
+      if (count) this.pendingRuntimeCommands.set(key, count); else this.pendingRuntimeCommands.delete(key);
+    }
+  }
+
+  async reserveSnooze(sessionPath: string, reservationId: string, wakeAt: number): Promise<{ reserved: true }> {
+    this.assertSessionAdmissionOpen(sessionPath);
+    this.assertExecutionAdmissionOpen(sessionPath);
+    const key = routeKey(sessionPath);
+    const route = this.getRoute(sessionPath);
+    if ((route.state !== 'cold' && route.state !== 'hot') || this.pendingRuntimeCommands.has(key)
+      || (route.state === 'hot' && route.checkpoint.requestId)) throw new BackendError('SESSION_NOT_IDLE', 'Session has pending or active work.');
+    // Install before the first await. Worker confirmation covers forwarded IPC
+    // and SDK queues; coordinator telemetry alone is never proof of idleness.
+    this.snoozeReservations.set(key, { reservationId, wakeAt });
+    try {
+      if (route.state === 'hot') {
+        const response = await route.worker.client.requestFrame!({ kind: 'runtime.command', operation: 'session.snoozeReserve',
+          payload: asWorkerJsonObject({ params: { reservationId, wakeAt }, publicRequestId: reservationId }) }, 'response');
+        if (!response.ok || response.result.kind !== 'runtime.command'
+          || !response.result.payload || typeof response.result.payload !== 'object'
+          || Array.isArray(response.result.payload) || response.result.payload.reserved !== true) {
+          throw new BackendError('SESSION_NOT_IDLE', 'Worker did not confirm idle admission.');
+        }
+        this.assertCurrentOwner(route, sessionPath);
+      }
+      if (this.snoozeReservations.get(key)?.reservationId !== reservationId || wakeAt <= Date.now()) {
+        throw new BackendError('SESSION_SNOOZE_EXPIRED', 'Snooze reservation expired.');
+      }
+      return { reserved: true };
+    } catch (error) {
+      // Release is ordered after the reserve on worker IPC, including ack loss.
+      await this.releaseSnooze(sessionPath, reservationId).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async releaseSnooze(sessionPath: string, reservationId: string): Promise<{ released: true }> {
+    const key = routeKey(sessionPath);
+    // Keep coordinator ownership until worker release is acknowledged. A lost
+    // response must leave admission fenced and permit an idempotent retry.
+    const route = this.getRoute(sessionPath);
+    if (route.state === 'hot') {
+      const response = await route.worker.client.requestFrame!({ kind: 'runtime.command', operation: 'session.snoozeRelease',
+        payload: asWorkerJsonObject({ params: { reservationId }, publicRequestId: reservationId }) }, 'response');
+      if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+      if (response.result.kind !== 'runtime.command' || !response.result.payload
+        || typeof response.result.payload !== 'object' || Array.isArray(response.result.payload)
+        || response.result.payload.released !== true) throw new BackendError('SESSION_SNOOZE_RELEASE_FAILED', 'Worker release was not acknowledged.');
+    }
+    // A stale completion can never delete a replacement reservation.
+    if (this.snoozeReservations.get(key)?.reservationId === reservationId) this.snoozeReservations.delete(key);
+    return { released: true };
   }
 
   /** Fence a private-session deletion against promotion, retirement, and hot
@@ -1281,6 +1357,10 @@ export class WorkerRuntimeRouter {
   }
 
   private assertSessionAdmissionOpen(sessionPath: string): void {
+    const key = routeKey(sessionPath);
+    const reservation = this.snoozeReservations.get(key);
+    if (reservation && reservation.wakeAt <= Date.now()) this.snoozeReservations.delete(key);
+    else if (reservation) throw new BackendError('SESSION_SNOOZED', 'Session admission is reserved for snooze.');
     if (this.forgettingSessionPaths.has(routeKey(sessionPath))) {
       throw new BackendError('SESSION_NOT_FOUND', `Session ${sessionPath} is being forgotten.`);
     }

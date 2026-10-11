@@ -343,6 +343,7 @@ export interface ViewState {
   /** Omitted by legacy hosts. A present incomplete value means the visible
    * summaries are immediately usable while older history is still indexing. */
   sessionCatalogProgress?: SessionCatalogProgress;
+  snoozedSessions?: import('./session-snooze.js').SnoozedSession[];
   openTabPaths: string[];
   /** Pinned tab paths (browser-style: pinned tabs cluster at the left). */
   pinnedTabPaths: string[];
@@ -380,6 +381,9 @@ export interface ViewState {
    *  run analytics and are removed from disk when closed. */
   privacyMode?: boolean;
   unreadFinishedSessionPaths: string[];
+  /** Raw host selection, independent of summary availability. Null means
+   * intentionally unselected; omitted legacy snapshots permit tab recovery. */
+  activeSessionPath?: string | null;
   activeSession: SessionSummary | null;
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
@@ -778,6 +782,8 @@ type WebviewToHostMessagePayload =
   | { type: 'clearQueue'; sessionPath: string }
   | { type: 'newSession' }
   | { type: 'openSession'; sessionPath: string }
+  | { type: 'snoozeSession'; sessionPath: string; durationHours: import('./session-snooze.js').SessionSnoozeDuration }
+  | { type: 'restoreSnoozedSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string; interactionId?: string }
   | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
   | {

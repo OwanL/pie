@@ -45,6 +45,7 @@ export interface BottomSectionProps {
   pruningSettings: ViewState['pruningSettings'];
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
+  pruningRefreshPending?: ViewState['pruningRefreshPending'];
   toolResultPruningSettings: ViewState['toolResultPruningSettings'];
   sessionTitlesSettings: ViewState['sessionTitlesSettings'];
   providerGateStats: ProviderGateStats;
@@ -69,7 +70,7 @@ export interface BottomSectionProps {
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
   lastCompaction: ViewState['lastCompactionBySession'][string];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleMcpSetServerEnabledForSession' | 'handleSetPrivacyMode' | 'handleSetBrowserServerLanEnabled' | 'handleSetBrowserServerEnabled' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetSessionTitlesSettings'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleMcpSetServerEnabledForSession' | 'handleSetPrivacyMode' | 'handleSetBrowserServerLanEnabled' | 'handleSetBrowserServerEnabled' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetPruningRefreshPending' | 'handleSetToolResultPruningSettings' | 'handleSetSessionTitlesSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -101,6 +102,7 @@ export const BottomSection = memo(function BottomSection({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  pruningRefreshPending,
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
@@ -157,6 +159,7 @@ export const BottomSection = memo(function BottomSection({
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
+        pruningRefreshPending={pruningRefreshPending}
         toolResultPruningSettings={toolResultPruningSettings}
         sessionTitlesSettings={sessionTitlesSettings}
         providerGateStats={providerGateStats}
@@ -196,6 +199,7 @@ export const BottomSection = memo(function BottomSection({
         onSetBrowserServerEnabled={handlers.handleSetBrowserServerEnabled}
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
+        onSetPruningRefreshPending={handlers.handleSetPruningRefreshPending}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
         onSetSessionTitlesSettings={handlers.handleSetSessionTitlesSettings}
       />

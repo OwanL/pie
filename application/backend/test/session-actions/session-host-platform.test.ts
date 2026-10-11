@@ -29,7 +29,93 @@ import { NOOP_RUN_OBSERVER } from '../../analytics-views';
 import type { PruningSettings } from '../../../lib/protocol/index.js';
 import { parseArgs as parseCoordinatorBackendArgs } from '../../../../harness/agent-processes/coordinator/backend-args';
 
+import { setPieLoggerOutputAdapter } from '../../../../lib/structured-logging/pie-logger';
+
 const PRUNING_STORAGE_KEY = 'pruningSettings';
+
+function capturePreflightTimings(t: { after: (fn: () => void) => void }): string[] {
+  const lines: string[] = [];
+  setPieLoggerOutputAdapter({ accepts: () => true, emit: (_level, _scope, line) => {
+    if (line.includes('DEBUG-startup-preflight')) lines.push(line);
+  } });
+  t.after(() => setPieLoggerOutputAdapter(undefined));
+  return lines;
+}
+
+function assertNestedPreflightTimings(lines: string[], verificationOutcome: 'success' | 'failure', privateValues: string[]): void {
+  const payloads = lines.map((line) => JSON.parse(line.slice(line.indexOf('{'))))
+    .filter((payload) => ['node-target-probe', 'sdk-artifact-verification'].includes(payload.stage));
+  assert.equal(payloads.length, 2);
+  assert.deepEqual(payloads.map(({ stage, outcome }) => ({ stage, outcome })), [
+    { stage: 'node-target-probe', outcome: 'success' },
+    { stage: 'sdk-artifact-verification', outcome: verificationOutcome },
+  ]);
+  for (const payload of payloads) {
+    assert.deepEqual(Object.keys(payload).sort(), ['durationMs', 'outcome', 'stage']);
+    assert.equal(typeof payload.durationMs, 'number');
+    assert.ok(Number.isFinite(payload.durationMs) && payload.durationMs >= 0);
+    for (const value of privateValues) assert.ok(!JSON.stringify(payload).includes(value));
+  }
+}
+
+test('startup timings preserve settings and preflight barriers and contain only durations', async (t) => {
+  const lines = capturePreflightTimings(t);
+  const gate = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    return { promise, release };
+  };
+  const settings = [gate(), gate(), gate()];
+  const preflight = gate();
+  const entered = gate();
+  let starts = 0;
+  const fixture = createPlatformFixture({ backendStartup: {
+    prepareDevelopmentEnvironment: () => undefined,
+    prepareBackendEnvironment: () => undefined,
+    resolveBackendLaunchPaths: async () => {
+      entered.release();
+      await preflight.promise;
+      throw new Error('private-preflight-value');
+    },
+  } });
+  const { getArchState, dispatchArch } = makeDispatch(createInitialArchState());
+  const backend = { start: async () => { starts++; } } as unknown as BackendClient;
+  const running = startSessionBackend({
+    platform: fixture.platform, backend, scheduleRender: () => undefined,
+    events: { attach: () => undefined, detach: () => undefined } as never,
+    state: new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0),
+    service: {
+      loadPruningSettings: () => settings[0].promise,
+      loadToolResultPruningSettings: () => settings[1].promise,
+      loadSessionTitlesSettings: () => settings[2].promise,
+      schedulePrivateSessionCleanup: () => undefined,
+    },
+    openSession: () => undefined, getArchState, dispatchArch,
+  });
+  assert.equal(lines.length, 0);
+  settings[0].release();
+  settings[1].release();
+  await Promise.resolve();
+  assert.equal(lines.length, 0);
+  assert.equal(starts, 0);
+  settings[2].release();
+  await entered.promise;
+  assert.equal(lines.length, 2);
+  assert.equal(starts, 0);
+  preflight.release();
+  await running;
+  assert.equal(starts, 0);
+  assert.equal(lines.length, 3);
+  for (const [index, line] of lines.entries()) {
+    const payload = JSON.parse(line.slice(line.indexOf('{')));
+    assert.deepEqual(Object.keys(payload).sort(), ['durationMs', 'outcome', 'stage']);
+    assert.equal(payload.stage, ['parallel-settings', 'restore-preparation', 'resolve-launch-paths'][index]);
+    assert.equal(payload.outcome, index === 2 ? 'failure' : 'success');
+    assert.equal(typeof payload.durationMs, 'number');
+    assert.ok(Number.isFinite(payload.durationMs) && payload.durationMs >= 0);
+    assert.ok(!line.includes('private-preflight-value'));
+  }
+});
 const PI_RUNTIME_ASSETS = [
   'dist/cli.js', 'dist/rpc-entry.js',
   'dist/modes/interactive/theme/dark.json',
@@ -273,6 +359,38 @@ function createRestorePlatformFixture(): PlatformFixture {
   });
 }
 
+test('startup restores private snoozes without cleanup and expired tabs in background from the atomic snapshot', async (t) => {
+  const root = createTempRoot(t);
+  const sleeping = path.join(root, 'sleeping.jsonl');
+  const expired = path.join(root, 'expired.jsonl');
+  const missing = path.join(root, 'missing.jsonl');
+  fs.writeFileSync(sleeping, 'private transcript\n');
+  fs.writeFileSync(expired, 'expired transcript\n');
+  const fixture = createRestorePlatformFixture();
+  const entry = (sessionPath: string, wakeAt: number) => ({ path: sessionPath, name: 'Saved', wakeAt, index: 0, pinnedIndex: -1, group: [] });
+  await fixture.platform.storage.update('sessionSnoozeTabSnapshot', {
+    openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [],
+    snoozedBySession: {
+      [sleeping]: entry(sleeping, Date.now() + 3600000),
+      [expired]: entry(expired, Date.now() - 1000),
+      [missing]: entry(missing, Date.now() + 3600000),
+    },
+  });
+  await fixture.platform.storage.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, [sleeping, expired]);
+  // A torn legacy mirror must not revive the sleeping path.
+  await fixture.platform.storage.update('openTabPaths', [sleeping]);
+  const restored = await restoreStoredTabs(fixture);
+  assert.deepEqual(restored.state.sessions.openTabPaths, [expired]);
+  assert.equal(restored.state.sessions.activeSessionPath, null);
+  assert.deepEqual(Object.keys(restored.state.sessions.snoozedBySession), [sleeping]);
+  assert.equal(restored.state.sessions.privacyModeBySession[sleeping], true);
+  assert.equal(restored.state.sessions.privacyModeBySession[expired], true);
+  assert.deepEqual(restored.opened, []);
+  assert.ok(restored.cleanup[0]!.openPaths.includes(sleeping));
+  assert.ok(restored.cleanup[0]!.openPaths.includes(expired));
+  assert.equal(fs.readFileSync(sleeping, 'utf8'), 'private transcript\n');
+});
+
 test('startup filters missing ordinary restored tabs, selects a healthy fallback and persists reconciled tabs', async (t) => {
   const root = createTempRoot(t);
   const missing = path.join(root, 'missing-parent', 'missing.jsonl');
@@ -504,7 +622,62 @@ test('startSessionBackend reports BackendReadyChanged{ready:false} and detaches 
   assert.ok(dispatched.some((event) => event.kind === 'NoticeShown' && (event.notice ?? '').includes('spawn refused')));
 });
 
+test('launch-path preflight reports nested successes and uses the spawned Node ABI rather than the host ABI', async (t) => {
+  const tempRoot = createTempRoot(t);
+  const runtimeOutDir = path.join(tempRoot, 'out');
+  const backendTarget = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules };
+  await createGenerationRuntimeFiles(runtimeOutDir, backendTarget);
+  const expectedRuntime = await resolveGenerationPiRuntime({ runtimeOutDir, target: backendTarget });
+  const fixture = createPlatformFixture({ getRuntimeOutputDirectory: () => runtimeOutDir });
+  fixture.pieSettings.set('nodePath', process.execPath);
+  const lines = capturePreflightTimings(t);
+  const originalModules = Object.getOwnPropertyDescriptor(process.versions, 'modules')!;
+  assert.equal(originalModules.configurable, true);
+  try {
+    Object.defineProperty(process.versions, 'modules', { ...originalModules, value: 'different-host-abi' });
+    const paths = await withIsolatedStartupEnvironment(() => fixture.platform.backendStartup.resolveBackendLaunchPaths());
+    assert.deepEqual(paths, {
+      nodePath: process.execPath,
+      sdkPath: expectedRuntime.sdkPath,
+      sourceArtifactDescriptor: expectedRuntime,
+    });
+  } finally {
+    Object.defineProperty(process.versions, 'modules', originalModules);
+  }
+  assert.equal(lines.length, 2);
+  assertNestedPreflightTimings(lines, 'success', [tempRoot, process.execPath, expectedRuntime.sdkPath]);
+});
+
+test('throwing preflight logger preserves the primary artifact mismatch error', async (t) => {
+  const tempRoot = createTempRoot(t);
+  const runtimeOutDir = path.join(tempRoot, 'out');
+  await createGenerationRuntimeFiles(runtimeOutDir, {
+    platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules === '0' ? '1' : '0',
+  });
+  const fixture = createPlatformFixture({ getRuntimeOutputDirectory: () => runtimeOutDir });
+  fixture.pieSettings.set('nodePath', process.execPath);
+  const resolve = () => withIsolatedStartupEnvironment(() => fixture.platform.backendStartup.resolveBackendLaunchPaths());
+  let artifactError: Error | undefined;
+  await assert.rejects(resolve, (error: Error) => {
+    artifactError = error;
+    assert.match(error.message, /target\.nodeAbi mismatch/);
+    return true;
+  });
+  let logAttempts = 0;
+  setPieLoggerOutputAdapter({ accepts: () => true, emit: () => {
+    logAttempts++;
+    throw new Error('logger failed');
+  } });
+  t.after(() => setPieLoggerOutputAdapter(undefined));
+  await assert.rejects(resolve, (error: Error) => {
+    assert.equal(error.message, artifactError!.message);
+    return true;
+  });
+  assert.equal(logAttempts, 2);
+});
+
 test('startSessionBackend fails closed when the selected Node target mismatches the generation artifact', async (t) => {
+  const lines = capturePreflightTimings(t);
   const tempRoot = createTempRoot(t);
   const runtimeOutDir = path.join(tempRoot, 'out');
   const wrongAbi = process.versions.modules === '0' ? '1' : '0';
@@ -555,6 +728,7 @@ test('startSessionBackend fails closed when the selected Node target mismatches 
     restoreRuntimeEnvironment();
   }
 
+  assertNestedPreflightTimings(lines, 'failure', [tempRoot, process.execPath, 'target.nodeAbi mismatch']);
   assert.deepEqual(calls, [], 'a target mismatch must stop before event attachment or backend spawn');
   assert.ok(dispatched.some((event) => (
     event.kind === 'NoticeShown' && (event.notice ?? '').includes('target.nodeAbi mismatch')

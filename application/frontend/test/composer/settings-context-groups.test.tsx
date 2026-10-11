@@ -129,7 +129,7 @@ test('skill pruning groups keep scope, limits, and always-keep controls', () => 
 
     const groups = contentGroups(container);
     assert.deepEqual(groups.map((group) => group.getAttribute('aria-label')), ['Scope & limits', 'Always keep']);
-    assert.deepEqual([...groups[0].querySelectorAll('[role="checkbox"]')].map((control) => control.textContent?.trim()), ['Main agents', 'Subagents']);
+    assert.deepEqual([...groups[0].querySelectorAll('[role="checkbox"]')].map((control) => control.textContent?.trim()), ['Main agents', 'Subagents', 'Re-prune on follow-up messages']);
     assert.ok(groups[0].querySelector('[aria-label="Pruning mode"]'));
     assert.ok(groups[0].querySelector('[aria-label="About Scope & limits"]'));
     assert.ok(groups[0].textContent?.includes('Skill limit'));

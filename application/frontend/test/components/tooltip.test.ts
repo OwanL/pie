@@ -401,6 +401,105 @@ test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', asyn
   }
 });
 
+test('activatable tall tooltips constrain to the larger side and keep the trigger clear', async () => {
+  installFakeTimers();
+  const originalHeight = window.innerHeight;
+  const originalWidth = window.innerWidth;
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 640 });
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 360 });
+  try {
+    const props = (label: string) => ({
+      contentNode: h('div', { class: 'rich-body', style: { overflowY: 'auto', maxHeight: 'var(--pie-tooltip-available-height, 100vh)' } }, label),
+      dismissOnActivation: true, placement: 'top' as const, delayShow: 0,
+    });
+    act(() => render(h(Tooltip, props('details'), h('button', null, 'scout')), container));
+    const trigger = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+    const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+    trigger.getBoundingClientRect = () => ({ top: 240, bottom: 260, left: 100, right: 140, width: 40, height: 20 } as DOMRect);
+    // Model the caller's CSS variable cap plus 24px of real host padding/border.
+    // Every uncapped measurement must see the natural 700px panel, not the last cap.
+    let naturalMeasurements = 0;
+    const panelHeight = () => {
+      const cap = host.style.getPropertyValue('--pie-tooltip-available-height');
+      return cap ? Math.min(700, parseFloat(cap)) : 700;
+    };
+    host.getBoundingClientRect = () => {
+      if (!host.style.getPropertyValue('--pie-tooltip-available-height')) naturalMeasurements++;
+      const body = host.firstElementChild as HTMLElement;
+      body.getBoundingClientRect = () => ({ height: panelHeight() } as DOMRect);
+      return { width: 320, height: panelHeight() + 24 } as DOMRect;
+    };
+    const assertClear = () => {
+      assert.equal(host.style.getPropertyValue('--pie-tooltip-available-height'), '344px', 'below space is 368px minus 24px host chrome');
+      assert.equal(host.style.top, '266px', 'the larger side below wins when neither side fits');
+      assert.equal(host.style.left, '6px');
+      assert.ok(parseFloat(host.style.top) >= 260 + 6, 'host must not cover the trigger');
+      assert.equal(parseFloat(host.style.top) + host.getBoundingClientRect().height, 634, 'constrained host stays within viewport');
+      assert.equal((host.firstElementChild as HTMLElement).style.overflowY, 'auto', 'panel retains caller scrolling');
+      assert.ok(panelHeight() < 700, 'the inherited cap constrains the tall panel');
+    };
+    await act(async () => { trigger.dispatchEvent(new MouseEvent('mouseenter')); flushTimers(); });
+    assertClear();
+    const firstMeasurements = naturalMeasurements;
+    await act(async () => render(h(Tooltip, props('updated details'), h('button', null, 'scout')), container));
+    assert.ok(naturalMeasurements > firstMeasurements, 'content updates reset the cap before measuring');
+    assertClear();
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+    assert.equal(host.style.display, 'none', 'resize retains existing dismissal behavior');
+    assert.equal(host.style.getPropertyValue('--pie-tooltip-available-height'), '', 'resize clears the stale cap');
+    const updateMeasurements = naturalMeasurements;
+    await act(async () => { trigger.dispatchEvent(new MouseEvent('mouseenter')); flushTimers(); });
+    assert.ok(naturalMeasurements > updateMeasurements, 're-hover starts with a natural measurement');
+    assertClear();
+  } finally {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight });
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    restoreTimers();
+  }
+});
+
+test('activatable tooltips prefer a fitting side and flip when only the other side fits', async () => {
+  installFakeTimers();
+  const originalHeight = window.innerHeight;
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 640 });
+  try {
+    for (const scenario of [
+      { placement: 'top' as const, triggerTop: 240, height: 100, expectedTop: 134 },
+      { placement: 'top' as const, triggerTop: 100, height: 200, expectedTop: 126 },
+      { placement: 'bottom' as const, triggerTop: 500, height: 200, expectedTop: 294 },
+    ]) {
+      act(() => render(h(Tooltip, { contentNode: h('div', null, 'details'), dismissOnActivation: true, placement: scenario.placement, delayShow: 0 }, h('button', null, 'scout')), container));
+      const trigger = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+      const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+      trigger.getBoundingClientRect = () => ({ top: scenario.triggerTop, bottom: scenario.triggerTop + 20, left: 100, width: 40 } as DOMRect);
+      host.getBoundingClientRect = () => {
+        (host.firstElementChild as HTMLElement).getBoundingClientRect = () => ({ height: scenario.height - 24 } as DOMRect);
+        return { width: 320, height: scenario.height } as DOMRect;
+      };
+      await act(async () => { trigger.dispatchEvent(new MouseEvent('mouseenter')); flushTimers(); });
+      assert.equal(host.style.top, `${scenario.expectedTop}px`);
+      await act(async () => { trigger.dispatchEvent(new MouseEvent('mouseleave')); flushTimers(); });
+    }
+  } finally {
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight });
+    restoreTimers();
+  }
+});
+
+test('default tall tooltips retain their positioning without an activation height cap', async () => {
+  installFakeTimers();
+  try {
+    act(() => render(h(Tooltip, { contentNode: h('div', null, 'details'), delayShow: 0 }, h('span', null, 'target')), container));
+    const trigger = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+    const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+    trigger.getBoundingClientRect = () => ({ top: 240, bottom: 260, left: 100, width: 40 } as DOMRect);
+    host.getBoundingClientRect = () => ({ width: 320, height: window.innerHeight + 100 } as DOMRect);
+    await act(async () => { trigger.dispatchEvent(new MouseEvent('mouseenter')); flushTimers(); });
+    assert.equal(host.style.top, '6px', 'default tall tooltips retain viewport clamping');
+    assert.equal(host.style.getPropertyValue('--pie-tooltip-available-height'), '', 'default tooltips do not opt into a cap');
+  } finally { restoreTimers(); }
+});
+
 test('inspectors return focus on Escape without reopening the rich surface', async () => {
   installFakeTimers();
   try {

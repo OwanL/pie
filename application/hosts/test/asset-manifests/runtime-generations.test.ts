@@ -141,6 +141,32 @@ test('records bounded acquisition and per-generation verification phase timings'
     assert.equal(acquisition.cleanupMs, 0, 'acquisition performs no retention cleanup');
     assert.ok(Number(verifications[0]?.files) > 0);
     assert.ok(Number(verifications[0]?.bytes) > 0);
+    const profile = verifications[0]?.scanProfile as Record<string, unknown>;
+    assert.ok(profile, 'acquisition scans must expose bounded observational metrics');
+    for (const field of ['cpuUserMs', 'cpuSystemMs']) {
+      assert.ok(Number.isFinite(profile[field]) && Number(profile[field]) >= 0, field);
+    }
+    const manifest = JSON.parse(await readFile(path.join(path.dirname(published.outDir), 'runtime-manifest.json'), 'utf8')) as { files: Array<{ path: string }> };
+    const directories = new Set(['']);
+    for (const file of manifest.files) {
+      let directory = path.posix.dirname(file.path);
+      while (directory !== '.') {
+        directories.add(directory);
+        directory = path.posix.dirname(directory);
+      }
+    }
+    for (const [operation, count] of Object.entries({
+      hash: manifest.files.length,
+      lstat: manifest.files.length + directories.size,
+      readdir: directories.size,
+    })) {
+      const metric = profile[operation] as Record<string, number>;
+      assert.equal(metric.count, count, `${operation} counts actual scan operations only`);
+      assert.ok(Number.isFinite(metric.observedTotalMs) && metric.observedTotalMs >= 0);
+      assert.ok(Number.isFinite(metric.observedMaxMs) && metric.observedMaxMs >= 0);
+      assert.ok(metric.observedTotalMs >= metric.observedMaxMs);
+    }
+    assert.equal(rows.length, 1, 'publication and release do not emit scan profiles');
     const phases = verifications[0]?.phasesMs as Record<string, unknown>;
     for (const phase of ['manifestMs', 'fileScanMs', 'manifestComparisonMs', 'contentHashMs', 'outputShapeMs']) {
       assert.equal(typeof phases[phase], 'number', `${phase} should be a duration`);
@@ -154,6 +180,16 @@ test('records bounded acquisition and per-generation verification phase timings'
     const leaseWithoutDiagnostics = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
     assert.equal(leaseWithoutDiagnostics.generation, published.generation);
     await leaseWithoutDiagnostics.release();
+
+    const originalCpuUsage = process.cpuUsage;
+    process.cpuUsage = () => { throw new Error('diagnostic CPU probe failed'); };
+    try {
+      const leaseWithoutCpu = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+      assert.equal(leaseWithoutCpu.generation, published.generation, 'a diagnostic exception cannot reject valid runtime bytes');
+      await leaseWithoutCpu.release();
+    } finally {
+      process.cpuUsage = originalCpuUsage;
+    }
   });
 }));
 
@@ -168,26 +204,34 @@ test('acquisition resolves before reading a valid unused prior payload and defer
   await writeFile(path.join(selectionsDir, invalidMarker), '{torn');
 
   // Gate the actual payload-hashing seam, not manifest metadata or timing output.
-  const fsSync = require('node:fs') as typeof import('node:fs');
-  const descriptor = Object.getOwnPropertyDescriptor(fsSync, 'createReadStream');
+  const fsPromises = require('node:fs/promises') as typeof import('node:fs/promises');
+  const descriptor = Object.getOwnPropertyDescriptor(fsPromises, 'open');
   assert.ok(descriptor);
-  const original = fsSync.createReadStream;
+  const original = fsPromises.open;
   let unblock!: () => void;
   let reached!: () => void;
   const gate = new Promise<void>((resolve) => { unblock = resolve; });
   const priorRead = new Promise<'prior-read'>((resolve) => { reached = () => resolve('prior-read'); });
   const selectedReads = new Set<string>();
-  Object.defineProperty(fsSync, 'createReadStream', {
+  Object.defineProperty(fsPromises, 'open', {
     ...descriptor,
-    value: (...args: unknown[]) => {
+    value: async (...args: unknown[]) => {
       const filePath = String(args[0]);
-      if (filePath.startsWith(`${selected.outDir}${path.sep}`)) selectedReads.add(path.relative(selected.outDir, filePath).replaceAll('\\', '/'));
-      if (!filePath.startsWith(`${prior.outDir}${path.sep}`)) return Reflect.apply(original, fsSync, args);
-      reached();
-      return (async function* () {
-        await gate;
-        yield* Reflect.apply(original, fsSync, args);
-      })();
+      const handle = await Reflect.apply(original, fsPromises, args);
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === 'read') return async (...readArgs: unknown[]) => {
+            if (filePath.startsWith(`${selected.outDir}${path.sep}`)) selectedReads.add(path.relative(selected.outDir, filePath).replaceAll('\\', '/'));
+            if (filePath.startsWith(`${prior.outDir}${path.sep}`)) {
+              reached();
+              await gate;
+            }
+            return Reflect.apply(target.read, target, readArgs);
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
     },
   });
   let lease: RuntimeLease | undefined;
@@ -205,7 +249,7 @@ test('acquisition resolves before reading a valid unused prior payload and defer
     try {
       lease = await acquisition;
     } finally {
-      Object.defineProperty(fsSync, 'createReadStream', descriptor);
+      Object.defineProperty(fsPromises, 'open', descriptor);
     }
     await lease?.release();
   }

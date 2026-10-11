@@ -50,6 +50,9 @@ function queueStartupTiming(record) {
   try {
     line = `${JSON.stringify({
       ...record,
+      // Executing module location, not a byte/hash attestation or the context's
+      // extension directory (VS Code may still have an older loader cached).
+      bootstrapDirectory: __dirname,
       tag: STARTUP_TIMING_TAG,
       timestamp: new Date().toISOString(),
       pid: process.pid,

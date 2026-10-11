@@ -1693,7 +1693,7 @@ test('cold model settings append canonical Pi entries and survive a fresh store 
     await h.store.openSnapshot(sessionPath, browseOpenOptions);
     assert.equal(h.store.getBrowseCacheStats().entries, 1);
 
-    const changed = h.store.setModelSettings(sessionPath, {
+    const changed = await h.store.setModelSettings(sessionPath, {
       model: { provider: 'mock', modelId: 'model-new' },
       thinkingLevel: 'high',
     });
@@ -1711,7 +1711,7 @@ test('cold model settings append canonical Pi entries and survive a fresh store 
     assert.equal(thinkingChange.parentId, modelChange.id);
     assert.equal(thinkingChange.thinkingLevel, 'high');
 
-    const noOp = h.store.setModelSettings(sessionPath, {
+    const noOp = await h.store.setModelSettings(sessionPath, {
       model: { provider: 'mock', modelId: 'model-new' },
       thinkingLevel: 'high',
     });
@@ -1739,7 +1739,7 @@ test('retained new-session handles remain promotable after a cold model-settings
   const h = await makeHarness();
   try {
     const handle = h.store.create({ cwd: h.root });
-    const changed = h.store.setHandleModelSettings(handle, {
+    const changed = await h.store.setHandleModelSettings(handle, {
       model: { provider: 'mock', modelId: 'model-new' },
       thinkingLevel: 'high',
     });
@@ -1893,10 +1893,13 @@ test('a failed atomic cold model-settings commit preserves durable bytes and the
         SessionManager: {
           open(targetPath: string) {
             const manager = SessionManager.open(targetPath);
-            manager.appendPieModelSettingsChange = () => {
-              batchCalls += 1;
-              throw new Error('injected atomic settings failure');
-            };
+            manager.preparePieModelSettingsChange = () => ({
+              commit() {
+                batchCalls += 1;
+                throw new Error('injected atomic settings failure');
+              },
+              dispose() {},
+            });
             return manager;
           },
         },
@@ -1910,7 +1913,7 @@ test('a failed atomic cold model-settings commit preserves durable bytes and the
     const before = await fs.readFile(sessionPath, 'utf8');
     assert.equal(store.getBrowseCacheStats().entries, 1);
 
-    assert.throws(
+    await assert.rejects(
       () => store.setModelSettings(sessionPath, {
         model: { provider: 'mock', modelId: 'model-new' },
         thinkingLevel: 'high',
@@ -1926,7 +1929,7 @@ test('a failed atomic cold model-settings commit preserves durable bytes and the
   }
 });
 
-test('a transient atomic-replace denial is delegated once and fails closed', async () => {
+test('a transient atomic-replace denial exhausts guarded retries and fails closed', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();
   try {
@@ -1941,13 +1944,16 @@ test('a transient atomic-replace denial is delegated once and fails closed', asy
         SessionManager: {
           open(targetPath: string) {
             const manager = SessionManager.open(targetPath);
-            manager.appendPieModelSettingsChange = () => {
-              batchCalls += 1;
-              const error = new Error('injected transient atomic replace denial') as NodeJS.ErrnoException;
-              error.code = 'EPERM';
-              error.syscall = 'rename';
-              throw error;
-            };
+            manager.preparePieModelSettingsChange = () => ({
+              commit() {
+                batchCalls += 1;
+                const error = new Error('injected transient atomic replace denial') as NodeJS.ErrnoException;
+                error.code = 'EPERM';
+                error.syscall = 'rename';
+                throw error;
+              },
+              dispose() {},
+            });
             return manager;
           },
         },
@@ -1961,7 +1967,7 @@ test('a transient atomic-replace denial is delegated once and fails closed', asy
     const before = await fs.readFile(sessionPath, 'utf8');
     const beforeContext = store.context(sessionPath);
 
-    assert.throws(
+    await assert.rejects(
       () => store.setModelSettings(sessionPath, {
         model: { provider: 'mock', modelId: 'model-new' },
         thinkingLevel: 'high',
@@ -1971,7 +1977,7 @@ test('a transient atomic-replace denial is delegated once and fails closed', asy
         && (error as NodeJS.ErrnoException).syscall === 'rename',
     );
 
-    assert.equal(batchCalls, 1, 'one settings intent is delegated once to the SDK atomic operation');
+    assert.equal(batchCalls, 10, 'one prepared settings intent has ten guarded publication attempts');
     assert.equal(await fs.readFile(sessionPath, 'utf8'), before, 'a rejected SDK commit leaves durable bytes unchanged');
     assert.deepEqual(store.context(sessionPath), beforeContext, 'failed settings are not exposed as committed context');
     assert.equal(store.getBrowseCacheStats().entries, 1, 'a failed commit preserves the valid pre-write cache');
@@ -1996,8 +2002,8 @@ test('a stale cold settings lease is rejected before the SDK batch seam', async 
         SessionManager: {
           open(targetPath: string) {
             const manager = SessionManager.open(targetPath);
-            const originalBatch = manager.appendPieModelSettingsChange.bind(manager);
-            manager.appendPieModelSettingsChange = (...args: unknown[]) => {
+            const originalBatch = manager.preparePieModelSettingsChange.bind(manager);
+            manager.preparePieModelSettingsChange = (...args: unknown[]) => {
               batchCalls += 1;
               return originalBatch(...args);
             };
@@ -2016,7 +2022,7 @@ test('a stale cold settings lease is rejected before the SDK batch seam', async 
     });
     const before = await fs.readFile(sessionPath, 'utf8');
 
-    assert.throws(
+    await assert.rejects(
       () => store.setModelSettings(sessionPath, {
         model: { provider: 'mock', modelId: 'model-new' },
         thinkingLevel: 'high',
@@ -2041,7 +2047,7 @@ test('a retained-handle snapshot cannot publish pre-settings data under the post
     // openSessionBrowseSnapshot yields for the durable stat after projecting
     // the manager. Mutate in that gap: the in-flight projection is now stale
     // even though the retained handle itself has been restamped.
-    h.store.setHandleModelSettings(handle, {
+    await h.store.setHandleModelSettings(handle, {
       model: { provider: 'mock', modelId: 'model-new' },
       thinkingLevel: 'high',
     });

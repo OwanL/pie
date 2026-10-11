@@ -14,6 +14,14 @@ import { resolveGenerationPiRuntime } from './pi-runtime-resolution';
 import { resolvePieDevelopmentProfilePaths } from './host-coordinator';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger';
 
+function finishPreflightTiming(stage: string, started: number, outcome: 'success' | 'failure'): void {
+  try {
+    appendPieLog('info', 'startup', 'DEBUG-startup-preflight', {
+      stage, durationMs: performance.now() - started, outcome,
+    });
+  } catch { /* Best-effort diagnostics preserve the original error. */ }
+}
+
 const DEVELOPMENT_RUNTIME_PATH_ENV = 'PIE_DEVELOPMENT_PI_RUNTIME';
 const ALLOW_DEVELOPMENT_RUNTIME_ENV = 'PIE_ALLOW_DEVELOPMENT_RUNTIME';
 const DEVELOPMENT_PI_WORKSPACE_ENV = 'PIE_DEVELOPMENT_PI_WORKSPACE';
@@ -105,7 +113,15 @@ export function createBackendStartupPlatform(host: BackendStartupHost): BackendS
         env,
       }));
       const exec = createCommandExecutor();
-      const target = await probeBackendNodeTarget(nodePath, { exec });
+      const probeStarted = performance.now();
+      let probeOutcome: 'success' | 'failure' = 'failure';
+      let target: Awaited<ReturnType<typeof probeBackendNodeTarget>>;
+      try {
+        target = await probeBackendNodeTarget(nodePath, { exec });
+        probeOutcome = 'success';
+      } finally {
+        finishPreflightTiming('node-target-probe', probeStarted, probeOutcome);
+      }
 
       const developmentWorkspace = env[DEVELOPMENT_PI_WORKSPACE_ENV]?.trim();
       const developmentArtifactDir = env[DEVELOPMENT_RUNTIME_PATH_ENV]?.trim();
@@ -131,16 +147,24 @@ export function createBackendStartupPlatform(host: BackendStartupHost): BackendS
           `${DEVELOPMENT_RUNTIME_PATH_ENV} requires ${ALLOW_DEVELOPMENT_RUNTIME_ENV}=1.`,
         );
       }
-      const runtime = await resolveGenerationPiRuntime({
-        runtimeOutDir: host.getRuntimeOutputDirectory(),
-        target,
-        ...(developmentArtifactDir ? {
-          developmentOverride: {
-            artifactDir: developmentArtifactDir,
-            allowDevelopmentRuntime: true,
-          },
-        } : {}),
-      });
+      const verificationStarted = performance.now();
+      let verificationOutcome: 'success' | 'failure' = 'failure';
+      let runtime: Awaited<ReturnType<typeof resolveGenerationPiRuntime>>;
+      try {
+        runtime = await resolveGenerationPiRuntime({
+          runtimeOutDir: host.getRuntimeOutputDirectory(),
+          target,
+          ...(developmentArtifactDir ? {
+            developmentOverride: {
+              artifactDir: developmentArtifactDir,
+              allowDevelopmentRuntime: true,
+            },
+          } : {}),
+        });
+        verificationOutcome = 'success';
+      } finally {
+        finishPreflightTiming('sdk-artifact-verification', verificationStarted, verificationOutcome);
+      }
       return {
         nodePath,
         sdkPath: runtime.sdkPath,

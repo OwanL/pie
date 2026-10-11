@@ -475,6 +475,25 @@ async function writeOutput(
   });
 }
 
+/** Verification is a hard barrier; drain both independently guarded imports before
+ * publishing success or propagating failure to protocol/stream teardown. */
+export async function preloadVerifiedInventoryModules<Mode, Sdk, Prompt>(
+  verifyAndSelectMode: () => Promise<Mode>,
+  loadFull: (mode: Mode) => Promise<Sdk>,
+  loadPrompt: (mode: Mode) => Promise<Prompt>,
+): Promise<[Sdk, Prompt]> {
+  const mode = await verifyAndSelectMode();
+  // Schedule independently so even a synchronous loader throw cannot prevent
+  // the other trusted loader from starting or escaping the settlement drain.
+  const [full, prompt] = await Promise.allSettled([
+    Promise.resolve().then(() => loadFull(mode)),
+    Promise.resolve().then(() => loadPrompt(mode)),
+  ]);
+  if (full.status === 'rejected') throw full.reason;
+  if (prompt.status === 'rejected') throw prompt.reason;
+  return [full.value, prompt.value];
+}
+
 async function main(): Promise<void> {
   const inputStream = fs.createReadStream('', { fd: IPC_READ_FD, autoClose: false });
   const outputStream = fs.createWriteStream('', { fd: IPC_WRITE_FD, autoClose: false });
@@ -492,17 +511,17 @@ async function main(): Promise<void> {
     let sdk: SdkModule;
     let systemPromptModule: SdkSystemPromptModule;
     try {
-      const verifiedRuntime = await verifySdkRuntimeSelection(initialization.sdkPath, sdkRuntime);
-      // Preload only validated SDK code. Resource and user extension discovery
-      // starts only after the separate request-specific frame arrives.
-      const selectedMode = sdkRuntimeLoadMode(verifiedRuntime, 'full');
-      // The inventory consumes only the common public services surface; the
-      // source loader has already selected and verified its typed factories.
-      sdk = await loadSdk(initialization.sdkPath, selectedMode) as unknown as SdkModule;
-      systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
-        initialization.sdkPath,
-        path.join('core', 'system-prompt.js'),
-        selectedMode,
+      [sdk, systemPromptModule] = await preloadVerifiedInventoryModules(
+        async () => {
+          const verifiedRuntime = await verifySdkRuntimeSelection(initialization.sdkPath, sdkRuntime);
+          // Preload only validated SDK code. Resource and user extension discovery
+          // starts only after the separate request-specific frame arrives.
+          return sdkRuntimeLoadMode(verifiedRuntime, 'full');
+        },
+        (selectedMode) => loadSdk(initialization.sdkPath, selectedMode) as unknown as Promise<SdkModule>,
+        (selectedMode) => loadSdkInternalModule<SdkSystemPromptModule>(
+          initialization.sdkPath, path.join('core', 'system-prompt.js'), selectedMode,
+        ),
       );
     } finally {
       workerTimings.sdkImportDurationMs = Math.max(0, performance.now() - sdkImportStartedAt);

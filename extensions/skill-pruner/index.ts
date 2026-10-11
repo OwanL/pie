@@ -13,7 +13,7 @@ import {
 	recordPrunedTools,
 	clearCapabilityStateForTesting,
 	clearPrunedToolsForTesting,
-} from "../../harness/tool-and-skill-selection/state/selector-state.js";
+} from "../../harness/tool-and-skill-selection/state/selector-state.ts";
 import register from "../../harness/tool-and-skill-selection/lifecycle/register.js";
 import { clearPrepassCacheForTesting, setPrepassCacheNowForTesting } from "../../harness/tool-and-skill-selection/state/prepass-cache.js";
 import { clonePruningConfig } from "../../harness/tool-and-skill-selection/lifecycle/pruning-lifecycle.js";
@@ -45,7 +45,7 @@ export function __setFormatter(fn: ((skills: Skill[]) => string) | null): void {
 	setFormatSkillsForPromptImpl(fn);
 }
 
-export function __setCompleteFn(fn: CompleteSimpleFn | null): void {
+export function __setCompleteFn(fn: CompleteSimpleFn | null | false): void {
 	setCompleteFnOverride(fn === null ? false : fn);
 }
 

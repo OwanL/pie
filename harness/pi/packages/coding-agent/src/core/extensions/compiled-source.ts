@@ -1,20 +1,21 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import * as ts from "typescript";
+import type * as TypeScript from "typescript";
 import type { ExtensionFactory } from "./types.ts";
 
 const maxSourceBytes = 2 * 1024 * 1024;
 const cacheDir = path.join(tmpdir(), "pi-extension-provenance-v1");
-const policy = `v2:${ts.version}:esbuild=0.28.1:node22:treeShaking=false:ignoreAnnotations:keepNames:splitting=false:node/import:main`;
+const require = createRequire(import.meta.url);
+const policy = `v3:${require("typescript/package.json").version}:esbuild=0.28.1:node22:treeShaking=false:ignoreAnnotations:keepNames:splitting=false:node/import:main`;
 const globals = new Set(["__dirname", "__filename", "require", "module", "exports"]);
 
 /** Pure code only: no factories, graph, discovery or sourceInfo survives a pass. */
 export async function rewriteCompiledSource(filename: string, sourceBytes: Buffer): Promise<string | undefined> {
 	if (sourceBytes.byteLength > maxSourceBytes) return undefined;
-	const source = sourceBytes.toString("utf8");
 	const key = createHash("sha256")
 		.update(policy)
 		.update("\0")
@@ -46,6 +47,8 @@ export async function rewriteCompiledSource(filename: string, sourceBytes: Buffe
 	} catch {
 		/* Unavailable/malformed cache is a miss, never a discovery failure. */
 	}
+	const source = sourceBytes.toString("utf8");
+	const ts: typeof TypeScript = require("typescript");
 	const kind = /\.[cm]?tsx$/.test(filename)
 		? ts.ScriptKind.TSX
 		: /\.[cm]?ts$/.test(filename)
@@ -60,16 +63,38 @@ export async function rewriteCompiledSource(filename: string, sourceBytes: Buffe
 		dirname: path.posix.dirname(normalized),
 		filename: normalized,
 	};
-	function binding(name: ts.Node): void {
+	function binding(name: TypeScript.Node): void {
 		if (ts.isIdentifier(name) && globals.has(name.text)) unsupported = true;
 		else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
 			for (const element of name.elements) if (ts.isBindingElement(element)) binding(element.name);
 		}
 	}
-	function replace(node: ts.Node, text: string): void {
+	function assignmentTarget(node: TypeScript.Node): boolean {
+		const parent = node.parent;
+		if (
+			ts.isBinaryExpression(parent) &&
+			parent.left === node &&
+			parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+			parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+		)
+			return true;
+		// Follow only the target side of destructuring; keys and default values are reads.
+		if (
+			(ts.isParenthesizedExpression(parent) && parent.expression === node) ||
+			(ts.isPropertyAssignment(parent) && parent.initializer === node) ||
+			(ts.isShorthandPropertyAssignment(parent) && parent.name === node) ||
+			(ts.isSpreadAssignment(parent) && parent.expression === node) ||
+			(ts.isSpreadElement(parent) && parent.expression === node) ||
+			ts.isArrayLiteralExpression(parent) ||
+			ts.isObjectLiteralExpression(parent)
+		)
+			return assignmentTarget(parent);
+		return false;
+	}
+	function replace(node: TypeScript.Node, text: string): void {
 		edits.push({ start: node.getStart(file), end: node.end, text });
 	}
-	function visit(node: ts.Node): void {
+	function visit(node: TypeScript.Node): void {
 		if (
 			ts.isVariableDeclaration(node) ||
 			ts.isParameter(node) ||
@@ -112,7 +137,12 @@ export async function rewriteCompiledSource(filename: string, sourceBytes: Buffe
 					ts.isPropertySignature(parent) ||
 					ts.isMethodSignature(parent)) &&
 				parent.name === node;
-			if (propertyName) return;
+			if (
+				propertyName ||
+				(ts.isBindingElement(parent) && parent.propertyName === node) ||
+				(ts.isImportSpecifier(parent) && parent.propertyName === node)
+			)
+				return;
 			if (node.text === "module") {
 				// esbuild's CJS wrapper preserves exports, not Jiti's original Module metadata.
 				if (
@@ -132,10 +162,7 @@ export async function rewriteCompiledSource(filename: string, sourceBytes: Buffe
 			} else if (node.text !== "exports") {
 				// Assignment/update/delete of provenance globals is not equivalent to a literal.
 				if (
-					(ts.isBinaryExpression(parent) &&
-						parent.left === node &&
-						parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-						parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+					assignmentTarget(node) ||
 					ts.isPrefixUnaryExpression(parent) ||
 					ts.isPostfixUnaryExpression(parent) ||
 					ts.isDeleteExpression(parent)

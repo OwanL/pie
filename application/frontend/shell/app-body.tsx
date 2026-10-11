@@ -26,6 +26,7 @@ import { TranscriptCommitProvider } from '../transcript/commit-registry';
 import { InlineConfirmDialog } from '../notifications/inline-confirm-dialog';
 import { ConnectionBanner } from './connection-banner';
 import type { ClientTransport } from '../transport/client-transport';
+import { useSnoozeCommands } from '../session-tabs/use-snooze-commands';
 
 export interface AppBodyProps {
   adapter: {
@@ -54,6 +55,7 @@ export function AppBody({ adapter }: AppBodyProps) {
     [connectionState, transport],
   );
 
+  const snoozeCommands = useSnoozeCommands(postApplicationCommand);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
   const retryCreateOperation = useCallback((operationId: string) => {
@@ -234,6 +236,10 @@ export function AppBody({ adapter }: AppBodyProps) {
       {derived.showSessionChrome && (
         <SessionTabs
           sessions={viewState.sessions}
+          snoozedSessions={viewState.snoozedSessions}
+          sessionCapabilitiesBySession={viewState.sessionCapabilitiesBySession}
+          onSnooze={snoozeCommands.snooze}
+          onRestoreSnoozed={snoozeCommands.restore}
           sessionCatalogProgress={viewState.sessionCatalogProgress}
           openTabPaths={viewState.openTabPaths}
           pinnedTabPaths={viewState.pinnedTabPaths}
@@ -335,6 +341,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningSettings={viewState.pruningSettings}
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}
+        pruningRefreshPending={viewState.pruningRefreshPending}
         toolResultPruningSettings={viewState.toolResultPruningSettings}
         sessionTitlesSettings={viewState.sessionTitlesSettings}
         providerGateStats={viewState.aggregateStats.providerGate}

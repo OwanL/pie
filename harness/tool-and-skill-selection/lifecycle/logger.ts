@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { PruningDecision, PruningMode } from "../settings/config-types.js";
-import { countTokens } from "../../../lib/tokenization.js";
-import { JsonlWriter } from "../../../lib/structured-logging/jsonl-writer.js";
+import { countTokens } from "../../../lib/tokenization.ts";
+import { JsonlWriter } from "../../../lib/structured-logging/jsonl-writer.ts";
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
 const CONFIG_ROOT = process.env.PI_CODING_AGENT_DIR

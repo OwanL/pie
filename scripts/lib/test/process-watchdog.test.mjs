@@ -83,7 +83,26 @@ test('withProcessTreeIsolation creates a Unix process group but not a Windows de
   assert.equal(withProcessTreeIsolation({ cwd: 'C:\\tmp' }, 'win32').detached, false);
 });
 
-test('killProcessTree gives Windows a grace window then uses identity-checked taskkill /T /F', async () => {
+test('closed Windows root never authorizes visible old or unproven descendants', async () => {
+  for (const identity of ['20261009134013.000000+780', '20261009180000.000000+780']) {
+    const child = new ChildProcess();
+    child.pid = 3268;
+    child.exitCode = 0;
+    const calls = [];
+    const result = await killProcessTree(child, {
+      platform: 'win32', gracefulMs: 1, forceMs: 1,
+      spawnSyncImpl: (command, args) => {
+        if (command === 'taskkill') calls.push(args);
+        return { status: 0, stdout: `27736|3268|${identity}\n` };
+      },
+      killImpl: (pid) => { if (pid === 3268) throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+    });
+    assert.deepEqual(calls, []);
+    assert.equal(result.gone, false);
+  }
+});
+
+test('killProcessTree gives Windows a grace window then uses individually identity-checked taskkill /F', async () => {
   const child = fakeChild(4321);
   const calls = [];
   let alive = true;
@@ -99,7 +118,7 @@ test('killProcessTree gives Windows a grace window then uses identity-checked ta
     killImpl: (_pid, signal) => { if (signal === 0 && !alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
   });
   const taskkill = calls.find((call) => call.command === 'taskkill');
-  assert.deepEqual(taskkill.args, ['/T', '/F', '/PID', '4321']);
+  assert.deepEqual(taskkill.args, ['/F', '/PID', '4321']);
   assert.deepEqual(child.killCalls, []);
   assert.equal(result.gone, true);
   assert.deepEqual(result.ownedPids, [4321]);
@@ -126,7 +145,7 @@ test('Windows ownership query projects only ancestry and preserves precise provi
   assert.equal(rows[0].identity, identity);
 });
 
-test('real Windows census returns a stable precise identity for this owned test process', { skip: process.platform !== 'win32' }, () => {
+integrationTest('real Windows census returns a stable precise identity for this owned test process', { skip: process.platform !== 'win32' }, () => {
   const first = snapshotProcessTree(process.pid)[0];
   const second = snapshotProcessTree(process.pid)[0];
   assert.match(first.identity, /^\d{14}\.\d{6}[+-]\d{3}$/u);
@@ -140,7 +159,7 @@ test('killProcessTree confirms absent Windows identities despite a later live PI
     spawnSyncImpl: (command) => {
       if (command === 'taskkill') return { status: 0 };
       queries += 1;
-      return { status: 0, stdout: queries < 3 ? '4321|1|captured-root\n7654|4321|captured-child\n' : '' };
+      return { status: 0, stdout: queries < 4 ? '4321|1|20261009170000.000000+780\n7654|4321|20261009170001.000000+780\n' : '' };
     },
     // Model PID reuse after the final census: the later probe sees a new
     // process, but absence already proves the captured identity gone.
@@ -202,7 +221,7 @@ test('killProcessTree fails closed when the captured Windows creation identity a
   });
   assert.deepEqual(calls, []);
   assert.equal(result.gone, false);
-  assert.deepEqual(result.ownedProcesses, [{ pid: 4321, ppid: 1, identity: null, creationDate: null }]);
+  assert.deepEqual(result.ownedProcesses, []);
   assert.deepEqual(result.survivorProcesses, [{ pid: 4321, ppid: 1, identity: null, creationDate: null }]);
   assert.ok(result.diagnostics.some((message) => message.includes('no captured creation identity')));
   assert.ok(result.diagnostics.some((message) => message.includes('enumeration failed') && message.includes('timeout')));
@@ -220,7 +239,7 @@ test('killProcessTree treats a missing current Windows creation date as unknown'
         return { status: 0, stdout: '' };
       }
       query += 1;
-      return { status: 0, stdout: query === 1 ? '4321|1|captured-root\n' : '4321|1|\n' };
+      return { status: 0, stdout: query <= 2 ? '4321|1|captured-root\n' : '4321|1|\n' };
     },
     killImpl: () => {},
   });
@@ -241,7 +260,7 @@ test('killProcessTree does not signal a reused Windows root or its new children'
         return { status: 0, stdout: '' };
       }
       query += 1;
-      if (query === 1) return { status: 0, stdout: '4321|1|old-root\n' };
+      if (query <= 2) return { status: 0, stdout: '4321|1|old-root\n' };
       return { status: 0, stdout: '4321|1|new-root\n7654|4321|new-child\n' };
     },
     killImpl: () => {},
@@ -270,8 +289,8 @@ test('killProcessTree leaves a reused Windows tree unverified when the real Chil
       });
       assert.deepEqual(calls, ['powershell.exe']);
       assert.equal(result.gone, false);
-      assert.deepEqual(result.ownedPids, [123, 456]);
-      assert.deepEqual(result.ownedProcesses.map(({ identity }) => identity), ['reused-root', 'new-descendant']);
+      assert.deepEqual(result.ownedPids, []);
+      assert.deepEqual(result.ownedProcesses, []);
       assert.ok(result.diagnostics.some((message) => message.includes('ownership is unverified') && message.includes('taskkill skipped')));
     });
   }
@@ -290,16 +309,188 @@ test('killProcessTree may target a captured Windows child only when its creation
         return { status: 0, stdout: '' };
       }
       query += 1;
-      if (query === 1) return { status: 0, stdout: '4321|1|old-root\n7654|4321|known-child\n' };
-      return { status: 0, stdout: '4321|1|new-root\n7654|1|known-child\n' };
+      if (query <= 2) return { status: 0, stdout: '4321|1|20261009170000.000000+780\n7654|4321|20261009170001.000000+780\n' };
+      return { status: 0, stdout: '4321|1|new-root\n7654|1|20261009170001.000000+780\n' };
     },
     killImpl: (pid, signal) => {
       if (signal === 0 && pid === 7654 && !childAlive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
     },
   });
-  assert.deepEqual(calls, [['/T', '/F', '/PID', '7654']]);
+  assert.deepEqual(calls, [['/F', '/PID', '7654']]);
   assert.equal(result.gone, true);
   assert.deepEqual(result.survivors, []);
+});
+
+test('Windows watchdog retains live-captured leaks, skips reuse, and fails closed on census failure', async (t) => {
+  for (const scenario of ['leak', 'reuse', 'failed-census', 'unseen-newer', 'older-ghost']) {
+    await t.test(scenario, async () => {
+      const root = '20261009170000.000000+780';
+      const captured = '20261009170001.000000+780';
+      const child = new ChildProcess();
+      child.pid = 4321;
+      let closed = false;
+      let descendantAlive = true;
+      const calls = [];
+      const watchdog = watchChildProcess(child, {
+        timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+        spawnSyncImpl: (command, args) => {
+          if (command === 'taskkill') {
+            calls.push(args);
+            descendantAlive = false;
+            return { status: 0 };
+          }
+          if (!closed) return { status: 0, stdout: `4321|1|${root}\n${scenario === 'unseen-newer' || scenario === 'older-ghost' ? '' : `7654|4321|${captured}\n`}` };
+          if (scenario === 'failed-census') return { status: null, error: new Error('census timeout') };
+          const identity = scenario === 'reuse' ? '20261009170002.000000+780'
+            : scenario === 'older-ghost' ? '20261009160000.000000+780' : captured;
+          return { status: 0, stdout: `7654|4321|${identity}\n` };
+        },
+        killImpl: (pid) => {
+          if ((pid === 4321 && closed) || (pid === 7654 && !descendantAlive)) {
+            throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+          }
+        },
+      });
+      child.exitCode = 0;
+      closed = true;
+      const result = await watchdog.settle();
+      assert.deepEqual(calls, scenario === 'leak' ? [['/F', '/PID', '7654']] : []);
+      assert.equal(result.gone, scenario !== 'failed-census' && scenario !== 'unseen-newer');
+      assert.equal(result.ownedPids.includes(7654), !['unseen-newer', 'older-ghost'].includes(scenario));
+    });
+  }
+});
+
+test('Windows live capture rejects impossible older children and root closure or reuse during capture', async (t) => {
+  for (const scenario of ['older-child', 'root-closed', 'root-reused', 'latest-root-absent', 'changed-ancestry']) {
+    await t.test(scenario, async () => {
+      const child = new ChildProcess();
+      child.pid = 4321;
+      const root = '20261009170000.000000+780';
+      const calls = [];
+      let query = 0;
+      const result = await killProcessTree(child, {
+        platform: 'win32', gracefulMs: 1, forceMs: 1,
+        spawnSyncImpl: (command, args) => {
+          if (command === 'taskkill') { calls.push(args); return { status: 0 }; }
+          query += 1;
+          if (query === 2 && scenario === 'root-closed') child.exitCode = 0;
+          if (query >= 2 && scenario === 'latest-root-absent') return { status: 0, stdout: '' };
+          const identity = query >= 2 && scenario === 'root-reused' ? '20261009170002.000000+780' : root;
+          const descendant = scenario === 'older-child' ? '20261009160000.000000+780' : '20261009170001.000000+780';
+          return { status: 0, stdout: `4321|1|${identity}\n7654|${scenario === 'changed-ancestry' ? 99 : 4321}|${descendant}\n` };
+        },
+        killImpl: () => {},
+      });
+      assert.deepEqual(calls, ['older-child', 'changed-ancestry'].includes(scenario) ? [['/F', '/PID', '4321']] : []);
+      assert.equal(result.ownedPids.includes(7654), false);
+      if (!['older-child', 'changed-ancestry'].includes(scenario)) assert.equal(result.gone, false);
+    });
+  }
+});
+
+test('Windows watchdog cannot recover failed live ownership capture from an empty post-close census', async () => {
+  const child = new ChildProcess();
+  child.pid = 4321;
+  let closed = false;
+  const calls = [];
+  const watchdog = watchChildProcess(child, {
+    timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+    spawnSyncImpl: (command) => {
+      calls.push(command);
+      return closed ? { status: 0, stdout: '' } : { status: null, error: new Error('census timeout') };
+    },
+    killImpl: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+  });
+  child.exitCode = 0;
+  closed = true;
+  const result = await watchdog.settle();
+  assert.equal(result.gone, false);
+  assert.ok(result.diagnostics.some((message) => message.includes('failed live capture')));
+  assert.ok(!calls.includes('taskkill'));
+});
+
+test('Windows watchdog retains an observed unproven descendant after root exit and reparenting', async () => {
+  const child = new ChildProcess();
+  child.pid = 4321;
+  let closed = false;
+  let census = 0;
+  const calls = [];
+  const watchdog = watchChildProcess(child, {
+    timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+    spawnSyncImpl: (command, args) => {
+      if (command === 'taskkill') { calls.push(args); return { status: 0 }; }
+      census += 1;
+      if (census === 1) return { status: 0, stdout: '4321|1|\n7654|4321|descendant-identity\n' };
+      return { status: 0, stdout: '7654|1|descendant-identity\n' };
+    },
+    killImpl: (pid) => {
+      if (pid === 4321 && closed) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    },
+  });
+  child.exitCode = 0;
+  closed = true;
+  const result = await watchdog.settle();
+  assert.deepEqual(calls, [], 'unknown descendants are never targeted');
+  assert.equal(result.gone, false, 'the observed descendant cannot be certified extinct after escaping the root');
+  assert.ok(result.survivors.includes(7654));
+  assert.ok(result.survivorProcesses.some((entry) => entry.pid === 7654 && entry.identity === 'descendant-identity'));
+});
+
+test('Windows later consistent capture does not clear prior unproven ownership uncertainty', async () => {
+  const child = new ChildProcess();
+  child.pid = 4321;
+  let closed = false;
+  let census = 0;
+  const calls = [];
+  const root = '20261009170000.000000+780';
+  const descendant = '20261009170001.000000+780';
+  const watchdog = watchChildProcess(child, {
+    timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+    spawnSyncImpl: (command, args) => {
+      if (command === 'taskkill') { calls.push(args); return { status: 0 }; }
+      census += 1;
+      if (census === 1) return { status: 0, stdout: `4321|1|\n7654|4321|${descendant}\n` };
+      if (census <= 3) return { status: 0, stdout: `4321|1|${root}\n` };
+      return { status: 0, stdout: `7654|1|${descendant}\n` };
+    },
+    killImpl: (pid) => {
+      if (pid === 4321) {
+        closed = true;
+        child.exitCode = 0;
+        throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      }
+    },
+  });
+  const result = await watchdog.settle();
+  assert.ok(calls.every((args) => args.at(-1) !== '7654'), 'the unproven descendant is never targeted');
+  assert.equal(closed, true);
+  assert.equal(result.gone, false, 'a consistent root capture cannot erase uncertainty about the escaped descendant');
+  assert.ok(result.survivors.includes(7654));
+});
+
+test('Windows cleanup reports unseen descendants in pre-force and final censuses without targeting them', async (t) => {
+  for (const stage of ['pre-force', 'final']) {
+    await t.test(stage, async () => {
+      let queries = 0;
+      let rootAlive = stage === 'pre-force';
+      const calls = [];
+      const result = await killProcessTree(fakeChild(4321), {
+        platform: 'win32', gracefulMs: 1, forceMs: 1,
+        spawnSyncImpl: (command, args) => {
+          if (command === 'taskkill') { calls.push(args); rootAlive = false; return { status: 0 }; }
+          queries += 1;
+          const root = queries <= 2 || rootAlive ? '4321|1|20261009170000.000000+780\n' : '';
+          return { status: 0, stdout: root + (queries >= 3 ? '7654|4321|20261009170001.000000+780\n' : '') };
+        },
+        killImpl: (pid) => { if (pid === 4321 && !rootAlive) throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+      });
+      assert.deepEqual(calls, stage === 'pre-force' ? [['/F', '/PID', '4321']] : []);
+      assert.equal(result.gone, false);
+      assert.deepEqual(result.ownedPids, [4321]);
+      assert.ok(result.survivors.includes(7654));
+    });
+  }
 });
 
 test('killProcessTree still recognizes an already-gone Windows root without creation identity', async () => {

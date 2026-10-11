@@ -118,6 +118,11 @@ export interface SessionsState {
   sessionCatalogProgress: SessionCatalogProgress;
   /** Open tab paths (preserves order; pinned tabs form the leading prefix). */
   openTabPaths: string[];
+  snoozedBySession: Record<string, import('./session-snooze.js').SessionSnoozeEntry>;
+  pendingSnoozes: Record<string, { reservationId: string; wakeAt: number }>;
+  snoozeSequence: number;
+  snoozeReleases: Record<string, { sessionPath: string; reservationId: string;
+    deferredOpens?: Extract<import('./effects/effects.js').Effect, { kind: 'OpenSession' }>[] }>;
   /** Pinned tab paths (browser-style: clustered at the far left, icon-only). */
   pinnedTabPaths: string[];
   /** Pinned-session groups (Discord-style clustering). Each inner array is an
@@ -612,6 +617,10 @@ export function createInitialArchState(): ArchState {
       sessions: [],
       sessionCatalogProgress: { complete: true, processed: 0, total: 0 },
       openTabPaths: [],
+      snoozedBySession: {},
+      pendingSnoozes: {},
+      snoozeSequence: 0,
+      snoozeReleases: {},
       pinnedTabPaths: [],
       pinnedTabGroups: [],
       runningSessionPaths: [],

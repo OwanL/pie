@@ -8,7 +8,10 @@ version pins, required files, and `PIE_CACHE_DIR` cache targets are owned by
 The guard resolves only `<PI_CODING_AGENT_DIR>/npm/node_modules/<package>` and
 never searches or patches a global npm installation. It applies exact
 fingerprint checked, atomic, idempotent transforms for the raw-results-only
-web workflow and the contract's cache targets.
+web workflow, the contract's cache targets, and deferred MCP script loading.
+MCP tools and hooks still register eagerly. Only the script executor loads on
+first use, with session ownership checked again after the import. Unsupported
+or partially adapted entry sources are left unchanged.
 
 Readiness reports the managed package manifest, required source files, source
 fingerprint (`pristine` or `supported-patched`), and intended cache target. It

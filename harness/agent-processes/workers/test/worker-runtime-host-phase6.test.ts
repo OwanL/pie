@@ -984,27 +984,104 @@ test('agent_settled refreshes session.opened from the current session and preser
   assert.equal(emittedPayload.runtimeReady, true);
 });
 
+test('session.opened retains all transcript rows and whole-branch usage above 100,000 JSON values', async () => {
+  const { host, sent, runtimeFailures } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = '/sessions/many-accounted-rows.jsonl';
+  const transcript = Array.from({ length: 5_000 }, (_, index) => ({
+    id: `message-${index}`,
+    role: 'assistant',
+    createdAt: '2026-09-26T10:05:00.000Z',
+    status: 'completed',
+    parts: [{ kind: 'text', text: `reply-${index}` }],
+  })) as unknown as SessionOpenedPayload['transcript'];
+  const sessionUsage: NonNullable<SessionOpenedPayload['sessionUsage']> = {
+    samples: Array.from({ length: 6_000 }, (_, index) => ({
+      sourceId: `invocation-${index}`,
+      kind: 'conversation',
+      modelId: 'model',
+      provider: 'provider',
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 4,
+      totalTokens: 19,
+    })),
+    authority: 'canonical',
+    freshness: 'fresh',
+    refreshStatus: 'idle',
+    branchId: 'branch-leaf',
+    branchEntryIds: transcript.map((row) => row.id),
+    incompleteInvocationCount: 0,
+    unpricedInvocationCount: 0,
+  };
+  const payload = makeOpenedPayload(sessionPath, transcript, { sessionUsage });
+  const frameDraft = (eventPayload: unknown) => ({
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: 1,
+    workerId: 'host-worker',
+    workerGeneration: 1,
+    workerPid: process.pid,
+    rootSessionPath: sessionPath,
+    leasePath: sessionPath,
+    leaseRevision: 1,
+    sessionPath,
+    kind: 'runtime.event' as const,
+    event: 'session.opened' as const,
+    payload: eventPayload,
+  });
+  const countValues = (value: unknown): number => {
+    if (value === null || typeof value !== 'object') return 1;
+    return 1 + Object.values(value).reduce<number>((count, child) => count + countValues(child), 0);
+  };
+  // Neither independently valid component crossed the old cap; only their
+  // combined session.opened frame did. Keep this fixture near 110k values.
+  assert.ok(countValues(transcript) < 100_000);
+  assert.ok(countValues(sessionUsage) < 100_000);
+  assert.ok(countValues(payload) > 100_000 && countValues(payload) < 115_000);
+  assert.equal(validateWorkerIpcFrameDraft(frameDraft(makeOpenedPayload(sessionPath, transcript))), undefined);
+  assert.equal(validateWorkerIpcFrameDraft(frameDraft(makeOpenedPayload(sessionPath, [], { sessionUsage }))), undefined);
+  const measurement = measureWorkerIpcMessage(frameDraft(payload));
+  assert.equal(measurement.ok, true);
+  if (measurement.ok) assert.ok(measurement.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES);
+
+  internals.openedPayload = payload;
+  internals.buildOpenedPayload = async () => payload;
+  await internals.emitRefreshedSessionOpened(sessionPath);
+
+  const openedFrames = sent.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'session.opened');
+  assert.equal(openedFrames.length, 1);
+  const emitted = openedFrames[0]!.payload as SessionOpenedPayload;
+  assert.equal(emitted.transcript.length, transcript.length, 'the combined frame must not discard transcript rows');
+  assert.deepEqual(emitted.transcript, transcript);
+  assert.deepEqual(emitted.transcriptWindow, payload.transcriptWindow);
+  assert.deepEqual(emitted.sessionUsage, sessionUsage, 'whole-branch accounting and freshness metadata remain intact');
+  assert.equal(emitted.snapshotUnavailable, undefined);
+  assert.equal(emitted.transcriptSkipped, undefined);
+  assert.equal(emitted.runtimeReady, true);
+  assert.equal(validateWorkerIpcFrameDraft(frameDraft(emitted)), undefined);
+  assert.deepEqual(runtimeFailures, []);
+});
+
 test('session.opened structural fallback keeps the worker usable and durable history pageable', async () => {
   const { host, sent, runtimeFailures } = makeHost();
   const internals = getInternals(host);
   const sessionPath = '/sessions/complex.jsonl';
+  let nestedDetails: unknown = { content: 'saved child result' };
+  for (let depth = 0; depth < 65; depth += 1) nestedDetails = { child: nestedDetails };
   const transcript = [{
-    id: 'message-with-many-subagent-details',
+    id: 'message-with-deep-subagent-details',
     role: 'assistant',
     createdAt: '2026-09-26T10:05:00.000Z',
     status: 'completed',
-    parts: Array.from({ length: 8_000 }, (_, index) => ({
+    parts: [{
       kind: 'toolCall',
       toolCall: {
-        id: `subagent-${index}`,
+        id: 'subagent-deep',
         name: 'subagent',
-        result: {
-          details: {
-            results: [{ messages: [{ role: 'toolResult', content: 'saved child result' }] }],
-          },
-        },
+        result: { details: nestedDetails },
       },
-    })),
+    }],
   }] as unknown as SessionOpenedPayload['transcript'];
   const contextUsage = { tokens: 12_345, contextWindow: 128_000, percent: 0.0964 };
   const modelSettings = { defaultModel: 'provider/model', defaultThinkingLevel: 'high' } as any;
@@ -1040,7 +1117,7 @@ test('session.opened structural fallback keeps the worker usable and durable his
     assert.ok(sourceMeasurement.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES,
       'the transcript is structurally oversized, not byte oversized');
   }
-  assert.match(validateWorkerIpcFrameDraft(sourceDraft) ?? '', /too structurally complex/);
+  assert.match(validateWorkerIpcFrameDraft(sourceDraft) ?? '', /maximum nesting depth/);
 
   internals.openedPayload = payload;
   internals.buildOpenedPayload = async () => payload;

@@ -324,6 +324,10 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.doesNotMatch(transcriptCss, /message-assistant-width/);
   assert.doesNotMatch(composerCss, /\.pref-toggle(?:-icon|-check)?\b/);
   assert.doesNotMatch(reasoningBlock, /bg-control|rounded-md/);
+  assert.match(
+    transcriptCss,
+    /\.reasoning-block \.message-body,\s*\.reasoning-block \.reasoning-preview\s*\{\s*color:\s*var\(--panel-muted\);\s*\}/,
+  );
 
   const toolTitleRule = transcriptCss.match(/\.transcript-header-title-mono\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.doesNotMatch(toolTitleRule, /\b(?:background|border|padding)\s*:/);

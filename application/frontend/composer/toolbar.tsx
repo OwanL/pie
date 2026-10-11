@@ -75,6 +75,9 @@ interface ComposerToolbarProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  pruningRefreshPending?: boolean;
+  busy?: boolean;
+  onSetPruningRefreshPending?: (pending: boolean) => void;
   toolResultPruningSettings: ToolResultPruningSettings;
   sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
@@ -129,6 +132,9 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  pruningRefreshPending = false,
+  busy = false,
+  onSetPruningRefreshPending,
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
@@ -210,6 +216,15 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const autonomousModeLabel = autonomousMode
     ? 'Autonomous mode on — ask_user is unavailable'
     : 'Enable autonomous mode — run without the ask_user tool';
+  const refreshDisabled = !commandsAvailable || !sessionPath || isPendingTabPath(sessionPath)
+    || pruningSettings.mode === 'off' || pruningSettings.mainAgentEnabled === false
+    || prefs.extensionToggles['skill-pruner'] === false || !onSetPruningRefreshPending;
+  const refreshTooltip = 'Re-evaluate tools and skills for your next message'
+    + (pruningRefreshPending
+      ? '. Refresh pending for your next idle, nonempty send; click to cancel. Queued messages and empty continuation do not consume it.'
+      : busy
+        ? '. You can arm it while busy; it waits for your next idle, nonempty send, not a queued message or empty continuation.'
+        : '. Applies to your next idle, nonempty send, not an empty continuation.');
   const pinnedControls = (
     <>
       <ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
@@ -335,6 +350,26 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           onSetLanEnabled={onSetBrowserServerLanEnabled ?? (() => undefined)}
           onSetServerEnabled={onSetBrowserServerEnabled}
         />
+      ),
+    },
+    {
+      key: 'pruning-refresh',
+      kind: 'control',
+      content: (
+        <button
+          type="button"
+          class={`system-prompt-toggle-trigger pruning-refresh-trigger${pruningRefreshPending ? ' active' : ''}`}
+          aria-label="Refresh capabilities"
+          aria-pressed={pruningRefreshPending}
+          title={refreshTooltip}
+          disabled={refreshDisabled}
+          onClick={() => { if (!refreshDisabled) onSetPruningRefreshPending?.(!pruningRefreshPending); }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13 5.5A5.3 5.3 0 0 0 3.1 4M3 1.5V4h2.5M3 10.5A5.3 5.3 0 0 0 12.9 12M13 14.5V12h-2.5" />
+          </svg>
+          {pruningRefreshPending && <span class="pruning-refresh-pending" aria-hidden="true" />}
+        </button>
       ),
     },
     ...(sessionCostIndicator && !prefs.hideSessionCost ? [{

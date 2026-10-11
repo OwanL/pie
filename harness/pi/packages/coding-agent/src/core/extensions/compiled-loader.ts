@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { builtinModules, createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -29,7 +29,7 @@ function fileExists(filename: string): boolean {
 
 /**
  * Opt-in Node compiler for one-use inventory only, not general reload/session loading.
- * No module/factory/graph cache. Each pass resolves and reads the complete source graph.
+ * No module/factory/graph cache. Each pass rereads supported graphs; rejected graphs use fresh Jiti.
  * Alias paths are authoritative caller-verified SDK bytes; never bundle another SDK.
  */
 export async function prepareCompiledExtensions(
@@ -51,7 +51,9 @@ export async function prepareCompiledExtensions(
 			if (root) await rm(root, { recursive: true, force: true });
 		},
 	};
-	if (!paths.length || "Bun" in globalThis) return pass;
+	// Ambient Jiti policy is not reproduced by the compiler. Keep the original loader
+	// whenever an override could affect resolution, transformation, or native identity.
+	if (!paths.length || "Bun" in globalThis || Object.keys(process.env).some((key) => /^JITI_/i.test(key))) return pass;
 	const entries = [...new Set(paths.map((entry) => path.resolve(entry)))];
 	const previous = buildQueue;
 	let release: () => void = () => {};
@@ -61,13 +63,34 @@ export async function prepareCompiledExtensions(
 	await previous;
 	try {
 		if (esbuild.version !== "0.28.1" || entries.length > 512) return pass;
+		const compiledEntries = entries.filter((entry) => !(/\.(?:cjs|mjs|js|json)$/.test(entry) && fileExists(entry)));
+		if (!compiledEntries.length) return pass;
 		for (const target of Object.values(aliases)) if (!path.isAbsolute(target) || !fileExists(target)) return pass;
 		root = await mkdtemp(path.join(tmpdir(), "pi-compiled-extensions-"));
 		const unsupported = new Set<string>();
 		let sourceBytes = 0;
 		let inputCount = 0;
+		const sources = new Map<string, Promise<string | undefined>>();
+		function readSource(filename: string): Promise<string | undefined> {
+			let pending = sources.get(filename);
+			if (!pending) {
+				pending = (async () => {
+					if (++inputCount > 4096 || statSync(filename).size > 2 * 1024 * 1024)
+						throw new Error("Compiler input budget exceeded");
+					const source = await readFile(filename);
+					sourceBytes += source.byteLength;
+					if (sourceBytes > 64 * 1024 * 1024) throw new Error("Compiler source budget exceeded");
+					if (!extensions.includes(path.extname(filename))) throw new Error("Unsupported compiler input");
+					const rewritten = await rewriteCompiledSource(filename, source);
+					if (rewritten === undefined) unsupported.add(path.resolve(filename));
+					return rewritten;
+				})();
+				sources.set(filename, pending);
+			}
+			return pending;
+		}
 		const result = await esbuild.build({
-			entryPoints: entries.map((entry, index) => ({ in: entry, out: `entry-${index}` })),
+			entryPoints: compiledEntries.map((entry, index) => ({ in: entry, out: `entry-${index}` })),
 			outdir: root,
 			outExtension: { ".js": ".mjs" },
 			bundle: true,
@@ -91,7 +114,9 @@ export async function prepareCompiledExtensions(
 				{
 					name: "jiti-resolution-and-source-provenance",
 					setup(build) {
-						build.onResolve({ filter: /.*/ }, (args) => {
+						const resolving = Symbol("native-boundary-resolution");
+						build.onResolve({ filter: /.*/ }, async (args) => {
+							if (args.pluginData === resolving) return undefined;
 							const nativePath = (filename: string) =>
 								args.kind === "require-call" ? filename.replace(/\\/g, "/") : pathToFileURL(filename).href;
 							if (Object.hasOwn(aliases, args.path))
@@ -116,24 +141,84 @@ export async function prepareCompiledExtensions(
 								return { path: args.path, external: true };
 							}
 							// Jiti tries the exact path before TS substitution; esbuild does the reverse.
+							let exact: string | undefined;
 							if (args.path.startsWith(".") || path.isAbsolute(args.path)) {
-								const exact = path.resolve(args.resolveDir, args.path);
-								if (fileExists(exact)) return { path: exact };
+								const candidate = path.resolve(args.resolveDir, args.path);
+								let missing = false;
+								try {
+									const stats = statSync(candidate);
+									if (stats.isFile()) exact = candidate;
+									else if (
+										stats.isDirectory() &&
+										args.path.endsWith(".js") &&
+										[".ts", ".tsx"].some((extension) => fileExists(candidate.slice(0, -3) + extension))
+									) {
+										// esbuild may substitute TS before this directory; let Jiti own it.
+										unsupported.add(path.resolve(args.importer));
+									}
+								} catch (error) {
+									missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+								}
+								if (
+									missing &&
+									args.namespace === "file" &&
+									/\.[cm]?tsx?$/.test(args.importer) &&
+									args.path.endsWith(".js") &&
+									(/^(?:\.{1,2}[/\\])/.test(args.path) || path.isAbsolute(args.path))
+								) {
+									// Jiti 2.7 jitiResolve first tries appended extensions, then
+									// replaces .js with .ts (not .tsx). esbuild also prefers .ts.
+									const replacement = candidate.slice(0, -3) + ".ts";
+									if (extensions.some((extension) => existsSync(candidate + extension))) {
+										// esbuild may choose TS substitution instead of Jiti's appended path.
+										unsupported.add(path.resolve(args.importer));
+										return { path: nativePath(candidate), external: true };
+									} else {
+										if (fileExists(replacement)) exact = replacement;
+										else if (fileExists(candidate.slice(0, -3) + ".tsx")) {
+											// Jiti cannot resolve this substitution. Discard only its consumers,
+											// without parsing the unsupported target or aborting sibling roots.
+											unsupported.add(path.resolve(args.importer));
+											return { path: nativePath(candidate), external: true };
+										}
+									}
+								}
 							}
-							return undefined;
+							const resolved: esbuild.OnResolveResult = exact
+								? { path: exact, namespace: "file" }
+								: await build.resolve(args.path, {
+										importer: args.importer,
+										namespace: args.namespace,
+										resolveDir: args.resolveDir,
+										kind: args.kind,
+										with: args.with,
+										pluginData: resolving,
+									});
+							if (resolved.errors?.length || resolved.external || !resolved.path) return resolved;
+							if (resolved.namespace === "file" && /\.(?:cjs|mjs|js|json)$/.test(resolved.path)) {
+								// Stop before parsing native modules: even inert stubs can reject ESM
+								// import shapes. Every consumer of this importer falls back before evaluation.
+								unsupported.add(path.resolve(args.importer));
+								return { ...resolved, external: true };
+							}
+							if (
+								args.importer &&
+								resolved.namespace === "file" &&
+								/\.[cm]?tsx?$/.test(resolved.path) &&
+								(await readSource(resolved.path)) === undefined
+							) {
+								// Reject this consumer before parsing any known-discarded dependency graph.
+								unsupported.add(path.resolve(args.importer));
+								return { ...resolved, external: true };
+							}
+							return { ...resolved, pluginData: undefined };
 						});
 						build.onLoad({ filter: /.*/, namespace: "file" }, async (args) => {
-							if (++inputCount > 4096 || statSync(args.path).size > 2 * 1024 * 1024)
-								throw new Error("Compiler input budget exceeded");
-							const source = await readFile(args.path);
-							sourceBytes += source.byteLength;
-							if (sourceBytes > 64 * 1024 * 1024) throw new Error("Compiler source budget exceeded");
-							if (args.path.endsWith(".json")) return { contents: source, loader: "json" };
-							if (!extensions.includes(path.extname(args.path))) throw new Error("Unsupported compiler input");
-							const rewritten = await rewriteCompiledSource(args.path, source);
-							if (rewritten === undefined) unsupported.add(path.resolve(args.path));
+							const rewritten = await readSource(args.path);
 							const loader = /\.[cm]?tsx$/.test(args.path) ? "tsx" : /\.[cm]?ts$/.test(args.path) ? "ts" : "js";
-							return { contents: rewritten ?? source, loader };
+							// Unsupported roots cannot be external entry points. Explicit ESM has no
+							// import-shape ambiguity, and this marked output is never evaluated.
+							return { contents: rewritten ?? "export {};", loader };
 						});
 					},
 				},

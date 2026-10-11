@@ -95,6 +95,16 @@ import {
  * a full session catalogue part of every ViewState snapshot. */
 const MAX_CANONICAL_ACTIVITY_VIEW_SESSIONS = 32;
 
+// Local call/await boundaries only: these can overlap activation and other
+// startup timings and must not be summed as exclusive attribution.
+function finishPreBackendTiming(stage: string, started: number, outcome: 'success' | 'failure'): void {
+  try {
+    appendPieLog('info', 'startup', 'DEBUG-startup-preflight', {
+      stage, durationMs: performance.now() - started, outcome,
+    });
+  } catch { /* Diagnostics must never replace a startup error. */ }
+}
+
 /**
  * Platform-neutral application composition and lifecycle for the pie host.
  *
@@ -670,7 +680,7 @@ export class HostRuntime {
         // of the post-reorder state) rather than re-reading the service's
         // internal state; session names are looked up from the current
         // archState solely to enrich the persisted { path, name } objects.
-        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths, pinnedTabGroups, privateSessionPaths) => {
+        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths, pinnedTabGroups, privateSessionPaths, snoozedBySession) => {
           const sessions = this.archState.sessions.sessions;
           const tabObjects = openTabPaths
             .filter((p) => !isPendingTabPath(p))
@@ -709,6 +719,13 @@ export class HostRuntime {
             ...new Set([...storedPrivateSessionPaths, ...activePrivateSessionPaths]),
           ]).filter((sessionPath) => !isPendingTabPath(sessionPath));
           try {
+            // A single storage value commits snoozes together with their tab
+            // snapshot. Legacy mirrors may fail without losing a waking tab.
+            if (snoozedBySession !== undefined) await this.platform.storage.update('sessionSnoozeTabSnapshot', {
+              openTabPaths: tabObjects, activeSessionPath: persistedActiveSessionPath,
+              pinnedTabPaths: persistedPinnedTabPaths, pinnedTabGroups: persistedPinnedTabGroups,
+              snoozedBySession,
+            });
             await Promise.all([
               this.platform.storage.update(OPEN_TABS_STORAGE_KEY, tabObjects),
               this.platform.storage.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath),
@@ -834,15 +851,30 @@ export class HostRuntime {
 
   private async startInternal(): Promise<void> {
     this.reportStatus('Starting');
-    await this.analyticsHandoffControl?.start();
+    const handoffStarted = performance.now();
+    let handoffOutcome: 'success' | 'failure' = 'failure';
+    try {
+      await this.analyticsHandoffControl?.start();
+      handoffOutcome = 'success';
+    } finally {
+      finishPreBackendTiming('analytics-handoff-start', handoffStarted, handoffOutcome);
+    }
     if (this.shutdownRequested) return;
     // Try canonical analytics before services can produce captures. A failed
     // analytics helper must not take down Pie's primary session/backend
     // harness; its capture closures remain fail-closed and never write to the
     // legacy authority. Keep startup evidence tied to a successful readiness
     // probe so a degraded host cannot claim canonical readiness.
+    const analyticsStarted = performance.now();
     try {
-      await this.analyticsRuntime.start();
+      let analyticsOutcome: 'success' | 'failure' = 'failure';
+      try {
+        await this.analyticsRuntime.start();
+        analyticsOutcome = 'success';
+      } finally {
+        // Excludes loaded-generation recording and the degraded-start warning.
+        finishPreBackendTiming('analytics-runtime-start', analyticsStarted, analyticsOutcome);
+      }
       if (this.shutdownRequested) return;
       this.analyticsRuntime.recordLoadedGeneration();
     } catch (error) {
@@ -855,10 +887,26 @@ export class HostRuntime {
         'Pie started, but analytics is unavailable for this window. New analytics capture is paused; see Output > pie for the startup error.',
       );
     }
-    this.hydratePrivacyMarkers();
-    this.tokenRateService.start();
-    this.aggregateStatsService.start();
-    await this.statsService.start();
+    const privacyStarted = performance.now();
+    let privacyOutcome: 'success' | 'failure' = 'failure';
+    try {
+      this.hydratePrivacyMarkers();
+      privacyOutcome = 'success';
+    } finally {
+      finishPreBackendTiming('privacy-marker-initialization', privacyStarted, privacyOutcome);
+    }
+    // Includes synchronous rate/aggregate starts and the awaited stats start;
+    // excludes their later background work and session-service startup.
+    const statsStarted = performance.now();
+    let statsOutcome: 'success' | 'failure' = 'failure';
+    try {
+      this.tokenRateService.start();
+      this.aggregateStatsService.start();
+      await this.statsService.start();
+      statsOutcome = 'success';
+    } finally {
+      finishPreBackendTiming('host-stats-start', statsStarted, statsOutcome);
+    }
     if (this.shutdownRequested) return;
     await this.service.start();
     if (this.shutdownRequested) return;

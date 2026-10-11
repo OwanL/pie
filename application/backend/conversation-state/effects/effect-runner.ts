@@ -90,7 +90,7 @@ export interface QueueRouter {
  * existing `globalState`-backed tab persistence helper.
  */
 export interface TabPersistenceSink {
-  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][], privateSessionPaths?: string[]): Promise<void>;
+  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][], privateSessionPaths?: string[], snoozedBySession?: Record<string, import('../session-snooze.js').SessionSnoozeEntry>): Promise<void>;
 }
 
 /** Logger sink for `Log`. Matches the audit-log surface used elsewhere. */
@@ -118,6 +118,7 @@ export interface OpenFileSink {
 }
 
 export interface SessionServiceLike {
+  openSession?(sessionPath: string): void;
   hydrateModelState(sessionPath: string, metadata?: {
     hydrationRevision?: number;
     modelWriteFence?: number;
@@ -341,6 +342,8 @@ export class EffectRunner {
   /** The backend-ready watchdog timer. Started by `StartBackendReadyWatchdog`,
    * cleared by `CancelBackendReadyWatchdog` / `DrainBackendReadyQueue` / fire. */
   private backendReadyWatchdog: TimerHandle | null = null;
+  private sessionSnoozeTimer: TimerHandle | null = null;
+  private readonly snoozeReleaseResources = new Map<string, { timer: TimerHandle | null }>();
 
   /** Session operations delegate their non-serializable execution resources
    * to the operation-owned controller; this façade retains no operation state. */
@@ -481,6 +484,47 @@ export class EffectRunner {
       SessionCloseBridgeAck: (e) => this.handleSessionCloseBridgeAck(e),
       RestartBackend: (e) => this.handleRestartBackend(e),
       PersistTabs: (e) => this.handlePersistTabs(e),
+      ReserveSessionSnooze: (e) => {
+        void this.deps.backend.request('session.snoozeReserve', {
+          sessionPath: e.sessionPath, reservationId: e.reservationId, wakeAt: e.wakeAt,
+        }, { timeoutMs: 5_000 }).then((result) => {
+          const ok = !!result && typeof result === 'object' && (result as { reserved?: unknown }).reserved === true;
+          this.deps.dispatchEvent({ kind: 'SessionSnoozeReservationResult', sessionPath: e.sessionPath, reservationId: e.reservationId, ok, now: Date.now() });
+        }, () => this.deps.dispatchEvent({ kind: 'SessionSnoozeReservationResult', sessionPath: e.sessionPath, reservationId: e.reservationId, ok: false, now: Date.now() }));
+      },
+      ReleaseSessionSnooze: (e) => {
+        if (this.snoozeReleaseResources.has(e.reservationId)) return;
+        const resource = { timer: null as TimerHandle | null };
+        this.snoozeReleaseResources.set(e.reservationId, resource);
+        const attempt = (index: number): void => {
+          resource.timer = null;
+          void this.deps.backend.request('session.snoozeRelease', { sessionPath: e.sessionPath, reservationId: e.reservationId }, { timeoutMs: 5_000 })
+            .then((result) => {
+              if (!result || typeof result !== 'object' || (result as { released?: unknown }).released !== true) throw new Error('Release not acknowledged');
+              finish(true);
+            }).catch(() => {
+              if (this.snoozeReleaseResources.get(e.reservationId) !== resource) return;
+              if (index < 2) resource.timer = this.timer.schedule(() => attempt(index + 1), 250 * 2 ** index);
+              else finish(false);
+            });
+        };
+        const finish = (ok: boolean): void => {
+          if (this.snoozeReleaseResources.get(e.reservationId) !== resource) return;
+          this.snoozeReleaseResources.delete(e.reservationId);
+          this.deps.dispatchEvent({ kind: 'SessionSnoozeReleaseResult', sessionPath: e.sessionPath, reservationId: e.reservationId, ok });
+        };
+        attempt(0);
+      },
+      SelectSnoozeSuccessor: (e) => { this.deps.service.openSession?.(e.sessionPath); },
+      ScheduleSessionSnooze: (e) => {
+        if (this.sessionSnoozeTimer !== null) this.timer.cancel(this.sessionSnoozeTimer);
+        this.sessionSnoozeTimer = null;
+        if (e.wakeAt === null) return;
+        this.sessionSnoozeTimer = this.timer.schedule(() => {
+          this.sessionSnoozeTimer = null;
+          this.deps.dispatchEvent({ kind: 'SessionSnoozeTimerFired', now: Date.now() });
+        }, Math.max(0, Math.min(2_147_483_647, e.wakeAt - Date.now())));
+      },
     };
   }
 
@@ -711,6 +755,7 @@ export class EffectRunner {
         effect.pinnedTabPaths,
         effect.pinnedTabGroups,
         effect.privateSessionPaths,
+        effect.snoozedBySession,
       ),
     );
 
@@ -1511,6 +1556,10 @@ export class EffectRunner {
   /** Dispose of every opaque execution resource owned below this façade. */
   dispose(): void {
     this.clearBackendReadyWatchdog();
+    if (this.sessionSnoozeTimer !== null) this.timer.cancel(this.sessionSnoozeTimer);
+    this.sessionSnoozeTimer = null;
+    for (const resource of this.snoozeReleaseResources.values()) if (resource.timer !== null) this.timer.cancel(resource.timer);
+    this.snoozeReleaseResources.clear();
     this.sessionOperations.dispose();
     for (const timer of this.lastCompactionTimers.values()) this.timer.cancel(timer);
     this.lastCompactionTimers.clear();

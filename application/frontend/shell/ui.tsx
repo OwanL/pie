@@ -81,6 +81,7 @@ interface ComposerProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  pruningRefreshPending?: boolean;
   toolResultPruningSettings: ToolResultPruningSettings;
   sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
@@ -133,6 +134,7 @@ interface ComposerProps {
    *  entries + toggle state. */
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetPruningRefreshPending?: (pending: boolean) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   onSetSessionTitlesSettings: (settings: Partial<SessionTitlesSettings>) => void;
   /** AppBody registers the composer's `sendAsRetry` here so the
@@ -167,6 +169,7 @@ function ComposerView({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  pruningRefreshPending,
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
@@ -205,6 +208,7 @@ function ComposerView({
   onSetBrowserServerEnabled,
   onSetSystemPromptToggles,
   onSetPruningSettings,
+  onSetPruningRefreshPending,
   onSetToolResultPruningSettings,
   onSetSessionTitlesSettings,
   sendRetryDraftRef,
@@ -439,6 +443,9 @@ function ComposerView({
             pruningSettings={pruningSettings}
             pruningCatalog={pruningCatalog}
             pruningResult={pruningResult}
+            pruningRefreshPending={pruningRefreshPending}
+            busy={executionBusy}
+            onSetPruningRefreshPending={onSetPruningRefreshPending}
             toolResultPruningSettings={toolResultPruningSettings}
             sessionTitlesSettings={sessionTitlesSettings}
             providerGateStats={providerGateStats}

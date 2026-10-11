@@ -858,7 +858,9 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
   const operation = operationId ? state.operations[operationId] : undefined;
   if (!pending || (operation && (operation.kind !== 'message.edit' || operation.terminal
     || (event.ok && operation.acceptance === 'accepted'
-      && (operation.reconciliation !== undefined || operation.commit === 'committed'))
+      && (operation.commit === 'committed'
+        || (operation.reconciliation !== undefined && event.committed !== true)))
+    || (event.operationAttempt !== undefined && operation.attempt !== event.operationAttempt)
     || (event.backendGeneration !== undefined && operation.backendGeneration !== event.backendGeneration)))) {
     return { state, effects: [] };
   }

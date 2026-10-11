@@ -33,13 +33,18 @@ export function useAppBodyDerivedState(
     deferredTriggers,
   } = viewState;
 
-  const panelSurface = resolvePanelSurface({ backendReady, notice, openTabPaths });
+  const panelSurface = resolvePanelSurface({ backendReady, notice, openTabPaths, activeSessionPath: viewState.activeSessionPath });
   const hasActiveTabs = panelSurface === 'session';
   const showSessionChrome = panelSurface !== 'loading';
-  const activeSessionPath = activeSession?.path ?? null;
-  const recoverySessionPath = openTabPaths.find((p) => !isPendingTabPath(p)) ?? sessions[0]?.path ?? null;
+  const activeSessionPath = viewState.activeSessionPath === null ? null : activeSession?.path ?? null;
+  // Only legacy snapshots may infer selection from the first recoverable tab.
+  // A raw host path remains the recovery target even before its summary exists.
+  const recoveryCandidate = viewState.activeSessionPath === undefined
+    ? openTabPaths.find((p) => !isPendingTabPath(p)) ?? sessions[0]?.path ?? null
+    : viewState.activeSessionPath;
+  const recoverySessionPath = recoveryCandidate && !isPendingTabPath(recoveryCandidate) ? recoveryCandidate : null;
   const needsSessionRecovery = hasActiveTabs && activeSession === null && recoverySessionPath !== null;
-  const transcriptHydrating = isTranscriptHydrating({ transcript, systemPrompts, transcriptLoaded });
+  const transcriptHydrating = hasActiveTabs && isTranscriptHydrating({ transcript, systemPrompts, transcriptLoaded });
   const loadingStatus = resolveLoadingStatus({
     backendReady,
     hasOpenTabs: hasActiveTabs,

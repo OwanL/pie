@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import { Value } from "typebox/value";
 import { BUCKET_GUIDANCE, SubagentParams, prepareSubagentArguments } from "../schema.js";
 
-test("BUCKET_GUIDANCE describes every model bucket", () => {
-	assert.match(BUCKET_GUIDANCE, /small/);
-	assert.match(BUCKET_GUIDANCE, /medium/);
-	assert.match(BUCKET_GUIDANCE, /frontier/);
+test("BUCKET_GUIDANCE selects buckets by delegated task complexity", () => {
+	assert.equal(BUCKET_GUIDANCE, "Choose the bucket explicitly by task complexity, not role: small for well-defined implementation, investigation, or review with limited ambiguity; medium for tasks requiring substantial judgment across interacting concerns; frontier for unusually difficult reasoning, diagnosis, or design. Judge the delegated task, not the overall project size. Escalate when the task exceeds the selected bucket.");
+	assert.match(BUCKET_GUIDANCE, /task complexity, not role/);
+	assert.match(BUCKET_GUIDANCE, /well-defined implementation, investigation, or review with limited ambiguity/);
+	assert.match(BUCKET_GUIDANCE, /substantial judgment across interacting concerns/);
+	assert.match(BUCKET_GUIDANCE, /unusually difficult reasoning, diagnosis, or design/);
+	assert.match(BUCKET_GUIDANCE, /Judge the delegated task, not the overall project size/);
+	assert.match(BUCKET_GUIDANCE, /Escalate when the task exceeds the selected bucket/);
 });
 
 test("SubagentParams exposes one required task shape without a reasoning override", () => {

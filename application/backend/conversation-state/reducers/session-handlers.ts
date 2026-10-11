@@ -1873,7 +1873,8 @@ export function handleMessageOperationStatus(state: ArchState, event: Extract<Ev
       draft.settings.noticeKind = event.state === 'generation-ended' ? 'backend-exit' : 'operational-error';
       draft.settings.noticeRaw = event.error ?? null;
       draft.settings.noticeSessionPath = event.sessionPath;
-    } else if ((updated.terminal || updated.acceptance === 'accepted')
+    } else if (event.operationKind !== 'message.edit'
+      && (updated.terminal || updated.acceptance === 'accepted')
       && draft.settings.noticeSessionPath === event.sessionPath
       && draft.settings.notice?.includes('acknowledgement delayed.')) {
       draft.settings.notice = null;

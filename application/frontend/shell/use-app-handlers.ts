@@ -54,6 +54,7 @@ export interface AppHandlers {
   handleSetBrowserServerEnabled: (enabled: boolean) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
+  handleSetPruningRefreshPending: (pending: boolean) => void;
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
   handleSetSessionTitlesSettings: (partial: Partial<SessionTitlesSettings>) => void;
   handleEditRequest: (messageId: string) => void;
@@ -213,6 +214,11 @@ export function useAppHandlers(
     if (!sessionPath) return;
     postMessage({ type: 'setSystemPromptToggles', sessionPath, disabledEntries });
   }, [postMessage, activeSessionPathRef]);
+  const handleSetPruningRefreshPending = useCallback((pending: boolean) => {
+    const sessionPath = activeSessionPathRef.current;
+    if (!sessionPath) return;
+    postMessage({ type: 'setPruningRefreshPending', sessionPath, pending });
+  }, [postMessage, activeSessionPathRef]);
   const handleSetPruningSettings = useCallback((partial: Partial<PruningSettings>) => postMessage({ type: 'setPruningSettings', settings: partial }), [postMessage]);
   const handleSetToolResultPruningSettings = useCallback((partial: Partial<ToolResultPruningSettings>) => postMessage({ type: 'setToolResultPruningSettings', settings: partial }), [postMessage]);
   const handleSetSessionTitlesSettings = useCallback((partial: Partial<SessionTitlesSettings>) => postMessage({ type: 'setSessionTitlesSettings', settings: partial }), [postMessage]);
@@ -354,6 +360,7 @@ export function useAppHandlers(
       handleSetPrivacyMode,
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
+      handleSetPruningRefreshPending,
       handleSetToolResultPruningSettings,
       handleSetSessionTitlesSettings,
       handleEditRequest,
@@ -417,6 +424,7 @@ export function useAppHandlers(
       handleOpenContextMenu,
       handleSetBrowserServerLanEnabled,
       handleSetBrowserServerEnabled,
+      handleSetPruningRefreshPending,
     ],
   );
 }

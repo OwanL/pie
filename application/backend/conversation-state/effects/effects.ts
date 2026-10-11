@@ -216,6 +216,7 @@ export interface PersistTabsEffect extends EffectBase {
   pinnedTabGroups: string[][];
   /** Persist only the session-scoped privacy markers; never session content. */
   privateSessionPaths?: string[];
+  snoozedBySession?: Record<string, import('../session-snooze.js').SessionSnoozeEntry>;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -527,6 +528,10 @@ export type Effect =
   | RecoverOpenSessionEffect
   | CreateSessionEffect
   | NotifySessionViewedEffect
+  | { kind: 'ScheduleSessionSnooze'; corrId: string; wakeAt: number | null }
+  | { kind: 'ReserveSessionSnooze'; corrId: string; sessionPath: string; reservationId: string; wakeAt: number }
+  | { kind: 'ReleaseSessionSnooze'; corrId: string; sessionPath: string; reservationId: string }
+  | { kind: 'SelectSnoozeSuccessor'; corrId: string; sessionPath: string }
   | PersistTabsEffect
   | LogEffect
   | SetModelRpcEffect

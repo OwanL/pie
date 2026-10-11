@@ -29,6 +29,8 @@ import {
 	patchWorkflowDescriptionInSource,
 	patchMcpCacheFiles,
 	patchMcpCachePathInSource,
+	patchMcpScriptLoadingFiles,
+	patchMcpScriptLoadingInSource,
 	patchWebFetchCacheFiles,
 	patchWebFetchCachePathInSource,
 	inspectManagedPackageReadiness,
@@ -81,6 +83,21 @@ const MCP_AGENT_DIR_SRC = [
 	"  return join(getAgentDir(), ...segments);",
 	"}",
 ].join("\n");
+
+// Complete supported script-loading seam from pi-mcp-adapter@2.20.1.
+const MCP_INDEX_SRC = [
+	'import { runMcpScript } from "./mcp-code.ts";',
+	'export async function execute(state, params, getPiTools, signal, executeOwner) {',
+	'        executeOwner?.throwIfInactive();',
+	'        return runMcpScript(state, params.code, params.timeoutMs, getPiTools, signal);',
+	'}',
+].join("\n");
+
+function writeMcpRequiredSources(root: string): void {
+	writePkgFile(root, "index.ts", MCP_INDEX_SRC);
+	writePkgFile(root, "mcp-code.ts", "export const fixture = true;\n");
+	writePkgFile(root, "mcp-script-worker.mjs", "export const fixture = true;\n");
+}
 
 const WEB_STORAGE_SRC = [
 	'import { join } from "node:path";',
@@ -211,6 +228,73 @@ test("patchWebFetchCachePathInSource preserves the config root and adds the cach
 	assert.ok(out.includes("return join(baseDir, FETCH_CACHE_DIR);"));
 	assert.equal(patchWebFetchCachePathInSource(out), out);
 	assert.equal(patchWebFetchCachePathInSource('export const changed = true;\n'), 'export const changed = true;\n');
+});
+
+test("MCP script source adaptation is idempotent and retains owner guards and arguments", () => {
+	const patched = patchMcpScriptLoadingInSource(MCP_INDEX_SRC);
+	assert.equal(patchMcpScriptLoadingInSource(patched), patched);
+	assert.ok(patched.includes('// Script execution is loaded on demand; registration remains eager.'));
+	assert.equal(patched.match(/executeOwner\?\.throwIfInactive\(\);/g)?.length, 2);
+	assert.ok(patched.includes('const { runMcpScript } = await import("./mcp-code.ts");'));
+	assert.ok(patched.includes('return runMcpScript(state, params.code, params.timeoutMs, getPiTools, signal);'));
+});
+
+test("MCP script file adaptation targets only index.ts and rejects drift without mutation", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writeMcpRequiredSources(root);
+		writePkgFile(root, "unrelated.ts", MCP_INDEX_SRC);
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		assert.equal(await patchMcpScriptLoadingFiles(root), 1);
+		assert.equal(await patchMcpScriptLoadingFiles(root), 0);
+		assert.equal(readFileSync(path.join(root, "unrelated.ts"), "utf8"), MCP_INDEX_SRC);
+		assert.equal(readFileSync(path.join(root, "agent-dir.ts"), "utf8"), MCP_AGENT_DIR_SRC);
+		assert.equal(readFileSync(path.join(root, "mcp-code.ts"), "utf8"), "export const fixture = true;\n");
+		const patched = patchMcpScriptLoadingInSource(MCP_INDEX_SRC);
+		for (const drift of [
+			MCP_INDEX_SRC.replace("params.timeoutMs", "123"),
+			`${MCP_INDEX_SRC}\n${MCP_INDEX_SRC}`,
+			MCP_INDEX_SRC.replace('import { runMcpScript } from "./mcp-code.ts";', '// Script execution is loaded on demand; registration remains eager.'),
+			patched.replace('        executeOwner?.throwIfInactive();\n        return', '        return'),
+		]) {
+			writePkgFile(root, "index.ts", drift);
+			assert.equal(await patchMcpScriptLoadingFiles(root), 0);
+			assert.equal(readFileSync(path.join(root, "index.ts"), "utf8"), drift);
+			assert.throws(() => patchMcpScriptLoadingInSource(drift), /Unsupported/);
+		}
+		writePkgFile(root, "index.ts", MCP_INDEX_SRC);
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.21.0"}');
+		assert.equal(await patchMcpScriptLoadingFiles(root), 0);
+		assert.equal(readFileSync(path.join(root, "index.ts"), "utf8"), MCP_INDEX_SRC);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("MCP readiness accepts mixed adaptations and self-heal completes both seams", async () => {
+	const root = makePkg();
+	try {
+		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writeMcpRequiredSources(root);
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		const inspect = () => inspectManagedPackageReadiness(root, "pi-mcp-adapter", path.join(root, "cache"));
+		assert.equal((await inspect()).sourceFingerprint, "pristine");
+		await patchMcpCacheFiles(root);
+		assert.equal((await inspect()).status, "ready");
+		assert.equal((await inspect()).sourceFingerprint, "supported-patched");
+		await runManagedPackageSelfHeal(() => null, () => root, async () => [await inspect()]);
+		assert.equal(readFileSync(path.join(root, "index.ts"), "utf8"), patchMcpScriptLoadingInSource(MCP_INDEX_SRC));
+		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
+		assert.equal((await inspect()).status, "ready");
+		assert.equal((await inspect()).sourceFingerprint, "supported-patched");
+		await runManagedPackageSelfHeal(() => null, () => root, async () => [await inspect()]);
+		assert.equal(readFileSync(path.join(root, "agent-dir.ts"), "utf8"), patchMcpCachePathInSource(MCP_AGENT_DIR_SRC));
+		writePkgFile(root, "index.ts", MCP_INDEX_SRC.replace("params.code", "params.changed"));
+		assert.equal((await inspect()).status, "unsupported-source");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 // --- fs: cache seam relocation ---
@@ -890,6 +974,7 @@ test("managed readiness rejects loose cache markers with an unsupported function
 		);
 
 		writePkgFile(mcpRoot, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writeMcpRequiredSources(mcpRoot);
 		writePkgFile(
 			mcpRoot,
 			"agent-dir.ts",
@@ -935,6 +1020,7 @@ test("managed readiness rejects duplicate, mixed-state, and incomplete fingerpri
 		assert.equal((await inspectManagedPackageReadiness(root, "pi-web-access", path.join(root, "cache"))).status, "unsupported-source");
 
 		writePkgFile(mcpRoot, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writeMcpRequiredSources(mcpRoot);
 		writePkgFile(mcpRoot, "agent-dir.ts", `${MCP_AGENT_DIR_SRC}\n${MCP_AGENT_DIR_SRC}`);
 		assert.equal((await inspectManagedPackageReadiness(mcpRoot, "pi-mcp-adapter", path.join(mcpRoot, "cache"))).status, "unsupported-source");
 		writePkgFile(mcpRoot, "agent-dir.ts", MCP_AGENT_DIR_SRC.replace('import { join, resolve } from "node:path";', 'import { join } from "node:path";'));
@@ -952,6 +1038,7 @@ test("managed readiness accepts the pristine MCP source and reports both cache t
 	const root = makePkg();
 	try {
 		writePkgFile(root, "package.json", '{"name":"pi-mcp-adapter","version":"2.20.1"}');
+		writeMcpRequiredSources(root);
 		writePkgFile(root, "agent-dir.ts", MCP_AGENT_DIR_SRC);
 		const result = await inspectManagedPackageReadiness(root, "pi-mcp-adapter", path.join(root, "cache"));
 		assert.equal(result.status, "ready");

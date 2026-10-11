@@ -2786,6 +2786,10 @@ export class StatsService implements RunObserver {
       let oldestPath: string | undefined;
       let oldestUse = Number.POSITIVE_INFINITY;
       for (const [path, entry] of this.canonicalSessionUsageByPath) {
+        // The displayed cumulative total outranks background hydration, even
+        // when the latter was inserted more recently. A single entry already
+        // fits all bounds (oversized roots are stored as explicit unknown).
+        if (path === this.getArchState().sessions.activeSessionPath) continue;
         if (entry.lastUsed < oldestUse) {
           oldestUse = entry.lastUsed;
           oldestPath = path;

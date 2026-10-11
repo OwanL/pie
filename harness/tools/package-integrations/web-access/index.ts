@@ -26,8 +26,9 @@
  *      packages under `<PI_CODING_AGENT_DIR>/npm/node_modules` (mirroring
  *      pi's `getManagedNpmInstallPath`), so stale global copies are never
  *      patched.
- *   2. Applies the exact-version/fingerprint-checked cache seams, then
- *      hard-clamps the web-search workflow and schema to raw results only.
+ *   2. Applies the exact-version/fingerprint-checked cache and MCP script
+ *      loading seams, then hard-clamps the web-search workflow and schema
+ *      to raw results only.
  *   3. Repairs `.DELETE.<hash>` corruption — renaming each artifact back to
  *      its original name only when no real file occupies that name.
  *
@@ -47,8 +48,10 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyManagedPackageSources, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../../../lib/managed-packages/managed-package-contract.mjs";
+import { classifyManagedPackageSources, classifyMcpScriptSource, patchMcpScriptLoadingInSource, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../../../lib/managed-packages/managed-package-contract.mjs";
 import { resolvePieDataPaths } from "../../../../lib/data-root/pie-data-root-core.mjs";
+
+export { patchMcpScriptLoadingInSource };
 
 /** Prefix on every diagnostic line so users can attribute/filter the source. */
 const LOG_PREFIX = "web-access-guard";
@@ -436,7 +439,8 @@ export async function inspectManagedPackageReadiness(
 			fingerprint = classifyManagedPackageSources(requirement.name, { index, storage });
 		} else {
 			const agentDir = await readFile(path.join(root, "agent-dir.ts"), "utf8");
-			fingerprint = classifyManagedPackageSources(requirement.name, { agentDir });
+			const index = await readFile(path.join(root, "index.ts"), "utf8");
+			fingerprint = classifyManagedPackageSources(requirement.name, { agentDir, index });
 		}
 	} catch {
 		fingerprint = "unavailable";
@@ -479,6 +483,37 @@ export async function patchMcpCacheFiles(root: string): Promise<number> {
 		return 0;
 	}
 	return patchPinnedCacheFile(root, "agent-dir.ts", patchMcpCachePathInSource, "mcp-cache-relocation");
+}
+
+/** Adapt only the pinned MCP entry; never scan or rewrite sibling modules. */
+export async function patchMcpScriptLoadingFiles(root: string): Promise<number> {
+	const version = await packageVersion(root, MCP_ADAPTER_PACKAGE_NAME);
+	if (version !== MCP_ADAPTER_VERSION) {
+		if (version !== null) log(`unsupported ${MCP_ADAPTER_PACKAGE_NAME} version ${version}; expected ${MCP_ADAPTER_VERSION} — script deferral skipped`);
+		return 0;
+	}
+	const target = path.join(root, "index.ts");
+	try {
+		const content = await readFile(target, "utf8");
+		const fingerprint = classifyMcpScriptSource(content);
+		if (fingerprint === "unsupported") {
+			log(`unsupported MCP script source fingerprint in ${target} — script deferral skipped`);
+			return 0;
+		}
+		if (fingerprint === "supported-patched") return 0;
+		const next = patchMcpScriptLoadingInSource(content);
+		if (next === content || classifyMcpScriptSource(next) !== "supported-patched") return 0;
+		await atomicWriteFile(target, next);
+		const actual = await readFile(target, "utf8");
+		if (actual !== next || classifyMcpScriptSource(actual) !== "supported-patched") {
+			log(`verification mismatch in ${target} after script deferral — reinstall ${MCP_ADAPTER_PACKAGE_NAME}`);
+			return 0;
+		}
+		return 1;
+	} catch (err) {
+		log(`failed to adapt MCP script loading in ${target}: ${describeErr(err)}`);
+		return 0;
+	}
 }
 
 /** Apply the version/fingerprint-checked web fetched-content cache seam. */
@@ -682,7 +717,10 @@ export async function runManagedPackageSelfHeal(
 	}
 	const mcpRoot = await resolveMcpRoot();
 	const mcp = readiness.find((result) => result.name === MCP_ADAPTER_PACKAGE_NAME);
-	if (mcp?.status === "ready" && mcpRoot) await patchMcpCacheFiles(mcpRoot);
+	if (mcp?.status === "ready" && mcpRoot) {
+		await patchMcpCacheFiles(mcpRoot);
+		await patchMcpScriptLoadingFiles(mcpRoot);
+	}
 }
 
 export async function runSelfHeal(

@@ -16,7 +16,7 @@ import {
   FileCatalogRefreshTiming,
   resolveCatalogRefreshMarkerPath,
 } from './catalog-ttl.js';
-import { reconcileCatalogText, type CatalogReconciliation } from './catalog-sync.js';
+import type { CatalogReconciliation } from './catalog-sync.js';
 import { COPILOT_HEADERS, parseCopilotModelsResponse } from './copilot-models.js';
 
 const PROVIDER = 'github-copilot';
@@ -52,9 +52,11 @@ async function syncGeneratedCatalog(root: string): Promise<void> {
 async function commitCatalog(
   root: string,
   catalogPath: string,
-  remoteModels: Parameters<typeof reconcileCatalogText>[1],
+  remoteModels: ReturnType<typeof parseCopilotModelsResponse>,
 ): Promise<CatalogReconciliation> {
   return withCatalogLock(`${catalogPath}.copilot-sync.lock`, async () => {
+    // YAML and its package resolver belong to execution, not registration.
+    const { reconcileCatalogText } = await import('./catalog-sync.js');
     // Read only after acquiring the cross-process lock. Another VS Code window
     // may have committed a newer catalog while this process fetched /models.
     const originalCatalog = await readFile(catalogPath, 'utf8');

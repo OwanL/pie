@@ -37,6 +37,20 @@ function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTo
   };
 }
 
+test('unknown cumulative coverage cannot label a live estimate as session total', () => {
+  const snapshot: SessionUsageSnapshot = { samples: [], authority: 'unknown', freshness: 'unknown' };
+  const cost = buildSessionCostIndicator(
+    buildSessionTokenUsageFromSnapshot(snapshot),
+    { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 },
+    'Selected', buildCompletedCostSummaryFromSnapshot(snapshot, undefined, undefined),
+    0, undefined, undefined,
+    { source: 'live-context', inputTokens: 0, outputTokens: 200000, cacheReadTokens: 0,
+      cacheWriteTokens: 0, totalTokens: 200000, unclassifiedContextTokens: 0 },
+    undefined, undefined, snapshot,
+  );
+  assert.equal(cost?.label, '—');
+});
+
 test('formatCostUsd renders zero, sub-cent, and normal amounts', () => {
   assert.equal(formatCostUsd(0), '$0.00');
   assert.equal(formatCostUsd(-1), '$0.00');
@@ -73,7 +87,7 @@ test('incomplete-cost session labels stay visually clean without weak suffix mar
   assert.ok(unknown);
   assert.equal(unknown.label, '—');
   assert.doesNotMatch(unknown.label, /[~*]/);
-  assert.match(unknown.ariaLabel, /unavailable because provider\/model usage is not yet priced/);
+  assert.match(unknown.ariaLabel, /cumulative usage coverage is unknown/);
 
   // A known subtotal with unpriced usage keeps a plain dollar label; the
   // incompleteness detail lives in the tooltip, not on the visible number.

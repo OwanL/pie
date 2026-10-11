@@ -848,6 +848,12 @@ export class BackendServer {
         onDiagnostic: (chunk) => backendWarn('backend-initial-context-inventory', 'worker diagnostic', { chunk }),
         onTiming: (sample) => backendLog('info', 'backend-timing', 'initial-context-inventory.stage', { ...sample }),
       });
+      // Preload only validated SDK modules while startup does independent work.
+      // No session cwd/model/agent settings or discovery until a cold open;
+      // idle expiry and coordinator disposal own this optional one-use spare.
+      void this.initialContextEstimateClient.warm().catch((error) => {
+        backendWarn('backend-initial-context-inventory', 'eager warm failed', { error: toErrorMessage(error) });
+      });
     }
     if (this.coldBrowseHelperEntryPath) {
       this.coldBrowseHelper = new ColdBrowseHelperClient({
@@ -1190,12 +1196,6 @@ export class BackendServer {
       ...(this.analyticsAuthority?.descriptor ? { analyticsActivation: this.analyticsAuthority.descriptor } : {}),
     });
 
-    // Preload only validated SDK modules in one short-lived spare. The child
-    // does not see session cwd/model/agent settings or discover user extensions
-    // until an actual cold open consumes it; idle expiry and dispose own it.
-    void this.initialContextEstimateClient?.warm().catch((error) => {
-      backendWarn('backend-initial-context-inventory', 'eager warm failed', { error: toErrorMessage(error) });
-    });
     this.startSessionCatalogPolling();
   }
 
@@ -4616,21 +4616,26 @@ export class BackendServer {
           message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' },
         } satisfies WorkerJsonObject) };
       }
-      const configuration = await this.configureSessionControlSettings(sessionPath, settings, frame.requestId);
-      const configurationSucceeded = configuration.status === 'succeeded';
-      const message = payload.prompt === undefined
-        ? { status: 'not_requested' }
-        : !configurationSucceeded
-          ? { status: 'not_sent', reason: configuration.status }
-          : await this.sendSessionControlPrompt(
-            frame,
-            sourceSessionPath,
-            sessionPath,
-            payload.prompt as string,
-            `${operationId}:send`,
-            sendCancellationGeneration,
-          );
-      return { result: workerJson({ creation, configuration, message } satisfies WorkerJsonObject) };
+      const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(sessionPath);
+      try {
+        const configuration = await this.configureSessionControlSettings(sessionPath, settings, frame.requestId);
+        const configurationSucceeded = configuration.status === 'succeeded';
+        const message = payload.prompt === undefined
+          ? { status: 'not_requested' }
+          : !configurationSucceeded
+            ? { status: 'not_sent', reason: configuration.status }
+            : await this.sendSessionControlPrompt(
+              frame,
+              sourceSessionPath,
+              sessionPath,
+              payload.prompt as string,
+              `${operationId}:send`,
+              sendCancellationGeneration,
+            );
+        return { result: workerJson({ creation, configuration, message } satisfies WorkerJsonObject) };
+      } finally {
+        releaseAdmission?.();
+      }
     }
 
     if (frame.action === 'read') {
@@ -4649,15 +4654,20 @@ export class BackendServer {
       if (Object.keys(patch).length === 0) {
         throw new BackendError('INVALID_PARAMS', 'settings.set requires at least one supported setting.');
       }
-      if (patch.model) await this.assertSessionControlModelAvailable(patch.model);
       const resolved = this.resolveSessionControlTarget('settings.set', payload, sourceSessionPath);
       this.assertSessionNotClosing(resolved.sessionPath);
-      if (patch.subagentProviderChoices) {
-        const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
-        BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
+      const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(resolved.sessionPath);
+      try {
+        if (patch.model) await this.assertSessionControlModelAvailable(patch.model);
+        if (patch.subagentProviderChoices) {
+          const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
+          BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
+        }
+        const configuration = await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId);
+        return { result: workerJson({ sessionPath: resolved.sessionPath, configuration }) };
+      } finally {
+        releaseAdmission?.();
       }
-      const configuration = await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId);
-      return { result: workerJson({ sessionPath: resolved.sessionPath, configuration }) };
     }
 
     if (frame.action === 'message') {
@@ -4668,31 +4678,36 @@ export class BackendServer {
       if (patch && Object.keys(patch).length === 0) {
         throw new BackendError('INVALID_PARAMS', 'message.settings must contain at least one supported setting.');
       }
-      if (patch?.model) await this.assertSessionControlModelAvailable(patch.model);
       const resolved = payload.replyTo !== undefined
         ? this.resolveSessionControlReplyTarget(payload, sourceSessionPath)
         : this.resolveSessionControlTarget('message', payload, sourceSessionPath);
       const sendCancellationGeneration = this.workerRuntimeRouter
         ?.operationCancellationGeneration?.(resolved.sessionPath);
       this.assertSessionNotClosing(resolved.sessionPath);
-      if (patch?.subagentProviderChoices) {
-        const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
-        BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
+      const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(resolved.sessionPath);
+      try {
+        if (patch?.model) await this.assertSessionControlModelAvailable(patch.model);
+        if (patch?.subagentProviderChoices) {
+          const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
+          BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
+        }
+        const configuration = patch
+          ? await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId)
+          : { status: 'not_requested' };
+        const message = configuration.status === 'succeeded' || configuration.status === 'not_requested'
+          ? await this.sendSessionControlPrompt(
+            frame,
+            sourceSessionPath,
+            resolved.sessionPath,
+            payload.prompt,
+            operationId,
+            sendCancellationGeneration,
+          )
+          : { status: 'not_sent', reason: configuration.status };
+        return { result: workerJson({ sessionPath: resolved.sessionPath, configuration, message }) };
+      } finally {
+        releaseAdmission?.();
       }
-      const configuration = patch
-        ? await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId)
-        : { status: 'not_requested' };
-      const message = configuration.status === 'succeeded' || configuration.status === 'not_requested'
-        ? await this.sendSessionControlPrompt(
-          frame,
-          sourceSessionPath,
-          resolved.sessionPath,
-          payload.prompt,
-          operationId,
-          sendCancellationGeneration,
-        )
-        : { status: 'not_sent', reason: configuration.status };
-      return { result: workerJson({ sessionPath: resolved.sessionPath, configuration, message }) };
     }
 
     const deletePayload = payload.delete;
@@ -4846,6 +4861,18 @@ export class BackendServer {
       request = { ...request, params };
     }
     const router = this.workerRuntimeRouter;
+    if (request.method === 'session.snoozeReserve' || request.method === 'session.snoozeRelease') {
+      const params = request.params as { sessionPath?: unknown; reservationId?: unknown; wakeAt?: unknown } | undefined;
+      if (!router || !params || typeof params.sessionPath !== 'string' || !params.sessionPath
+        || typeof params.reservationId !== 'string' || !params.reservationId
+        || (request.method === 'session.snoozeReserve' && (!Number.isSafeInteger(params.wakeAt) || (params.wakeAt as number) <= Date.now()))) {
+        throw new BackendError('INVALID_SNOOZE_REQUEST', 'Invalid snooze reservation request.');
+      }
+      onRequestValidated?.();
+      return request.method === 'session.snoozeReserve'
+        ? await router.reserveSnooze(params.sessionPath, params.reservationId, params.wakeAt as number)
+        : await router.releaseSnooze(params.sessionPath, params.reservationId);
+    }
     if (request.method === 'message.edit') {
       const params = validateMessageEdit(request.params);
       onRequestValidated?.();
@@ -5179,8 +5206,8 @@ export class BackendServer {
         const store = this.initializeColdSessionStore();
         await this.runColdSessionMutation(sessionPath, async () => {
           const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
-          if (retained) store.setHandleModelSettings(retained.handle, updates);
-          else store.setModelSettings(sessionPath, updates);
+          if (retained) await store.setHandleModelSettings(retained.handle, updates);
+          else await store.setModelSettings(sessionPath, updates);
         });
       },
       applyColdSystemPromptToggles: async (sessionPath, disabledEntries) => {

@@ -15,9 +15,15 @@ import type { SessionTabRunAction } from './run-state';
 import type { SessionTabContextTarget } from './types';
 import { useTabDragAndDrop } from './use-drag-and-drop.js';
 import { PinnedGroupContextMenu } from './pinned-group-context-menu';
+import { getSnoozeBlockedReason, type SnoozeDuration, type SnoozedSession } from './snooze';
+import { SnoozedSessionsAction } from './snoozed-sessions-menu';
 
 interface SessionTabsProps {
   sessions: SessionSummary[];
+  snoozedSessions?: SnoozedSession[];
+  sessionCapabilitiesBySession?: Record<string, import('../../lib/protocol/index.js').SessionCapabilities>;
+  onSnooze?: (path: string, duration: SnoozeDuration) => void;
+  onRestoreSnoozed?: (path: string) => void;
   sessionCatalogProgress?: SessionCatalogProgress;
   openTabPaths: string[];
   pinnedTabPaths: string[];
@@ -118,6 +124,18 @@ function areSessionTabsPropsEqual(
     && previous.sessionCatalogProgress?.total === next.sessionCatalogProgress?.total
     && previous.backendReady === next.backendReady
     && previous.hideConnectingWheel === next.hideConnectingWheel
+    && previous.onSnooze === next.onSnooze
+    && previous.onRestoreSnoozed === next.onRestoreSnoozed
+    && (previous.snoozedSessions ?? []).length === (next.snoozedSessions ?? []).length
+    && (previous.snoozedSessions ?? []).every((session, index) => {
+      const other = next.snoozedSessions?.[index];
+      return session.path === other?.path && session.name === other.name && session.wakeAt === other.wakeAt;
+    })
+    && previous.openTabPaths.every((path) => {
+      const left = previous.sessionCapabilitiesBySession?.[path];
+      const right = next.sessionCapabilitiesBySession?.[path];
+      return left?.billableActivity === right?.billableActivity && !!left?.primaryOperation === !!right?.primaryOperation;
+    })
     && previous.onSelect === next.onSelect
     && previous.onClose === next.onClose
     && previous.onMove === next.onMove
@@ -150,6 +168,10 @@ function areSessionTabsPropsEqual(
 
 function SessionTabsView({
   sessions,
+  snoozedSessions = [],
+  sessionCapabilitiesBySession,
+  onSnooze,
+  onRestoreSnoozed,
   sessionCatalogProgress,
   openTabPaths,
   pinnedTabPaths,
@@ -182,6 +204,7 @@ function SessionTabsView({
   deferredTimerSessionPaths,
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
+  const newSessionRef = useRef<HTMLButtonElement>(null);
   const [openGroupPath, setOpenGroupPath] = useState<string | null>(null);
   // Snapshot of the currently-open group's members, kept in sync while the
   // open group stays valid. When the open group's identifier drops out of its
@@ -613,6 +636,8 @@ function SessionTabsView({
         <DropGap index={renderedUnpinnedPaths.length} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
       </div>
       <div class="session-tabs-actions">
+        {onRestoreSnoozed && <SnoozedSessionsAction sessions={snoozedSessions}
+          onRestore={onRestoreSnoozed} available={!!backendReady} fallbackFocusRef={newSessionRef} />}
         {backendReady && sessionCatalogProgress?.complete === false && (
           <span
             class="session-tabs-indexing"
@@ -625,6 +650,7 @@ function SessionTabsView({
           </span>
         )}
         <button
+          ref={newSessionRef}
           class="session-tabs-new"
           type="button"
           title={backendReady ? 'New session' : 'New session is available when the backend is ready'}
@@ -673,6 +699,13 @@ function SessionTabsView({
           isPinned={pinnedPathSet.has(tabContextMenu.tabPath)}
           pinnedItems={pinnedItems}
           hasDeferredTriggers={deferredPathSet.has(tabContextMenu.tabPath)}
+          snoozeBlockedReason={getSnoozeBlockedReason(tabContextMenu.tabPath,
+            sessionCapabilitiesBySession?.[tabContextMenu.tabPath],
+            runningPathSet.has(tabContextMenu.tabPath),
+            startingModelPathSet.has(tabContextMenu.tabPath),
+            deferredPathSet.has(tabContextMenu.tabPath),
+            hasPendingRequest(pendingExtensionUIRequestsBySession, tabContextMenu.tabPath)) ?? (!backendReady ? 'Snoozing is available when the backend is ready.' : undefined)}
+          onSnooze={onSnooze}
           onNew={onNew}
           onContextAction={onContextAction}
           onGroupPinnedTab={onGroupPinnedTab}

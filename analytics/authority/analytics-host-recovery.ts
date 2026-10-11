@@ -73,6 +73,9 @@ export async function recoverStaleAnalyticsHosts(
     cursor = page.nextCursor;
   }
 
+  // A complete registry snapshot with no candidates needs no OS evidence.
+  if (candidates.length === 0) return { retiredHosts: 0, reclaimedLeases: 0 };
+
   const processCensus = await options.readProcessCensus();
   if (!processCensus.complete) {
     options.log?.('warn', 'stale-host recovery skipped; process census is incomplete', {

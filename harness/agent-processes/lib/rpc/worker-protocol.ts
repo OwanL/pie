@@ -94,7 +94,9 @@ export type WorkerRuntimeOperation =
   | 'settings.set'
   | 'systemPromptToggles.set'
   | 'test.extensionCommand'
-  | 'session.managerFence';
+  | 'session.managerFence'
+  | 'session.snoozeReserve'
+  | 'session.snoozeRelease';
 
 export type WorkerRuntimeEventName =
   | 'session.opened'
@@ -973,7 +975,7 @@ const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
   'session.truncateAfter', 'session.title.generate', 'session.title.assign', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
-  'settings.set', 'systemPromptToggles.set', 'test.extensionCommand', 'session.managerFence',
+  'settings.set', 'systemPromptToggles.set', 'test.extensionCommand', 'session.managerFence', 'session.snoozeReserve', 'session.snoozeRelease',
 ]);
 
 const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
@@ -1791,11 +1793,8 @@ function validateJsonObject(value: unknown, label: string): string | undefined {
 
 function validateJsonValue(value: unknown, label: string): string | undefined {
   const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
-  let nodes = 0;
   while (stack.length > 0) {
     const item = stack.pop()!;
-    nodes += 1;
-    if (nodes > 100_000) return `${label} is too structurally complex.`;
     if (item.depth > 64) return `${label} exceeds the maximum nesting depth.`;
     const current = item.value;
     if (current === null || typeof current === 'string' || typeof current === 'boolean') continue;

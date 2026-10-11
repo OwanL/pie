@@ -45,7 +45,10 @@ export function inspectManagedPackage({ agentDir, packageName, cacheDir = proces
   try {
     const files = packageName === 'pi-web-access'
       ? { index: readFileSync(path.join(root, 'index.ts'), 'utf8'), storage: readFileSync(path.join(root, 'storage.ts'), 'utf8') }
-      : { agentDir: readFileSync(path.join(root, 'agent-dir.ts'), 'utf8') };
+      : {
+          index: readFileSync(path.join(root, 'index.ts'), 'utf8'),
+          agentDir: readFileSync(path.join(root, 'agent-dir.ts'), 'utf8'),
+        };
     fingerprint = classifyManagedPackageSources(packageName, files);
   } catch {
     fingerprint = 'unavailable';

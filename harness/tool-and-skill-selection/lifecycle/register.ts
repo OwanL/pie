@@ -1,5 +1,5 @@
 import type { ExtensionAPI, BeforeAgentStartEvent, InputEvent, ToolCallEvent, Skill } from "@earendil-works/pi-coding-agent";
-import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "./logger.js";
+import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "./logger.ts";
 import {
 	getFormatSkillsForPromptImpl,
 	getAllowedChildTools,
@@ -10,12 +10,12 @@ import {
 	recordPrunedTools,
 	state,
 	PROCESS_SESSION_ID,
-} from "../state/selector-state.js";
-import { toErrorMessage } from "../../../lib/structured-logging/error-message.js";
-import { rootSessionAttribution } from "../../../lib/session-attribution.js";
-import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.js";
-import { createRequestCapabilityDefinition, type PiToolSeams } from "../recovery/request-capability-ports.js";
-import { getCodeVersion, prewarmCodeVersion } from "./version.js";
+} from "../state/selector-state.ts";
+import { toErrorMessage } from "../../../lib/structured-logging/error-message.ts";
+import { rootSessionAttribution } from "../../../lib/session-attribution.ts";
+import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.ts";
+import { createRequestCapabilityDefinition, type PiToolSeams } from "../recovery/request-capability-ports.ts";
+import { getCodeVersion, prewarmCodeVersion } from "./version.ts";
 import type { PruningResult } from "../settings/config-types.js";
 import {
 	buildPrepassFingerprint,
@@ -23,25 +23,34 @@ import {
 	cacheSuccessfulPrepassCrossSession,
 	getCachedPrepass,
 	getCachedPrepassCrossSession,
-} from "../state/prepass-cache.js";
-import { pruningResultRenderer } from "./render.js";
+} from "../state/prepass-cache.ts";
+import { pruningResultRenderer } from "./render.ts";
 import type { PrepassInvocation, PrepassRunResult, PrepassUsage, SkillPruningResult, ToolPruningResult } from "../prepass/types.js";
-import { getCompleteFn, getRecentConversation, runPruningPrepass } from "../prepass/prepass.js";
-import { buildReplacement, buildDecision, buildFeedbackMessage, estimateToolTokens } from "../prepass/message-builders.js";
-import { shouldSkipPruning, getSessionId, getSessionPath, getConfig } from "./pruning-lifecycle.js";
-import { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } from "../../agent-instructions/skill-selection/skill-policy.js";
-import { applyToolSelection, RECOVERY_TOOL_NAME } from "../../tools/selection/tool-policy.js";
-import { ASK_USER_TOOL_NAME } from "../../tools/catalog/tool-names.js";
-import { isAutonomousModeEnabled } from "../settings/autonomous-mode.js";
-import { isInSubagentContext, subagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.js";
+import { buildReplacement, buildDecision, buildFeedbackMessage, estimateToolTokens } from "../prepass/message-builders.ts";
+import { shouldSkipPruning, getSessionId, getSessionPath, getConfig } from "./pruning-lifecycle.ts";
+import { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } from "../../agent-instructions/skill-selection/skill-policy.ts";
+import { applyToolSelection, RECOVERY_TOOL_NAME } from "../../tools/selection/tool-policy.ts";
+import { ASK_USER_TOOL_NAME } from "../../tools/catalog/tool-names.ts";
+import { isAutonomousModeEnabled } from "../settings/autonomous-mode.ts";
+import { isInSubagentContext, subagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.ts";
 import {
 	currentChildToolRuntimeOwner,
 	registerChildToolRuntimeCleanup,
-} from "../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js";
-import { clearSessionPruningState } from "../state/session-pruning-state.js";
+} from "../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.ts";
+import { clearSessionPruningState } from "../state/session-pruning-state.ts";
 
 const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
 const WAKE_TOOL_NAMES = ["wakeup_timer"];
+
+// Share only execution-module loading, never registration/session closures.
+// A rejected load must not poison later refreshes or other registrations.
+let prepassModulePromise: Promise<typeof import("../prepass/prepass.js")> | undefined;
+function loadPrepassModule() {
+	return prepassModulePromise ??= import("../prepass/prepass.ts").catch((error) => {
+		prepassModulePromise = undefined;
+		throw error;
+	});
+}
 
 export default function register(pi: ExtensionAPI) {
 	// Asynchronously pre-warm the cached code version (git SHA) so the first
@@ -168,10 +177,40 @@ export default function register(pi: ExtensionAPI) {
 			}
 		}
 
+		const activeConfig = getConfig();
+		const turnProtectedToolNames = event.prompt.startsWith(DEFERRED_TRIGGER_WAKE_PREFIX)
+			? WAKE_TOOL_NAMES
+			: [];
 		const reapplySelection = () => {
-			const hiddenNames = new Set(getHiddenSkills(sessionId).keys());
+			const hiddenSkills = getHiddenSkills(sessionId);
+			let skills = (event.systemPromptOptions.skills ?? []) as Skill[];
+			if (!isChildSession) {
+				// Sticky decisions still honor the latest visibility/protection policy.
+				// Mutate only the owned hidden catalog: recordHiddenSkills would also
+				// clear loaded-skill recovery records, which remain valid on reuse.
+				const { visibleSkills, effectivePinned } = resolveVisibleSkills(skills, activeConfig);
+				skills = visibleSkills;
+				for (const name of effectivePinned) hiddenSkills.delete(name);
+
+				const previouslyPruned = getPrunedTools(sessionId);
+				const toolsManuallyDisabled = Array.isArray(event.systemPromptOptions.selectedTools)
+					&& event.systemPromptOptions.selectedTools.length === 0;
+				if (!toolsManuallyDisabled && previouslyPruned.size > 0) {
+					const active = toolSeams.getActiveTools();
+					const considered = new Set([...active, ...previouslyPruned]);
+					const available = toolSeams.getAllTools().filter((tool) => considered.has(tool.name)
+						&& !(autonomousMode && tool.name === ASK_USER_TOOL_NAME));
+					// Reusing the selector preserves transitive dependencies as well as
+					// explicit and wake-turn protection, without touching active tools.
+					const selection = applyToolSelection(available,
+						[...previouslyPruned].filter((name) => !active.includes(name)), activeConfig, turnProtectedToolNames);
+					const restored = selection.includedToolNames.filter((name) => previouslyPruned.has(name) && !active.includes(name));
+					if (restored.length > 0) setActiveTools([...active, ...restored]);
+					for (const name of selection.includedToolNames) previouslyPruned.delete(name);
+				}
+			}
+			const hiddenNames = new Set(hiddenSkills.keys());
 			if (hiddenNames.size === 0) return promptRefreshResult();
-			const skills = (event.systemPromptOptions.skills ?? []) as Skill[];
 			const match = modifiedSystemPrompt.match(SKILLS_BLOCK_RE);
 			if (!match) return promptRefreshResult();
 			const includedSkills = skills.filter((skill) => !hiddenNames.has(skill.name));
@@ -197,15 +236,14 @@ export default function register(pi: ExtensionAPI) {
 			return reapplySelection();
 		}
 
-		const activeConfig = getConfig();
 		if (isChildSession) processedChildSessions.add(sessionId);
 		const skipInfo = shouldSkipPruning(event, activeConfig);
 		const mainDisabled = skipInfo.skip && skipInfo.reason !== "too-short";
 		if (!isChildSession && !mainDisabled
 			&& state.processedMainSessions.get(sessionId) === activeConfig.mode
 			&& !activeConfig.followUpEnabled && !event.refreshPruning) {
-			// Preserve the actual live tools, including recoveries and user changes.
-			// Pi rebuilds the skills prompt each request, so only reapply its filter.
+			// Preserve recoveries and user changes while reconciling protections
+			// against the latest config before reapplying Pi's rebuilt skills block.
 			return reapplySelection();
 		}
 		if (!isChildSession) {
@@ -290,6 +328,16 @@ export default function register(pi: ExtensionAPI) {
 		const hasToolsConfig = activeConfig.tools && availableTools.length > 0;
 
 		if (skills.length > 0 || hasToolsConfig) {
+			let prepassModule: typeof import("../prepass/prepass.js");
+			try {
+				prepassModule = await loadPrepassModule();
+			} catch (error) {
+				if (stopIfSessionDisposed()) return undefined;
+				throw error;
+			}
+			// Loading introduces a new suspension point before any scorer work.
+			if (stopIfSessionDisposed()) return undefined;
+			const { getCompleteFn, getRecentConversation, runPruningPrepass } = prepassModule;
 			const { visibleSkills, effectivePinned } = resolveVisibleSkills(skills, activeConfig);
 			const contextFile = event.systemPromptOptions.contextFiles?.[0];
 
@@ -303,9 +351,6 @@ export default function register(pi: ExtensionAPI) {
 			// The recovery tool itself is never a prune candidate. Tools recovered
 			// under the previous decision are not protected here: this new decision
 			// may hide them again when the task changes.
-			const turnProtectedToolNames = event.prompt.startsWith(DEFERRED_TRIGGER_WAKE_PREFIX)
-				? WAKE_TOOL_NAMES
-				: [];
 			const forcedToolNames = new Set<string>([
 				...(activeConfig.tools?.alwaysKeep ?? []),
 				RECOVERY_TOOL_NAME,

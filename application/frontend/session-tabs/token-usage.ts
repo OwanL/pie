@@ -1281,6 +1281,9 @@ export function buildSessionCostIndicator(
       `  Provenance: ${incompleteInvocations} unknown and ${unpricedInvocations} unpriced invocation(s).`,
     );
   }
+  if (summary.accountingUnknown) {
+    tooltipLines.push('', 'Cumulative session cost unavailable · known rows and current turn estimates are subtotals only.');
+  }
   if (usageRefreshFailed) {
     tooltipLines.push('', 'Usage refresh failed · showing the last completed snapshot.');
   } else if (usageIsStale) {
@@ -1304,7 +1307,9 @@ export function buildSessionCostIndicator(
   // refresh keeps its `!` marker. Missing cost is an explicit em dash, never
   // a fabricated zero.
   const refreshErrorMarker = usageRefreshFailed ? '!' : '';
-  const label = hasIncompleteCost
+  const label = summary.accountingUnknown
+    ? `—${refreshErrorMarker}`
+    : hasIncompleteCost
     ? hasAnyKnownCost ? `${displayCost}${refreshErrorMarker}` : `—${refreshErrorMarker}`
     : usageNeedsStatusIndicator && !hasAnyKnownCost ? `—${refreshErrorMarker}` : `${displayCost}${refreshErrorMarker}`;
   const freshnessAria = usageRefreshFailed
@@ -1312,7 +1317,9 @@ export function buildSessionCostIndicator(
     : usageIsStale
       ? ' Usage refresh in progress; showing the last completed snapshot.'
       : '';
-  const ariaLabel = hasIncompleteCost
+  const ariaLabel = summary.accountingUnknown
+    ? `Session cost unavailable; cumulative usage coverage is unknown.${freshnessAria}`
+    : hasIncompleteCost
     ? hasAnyKnownCost
       ? `Known estimated session cost ${displayCost}; some provider/model usage is not yet priced.${freshnessAria}`
       : `Estimated session cost unavailable because provider/model usage is not yet priced.${freshnessAria}`

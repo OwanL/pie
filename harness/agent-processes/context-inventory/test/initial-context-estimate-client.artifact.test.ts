@@ -679,6 +679,8 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
   const repoRoot = path.resolve(__dirname, '../../../../');
   const artifactDir = sourceDescriptor.artifactDir;
   const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
+  assert.deepEqual(selectedRuntime.sdkRuntime.descriptor, sourceDescriptor,
+    'the real child explicitly reuses the verified --sdk-path candidate descriptor');
   const sdkPath = selectedRuntime.sdkPath;
   const tsxLoader = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', 'tsx', 'dist', 'loader.cjs');
   await fs.access(path.join(sdkPath, 'dist', 'index.js'));
@@ -690,6 +692,13 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
   const sessionDir = path.join(tempDir, 'sessions');
   const cwd = path.join(tempDir, 'workspace');
   const systemPromptPath = path.join(agentDir, 'SYSTEM.md');
+  const extensionDir = path.join(agentDir, 'extensions', 'inventory-fixture');
+  const helperPath = path.join(extensionDir, 'helper.ts');
+  const toolName = 'inventory_source_fixture';
+  const initialHelperValue = 'initial-transitive-helper-sentinel';
+  const updatedHelperValue = 'changed-after-preload-helper-sentinel';
+  const writeHelper = (value: string) => fs.writeFile(helperPath,
+    `export const metadata: string = ${JSON.stringify(value)};\n`);
   const workerPath = path.resolve(__dirname, '..', 'initial-context-estimate-worker.ts');
   const timings: InitialContextEstimateTimingSample[] = [];
   const diagnostics: string[] = [];
@@ -736,6 +745,7 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
       fs.mkdir(authDir, { recursive: true }),
       fs.mkdir(cwd, { recursive: true }),
       fs.mkdir(agentDir, { recursive: true }),
+      fs.mkdir(extensionDir, { recursive: true }),
       fs.mkdir(sessionDir, { recursive: true }),
     ]);
     await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({
@@ -759,6 +769,32 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
       defaultModel: 'inventory-test-model',
     }));
     await fs.writeFile(systemPromptPath, 'request-time-settings-sentinel');
+    await writeHelper(initialHelperValue);
+    await fs.writeFile(path.join(extensionDir, 'index.ts'), `
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { StringEnum } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
+import { metadata } from './helper.js';
+
+export default function (pi: ExtensionAPI) {
+  // The production inventory default remains Jiti until the compiler passes its speed gate.
+  const evaluation = new Error().stack?.includes('pi-compiled-extensions-')
+    ? 'compiled-frame-confirmed' : 'jiti-frame-confirmed';
+  pi.registerTool({
+    name: ${JSON.stringify(toolName)},
+    label: 'Inventory source fixture',
+    description: metadata + ' ' + evaluation,
+    promptSnippet: metadata,
+    parameters: Type.Object({
+      value: Type.String({ description: metadata }),
+      mode: StringEnum(['offline-fixture']),
+    }),
+    async execute() {
+      throw new Error('Inventory must never execute the fixture tool');
+    },
+  });
+}
+`);
 
     const createClient = () => new InitialContextEstimateClient({
       entryPath: workerPath,
@@ -796,10 +832,27 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
     assert.ok(coldInventory?.systemPrompts.some((entry) => entry.text.includes('request-time-settings-sentinel')),
       JSON.stringify({ timings, diagnostics }));
 
+    const assertFixtureCatalog = (inventory: NonNullable<typeof coldInventory>, metadata: string) => {
+      const catalog = inventory.systemPrompts.find((entry) => entry.id === 'tools');
+      assert.ok(catalog, 'registered tools contribute to the inventory catalog');
+      assert.ok(catalog.text.includes(`## ${toolName}\n\n${metadata} jiti-frame-confirmed`),
+        'production discovery retains Jiti while the compiler speed gate is unmet');
+      assert.ok(catalog.text.includes(`"description": "${metadata}"`),
+        'the transitive helper contributes to the TypeBox parameter schema');
+      assert.ok(catalog.text.includes('"offline-fixture"'),
+        'the schema includes the aliased SDK StringEnum contribution');
+    };
+    assert.ok(coldInventory);
+    assertFixtureCatalog(coldInventory, initialHelperValue);
+
     await client.warm();
     await fs.writeFile(systemPromptPath, 'changed-after-preload-sentinel');
+    await writeHelper(updatedHelperValue);
     const freshSettingsInventory = await client.discover(input);
     assert.ok(freshSettingsInventory);
+    assertFixtureCatalog(freshSettingsInventory, updatedHelperValue);
+    assert.ok(!freshSettingsInventory.systemPrompts.some((entry) => entry.text.includes(initialHelperValue)),
+      'SDK prewarm does not cache the extension or its transitive helper metadata');
     assert.ok(freshSettingsInventory.systemPrompts.some((entry) => entry.text.includes('changed-after-preload-sentinel')),
       'the prewarmed process first reads user resources after the actual request');
     assert.ok(!freshSettingsInventory.systemPrompts.some((entry) => entry.text.includes('request-time-settings-sentinel')),
@@ -810,6 +863,10 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
     const reloadedSettingsInventory = await client.discover(input);
     assert.ok(reloadedSettingsInventory?.systemPrompts.some((entry) => entry.text.includes('freshly-reloaded-system-prompt-sentinel')),
       'a later disposable process reads the latest user prompt settings');
+    assert.ok(reloadedSettingsInventory);
+    assertFixtureCatalog(reloadedSettingsInventory, updatedHelperValue);
+    assert.ok(!reloadedSettingsInventory.systemPrompts.some((entry) => entry.text.includes(initialHelperValue)),
+      'later disposable processes retain no stale registered helper metadata');
 
     const cold = timings.find((sample) => sample.stage === 'discover' && sample.prewarmed === false);
     const warm = timings.find((sample) => sample.stage === 'discover' && sample.prewarmed === true);

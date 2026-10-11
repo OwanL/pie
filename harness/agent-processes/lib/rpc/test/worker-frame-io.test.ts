@@ -416,12 +416,13 @@ test('refresh flag cannot merge across exact identity or protectively correlated
       { accepted: true, coalesced: false });
     assert.equal(writer.getDebugState().queueDepth.lifecycle, 2);
   }
-  for (const extra of [
+  const extras: WorkerJsonObject[] = [
     { session: { path: '/other', sessionId: 'session-1' } },
     { session: { path: '/session.jsonl', sessionId: 'session-2' } },
     { selectionToken: 'selection' }, { operationId: 'operation' }, { replacesSessionPath: '/old' },
     { runtimeReady: false }, { transcriptSkipped: true }, { snapshotUnavailable: { code: 'gap' } },
-  ]) {
+  ];
+  for (const extra of extras) {
     const writer = new BoundedWorkerIpcWriter(new FakeSendTarget());
     writer.enqueue(command('active'));
     writer.enqueue(refresh('old'), replaceable);

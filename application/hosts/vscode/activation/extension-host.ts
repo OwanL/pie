@@ -104,7 +104,23 @@ export class PieExtension implements vscode.Disposable {
   }
 
   async start(): Promise<void> {
-    const acquisition = await this.acquireHostOwnership();
+    // Await boundary includes any bounded standalone handoff, not runtime startup.
+    // This span can overlap activation timings; durations are not additive.
+    const ownershipStarted = performance.now();
+    let acquisition: PieHostAcquisition;
+    let ownershipOutcome: 'success' | 'failure' = 'failure';
+    try {
+      acquisition = await this.acquireHostOwnership();
+      ownershipOutcome = acquisition.status === 'acquired' ? 'success' : 'failure';
+    } finally {
+      try {
+        appendPieLog('info', 'startup', 'DEBUG-startup-preflight', {
+          stage: 'host-ownership-acquisition',
+          durationMs: performance.now() - ownershipStarted,
+          outcome: ownershipOutcome,
+        });
+      } catch { /* Diagnostics must not change acquisition or refusal behavior. */ }
+    }
     if (acquisition.status !== 'acquired') {
       // Visible refusal notification; pie starts nothing in this window.
       this.ownershipRefused = true;

@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import type { ComponentChildren } from 'preact';
 import { useContext, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { LazyDetailRef, ToolCall } from '../../../lib/protocol/index.js';
 import { Tooltip } from '../../lib/components/tooltip';
@@ -56,7 +57,17 @@ function RawModelExchange({ detailRef, unavailable }: { detailRef?: LazyDetailRe
       const host = rootRef.current?.closest<HTMLElement>('.pie-tooltip-host');
       if (!host) return;
       const rect = host.getBoundingClientRect();
-      host.style.top = `${Math.max(6, Math.min(rect.top, window.innerHeight - rect.height - 6))}px`;
+      // Activatable text triggers reserve space on one side. Loading a larger
+      // capture must stay on that side rather than growing over the trigger.
+      const trigger = host.style.getPropertyValue('--pie-tooltip-available-height')
+        ? document.querySelector<HTMLElement>(`[aria-describedby~="${host.id}"]`)
+        : null;
+      if (trigger) {
+        const anchor = trigger.getBoundingClientRect();
+        host.style.top = `${rect.top < anchor.top ? anchor.top - rect.height - 6 : anchor.bottom + 6}px`;
+      } else {
+        host.style.top = `${Math.max(6, Math.min(rect.top, window.innerHeight - rect.height - 6))}px`;
+      }
     });
     observer.observe(rootRef.current);
     return () => observer.disconnect();
@@ -97,7 +108,7 @@ function RawModelExchange({ detailRef, unavailable }: { detailRef?: LazyDetailRe
   );
 }
 
-export function RawToolInspector({ toolCall }: { toolCall: ToolCall }) {
+export function RawToolInspector({ toolCall, children, triggerClassName }: { toolCall: ToolCall; children?: ComponentChildren; triggerClassName?: string }) {
   // Tooltip uses a detached Preact root: resolve ownership here, not inside it.
   const askUser = useContext(AskUserContext);
   const subagent = useContext(SubagentCallContext);
@@ -111,10 +122,10 @@ export function RawToolInspector({ toolCall }: { toolCall: ToolCall }) {
   return (
     <Tooltip contentNode={<RawModelExchange detailRef={detailRef} unavailable={subagent
       ? 'Model exchange capture unavailable: child durable session identity is not available.'
-      : 'Model exchange capture unavailable: session identity is not available.'} />} richRole="region" returnFocusOnEscape freezeWhileVisible placement="bottom" triggerClassName="tool-call-icon-inspector">
-      <button type="button" class="tool-call-kind-icon tool-call-raw-action" aria-label={`Inspect ${toolCall.name} model exchange`} onClick={(e) => e.stopPropagation()}>
+      : 'Model exchange capture unavailable: session identity is not available.'} />} richRole="region" returnFocusOnEscape freezeWhileVisible placement="bottom" dismissOnActivation={children !== undefined} triggerClassName={triggerClassName ?? 'tool-call-icon-inspector'}>
+      {children ?? <button type="button" class="tool-call-kind-icon tool-call-raw-action" aria-label={`Inspect ${toolCall.name} model exchange`} onClick={(e) => e.stopPropagation()}>
         <ToolIcon kind={toolIconKind(toolCall.name)} />
-      </button>
+      </button>}
     </Tooltip>
   );
 }

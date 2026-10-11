@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Private source-to-artifact builder. Never installs into the checkout or publishes.
-import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, lstatSync } from 'node:fs';
-import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { constants, existsSync, lstatSync, realpathSync } from 'node:fs';
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -28,6 +29,29 @@ const jsonText = value => `${JSON.stringify(canonical(value), null, 2)}\n`;
 const readJson = async file => JSON.parse(await readFile(file, 'utf8'));
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 
+/** Internal embedding seam. Snapshot/install ownership remains the caller's responsibility;
+ * public CLIs never accept this context or inventory overrides. */
+export function resolvePiBuildContext(context) {
+  if (context === undefined) return { repositoryRoot: REPOSITORY, env: process.env, dependencyOwnerRoot: REPOSITORY };
+  check(context && Object.keys(context).every(key => ['repositoryRoot', 'env', 'dependencyOwnerRoot'].includes(key)), 'Invalid Pi build context');
+  const root = context.repositoryRoot;
+  check(typeof root === 'string' && path.isAbsolute(root) && path.resolve(root) === root && realpathSync(root) === root, 'Pi build root must be absolute and canonical');
+  check(context.dependencyOwnerRoot === root, 'Dependencies must be owned by the selected root');
+  check(context.env && Object.values(context.env).every(value => typeof value === 'string'), 'Context requires a string environment');
+  for (const relative of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.prototools', '.npmrc', 'harness/pi/LICENSE', ...PACKAGE_DIRS.flatMap(dir => [`harness/pi/packages/${dir}/package.json`, `harness/pi/packages/${dir}/tsconfig.build.json`])]) {
+    const file = path.join(root, relative);
+    check(lstatSync(file).isFile() && realpathSync(file) === file, `Nonordinary build input: ${file}`);
+  }
+  const modules = path.join(root, 'node_modules');
+  check(lstatSync(modules).isDirectory() && realpathSync(modules) === modules, 'Separately owned dependencies required');
+  const require = createRequire(path.join(root, 'package.json'));
+  for (const tool of ['typescript/bin/tsc', 'typescript', 'esbuild']) {
+    const entry = realpathSync(require.resolve(tool));
+    check(isWithin(entry, modules) && lstatSync(entry).nlink === 1, `Build tool must be privately owned: ${tool}`);
+  }
+  return { repositoryRoot: root, dependencyOwnerRoot: root, env: { ...context.env } };
+}
+
 /** Resolve the required helper for the current native target; Linux has none. */
 export function resolveNativeModifierHelper(runtimeRoot, platform, arch, fileExists = existsSync) {
   if (platform === 'linux') return undefined;
@@ -49,18 +73,34 @@ function validateManifests(manifests, expectedVersion = readPinnedPiSourceVersio
   for (const manifest of manifests) check(manifest.version === expectedVersion, `Unexpected ${manifest.name} version; expected in-tree Pi source version ${expectedVersion}`);
 }
 const isWithin = (file, root) => { const rel = path.relative(root, file); return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)); };
+/** Resolve aliases without creating any portion of a prospective output.
+ * On Windows the JS realpath implementation preserves 8.3 spelling; native
+ * realpath expands it so independently addressed ancestors share one authority. */
+function canonicalProspectivePath(file) {
+  let ancestor = path.resolve(file);
+  const missing = [];
+  while (!existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    check(parent !== ancestor, `No existing output ancestor: ${file}`);
+    missing.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+  return path.join(realpathSync.native(ancestor), ...missing);
+}
+
 /** New, explicitly addressed private output only; never overwrite an existing directory. */
 export function assertPrivateOutput(output, repositoryRoot = REPOSITORY) {
   check(typeof output === 'string' && path.isAbsolute(output), 'Output must be an explicit absolute private path');
-  const absolute = path.resolve(output);
+  const absolute = canonicalProspectivePath(output);
   const home = os.homedir();
   const forbidden = [repositoryRoot, path.join(home, 'Documents'), path.join(home, '.vscode'), path.join(home, '.vscode-insiders'),
     path.join(home, '.pi'), path.join(home, '.config'), 'C:/dev/data'];
-  check(!forbidden.some(root => isWithin(absolute, path.resolve(root))), 'Output is inside a protected live location');
+  check(!forbidden.some(root => isWithin(absolute, canonicalProspectivePath(root))), 'Output is inside a protected live location');
   check(!/(?:^|[\\/])(?:node_modules|out|settings|data)(?:[\\/]|$)/i.test(absolute), 'Output must not target shared dependencies/output/data/settings');
   check(absolute !== path.parse(absolute).root && absolute !== path.resolve(home), 'Output must not be a root/home directory');
-  check(isWithin(absolute, path.resolve(os.tmpdir())) && absolute !== path.resolve(os.tmpdir()), 'Output must be a new directory beneath OS temporary storage');
-  let current = absolute;
+  const temporaryRoot = realpathSync.native(os.tmpdir());
+  check(isWithin(absolute, temporaryRoot) && absolute !== temporaryRoot, 'Output must be a new directory beneath OS temporary storage');
+  let current = path.resolve(output);
   while (true) {
     if (existsSync(current)) check(!lstatSync(current).isSymbolicLink(), `Symlink/junction output ancestor: ${current}`);
     const parent = path.dirname(current); if (parent === current) break; current = parent;
@@ -408,13 +448,105 @@ async function smoke(runtime, work, env) {
   await run(process.execPath, [...flags, path.join(runtime, 'node_modules/@earendil-works/pi-coding-agent/dist/cli.js'), '--offline', '--version'], work, env, 'network-denied source-built local CLI --version');
 }
 
+/** Internal deploy options; isolated callers retain the install's store and network policy. */
+export function piRuntimeDeployArguments({ deploy, context, pnpmCli, privateStore, networkPolicy } = {}) {
+  if (pnpmCli === undefined) {
+    check(privateStore === undefined && networkPolicy === undefined, 'Private deploy options require isolated pnpm');
+    return ['run', 'pnpm', '--', '--filter', 'pi-config', 'deploy', '--prod', deploy];
+  }
+  check(context !== undefined && path.isAbsolute(pnpmCli), 'Private pnpm requires an isolated context');
+  check(path.isAbsolute(privateStore ?? ''), 'Isolated deploy requires the invocation-owned store');
+  check(networkPolicy === 'offline' || networkPolicy === 'allow', 'Isolated deploy requires an explicit network policy');
+  return [pnpmCli, '--filter', 'pi-config', 'deploy', '--prod', '--package-import-method=copy', '--store-dir', privateStore,
+    ...(networkPolicy === 'offline' ? ['--offline'] : []), deploy];
+}
+
+/** pnpm's directory fetcher hardlinks workspace packages even with import-method=copy.
+ * Only replace entries in the newly created invocation-owned deployment. */
+export async function detachIsolatedDeployHardlinks(staging, ownedWork, compiledSource, operations = {}) {
+  const copy = operations.copyFile ?? copyFile;
+  const move = operations.rename ?? rename;
+  const remove = operations.unlink ?? unlink;
+  check(path.isAbsolute(staging) && path.isAbsolute(ownedWork), 'Deployment ownership requires absolute paths');
+  check(realpathSync(ownedWork) === ownedWork && realpathSync(staging) === staging
+    && path.dirname(staging) === ownedWork && path.basename(staging) === 'deploy-staging',
+  'Deployment must be the canonical invocation-owned staging root');
+  const files = [];
+  async function inventory(directory) {
+    const info = await lstat(directory);
+    check(info.isDirectory() && !info.isSymbolicLink(), `Invalid deployment directory: ${directory}`);
+    for (const name of await readdir(directory)) {
+      const file = path.join(directory, name);
+      const info = await lstat(file);
+      check(!info.isSymbolicLink(), `Refusing deployment symlink: ${file}`);
+      if (info.isDirectory()) await inventory(file);
+      else { check(info.isFile(), `Unsupported deployment entry: ${file}`); files.push(file); }
+    }
+  }
+  // Validate the entire closed deployment before replacing any entries.
+  await inventory(staging);
+  for (const file of files) {
+    const info = await lstat(file);
+    if (info.nlink === 1) continue;
+    check(info.isFile() && !info.isSymbolicLink(), `Deployment entry changed: ${file}`);
+    const temporary = `${file}.detach-${randomUUID()}`;
+    let failed = false;
+    let primaryError;
+    try {
+      await copy(file, temporary, constants.COPYFILE_EXCL);
+      await chmod(temporary, info.mode & 0o777);
+      check(sha(await readFile(file)) === sha(await readFile(temporary)), `Deployment copy changed bytes: ${file}`);
+      check((await lstat(temporary)).nlink === 1, `Deployment copy is shared: ${temporary}`);
+      await move(temporary, file);
+    } catch (error) {
+      failed = true;
+      primaryError = error;
+      throw error;
+    } finally {
+      try {
+        await remove(temporary);
+      } catch (cleanupError) {
+        if (cleanupError?.code !== 'ENOENT') {
+          if (!failed) throw cleanupError;
+          // Diagnostics must never replace the original thrown value, including
+          // frozen errors or non-Error throws.
+          try {
+            Object.defineProperty(primaryError, 'cleanupError', { value: cleanupError, configurable: true });
+          } catch {
+            try { console.error('Deployment detach cleanup failed:', cleanupError); } catch { /* preserve primary */ }
+          }
+        }
+      }
+    }
+  }
+  for (const file of files) {
+    const info = await lstat(file);
+    check(info.isFile() && !info.isSymbolicLink() && info.nlink === 1, `Deployment remains shared: ${file}`);
+    if (compiledSource) {
+      const relative = path.relative(path.join(staging, 'node_modules', '@earendil-works'), file).split(path.sep);
+      const index = PI_RUNTIME_PACKAGES.indexOf(`@earendil-works/${relative[0]}`);
+      if (index >= 0 && relative[1] === 'dist') {
+        const source = path.join(compiledSource, 'packages', PACKAGE_DIRS[index], ...relative.slice(1));
+        const sourceInfo = await lstat(source);
+        check(sourceInfo.isFile() && !sourceInfo.isSymbolicLink() && sourceInfo.nlink === 1,
+          `Compiled source remains shared after deploy: ${source}`);
+      }
+    }
+  }
+}
+
 /** Explicit output owns all scratch and artifact bytes. A failed build is retained for diagnosis. */
-export async function buildPiRuntime({ output, refreshLock } = {}) {
+export async function buildPiRuntime({ output, refreshLock, context, pnpmCli, privateStore, networkPolicy } = {}) {
   check(refreshLock === undefined, 'The npm --refresh-lock route is retired; use the shared pnpm lock');
+  const selected = resolvePiBuildContext(context);
+  const REPOSITORY = selected.repositoryRoot;
+  const SOURCE = path.join(REPOSITORY, 'harness/pi');
+  const inputOptions = { repositoryRoot: REPOSITORY, env: selected.env };
   assertPrivateOutput(output);
+  if (context !== undefined) assertPrivateOutput(output, REPOSITORY);
   await mkdir(output, { recursive: true });
   const work = path.join(output, 'work'); await mkdir(work);
-  const env = buildChildEnvironment(process.env, work);
+  const env = buildChildEnvironment(selected.env, work);
   for (const key of ['HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'npm_config_cache']) await mkdir(env[key], { recursive: true });
   const reader = await acquireDevelopmentReader(SOURCE);
   let teardownConfirmed = true;
@@ -422,30 +554,35 @@ export async function buildPiRuntime({ output, refreshLock } = {}) {
   const piSourceVersion = readPinnedPiSourceVersion(REPOSITORY);
   const manifests = await Promise.all(PACKAGE_DIRS.map(dir => readJson(path.join(SOURCE, 'packages', dir, 'package.json'))));
   validateManifests(manifests, piSourceVersion);
-  const inputEvidence = await capturePiRuntimeInputs();
+  const inputEvidence = await capturePiRuntimeInputs(inputOptions);
   check(inputEvidence.pinnedNodeVersion === process.version.slice(1), `Run the pinned Node ${inputEvidence.pinnedNodeVersion} toolchain (current ${process.version})`);
-  const compilation = await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
+  const compilation = await assertPiWorkspaceBuildStamp({ workspaceRoot: SOURCE, inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
   for (const dir of PACKAGE_DIRS) {
     check(existsSync(path.join(SOURCE, 'packages', dir, 'dist')), `Missing shared Pi ${dir}/dist output; run node scripts/build/pi-workspace.mjs before production deploy`);
   }
 
   const deploy = path.join(work, 'deploy-staging');
-  await run('proto', ['run', 'pnpm', '--', '--filter', 'pi-config', 'deploy', '--prod', deploy], REPOSITORY, process.env,
+  // Isolated callers reuse the executable already version-checked by the private
+  // installer; Proto cannot resolve tools after HOME becomes invocation-private.
+  check(pnpmCli === undefined || (context !== undefined && path.isAbsolute(pnpmCli)), 'Private pnpm requires an isolated context');
+  await run(pnpmCli === undefined ? 'proto' : process.execPath,
+    piRuntimeDeployArguments({ deploy, context, pnpmCli, privateStore, networkPolicy }), REPOSITORY, selected.env,
     'pnpm production workspace deploy (locked, scripts-disabled project settings)');
+  if (pnpmCli !== undefined) await detachIsolatedDeployHardlinks(deploy, work, SOURCE);
   const runtime = path.join(output, 'pi-runtime'); await mkdir(runtime);
   await materializeDeployedNodeModules(path.join(deploy, 'node_modules'), path.join(runtime, 'node_modules'), path.join(SOURCE, 'LICENSE'));
   check(await fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: runtime }) === compilation.compiledSha256,
     'Deployed Pi compiled bytes do not match the selected workspace compilation');
   const packed = await packPiRuntime({ runtimeDir: runtime, toolingDir: path.join(output, 'pi-tooling'),
-    provenance: { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
+    context: context === undefined ? undefined : selected, provenance: { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
       sourceTreeSha256: inputEvidence.sourceTreeSha256, lockSha256: inputEvidence.lockSha256, target: inputEvidence.target } });
   // Runtime map-comment packing changes bytes; full tooling must preserve every original compiler output.
   check(await fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: packed.tooling.artifactDir }) === compilation.compiledSha256,
     'Packed Pi tooling compiled bytes do not match the selected workspace compilation');
   await smoke(runtime, work, env);
-  await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
+  await assertPiWorkspaceBuildStamp({ workspaceRoot: SOURCE, inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
 
-  const afterDeploy = await capturePiRuntimeInputs();
+  const afterDeploy = await capturePiRuntimeInputs(inputOptions);
   check(fingerprintPiRuntimeInputs(inputEvidence) === fingerprintPiRuntimeInputs(afterDeploy),
     'Pi source/shared lock/toolchain/target changed during deploy; retain output and retry with stable inputs');
   const verified = await verifyPiRuntimeArtifact(runtime);
@@ -467,14 +604,83 @@ export async function buildPiRuntime({ output, refreshLock } = {}) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2);
-  if (args.includes('--help')) console.log('node scripts/build/pi-runtime.mjs --output <new-absolute-private-directory>\nLocked pnpm production deploy/materialize/role pack/offline runtime smoke/full verify; outputs pi-runtime/, pi-tooling/, build-evidence.json and work/ beneath fresh OS-temp output (requires current harness/pi/.cache/build.json evidence; run scripts/build/pi-workspace.mjs first).');
-  else {
-    const outputIndex = args.indexOf('--output');
-    check(outputIndex >= 0 && args[outputIndex + 1], 'Required --output <new-absolute-private-directory>');
-    const valid = args.filter((_, i) => i !== outputIndex && i !== outputIndex + 1);
-    check(valid.length === 0, 'Unknown builder argument (the npm --refresh-lock route is retired)');
-    buildPiRuntime({ output: args[outputIndex + 1] }).catch(error => { console.error(error); process.exitCode = 1; });
+/** Public CLI has no source-root, inventory, manifest or executable override. */
+export function parsePiRuntimeArguments(args) {
+  if (args.length === 1 && args[0] === '--help') return { help: true };
+  const options = { isolated: false, networkPolicy: 'offline' };
+  const seen = new Set();
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    check(!seen.has(arg), `Duplicate builder argument: ${arg}`); seen.add(arg);
+    if (arg === '--output') {
+      check(args[index + 1] && !args[index + 1].startsWith('--'), 'Required --output <new-absolute-private-directory>');
+      options.output = args[++index];
+    } else if (arg === '--isolated') options.isolated = true;
+    else if (arg === '--offline' || arg === '--allow-network') {
+      check(!seen.has(arg === '--offline' ? '--allow-network' : '--offline'), 'Conflicting network policy');
+      options.networkPolicy = arg === '--offline' ? 'offline' : 'allow';
+    } else throw new Error(arg === '--refresh-lock' ? 'The npm --refresh-lock route is retired; use the shared pnpm lock' : `Unknown builder argument: ${arg}`);
   }
+  check(options.output, 'Required --output <new-absolute-private-directory>');
+  check(options.isolated || (!seen.has('--offline') && !seen.has('--allow-network')), 'Network flags require --isolated');
+  return options;
+}
+
+/** Resolve installed Proto-owned pnpm before private HOME; never acquire tools. */
+export async function resolvePinnedPnpmCli(dependencies = {}) {
+  const inputs = await readWorkspaceDeployInputs(REPOSITORY);
+  check(inputs.pinnedNodeVersion === process.versions.node, `Run pinned Node ${inputs.pinnedNodeVersion}`);
+  const executable = (dependencies.execFileSync ?? execFileSync)('proto', ['bin', 'pnpm', inputs.pnpmVersion, '--config-mode', 'local'],
+    { cwd: REPOSITORY, env: process.env, encoding: 'utf8', timeout: 30_000, windowsHide: true }).trim();
+  check(path.isAbsolute(executable), 'Proto must resolve an installed absolute pnpm executable');
+  // Proto's Windows shim names its sibling bin/pnpm.cjs; Unix uses that
+  // entrypoint directly or a symlink to it. Do not run shims or global installs.
+  const cli = realpathSync(executable.endsWith('.cmd') ? path.join(path.dirname(executable), '..', 'bin', 'pnpm.cjs') : executable);
+  check(lstatSync(cli).isFile() && /\.(?:c?js|mjs)$/u.test(cli), 'Installed pnpm JS entrypoint required');
+  return cli;
+}
+
+export async function runPiRuntimeCli(args, dependencies = {}) {
+  const options = parsePiRuntimeArguments(args);
+  const log = dependencies.log ?? console.log;
+  if (options.help) {
+    log('node scripts/build/pi-runtime.mjs [--isolated [--offline | --allow-network]] --output <new-absolute-private-os-temp-directory>\nDefault: pack already compiled workspace. Isolated: snapshot, private frozen install (offline default), compile and canonical role pack; no publication.');
+    return;
+  }
+  assertPrivateOutput(options.output);
+  if (!options.isolated) return (dependencies.buildPiRuntime ?? buildPiRuntime)({ output: options.output });
+  const relative = path.relative(realpathSync.native(os.tmpdir()), canonicalProspectivePath(options.output));
+  check(!relative.split(path.sep)[0].startsWith('pie-isolated-sdk-'), 'Output must not overlap isolated workspace scratch');
+  const pnpmCli = await (dependencies.resolvePinnedPnpmCli ?? resolvePinnedPnpmCli)();
+  let workspace;
+  try {
+    const create = dependencies.createIsolatedPiWorkspace ?? (await import('./pi-isolated-workspace.mjs')).createIsolatedPiWorkspace;
+    workspace = await create({ repositoryRoot: REPOSITORY, pnpmCli, networkPolicy: options.networkPolicy });
+    const canonicalOutput = canonicalProspectivePath(options.output);
+    const canonicalScratch = canonicalProspectivePath(workspace.scratchRoot);
+    check(!isWithin(canonicalOutput, canonicalScratch) && !isWithin(canonicalScratch, canonicalOutput), 'Output overlaps isolated scratch');
+    log(`[pi-runtime] Isolated workspace ${workspace.scratchRoot}; network policy ${options.networkPolicy}`);
+    const provenancePath = path.join(workspace.scratchRoot, 'provenance.json');
+    await writeFile(provenancePath, jsonText(workspace.provenance));
+    log(`[pi-runtime] Snapshot provenance ${provenancePath}`);
+    const compile = dependencies.buildPiWorkspace ?? (await import('./pi-workspace.mjs')).buildPiWorkspace;
+    await compile({ context: workspace.context });
+    const result = await (dependencies.buildPiRuntime ?? buildPiRuntime)({ output: options.output, context: workspace.context, pnpmCli,
+      // createIsolatedPiWorkspace installs into this invocation-owned scratch store.
+      privateStore: path.join(workspace.scratchRoot, 'store'), networkPolicy: options.networkPolicy });
+    await writeFile(path.join(options.output, 'isolated-provenance.json'), jsonText(workspace.provenance));
+    log(`[pi-runtime] Artifact provenance ${path.join(options.output, 'isolated-provenance.json')}`);
+    await workspace.cleanup({ teardownConfirmed: true });
+    return result;
+  } catch (error) {
+    // Even confirmed failures retain receipts and logs for diagnosis. Never
+    // reclaim uncertain child trees, or delete independently owned role output.
+    const scratchRoot = workspace?.scratchRoot ?? error.scratchRoot;
+    if (scratchRoot) log(`[pi-runtime] Failed isolated build retained at ${scratchRoot}`);
+    throw error;
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runPiRuntimeCli(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });
 }

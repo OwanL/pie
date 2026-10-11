@@ -84,6 +84,100 @@ function closeTemporary(temporary: TemporaryStore): void {
   rmSync(temporary.root, { recursive: true, force: true });
 }
 
+test('empty and fully paginated clean stopped registries skip process census and recovery', async (t) => {
+  for (const cleanHistory of [false, true]) {
+    await t.test(cleanHistory ? 'clean stopped pages' : 'empty registry', async () => {
+      const temporary = temporaryStore();
+      try {
+        const hosts = cleanHistory ? [
+          registerHost(temporary.store, 'clean-first', 720),
+          registerHost(temporary.store, 'clean-last', 721),
+        ] : [];
+        for (const host of hosts) stopHost(temporary.store, host);
+        const stopped = hosts.map((host) => temporary.store.getAnalyticsHost(host.hostInstanceId)!);
+        const calls: string[] = [];
+        const result = await recoverStaleAnalyticsHosts(options(temporary.store, census(), {
+          registry: {
+            listAnalyticsWriterLeases: () => { calls.push('leases'); return []; },
+            listAnalyticsHosts: (_workspaceId, page) => {
+              calls.push(page?.cursor ?? 'first');
+              return cleanHistory && !page?.cursor
+                ? { hosts: [stopped[0]], truncated: true, nextCursor: 'last' }
+                : { hosts: stopped.slice(1), truncated: false };
+            },
+            recoverAnalyticsHostAfterProcessExit: () => assert.fail('unexpected recovery'),
+          },
+          readProcessCensus: async () => assert.fail('unexpected process census'),
+        }));
+        assert.deepEqual(result, { retiredHosts: 0, reclaimedLeases: 0 });
+        assert.deepEqual(calls, cleanHistory ? ['leases', 'first', 'last'] : ['leases', 'first']);
+      } finally {
+        closeTemporary(temporary);
+      }
+    });
+  }
+});
+
+test('later-page nonterminal hosts and stopped orphan leases still collect census and preserve live writers', async (t) => {
+  for (const orphan of [false, true]) {
+    await t.test(orphan ? 'stopped orphan' : 'nonterminal', async () => {
+      const temporary = temporaryStore();
+      try {
+        const history = registerHost(temporary.store, 'first-page-history', 722);
+        stopHost(temporary.store, history);
+        const host = registerHost(temporary.store, 'later-page-candidate', 723);
+        const lease = temporary.store.acquireAnalyticsWriterLease(writerIdentity(host), 0, NOW - 1);
+        if (orphan) stopHost(temporary.store, host);
+        const candidate = temporary.store.getAnalyticsHost(host.hostInstanceId)!;
+        const calls: string[] = [];
+        const result = await recoverStaleAnalyticsHosts(options(temporary.store, census(), {
+          registry: {
+            listAnalyticsWriterLeases: temporary.store.listAnalyticsWriterLeases.bind(temporary.store),
+            listAnalyticsHosts: (_workspaceId, page) => {
+              calls.push(page?.cursor ?? 'first');
+              return page?.cursor
+                ? { hosts: [candidate], truncated: false }
+                : { hosts: [temporary.store.getAnalyticsHost(history.hostInstanceId)!], truncated: true, nextCursor: 'last' };
+            },
+            recoverAnalyticsHostAfterProcessExit: () => assert.fail('live candidate must not be recovered'),
+          },
+          readProcessCensus: async () => {
+            calls.push('census');
+            return census({ processes: [{ processId: host.processId, processCreatedAtMs: 1_000 }] });
+          },
+        }));
+        assert.deepEqual(calls, ['first', 'last', 'census']);
+        assert.deepEqual(result, { retiredHosts: 0, reclaimedLeases: 0 });
+        assert.deepEqual(temporary.store.getAnalyticsHost(host.hostInstanceId), candidate);
+        assert.deepEqual(temporary.store.listAnalyticsWriterLeases(WORKSPACE_ID), [lease]);
+      } finally {
+        closeTemporary(temporary);
+      }
+    });
+  }
+});
+
+test('unavailable or truncated lease census fails closed before host or process reads', async (t) => {
+  for (const message of ['lease census unavailable', 'lease census truncated']) {
+    await t.test(message, async () => {
+      const warnings: string[] = [];
+      const result = await recoverStaleAnalyticsHosts({
+        workspaceId: WORKSPACE_ID,
+        now: () => NOW,
+        registry: {
+          listAnalyticsWriterLeases: () => { throw new Error(message); },
+          listAnalyticsHosts: () => assert.fail('unexpected host read'),
+          recoverAnalyticsHostAfterProcessExit: () => assert.fail('unexpected recovery'),
+        },
+        readProcessCensus: async () => assert.fail('unexpected process census'),
+        log: (level, _message, data) => { if (level === 'warn') warnings.push(String(data?.error)); },
+      });
+      assert.deepEqual(result, { retiredHosts: 0, reclaimedLeases: 0 });
+      assert.deepEqual(warnings, [message]);
+    });
+  }
+});
+
 test('recovers a stopped host only when its exact identity has an orphaned writer lease', async () => {
   const temporary = temporaryStore();
   const host = registerHost(temporary.store, 'stopped-orphan', 701);
@@ -110,6 +204,7 @@ test('recovers a stopped host only when its exact identity has an orphaned write
 
 test('does not recover a host registered after process census collection begins', async () => {
   const temporary = temporaryStore();
+  const preexisting = registerHost(temporary.store, 'preexisting-live-host', 712);
   let lateHost: AnalyticsHostRecord | undefined;
   try {
     const result = await recoverStaleAnalyticsHosts({
@@ -119,7 +214,7 @@ test('does not recover a host registered after process census collection begins'
         // registered while collection was in flight. Its absence proves nothing.
         lateHost = registerHost(temporary.store, 'registered-during-census', 710);
         temporary.store.acquireAnalyticsWriterLease(writerIdentity(lateHost), 0, NOW - 1);
-        return census();
+        return census({ processes: [{ processId: preexisting.processId, processCreatedAtMs: 1_000 }] });
       },
     });
     assert.deepEqual(result, { retiredHosts: 0, reclaimedLeases: 0 });

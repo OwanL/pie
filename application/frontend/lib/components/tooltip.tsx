@@ -63,6 +63,10 @@ export interface TooltipProps {
   richRole?: 'tooltip' | 'region';
   /** Return keyboard focus to the trigger when Escape closes an inspector. */
   returnFocusOnEscape?: boolean;
+  /** Close on click or Enter/Space without consuming the trigger's action.
+   *  Keeps the trigger clear by choosing an available side and exposing
+   *  `--pie-tooltip-available-height` for content to constrain its height. */
+  dismissOnActivation?: boolean;
 }
 
 /**
@@ -93,6 +97,7 @@ export function Tooltip({
   freezeWhileVisible = false,
   richRole = 'tooltip',
   returnFocusOnEscape = false,
+  dismissOnActivation = false,
   triggerClassName,
 }: TooltipProps): JSX.Element {
   const [isVisible, setIsVisible] = useState(false);
@@ -248,6 +253,10 @@ export function Tooltip({
       host.removeAttribute('aria-label');
     }
 
+    // Discard the previous cap before measuring natural content on every update
+    // or re-hover, and when hiding (including viewport resize dismissal).
+    host.style.removeProperty('--pie-tooltip-available-height');
+
     if (!isVisible || (!effectiveContent && !showRich) || !trigger) {
       host.style.display = 'none';
       if (richMountedRef.current) {
@@ -281,11 +290,30 @@ export function Tooltip({
     // Snapshot the trigger rect so the scroll handler can detect whether the
     // trigger actually moved on scroll (vs. a fixed container that stayed put).
     lastTriggerRectRef.current = { top: rect.top, bottom: rect.bottom };
-    const hostRect = host.getBoundingClientRect();
+    let hostRect = host.getBoundingClientRect();
     const gap = 6;
+    let selectedPlacement = placement;
+
+    if (dismissOnActivation) {
+      // Unlike passive tooltips, this host must never intercept the trigger's
+      // first click. Prefer the requested side when it fits; otherwise use the
+      // other side if it fits, or the larger side when neither can fit naturally.
+      const above = Math.max(0, rect.top - gap * 2);
+      const below = Math.max(0, window.innerHeight - rect.bottom - gap * 2);
+      const preferredSpace = placement === 'top' ? above : below;
+      const otherSpace = placement === 'top' ? below : above;
+      if (hostRect.height > preferredSpace && otherSpace > preferredSpace) {
+        selectedPlacement = placement === 'top' ? 'bottom' : 'top';
+      }
+      const available = selectedPlacement === 'top' ? above : below;
+      const contentHeight = host.firstElementChild?.getBoundingClientRect().height ?? hostRect.height;
+      const chrome = Math.max(0, hostRect.height - contentHeight);
+      host.style.setProperty('--pie-tooltip-available-height', `${Math.max(0, available - chrome)}px`);
+      hostRect = host.getBoundingClientRect();
+    }
 
     let top =
-      placement === 'bottom'
+      selectedPlacement === 'bottom'
         ? rect.bottom + gap
         : rect.top - hostRect.height - gap;
     let left = rect.left + rect.width / 2 - hostRect.width / 2;
@@ -293,14 +321,16 @@ export function Tooltip({
     // Keep inside the viewport.
     const maxLeft = window.innerWidth - hostRect.width - gap;
     left = Math.max(gap, Math.min(left, maxLeft));
-    if (top + hostRect.height + gap > window.innerHeight) {
-      top = rect.top - hostRect.height - gap;
+    if (!dismissOnActivation) {
+      if (top + hostRect.height + gap > window.innerHeight) {
+        top = rect.top - hostRect.height - gap;
+      }
+      top = Math.max(gap, top);
     }
-    top = Math.max(gap, top);
 
     host.style.top = `${top}px`;
     host.style.left = `${left}px`;
-  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement, richRole, dismissTooltip]);
+  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement, richRole, dismissTooltip, dismissOnActivation]);
 
   // Remove the host when the component unmounts, and tear down any pending timers.
   useEffect(() => {
@@ -384,6 +414,9 @@ export function Tooltip({
         },
         onKeyDown: (e: KeyboardEvent) => {
           (singleVNode.props as { onKeyDown?: (event: KeyboardEvent) => void }).onKeyDown?.(e);
+          if (dismissOnActivation && (e.key === 'Enter' || e.key === ' ')) {
+            dismissTooltip();
+          }
           if (e.key === 'Escape') {
             e.preventDefault();
             dismissTooltip();
@@ -424,6 +457,7 @@ export function Tooltip({
       onMouseLeave={hideTooltip}
       onPointerEnter={showTooltip}
       onPointerLeave={hideTooltip}
+      onClick={dismissOnActivation ? dismissTooltip : undefined}
     >
       {wrappedChildren}
     </span>

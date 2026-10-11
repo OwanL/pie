@@ -2,7 +2,7 @@ import type { ViewState } from '../../lib/protocol/index.js';
 
 export type PanelSurface = 'loading' | 'empty' | 'session';
 
-type PanelSurfaceState = Pick<ViewState, 'backendReady' | 'notice' | 'openTabPaths'>;
+type PanelSurfaceState = Pick<ViewState, 'backendReady' | 'notice' | 'openTabPaths' | 'activeSessionPath'>;
 type PanelBootState = Pick<ViewState, 'backendReady' | 'notice'>;
 
 export function isPanelBooting(state: PanelBootState): boolean {
@@ -11,9 +11,14 @@ export function isPanelBooting(state: PanelBootState): boolean {
 }
 
 export function resolvePanelSurface(state: PanelSurfaceState): PanelSurface {
-  // If there are open tabs, always show the session surface — even during boot.
-  // This lets users type immediately; their messages will be queued until the
-  // backend is ready.
+  // Background restoration may leave tabs intentionally unselected. Keep the
+  // empty surface (and tab chrome), not a transcript loader or composer.
+  if (state.activeSessionPath === null) {
+    return isPanelBooting(state) ? 'loading' : 'empty';
+  }
+
+  // Selected/legacy tabs show the session surface even during boot, allowing
+  // queued input before the backend is ready.
   if (state.openTabPaths.length > 0) {
     return 'session';
   }

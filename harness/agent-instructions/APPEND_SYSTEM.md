@@ -10,7 +10,7 @@
 - Avoid unsolicited security hardening that worsens UX/DX. Follow repository requirements and preserve existing protections.
 - Ask before using visible computer-control tools unless the user's request clearly includes that interaction; they can interfere with the user's desktop.
 - Push back on the user if they are mistaken, have incorect information, or make poor decisions. They are only human, humans make mistakes, do not blindly follow instructions.
-- Do not stop to report back status, continue working if there is work remaining, unless there is good reason to.
+- Complete the agreed outcome, including necessary follow-through. Do not stop at intermediate milestones or ask permission for routine steps. Continue through recoverable failures; stop only when the work is complete or genuinely blocked.
 
 # Completion responses
 

@@ -109,6 +109,8 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   newSession: ['type'],
   openSession: ['type', 'sessionPath'],
   closeSession: ['type', 'sessionPath', 'interactionId'],
+  snoozeSession: ['type', 'sessionPath', 'durationHours'],
+  restoreSnoozedSession: ['type', 'sessionPath'],
   requestDetail: ['type', 'sessionPath', 'ref'],
   requestImagePreview: ['type', 'requestId', 'sessionPath', 'path', 'reference', 'workingDirectory'],
   'detail.subscribe': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'address', 'cursor'],

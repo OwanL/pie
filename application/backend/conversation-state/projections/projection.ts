@@ -134,6 +134,9 @@ export function projectSessionCapabilities(
       },
     };
   }
+  for (const release of Object.values(state.sessions.snoozeReleases)) {
+    projected[release.sessionPath] = { ...(projected[release.sessionPath] ?? EMPTY_CAPABILITY_FACTS), canContinue: false, canCompact: false };
+  }
   return projected;
 }
 
@@ -704,7 +707,8 @@ function projectViewState(state: ArchState): ViewState {
     activePath ? fileChanges.readFilePathsBySession[activePath] ?? EMPTY_READ_PATHS : EMPTY_READ_PATHS;
 
   // ── Derived busy flag ──
-  const busy = !!activePath && sessions.runningSessionPaths.includes(activePath);
+  const busy = !!activePath && (sessions.runningSessionPaths.includes(activePath)
+    || Object.values(sessions.snoozeReleases).some((release) => release.sessionPath === activePath));
 
   // ── 'Starting model' session paths (muted tab dot) ──
   // A running turn whose pruning prepass already succeeded but has not yet
@@ -733,12 +737,14 @@ function projectViewState(state: ArchState): ViewState {
   const noticeVisible = settings.noticeSessionPath === null || settings.noticeSessionPath === activePath;
 
   return {
-    sessions: sessions.sessions,
+    sessions: sessions.sessions.filter((s) => !sessions.snoozedBySession[s.path]),
+    snoozedSessions: Object.values(sessions.snoozedBySession).map(({ path, name, wakeAt }) => ({ path, name, wakeAt })),
     sessionCatalogProgress: sessions.sessionCatalogProgress,
     openTabPaths: sessions.openTabPaths,
     pinnedTabPaths: sessions.pinnedTabPaths,
     pinnedTabGroups: sessions.pinnedTabGroups,
-    runningSessionPaths: sessions.runningSessionPaths,
+    runningSessionPaths: [...new Set([...sessions.runningSessionPaths,
+      ...Object.values(sessions.snoozeReleases).map((release) => release.sessionPath)])],
     sessionCapabilitiesBySession: projectSessionCapabilities(state),
     generatingTitleSessionPaths: Object.entries(sessions.titleGenerationBySession)
       .filter(([, generation]) => generation.status === 'armed' || generation.status === 'pending')
@@ -748,6 +754,7 @@ function projectViewState(state: ArchState): ViewState {
     lastCompactionBySession: sessions.lastCompactionBySession,
     privacyMode: activePath ? sessions.privacyModeBySession[activePath] === true : false,
     unreadFinishedSessionPaths: sessions.unreadFinishedSessionPaths,
+    activeSessionPath: activePath,
     activeSession,
     transcript: activeTranscript,
     transcriptWindow: activeTranscriptWindow,

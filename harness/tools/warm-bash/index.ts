@@ -27,8 +27,7 @@
 
 import { createBashTool, createLocalBashOperations, getAgentDir, getShellConfig, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
-import { createWarmBashOperations, createWarmBashMetrics } from "./operations.js";
-import { probeGnuGrep } from "./auto-prune.js";
+import { probeGnuGrep } from "./gnu-grep-probe.js";
 import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./logger.js";
 import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { WarmBashPool } from "./warm-pool.js";
@@ -38,6 +37,13 @@ import type { BashOperations } from "./types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./shared-state.js";
 import { prependManagedBinDir, sanitizeProtoEnv } from "./managed-env.js";
 import { optimizeAutoDetectedShell } from "./shell-path.js";
+
+// Keep the execution graph out of cold registration. The normal module loader
+// retains module identity; one shared promise also coalesces concurrent first use.
+let operationsModule: Promise<typeof import("./operations.js")> | undefined;
+function loadOperations(): Promise<typeof import("./operations.js")> {
+  return operationsModule ??= import("./operations.js");
+}
 
 function idleTarget(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_WARM_POOL ?? "", 10);
@@ -242,13 +248,19 @@ export default function (pi: ExtensionAPI) {
     toolPoolGeneration.clear();
   }
 
-  function getTool(sessionId: string, cwd: string, rootSessionId?: string): ReturnType<typeof createBashTool> {
+  async function getTool(sessionId: string, cwd: string, rootSessionId?: string, signal?: AbortSignal): Promise<ReturnType<typeof createBashTool>> {
     let entry = sessionCwd.get(sessionId);
     if (!entry) {
       entry = { cwd };
       sessionCwd.set(sessionId, entry);
     }
     entry.cwd = cwd; // keep current in case a session ever changes cwd
+
+    const { createWarmBashOperations, createWarmBashMetrics } = await loadOperations();
+    // Shutdown deletes the entry. A later call with the same session id may
+    // create a new entry, but must not revive this in-flight invocation. Sample
+    // pool/config only after the await so concurrent changes cannot be cached.
+    if (signal?.aborted || sessionCwd.get(sessionId) !== entry) throw new Error("aborted");
 
     const poolCfgNow = currentPoolCfg();
     const opsCfgNow = currentOpsCfg();
@@ -336,7 +348,13 @@ export default function (pi: ExtensionAPI) {
     }
     const sessionId = ctx.sessionManager.getSessionId();
     const rootSessionId = rootSessionAttribution(ctx, sessionId).rootSessionId;
-    const tool = getTool(sessionId, ctx.cwd, rootSessionId);
+    const pendingTool = getTool(sessionId, ctx.cwd, rootSessionId, signal);
+    const entry = sessionCwd.get(sessionId);
+    const tool = await pendingTool;
+    // getTool itself is async: shutdown/abort can also run between its return
+    // and this continuation. Config-driven tool invalidation is not disposal;
+    // use the session entry identity rather than cached-tool identity here too.
+    if (signal?.aborted || sessionCwd.get(sessionId) !== entry) throw new Error("aborted");
     const effectiveParams = {
       ...params,
       timeout: effectiveTimeout({ timeout: params.timeout, defaultTimeout: defaultTimeout(), maxTimeout: BASH_MAX_TIMEOUT }),

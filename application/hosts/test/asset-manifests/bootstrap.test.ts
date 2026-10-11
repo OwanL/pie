@@ -166,6 +166,8 @@ test('writes bounded timing-only bootstrap diagnostics without delaying activati
     assert.equal(typeof entry.bootstrapModuleStartedAt, 'string');
     assert.equal(new Date(entry.bootstrapModuleStartedAt as string).toISOString(), entry.bootstrapModuleStartedAt);
     assert.equal(typeof entry.bootstrapModuleMs, 'number');
+    const bootstrapDirectory = path.dirname(require.resolve('../../vscode/runtime/bootstrap.cjs'));
+    assert.equal(entry.bootstrapDirectory, bootstrapDirectory, 'records the executing loader directory, not the extension context');
 
     const activation = rows.find((row) => row.source === 'bootstrap' && row.event === 'activation');
     assert.ok(activation);
@@ -173,13 +175,14 @@ test('writes bounded timing-only bootstrap diagnostics without delaying activati
     assert.equal(activation.pid, process.pid);
     assert.equal(typeof activation.timestamp, 'string');
     assert.equal(activation.outcome, 'success');
+    assert.equal(activation.bootstrapDirectory, bootstrapDirectory);
     assert.equal(typeof activation.bootstrapModuleMs, 'number');
     assert.equal(typeof activation.activationSyncPrefixMs, 'number');
     assert.equal(typeof activation.activationMs, 'number');
     assert.equal(typeof activation.delegateRequireMs, 'number');
     assert.equal(typeof activation.delegateActivateMs, 'number');
     assert.deepEqual(Object.keys(activation).sort(), [
-      'activationMs', 'activationSyncPrefixMs', 'bootstrapModuleMs', 'delegateActivateMs',
+      'activationMs', 'activationSyncPrefixMs', 'bootstrapDirectory', 'bootstrapModuleMs', 'delegateActivateMs',
       'delegateRequireMs', 'event', 'identityReadMs', 'outcome', 'pid', 'schema', 'source',
       'tag', 'timestamp',
     ]);

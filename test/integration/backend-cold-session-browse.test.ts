@@ -162,7 +162,7 @@ async function makeColdServer(
           appendThinkingLevelChange: (thinkingLevel: string) => append({
             type: 'thinking_level_change', thinkingLevel,
           }),
-          appendPieModelSettingsChange: (
+          preparePieModelSettingsChange: (
             provider: string | undefined,
             modelId: string | undefined,
             thinkingLevel: string | undefined,
@@ -177,10 +177,20 @@ async function makeColdServer(
             if (thinkingLevel !== undefined) {
               rows.push({ type: 'thinking_level_change', thinkingLevel });
             }
-            const ids = appendRows(rows);
+            let result: { modelChangeId?: string; thinkingLevelChangeId?: string } | undefined;
+            let disposed = false;
             return {
-              modelChangeId: provider === undefined ? undefined : ids.shift(),
-              thinkingLevelChangeId: thinkingLevel === undefined ? undefined : ids.shift(),
+              commit: () => {
+                if (result) return result;
+                if (disposed) throw new Error('Prepared model settings change is disposed.');
+                const ids = appendRows(rows);
+                result = {
+                  modelChangeId: provider === undefined ? undefined : ids.shift(),
+                  thinkingLevelChangeId: thinkingLevel === undefined ? undefined : ids.shift(),
+                };
+                return result;
+              },
+              dispose: () => { disposed = true; },
             };
           },
         };
@@ -341,7 +351,7 @@ test('cold discovery retries when model settings and prompt toggles change befor
   try {
     const opening = h.server.buildSessionOpenedPayload(h.sessionPath);
     await firstDiscoveryStarted;
-    h.server.coldSessionStore.setModelSettings(h.sessionPath, {
+    await h.server.coldSessionStore.setModelSettings(h.sessionPath, {
       model: { provider: 'mock', modelId: 'model-b' },
     });
     await writeSystemPromptTogglesForSession(h.sessionPath, ['skills']);

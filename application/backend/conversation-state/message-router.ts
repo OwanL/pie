@@ -14,6 +14,7 @@ import type {
   RendererCommandContext,
 } from '../../lib/protocol/index.js';
 import { isBoundedImagePreviewData } from '../../lib/protocol/image-preview.js';
+import { sessionSnoozeWakeAt } from '../../lib/protocol/session-snooze.js';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../../../lib/structured-logging/pie-logger';
@@ -94,6 +95,7 @@ export interface SessionServiceLike {
    *  `triggerId` is omitted). Invoked by the webview's status-strip cancel
    *  affordance. */
   cancelDeferredTrigger(sessionPath: string, triggerId?: string): void;
+  getDeferredTriggers?(): import('../../lib/protocol/deferred-triggers.js').DeferredTriggerView[];
 }
 
 /**
@@ -225,6 +227,20 @@ export class MessageRouter {
       case 'openSession':
         return this.onOpenSession(msg as Extract<WebviewToHostMessage, { type: 'openSession' }>, context);
 
+      case 'snoozeSession': {
+        const request = msg as Extract<WebviewToHostMessage, { type: 'snoozeSession' }>;
+        if (![4, 8, 12, 24, 48, 'monday'].includes(request.durationHours) || typeof request.sessionPath !== 'string') return;
+        const now = Date.now();
+        const deferredTarget = (this.service.getDeferredTriggers?.() ?? []).some((t) => (t.targetSession ?? t.sessionPath) === request.sessionPath);
+        this.dispatchEvent({ kind: 'SessionSnoozeRequested', sessionPath: request.sessionPath, now,
+          wakeAt: sessionSnoozeWakeAt(now, request.durationHours), deferredTarget });
+        return;
+      }
+      case 'restoreSnoozedSession': {
+        const request = msg as Extract<WebviewToHostMessage, { type: 'restoreSnoozedSession' }>;
+        this.dispatchEvent({ kind: 'SessionSnoozeRestoreRequested', sessionPath: request.sessionPath });
+        return;
+      }
       case 'closeSession':
         return await this.onCloseSession(msg as Extract<WebviewToHostMessage, { type: 'closeSession' }>, context);
 

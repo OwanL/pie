@@ -17,6 +17,7 @@ export const SKILL_PRUNER_BEHAVIOR_SETTING_LABELS = [
   'Mode',
   'Main agents',
   'Subagents',
+  'Re-prune on follow-up messages',
   'Skill limit',
   'Tool limit',
   'Omitted skills (never pruned)',
@@ -56,7 +57,7 @@ export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, tool
       />
       <div class="toolbar-settings-content-group" role="group" aria-label="Scope & limits">
         <h3 class="toolbar-settings-content-group-title">Scope &amp; limits<SettingsHelp label="Scope & limits">
-          Choose which agent turns can use the pruning prepass, its overall mode, and maximum numbers of skills and tools to retain.
+          Choose which agent turns can use the pruning prepass, its overall mode, and maximum numbers of skills and tools to retain. By default, follow-up messages retain the previous tool and skill selection. Enable re-pruning to select again on each follow-up; Refresh capabilities can recover omitted tools and skills for your next idle, nonempty message.
         </SettingsHelp></h3>
         <div class="toolbar-settings-item toolbar-settings-mode-row">
           <span class="toolbar-settings-item-label">Mode</span>
@@ -80,6 +81,11 @@ export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, tool
           label="Subagents"
           checked={pruningSettings.subagentEnabled ?? true}
           onChange={() => onSetPruningSettings({ subagentEnabled: !(pruningSettings.subagentEnabled ?? true) })}
+        />
+        <SettingCheckbox
+          label="Re-prune on follow-up messages"
+          checked={pruningSettings.followUpEnabled ?? false}
+          onChange={() => onSetPruningSettings({ followUpEnabled: !(pruningSettings.followUpEnabled ?? false) })}
         />
         <Stepper
           label="Skill limit"

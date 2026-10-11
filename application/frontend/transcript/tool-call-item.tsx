@@ -29,6 +29,7 @@ import {
 } from './subagent';
 import { StatusChip } from './status-chip';
 import { ToolCallCard } from './tool-call-card';
+import { RawToolInspector } from './tool-call-card/raw-tool-inspector';
 import { MessageItem } from './message-item';
 import { TranscriptMessageList } from './transcript-message-list';
 import { NestedVirtualList, NESTED_VIRTUALIZE_MIN_MESSAGES, estimateNestedMessageHeight } from './nested-virtual-list';
@@ -917,7 +918,15 @@ function SubagentSingleBlock({
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
         <div class="subagent-header-content">
-          <span class="subagent-agent-name transcript-header-title-mono">{singleResult.agent}</span>
+          <RawToolInspector toolCall={toolCall} triggerClassName="subagent-agent-trigger">
+            <span
+              class="subagent-agent-name transcript-header-title-mono"
+              tabIndex={0}
+              aria-label={`Inspect ${singleResult.agent} model exchange`}
+            >
+              {singleResult.agent}
+            </span>
+          </RawToolInspector>
           {activity && (
             <span class={cx('subagent-activity', status === 'idle' && 'subagent-activity-idle')} title={activity.diagnostic} aria-label={activity.diagnostic}>
               <span class="subagent-activity-dot" aria-hidden="true" />

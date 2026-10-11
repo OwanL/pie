@@ -17,6 +17,7 @@ import {
 } from '../../../lib/protocol/index.js';
 import { ComposerActions } from '../../composer/actions';
 import { ComposerToolbar } from '../../composer/toolbar';
+import { SkillPrunerSettings } from '../../settings/settings-menu-skill-pruner';
 import { allocateComposerModelWidthBudget, allocateComposerOverflow } from '../../composer/toolbar-overflow-allocation';
 
 const model: ModelInfo = {
@@ -228,6 +229,77 @@ function openOverflow(): HTMLElement {
   return popover!;
 }
 
+test('refresh follows browser network access at the end of the toolbar controls', () => {
+  rowWidth = 900;
+  mount();
+  const refresh = container.querySelector('[data-toolbar-item="pruning-refresh"]');
+  assert.ok(refresh);
+  assert.ok(refresh.closest('.composer-controls'));
+  assert.equal(refresh.previousElementSibling?.getAttribute('data-toolbar-item'), 'browser-network');
+  assert.equal(refresh.nextElementSibling, null);
+  assert.equal(container.querySelector('.composer-pinned-controls .pruning-refresh-trigger'), null);
+});
+
+test('refresh overflows at narrow widths and toggles only from host state, even while busy', () => {
+  rowWidth = 220;
+  const pending: boolean[] = [];
+  const toolbarProps = props({ busy: true, onSetPruningRefreshPending: (value) => pending.push(value) });
+  mount(toolbarProps);
+  const popover = openOverflow();
+  const button = popover.querySelector<HTMLButtonElement>('[aria-label="Refresh capabilities"]')!;
+  assert.ok(button.closest('[data-toolbar-item="pruning-refresh"]'));
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute('aria-pressed'), 'false');
+  assert.match(button.title, /next idle, nonempty send/);
+  click(button);
+  click(button);
+  assert.deepEqual(pending, [true, true], 'clicks do not change local pending state');
+  rerender({ ...toolbarProps, pruningRefreshPending: true });
+  const armed = container.querySelector<HTMLButtonElement>('[aria-label="Refresh capabilities"]')!;
+  assert.equal(armed.getAttribute('aria-pressed'), 'true');
+  assert.ok(armed.classList.contains('active'));
+  assert.ok(armed.querySelector('.pruning-refresh-pending'));
+  assert.match(armed.title, /Refresh pending/);
+  click(armed);
+  assert.deepEqual(pending, [true, true, false]);
+  assert.equal(container.querySelectorAll('[aria-label="Refresh capabilities"]').length, 1);
+});
+
+test('refresh is disabled for unavailable transport, session, or pruning scope', () => {
+  const attempts: boolean[] = [];
+  const base = props({ onSetPruningRefreshPending: (value) => attempts.push(value) });
+  for (const override of [
+    { commandsAvailable: false },
+    { sessionPath: null },
+    { sessionPath: '__pending__:create-test' },
+    { pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, mode: 'off' as const } },
+    { pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, mainAgentEnabled: false } },
+    { prefs: { ...DEFAULT_CHAT_PREFS, extensionToggles: { 'skill-pruner': false } } },
+  ]) {
+    rerender({ ...base, ...override });
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Refresh capabilities"]')!;
+    assert.equal(button.disabled, true, JSON.stringify(override));
+    click(button);
+  }
+  assert.deepEqual(attempts, []);
+});
+
+test('follow-up re-pruning defaults off and posts a passive settings toggle', () => {
+  const changes: unknown[] = [];
+  const settings = { ...DEFAULT_PRUNING_SETTINGS, followUpEnabled: undefined };
+  act(() => render(h(SkillPrunerSettings, {
+    prefs: DEFAULT_CHAT_PREFS, pruningSettings: settings, skillCatalog: [], toolCatalog: [],
+    onSetPrefs: () => {}, onSetPruningSettings: (value) => changes.push(value),
+  }), container));
+  const checkbox = [...container.querySelectorAll<HTMLElement>('[role="checkbox"]')]
+    .find((element) => element.textContent?.includes('Re-prune on follow-up messages'));
+  assert.ok(checkbox);
+  assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+  click(checkbox);
+  assert.deepEqual(changes, [{ followUpEnabled: true }]);
+  assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+});
+
 test('model width stays natural until secondary items are all overflowed, then uses only remaining row budget', () => {
   const input = {
     availableWidth: 410,
@@ -401,7 +473,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   const hiddenKeys = Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]'))
     .map((element) => element.dataset.toolbarItem);
   assert.deepEqual(hiddenKeys, [
-    'subagent-providers', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network',
+    'subagent-providers', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
     'run-status',
   ]);
   assert.equal(container.querySelectorAll('[data-toolbar-item="autonomous-mode"]').length, 1, 'moved controls are mounted once');
@@ -423,7 +495,7 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
-    ['mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network'],
+    ['mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
   );
 
   rowWidth = 900;

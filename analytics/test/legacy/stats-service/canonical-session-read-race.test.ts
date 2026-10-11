@@ -123,6 +123,42 @@ function branchObservation(options: {
   return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
 }
 
+test('background hydration and held restoration preserve the active bounded usage snapshot', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-usage-cache-'));
+  const stats = statsFixture(fixtureState(), {} as CanonicalAnalyticsReadModel, 0, root);
+  const cache = stats as unknown as {
+    cacheCanonicalSessionUsage(path: string, snapshot: import('../../../usage-accounting/session-usage').SessionUsageSnapshot, revision: string, scope: string, epoch: number): void;
+    canonicalSessionScopeKey(path: string): string;
+    canonicalSessionUsageByPath: Map<string, { snapshot: import('../../../usage-accounting/session-usage').SessionUsageSnapshot }>;
+    canonicalSessionUsageHeldByPath: Map<string, { snapshot: import('../../../usage-accounting/session-usage').SessionUsageSnapshot }> | null;
+    canonicalSessionUsageCacheSamples: number;
+    canonicalSessionUsageCacheBytes: number;
+    retainHeldCanonicalSessionUsage(status: 'refreshing'): void;
+  };
+  const snapshot = { authority: 'canonical' as const, samples: Array.from({ length: 2100 }, (_, i) => ({
+    sourceId: String(i), kind: 'conversation' as const, inputTokens: 0, outputTokens: 0,
+    cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, reportedCostUsd: 24 / 2100,
+  })) };
+  try {
+    cache.cacheCanonicalSessionUsage(SESSION_PATH, snapshot, '0', cache.canonicalSessionScopeKey(SESSION_PATH), 0);
+    assert.equal(cache.canonicalSessionUsageByPath.get(SESSION_PATH)?.snapshot.samples.length, 2100);
+    cache.cacheCanonicalSessionUsage('/background', snapshot, '0', 'background', 0);
+    assert.equal(cache.canonicalSessionUsageByPath.get(SESSION_PATH)?.snapshot.samples.length, 2100);
+    assert.equal(stats.getSessionUsage(SESSION_PATH).samples.length, 2100);
+    cache.canonicalSessionUsageHeldByPath = new Map(cache.canonicalSessionUsageByPath);
+    cache.cacheCanonicalSessionUsage('/background', snapshot, '0', 'background', 0);
+    cache.retainHeldCanonicalSessionUsage('refreshing');
+    assert.equal(stats.getSessionUsage(SESSION_PATH).samples.length, 2100);
+    cache.cacheCanonicalSessionUsage(SESSION_PATH, { ...snapshot, samples: Array(4001).fill(snapshot.samples[0]) }, '0', ROOT_ID, 0);
+    assert.equal(cache.canonicalSessionUsageByPath.get(SESSION_PATH)?.snapshot.authority, 'unknown');
+    assert.ok(cache.canonicalSessionUsageCacheSamples <= 4000);
+    assert.ok(cache.canonicalSessionUsageCacheBytes <= 4 * 1024 * 1024);
+  } finally {
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const ROOT_ID = 'root-read-race';
 const SESSION_PATH = '/sessions/read-race.jsonl';
 

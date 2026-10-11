@@ -1250,4 +1250,4 @@ export type HostEvent =
   | SessionsInterruptedEvent
   | SessionCloseResponseDeliveredEvent;
 
-export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;
+export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent | import('./session-snooze.js').SessionSnoozeEvent;

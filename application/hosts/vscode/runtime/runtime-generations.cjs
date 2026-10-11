@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('node:fs/promises');
-const fileStreams = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
@@ -30,7 +29,8 @@ const HASH_FILE_READ_CHUNK_BYTES = 64 * 1024;
 const STARTUP_TIMING_FILE = path.join(os.tmpdir(), 'pie-startup-timing.jsonl');
 const STARTUP_TIMING_TAG = 'DEBUG-startup-profile';
 const STARTUP_TIMING_MAX_BYTES = 1_048_576;
-const STARTUP_TIMING_MAX_RECORD_BYTES = 4_096;
+// Eight generation summaries plus one overflow summary, with scan aggregates.
+const STARTUP_TIMING_MAX_RECORD_BYTES = 8_192;
 const MAX_REPORTED_GENERATIONS = 8;
 
 let sequence = 0;
@@ -142,9 +142,80 @@ function createAcquisitionTiming() {
   };
 }
 
+function createScanProfile() {
+  return {
+    cpuUserMs: 0,
+    cpuSystemMs: 0,
+    lstat: { count: 0, observedTotalMs: 0, observedMaxMs: 0 },
+    readdir: { count: 0, observedTotalMs: 0, observedMaxMs: 0 },
+    hash: { count: 0, observedTotalMs: 0, observedMaxMs: 0 },
+  };
+}
+
+function diagnosticNow(profile) {
+  try {
+    return profile ? monotonicNow() : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordScanOperation(profile, operation, startedAt) {
+  if (!profile || startedAt === null) return;
+  try {
+    // Observed elapsed includes callback/event-loop scheduling, not just I/O.
+    // Totals overlap across the eight slots; they are not additive wall time.
+    const milliseconds = elapsedMs(startedAt);
+    const metric = profile[operation];
+    metric.count += 1;
+    metric.observedTotalMs += milliseconds;
+    metric.observedMaxMs = Math.max(metric.observedMaxMs, milliseconds);
+  } catch {
+    // Diagnostics must not replace a validation error or interrupt draining.
+  }
+}
+
+function scanCpuUsage(profile, previous) {
+  if (!profile) return null;
+  try {
+    // Process-wide CPU, including unrelated work during this scan.
+    const usage = process.cpuUsage(previous);
+    if (previous) {
+      profile.cpuUserMs += usage.user / 1000;
+      profile.cpuSystemMs += usage.system / 1000;
+    }
+    return usage;
+  } catch {
+    return null;
+  }
+}
+
+function mergeScanProfile(target, profile) {
+  target.cpuUserMs += profile.cpuUserMs;
+  target.cpuSystemMs += profile.cpuSystemMs;
+  for (const operation of ['lstat', 'readdir', 'hash']) {
+    target[operation].count += profile[operation].count;
+    target[operation].observedTotalMs += profile[operation].observedTotalMs;
+    target[operation].observedMaxMs = Math.max(target[operation].observedMaxMs, profile[operation].observedMaxMs);
+  }
+}
+
+function finalizeScanProfile(profile) {
+  return {
+    cpuUserMs: roundedMs(profile.cpuUserMs),
+    cpuSystemMs: roundedMs(profile.cpuSystemMs),
+    ...Object.fromEntries(['lstat', 'readdir', 'hash'].map((operation) => [operation, {
+      count: profile[operation].count,
+      observedTotalMs: roundedMs(profile[operation].observedTotalMs),
+      observedMaxMs: roundedMs(profile[operation].observedMaxMs),
+    }])),
+  };
+}
+
 function createVerificationSummary(generation) {
   return {
     generation,
+    scanProfile: createScanProfile(),
     count: 0,
     failures: 0,
     totalMs: 0,
@@ -170,6 +241,7 @@ function recordVerification(timing, generation, verification) {
   if (!summary) {
     if (!timing.verificationOverflow) {
       timing.verificationOverflow = {
+        scanProfile: createScanProfile(),
         count: 0,
         failures: 0,
         totalMs: 0,
@@ -186,6 +258,7 @@ function recordVerification(timing, generation, verification) {
     }
     summary = timing.verificationOverflow;
   }
+  mergeScanProfile(summary.scanProfile, verification.scanProfile);
   summary.count += 1;
   summary.failures += verification.failed ? 1 : 0;
   summary.totalMs += verification.totalMs;
@@ -199,6 +272,7 @@ function recordVerification(timing, generation, verification) {
 function finalizeAcquisitionTiming(timing) {
   const verifications = [...timing.verifications.values()].map((summary) => ({
     generation: summary.generation,
+    scanProfile: finalizeScanProfile(summary.scanProfile),
     count: summary.count,
     failures: summary.failures,
     totalMs: roundedMs(summary.totalMs),
@@ -211,6 +285,7 @@ function finalizeAcquisitionTiming(timing) {
     const summary = timing.verificationOverflow;
     verificationOverflow = {
       ...summary,
+      scanProfile: finalizeScanProfile(summary.scanProfile),
       totalMs: roundedMs(summary.totalMs),
       phasesMs: Object.fromEntries(Object.entries(summary.phasesMs).map(([phase, milliseconds]) => [phase, roundedMs(milliseconds)])),
     };
@@ -442,22 +517,46 @@ async function assertRegularFile(filePath, label) {
   return info;
 }
 
-async function hashFile(filePath) {
+async function hashFile(filePath, buffer) {
   const hash = crypto.createHash('sha256');
   let size = 0;
-  const stream = fileStreams.createReadStream(filePath, { highWaterMark: HASH_FILE_READ_CHUNK_BYTES });
-  for await (const chunk of stream) {
-    hash.update(chunk);
-    size += chunk.length;
+  let handle;
+  let hasPrimaryError = false;
+  try {
+    handle = await fs.open(filePath, 'r');
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      size += bytesRead;
+    }
+    return { sha256: hash.digest('hex'), size };
+  } catch (error) {
+    hasPrimaryError = true;
+    throw error;
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch (error) {
+        if (!hasPrimaryError) throw error;
+      }
+    }
   }
-  return { sha256: hash.digest('hex'), size };
 }
 
-async function collectFileRecords(rootDir, { split = false, omitTooling = false } = {}) {
+async function collectFileRecords(rootDir, { split = false, omitTooling = false, scanProfile } = {}) {
   const root = path.resolve(rootDir);
-  const rootInfo = await fs.lstat(root);
+  const rootStartedAt = diagnosticNow(scanProfile);
+  let rootInfo;
+  try {
+    rootInfo = await fs.lstat(root);
+  } finally {
+    recordScanOperation(scanProfile, 'lstat', rootStartedAt);
+  }
   if (!rootInfo.isDirectory()) throw new Error(`Runtime output is not a directory: ${rootDir}`);
   const records = [];
+  const freeBuffers = [];
   let sawTooling = false;
   const pending = [{ path: '', absolute: root, isDirectory: true }];
   let nextTaskIndex = 0;
@@ -467,7 +566,13 @@ async function collectFileRecords(rootDir, { split = false, omitTooling = false 
 
   async function scan(task) {
     if (task.isDirectory) {
-      const entries = await fs.readdir(task.absolute, { withFileTypes: true });
+      const startedAt = diagnosticNow(scanProfile);
+      let entries;
+      try {
+        entries = await fs.readdir(task.absolute, { withFileTypes: true });
+      } finally {
+        recordScanOperation(scanProfile, 'readdir', startedAt);
+      }
       if (failed) return;
       entries.sort((left, right) => left.name.localeCompare(right.name));
       const candidates = entries.map((entry) => {
@@ -484,7 +589,13 @@ async function collectFileRecords(rootDir, { split = false, omitTooling = false 
     }
 
     if (split && task.path.split('/')[0].toLowerCase() === TOOLING_DIRECTORY && task.path.split('/')[0] !== TOOLING_DIRECTORY) throw new Error('Noncanonical tooling directory.');
-    const info = await fs.lstat(task.absolute);
+    const metadataStartedAt = diagnosticNow(scanProfile);
+    let info;
+    try {
+      info = await fs.lstat(task.absolute);
+    } finally {
+      recordScanOperation(scanProfile, 'lstat', metadataStartedAt);
+    }
     if (failed) return;
     if (split && task.path === TOOLING_DIRECTORY) {
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Tooling output is not an ordinary directory.');
@@ -499,7 +610,17 @@ async function collectFileRecords(rootDir, { split = false, omitTooling = false 
     } else if (info.isFile()) {
       // Keep the slot through hashing: directory reads, metadata, and hashes
       // all share the same global limit, without directory-wide barriers.
-      const digest = await hashFile(task.absolute);
+      const hashStartedAt = diagnosticNow(scanProfile);
+      let digest;
+      // Each slot owns its buffer through close; at most eight scan-local
+      // allocations avoid a large Buffer allocation for every read.
+      const buffer = freeBuffers.pop() || Buffer.allocUnsafeSlow(HASH_FILE_READ_CHUNK_BYTES);
+      try {
+        digest = await hashFile(task.absolute, buffer);
+      } finally {
+        recordScanOperation(scanProfile, 'hash', hashStartedAt);
+        freeBuffers.push(buffer);
+      }
       records.push({ path: task.path, sha256: digest.sha256, size: digest.size });
     } else {
       throw new Error(`Unsupported runtime output entry: ${task.path}`);
@@ -858,6 +979,7 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
     contentHashMs: 0,
     outputShapeMs: 0,
   } : null;
+  const scanProfile = timing ? createScanProfile() : undefined;
   let files = 0;
   let bytes = 0;
   let failed = true;
@@ -876,7 +998,12 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
     const fileScanStartedAt = timing ? monotonicNow() : null;
     let actualRecords;
     try {
-      actualRecords = await collectFileRecords(outDir, { split: validated.split, omitTooling: validated.split && !fullTooling });
+      const cpuStartedAt = scanCpuUsage(scanProfile);
+      try {
+        actualRecords = await collectFileRecords(outDir, { split: validated.split, omitTooling: validated.split && !fullTooling, scanProfile });
+      } finally {
+        if (cpuStartedAt) scanCpuUsage(scanProfile, cpuStartedAt);
+      }
       if (validated.split && (await readToolingReference(outDir, actualRecords)).identity !== validated.toolingIdentity) throw new Error('Tooling identity mismatch.');
       if (timing) {
         files = actualRecords.length;
@@ -930,13 +1057,18 @@ async function verifyStoredGeneration(generationDir, generation, identity, timin
     };
   } finally {
     if (timing) {
-      recordVerification(timing, generation, {
-        failed,
-        totalMs: elapsedMs(startedAt),
-        files,
-        bytes,
-        phasesMs,
-      });
+      try {
+        recordVerification(timing, generation, {
+          failed,
+          totalMs: elapsedMs(startedAt),
+          files,
+          bytes,
+          phasesMs,
+          scanProfile,
+        });
+      } catch {
+        // Diagnostics must not change verification success or its first error.
+      }
     }
   }
 }

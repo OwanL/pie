@@ -18,8 +18,10 @@ import { ToolCallItem } from '../../../transcript/tool-call-item.tsx';
 // instead of falling back to the generic card.
 import '../../../transcript/register-builtins.ts';
 import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open';
+import { AskUserContext } from '../../../lib/hooks/ask-user-context';
+import { clearLazyDetailCache, receiveLazyDetailResult, setLazyDetailPostMessage } from '../../../transcript/lazy-detail-store';
 import { readFile } from 'node:fs/promises';
-import { DEFAULT_CHAT_PREFS, type ChatPrefs, type ToolCall } from '../../../../lib/protocol/index.js';
+import { DEFAULT_CHAT_PREFS, type ChatPrefs, type ToolCall, type WebviewToHostMessage } from '../../../../lib/protocol/index.js';
 import type { TokenPricingResolver } from '../../../session-tabs/token-usage';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../../../transcript/types';
 
@@ -30,6 +32,7 @@ let container: HTMLElement;
 
 beforeEach(() => {
   clearCollapsibleCache();
+  clearLazyDetailCache();
   container = document.createElement('div');
   document.body.appendChild(container);
 });
@@ -37,6 +40,7 @@ beforeEach(() => {
 afterEach(() => {
   render(null, container);
   container.remove();
+  clearLazyDetailCache();
 });
 
 /**
@@ -181,11 +185,10 @@ function makeRenderToolCall(prefs: ChatPrefs): RenderToolCall {
   return renderToolCall;
 }
 
-function mount(toolCall: ToolCall, prefs: ChatPrefs, pricingForModel?: TokenPricingResolver) {
+function mount(toolCall: ToolCall, prefs: ChatPrefs, pricingForModel?: TokenPricingResolver, sessionPath?: string) {
   const renderToolCall = makeRenderToolCall(prefs);
   act(() => {
-    render(
-      h(SubagentToolRenderer, {
+    const node = h(SubagentToolRenderer, {
         toolCall,
         prefs,
         workingDirectory: '/repo',
@@ -193,9 +196,10 @@ function mount(toolCall: ToolCall, prefs: ChatPrefs, pricingForModel?: TokenPric
         onContextMenu: noopContextMenu,
         renderToolCall,
         pricingForModel,
-      }),
-      container,
-    );
+      });
+    render(sessionPath ? h(AskUserContext.Provider, {
+      value: { sessionPath, postMessage: noop, pendingRequests: {}, registerInlineRequest: noop, unregisterInlineRequest: noop },
+    }, node) : node, container);
   });
 }
 
@@ -326,10 +330,10 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
   assert.doesNotMatch(host?.textContent ?? '', /Input|Cache read|Cache write/);
 });
 
-/** Open the model-details tooltip and return the visible host element. */
-async function openModelTooltip(): Promise<HTMLElement> {
-  const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
-  assert.ok(modelTrigger, 'model details trigger should render');
+/** Open a details tooltip through its real hover wrapper or keyboard focus. */
+async function openDetailsTooltip(element: HTMLElement, activation: 'hover' | 'focus' = 'hover'): Promise<HTMLElement> {
+  const wrapper = element.closest<HTMLElement>('.pie-tooltip-trigger');
+  assert.ok(wrapper, 'details target should have a tooltip wrapper');
   const originalSetTimeout = window.setTimeout;
   let showTooltip: TimerHandler | undefined;
   window.setTimeout = ((callback: TimerHandler) => {
@@ -338,7 +342,8 @@ async function openModelTooltip(): Promise<HTMLElement> {
   }) as typeof window.setTimeout;
   try {
     await act(async () => {
-      modelTrigger.closest<HTMLElement>('.pie-tooltip-trigger')?.dispatchEvent(new MouseEvent('mouseenter'));
+      if (activation === 'focus') element.focus();
+      else wrapper.dispatchEvent(new MouseEvent('mouseenter'));
       if (typeof showTooltip === 'function') showTooltip();
       await Promise.resolve();
     });
@@ -348,9 +353,179 @@ async function openModelTooltip(): Promise<HTMLElement> {
   const host = Array.from(document.querySelectorAll<HTMLElement>('.pie-tooltip-host'))
     .filter((candidate) => candidate.style.display === 'block')
     .at(-1);
-  assert.ok(host, 'model hover should open the rich runtime tooltip');
+  assert.ok(host, 'activation should open the details surface');
   return host;
 }
+
+async function openModelTooltip(): Promise<HTMLElement> {
+  const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
+  assert.ok(modelTrigger, 'model details trigger should render');
+  const host = await openDetailsTooltip(modelTrigger);
+  assert.equal(host.getAttribute('role'), 'tooltip');
+  assert.ok(host.querySelector('.subagent-model-details-tooltip'), 'model text retains rich runtime details');
+  return host;
+}
+
+function agentName(): HTMLElement {
+  const name = container.querySelector<HTMLElement>('.subagent-agent-name');
+  assert.ok(name, 'requested agent name should render');
+  return name;
+}
+
+function requestedAgentToolCall(agent: 'worker' | 'reviewer' | 'scout'): ToolCall {
+  const toolCall = telemetrySubagentToolCall('legacy');
+  toolCall.id = `agent-name-${agent}`;
+  (toolCall.input as any).agent = agent;
+  (toolCall.result as any).details.results[0].agent = agent;
+  return toolCall;
+}
+
+const captureSession = '/fixture/parent-session';
+const capturedExchange = {
+  produced: { name: 'subagent', arguments: { agent: 'captured-agent', task: 'EXACT captured task', opaque: ['unaltered', { value: 7 }] } },
+  received: [{ type: 'text', text: 'EXACT captured output' }, { type: 'image', mimeType: 'image/png', data: 'EXACT_BINARY' }],
+};
+
+function captureRequests(): WebviewToHostMessage[] {
+  const messages: WebviewToHostMessage[] = [];
+  setLazyDetailPostMessage((message) => messages.push(message));
+  return messages;
+}
+
+function assertCapturedInspector(host: HTMLElement) {
+  assert.equal(host.getAttribute('role'), 'region', 'same raw inspector surface as tool icons');
+  assert.ok(host.querySelector('.tool-call-raw-inspector'));
+  assert.equal(host.querySelector('.subagent-model-details-tooltip'), null);
+  assert.match(host.textContent ?? '', /Model produced/);
+  assert.match(host.textContent ?? '', /Model received/);
+  assert.doesNotMatch(host.textContent ?? '', /Usage & performance|Delegated task|Exact inherited parent context|Latest generation|worker-model|inspect telemetry|Keep telemetry visible|Context1\.5k|Output300 tok/);
+}
+
+function settleCapture(messages: WebviewToHostMessage[], toolCall: ToolCall, host: HTMLElement) {
+  const request = messages.at(-1);
+  assert.ok(request, 'agent-name inspection must lazily request the captured exchange');
+  assert.equal(request.type, 'requestDetail');
+  if (request.type !== 'requestDetail') return;
+  assert.equal(request.sessionPath, captureSession);
+  assert.deepEqual(request.ref, {
+    key: JSON.stringify(['model-exchange', captureSession, toolCall.durableEntryId ?? toolCall.id, toolCall.id]),
+    kind: 'model-exchange', source: 'durable', sessionPath: captureSession,
+    messageId: toolCall.durableEntryId ?? toolCall.id, toolCallId: toolCall.id,
+    sizeBytes: 0, summary: 'Captured model exchange', available: true,
+  });
+  act(() => receiveLazyDetailResult({ sessionPath: captureSession, key: request.ref.key, status: 'loaded', value: { ...capturedExchange, diagnostic: 'EXCLUDED_DIAGNOSTIC' }, sizeBytes: 500 }));
+  assertCapturedInspector(host);
+  const produced = host.querySelector('pre[aria-label="Model produced JSON"]');
+  const received = host.querySelector('pre[aria-label="Model received JSON"]');
+  assert.ok(produced);
+  assert.ok(received);
+  assert.deepEqual(JSON.parse(produced.textContent ?? ''), capturedExchange.produced);
+  assert.deepEqual(JSON.parse(received.textContent ?? ''), capturedExchange.received);
+  assert.doesNotMatch(host.textContent ?? '', /EXCLUDED_DIAGNOSTIC/);
+}
+
+test('worker, reviewer, and scout names lazily inspect exact captured subagent JSON while model text keeps telemetry', async () => {
+  const messages = captureRequests();
+  for (const agent of ['worker', 'reviewer', 'scout'] as const) {
+    const toolCall = requestedAgentToolCall(agent);
+    toolCall.durableEntryId = `original-entry-${agent}`;
+    const before = messages.length;
+    mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
+    const modelHost = await openModelTooltip();
+    assert.match(modelHost.textContent ?? '', /Context1\.5k \/ 200k tok/);
+    assert.match(modelHost.textContent ?? '', /Latest generation.*200\.0 tok\/s/s);
+    assert.equal(messages.length, before, 'mounting and model hover do not request a raw capture');
+    act(() => render(null, container));
+    mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
+    assert.equal(agentName().textContent, agent);
+    const host = await openDetailsTooltip(agentName());
+    assert.equal(messages.length, before + 1);
+    settleCapture(messages, toolCall, host);
+    assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false', 'hover does not expand');
+    act(() => render(null, container));
+  }
+});
+
+test('agent-name raw inspection is available without a model label', async () => {
+  const messages = captureRequests();
+  const toolCall = requestedAgentToolCall('scout');
+  const child = (toolCall.result as any).details.results[0];
+  delete child.model;
+  delete child.selectedModel;
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
+  assert.equal(container.querySelector('.subagent-model-label'), null);
+  assert.equal(container.querySelector('.subagent-model-details-trigger'), null);
+  assert.equal(messages.length, 0);
+  settleCapture(messages, toolCall, await openDetailsTooltip(agentName()));
+});
+
+test('parallel agent names inspect the same original parent capture, not synthetic child identities', async () => {
+  const messages = captureRequests();
+  const toolCall = requestedAgentToolCall('worker');
+  toolCall.durableEntryId = 'parallel-original-entry';
+  toolCall.input = { tasks: [{ agent: 'worker', task: 'first' }, { agent: 'reviewer', task: 'second' }, { agent: 'scout', task: 'third' }] };
+  const details = (toolCall.result as any).details;
+  details.mode = 'parallel';
+  const originalChild = details.results[0];
+  details.results = ['worker', 'reviewer', 'scout'].map((agent, index) => ({ ...originalChild, id: `runtime-child-${index}`, agent, task: `display child ${index}` }));
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: true }), undefined, captureSession);
+  assert.equal(messages.length, 0);
+  const names = Array.from(container.querySelectorAll<HTMLElement>('.subagent-agent-name'));
+  assert.deepEqual(names.map((name) => name.textContent), ['worker', 'reviewer', 'scout']);
+  for (const name of names) {
+    const before: number = messages.length;
+    const host = await openDetailsTooltip(name);
+    assert.equal(messages.length, before + 1);
+    settleCapture(messages, toolCall, host);
+    assert.doesNotMatch(host.textContent ?? '', /runtime-child-|display child/);
+    act(() => { name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.equal(host.style.display, 'none');
+  }
+  const keys = messages.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key);
+  assert.equal(new Set(keys).size, 1, 'every child uses the original parent ToolCall identity');
+});
+
+test('nested agent-name inspection is safely unavailable when the exact child session is unknown', async () => {
+  const messages = captureRequests();
+  mount(nestedSubagentToolCall(), prefsWith({ autoExpandSubagentCalls: true }), undefined, captureSession);
+  const names = container.querySelectorAll<HTMLElement>('.subagent-agent-name');
+  assert.equal(names.length, 2);
+  assert.equal(names[1].textContent, 'scout');
+  const host = await openDetailsTooltip(names[1]);
+  assertCapturedInspector(host);
+  assert.match(host.textContent ?? '', /child durable session identity is not available/);
+  assert.equal(messages.length, 0, 'must not request the parent session with a nested tool ID');
+  assert.doesNotMatch(host.textContent ?? '', /Recon complete|recon the codebase/);
+});
+
+test('agent-name raw inspection retains focus, click and keyboard header expansion and dismissal', async () => {
+  const messages = captureRequests();
+  const toolCall = requestedAgentToolCall('reviewer');
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
+  const name = agentName();
+  assert.equal(name.tabIndex, 0);
+  const host = await openDetailsTooltip(name, 'focus');
+  settleCapture(messages, toolCall, host);
+  assert.equal(document.activeElement, name);
+  const header = container.querySelector<HTMLElement>('.subagent-header');
+  assert.ok(header);
+  assert.equal(header.getAttribute('aria-expanded'), 'false', 'focus alone does not expand');
+  for (const [key, expanded] of [['Enter', 'true'], [' ', 'false']] as const) {
+    if (host.style.display === 'none') await openDetailsTooltip(name);
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    act(() => { name.dispatchEvent(event); });
+    assert.equal(header.getAttribute('aria-expanded'), expanded);
+    assert.equal(host.style.display, 'none', 'activation dismisses inspection');
+    assert.equal(document.activeElement, name);
+    assert.equal(event.defaultPrevented, true);
+  }
+  for (const expanded of ['true', 'false']) {
+    const clickHost = await openDetailsTooltip(name);
+    act(() => { name.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.equal(header.getAttribute('aria-expanded'), expanded);
+    assert.equal(clickHost.style.display, 'none');
+  }
+});
 
 function costEvidenceToolCall(usage: Record<string, number> | undefined): ToolCall {
   const child: Record<string, unknown> = {

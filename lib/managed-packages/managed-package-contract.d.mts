@@ -10,6 +10,8 @@ export const MANAGED_PACKAGE_REQUIREMENTS: readonly ManagedPackageRequirement[];
 export function managedPackageRoot(agentDir: string, packageName: string): string;
 export function managedRequiredFileCandidates(root: string, relative: string): readonly string[];
 export function resolveManagedCacheTargets(packageName: string, cacheDir: string | undefined): readonly string[] | null;
+export function classifyMcpScriptSource(content: string): "pristine" | "supported-patched" | "unsupported";
+export function patchMcpScriptLoadingInSource(content: string): string;
 export function classifyManagedPackageSources(
 	packageName: string,
 	files: { readonly index?: string; readonly storage?: string; readonly agentDir?: string },

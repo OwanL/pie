@@ -259,6 +259,75 @@ test('raw tooltip copies only captured payload, bounds huge binary preview and f
   }
 });
 
+for (const side of ['above', 'below'] as const) {
+  test(`async raw capture growth keeps the activatable text trigger clear ${side}`, () => {
+    const originalObserver = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver');
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+    const originalTimeout = window.setTimeout;
+    const pending: Array<() => void> = [];
+    const messages: WebviewToHostMessage[] = [];
+    let notifyResize: (() => void) | undefined;
+    let observed: Element | undefined;
+    class MockResizeObserver {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        observed = target;
+        notifyResize = () => this.callback([], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: MockResizeObserver });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 640 });
+    window.setTimeout = ((fn: () => void) => { pending.push(fn); return pending.length; }) as typeof window.setTimeout;
+    setLazyDetailPostMessage((message) => messages.push(message));
+    try {
+      const call = { ...base, detailRef: { key: 'source', kind: 'tool-result' as const, source: 'durable' as const, sessionPath: '/fixture', messageId: 'm', sizeBytes: 1, summary: '', available: true } };
+      act(() => render(h(RawToolInspector, { toolCall: call }, h('span', { tabIndex: 0, 'aria-describedby': 'existing-description' }, 'edit')), container));
+      const trigger = container.querySelector('span[tabindex="0"]') as HTMLElement;
+      const wrapper = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+      const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+      const anchorTop = side === 'above' ? 548 : 100;
+      const anchorBottom = anchorTop + 14;
+      const anchorRect = { top: anchorTop, bottom: anchorBottom, left: 100, right: 140, width: 40, height: 14 } as DOMRect;
+      trigger.getBoundingClientRect = wrapper.getBoundingClientRect = () => anchorRect;
+      let height = 142;
+      host.getBoundingClientRect = () => ({ top: parseFloat(host.style.top) || 0, height, width: 320 } as DOMRect);
+      act(() => { trigger.dispatchEvent(new Event('focus')); });
+      act(() => pending.splice(0).forEach((fn) => fn()));
+      assert.equal(host.style.top, side === 'above' ? '400px' : '120px');
+      assert.ok(host.style.getPropertyValue('--pie-tooltip-available-height'), 'text trigger opts into anchor clearance');
+      assert.equal(trigger.getAttribute('aria-describedby'), `existing-description ${host.id}`);
+      assert.equal(observed, host.querySelector('.tool-call-raw-inspector'));
+      assert.ok(notifyResize, 'raw inspector observes async content growth');
+      assert.match(host.textContent ?? '', /Loading captured model exchange/);
+      const request = messages[0];
+      assert.equal(request.type, 'requestDetail');
+      if (request.type !== 'requestDetail') return;
+      act(() => receiveLazyDetailResult({ sessionPath: '/fixture', key: request.ref.key, status: 'loaded', value: { received: [{ type: 'text', text: 'ASYNC CAPTURE' }] }, sizeBytes: 100 }));
+      assert.match(host.textContent ?? '', /ASYNC CAPTURE/);
+      height = 400;
+      if (side === 'above') {
+        const oldClampedTop = Math.max(6, Math.min(400, window.innerHeight - height - 6));
+        assert.equal(oldClampedTop, 234);
+        assert.ok(oldClampedTop + height > anchorTop, 'old viewport-only clamp would overlap the trigger');
+      }
+      act(() => notifyResize!());
+      assert.equal(host.style.top, side === 'above' ? '142px' : '120px');
+      if (side === 'above') assert.equal(parseFloat(host.style.top) + height, anchorTop - 6);
+      else assert.equal(parseFloat(host.style.top), anchorBottom + 6);
+    } finally {
+      act(() => render(null, container));
+      window.setTimeout = originalTimeout;
+      if (originalObserver) Object.defineProperty(globalThis, 'ResizeObserver', originalObserver);
+      else Reflect.deleteProperty(globalThis, 'ResizeObserver');
+      if (originalHeight) Object.defineProperty(window, 'innerHeight', originalHeight);
+      else Reflect.deleteProperty(window, 'innerHeight');
+      setLazyDetailPostMessage(noop);
+    }
+  });
+}
+
 test('inspection requests exact durable identity only when opened, retries failures and refreshes partial captures', () => {
   const messages: WebviewToHostMessage[] = [];
   setLazyDetailPostMessage((message) => messages.push(message));

@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire, isBuiltin } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolvePiBuildContext } from './pi-runtime.mjs';
 import { resolveOwnerModule } from '../lib/package-resolution.mjs';
+import { packingBuild } from './pi-packing-compiler.mjs';
 import { PI_RUNTIME_PACKAGES, writePiRuntimeManifest, verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
 
 const COMPILER_OWNER = { dependencyOwnerRoot: fileURLToPath(new URL('../../', import.meta.url)) };
@@ -95,7 +97,7 @@ async function thinMaps(runtimeDir, rows, ts, counts) {
     await unlink(file); counts.mapsInlined++;
   });
 }
-async function qualifyMistral(toolingDir, rows, ts, esbuild) {
+async function qualifyMistral(toolingDir, rows, ts, compilerPath, signal) {
   let sdkUses = 0;
   await jobs(rows.filter(rel => PI_RUNTIME_PACKAGES.some(name => rel.startsWith(path.join('node_modules', name) + path.sep)) && /\.[cm]?js$/.test(rel)), async rel => {
     const tree = ast(ts, rel, await readFile(path.join(toolingDir, rel), 'utf8'));
@@ -156,7 +158,7 @@ async function qualifyMistral(toolingDir, rows, ts, esbuild) {
   function exported(file, seen = new Set()) { if (seen.has(file)) return []; seen.add(file); const value = exports.get(file); return [...value.names, ...value.stars.flatMap(child => exported(child, seen).filter(name => name !== 'default'))]; }
   check(JSON.stringify([...new Set(exported(entryFile))].sort()) === JSON.stringify(BINDINGS), 'Mistral root named exports changed');
   const config = { bundle: true, platform: 'node', format: 'cjs', target: 'node24', packages: 'external', sourcemap: 'inline', sourcesContent: true, minify: false };
-  const result = await esbuild.build({ ...config, absWorkingDir: root, entryPoints: [entry], outfile: 'bundle.cjs', write: false, metafile: true, logLevel: 'silent' });
+  const result = await packingBuild(compilerPath, { ...config, absWorkingDir: root, entryPoints: [entry], outfile: 'bundle.cjs', write: false, metafile: true, logLevel: 'silent' }, { signal });
   check(!result.warnings.length && result.outputFiles.length === 1, 'compiler warnings/additional outputs');
   for (const file of Object.keys(result.metafile.inputs)) check(graph.has(path.resolve(root, file)), 'uninspected compiler input');
   const external = [...new Set([...Object.values(result.metafile.inputs), ...Object.values(result.metafile.outputs)].flatMap(value => value.imports).filter(value => value.external).map(value => value.path))].sort();
@@ -165,13 +167,14 @@ async function qualifyMistral(toolingDir, rows, ts, esbuild) {
   const bundle = result.outputFiles[0].contents, bundleText = Buffer.from(bundle).toString('utf8');
   const inline = bundleText.match(/\/\/# sourceMappingURL=data:application\/json;base64,(\S+)/)?.[1];
   check(inline && JSON.parse(Buffer.from(inline, 'base64').toString()).sources.every(source => !path.isAbsolute(source) && !/^[a-z][a-z\d+.-]*:/i.test(source)), 'bundle sourcemap must use relative sources');
-  return { root, metadata: { ...metadata, main: './index.mjs', exports: { '.': { default: './index.mjs' }, './package.json': './package.json' } }, bundle, config, sdkUses, graphFiles: graph.size, external };
+  return { compilerVersion: result.version, root, metadata: { ...metadata, main: './index.mjs', exports: { '.': { default: './index.mjs' }, './package.json': './package.json' } }, bundle, config, sdkUses, graphFiles: graph.size, external };
 }
 
 /** Caller owns this fresh OS-temp package and must check compiled source identity before packing.
  * Unsupported qualification throws before SDK evaluation; retained outputs are diagnostic, not usable artifacts.
  */
-export async function packPiRuntime({ runtimeDir, toolingDir, provenance }) {
+export async function packPiRuntime({ runtimeDir, toolingDir, provenance, context, signal }) {
+  const compilerOwner = context === undefined ? COMPILER_OWNER : resolvePiBuildContext(context);
   await assertOwnedPair(runtimeDir, toolingDir);
   const rows = await inventory(runtimeDir);
   const options = { target: provenance.target };
@@ -188,9 +191,8 @@ export async function packPiRuntime({ runtimeDir, toolingDir, provenance }) {
   await inventory(toolingDir);
   const tooling = await verifyPiRuntimeArtifact(toolingDir, options);
   check(tooling.identity === original.identity, 'tooling copy identity differs');
-  const ts = (await import(pathToFileURL(resolveOwnerModule('typescript', COMPILER_OWNER)).href)).default;
-  const esbuild = await import(pathToFileURL(resolveOwnerModule('esbuild', COMPILER_OWNER)).href);
-  const thin = await qualifyMistral(toolingDir, rows, ts, esbuild);
+  const ts = (await import(pathToFileURL(resolveOwnerModule('typescript', compilerOwner)).href)).default;
+  const thin = await qualifyMistral(toolingDir, rows, ts, resolveOwnerModule('esbuild', compilerOwner), signal);
   const counts = { declarationsRemoved: 0, mapsInlined: 0, mapsRetained: 0 };
   await thinMaps(runtimeDir, rows, ts, counts);
   const runtimeMistral = path.join(runtimeDir, 'node_modules', MISTRAL);
@@ -205,5 +207,5 @@ export async function packPiRuntime({ runtimeDir, toolingDir, provenance }) {
   await writePiRuntimeManifest(runtimeDir, provenance);
   const runtime = await verifyPiRuntimeArtifact(runtimeDir, options), verifiedTooling = await verifyPiRuntimeToolingArtifact(runtimeDir, options);
   check(verifiedTooling.identity === tooling.identity, 'final tooling identity differs');
-  return { runtime, tooling: verifiedTooling, evidence: { recipe: 1, typescript: ts.version, esbuild: esbuild.version, config: thin.config, originalIdentity: original.identity, runtimeIdentity: runtime.identity, counts, mistral: { version: thin.metadata.version, sdkUses: thin.sdkUses, graphFiles: thin.graphFiles, external: thin.external } } };
+  return { runtime, tooling: verifiedTooling, evidence: { recipe: 1, typescript: ts.version, esbuild: thin.compilerVersion, config: thin.config, originalIdentity: original.identity, runtimeIdentity: runtime.identity, counts, mistral: { version: thin.metadata.version, sdkUses: thin.sdkUses, graphFiles: thin.graphFiles, external: thin.external } } };
 }

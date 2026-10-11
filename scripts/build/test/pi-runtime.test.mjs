@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -16,8 +16,11 @@ import {
   computePiRuntimeInputFingerprint,
   materializeDeployedNodeModules,
   resolveNativeModifierHelper,
+  resolvePiBuildContext,
   run,
 } from '../pi-runtime.mjs';
+
+import { buildPiWorkspace } from '../pi-workspace.mjs';
 
 const piNames = [
   '@earendil-works/pi-ai',
@@ -61,6 +64,45 @@ function createFingerprintFixture(t, lockVersions = piNames.map((_, index) => `l
   return { root, write, computePiRuntimeInputFingerprint: options => computePiRuntimeInputFingerprint(options, { inventory: inventory(), workspaceRepositoryRoot: root }) };
 }
 
+test('internal context rejects public-style roots and inventory escape', () => {
+  assert.throws(() => resolvePiBuildContext({ repositoryRoot: '.', env: {}, dependencyOwnerRoot: '.' }), /absolute and canonical/);
+  assert.throws(() => resolvePiBuildContext({ inventory: 'external' }), /Invalid Pi build context/);
+  const defaults = resolvePiBuildContext();
+  assert.equal(defaults.env, process.env);
+  assert.equal(defaults.repositoryRoot, defaults.dependencyOwnerRoot);
+});
+
+test('internal context uses only canonical private inputs and owned tools', async t => {
+  const fixture = createFingerprintFixture(t);
+  fixture.write('harness/pi/LICENSE', 'fixture');
+  for (const dir of ['tui', 'ai', 'agent', 'coding-agent']) {
+    fixture.write(`harness/pi/packages/${dir}/package.json`, '{}');
+    fixture.write(`harness/pi/packages/${dir}/tsconfig.build.json`, '{}');
+  }
+  for (const tool of ['typescript', 'esbuild']) {
+    fixture.write(`node_modules/${tool}/package.json`, JSON.stringify({ name: tool, main: 'index.js' }));
+    fixture.write(`node_modules/${tool}/index.js`, '');
+  }
+  fixture.write('node_modules/typescript/bin/tsc', '');
+  const context = { repositoryRoot: fixture.root, dependencyOwnerRoot: fixture.root, env: { PATH: 'private' } };
+  const selected = resolvePiBuildContext(context);
+  assert.equal(selected.repositoryRoot, fixture.root);
+  assert.deepEqual(selected.env, { PATH: 'private' });
+  assert.notEqual(selected.env, context.env);
+  assert.throws(() => resolvePiBuildContext({ ...context, dependencyOwnerRoot: resolvePiBuildContext().repositoryRoot }), /owned by the selected root/);
+  execFileSync('git', ['init', '--quiet'], { cwd: fixture.root });
+  const reader = await acquireDevelopmentReader(path.join(fixture.root, 'harness/pi'));
+  try {
+    await assert.rejects(buildPiWorkspace({ context: { ...context, env: process.env } }), error => {
+      assert.match(error.message, /writer denied/);
+      assert.ok(error.message.includes(path.basename(fixture.root)));
+      return true;
+    });
+  } finally { await reader.release({ teardownConfirmed: true }); }
+  unlinkSync(path.join(fixture.root, 'node_modules/esbuild/index.js'));
+  assert.throws(() => resolvePiBuildContext(context));
+});
+
 test('buildPiRuntime rejects retired npm refresh before creating output or acquiring a reader', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-retired-refresh-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -78,15 +120,15 @@ test('production role packing preserves ordered compilation, smoke, stability an
   const checkpoints = [
     'assertPrivateOutput(output)',
     'acquireDevelopmentReader(SOURCE)',
-    'const inputEvidence = await capturePiRuntimeInputs()',
+    'const inputEvidence = await capturePiRuntimeInputs(inputOptions)',
     'const compilation = await assertPiWorkspaceBuildStamp',
     'await materializeDeployedNodeModules',
     'fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: runtime }) === compilation.compiledSha256',
     "packPiRuntime({ runtimeDir: runtime, toolingDir: path.join(output, 'pi-tooling')",
     'fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: packed.tooling.artifactDir }) === compilation.compiledSha256',
     'await smoke(runtime, work, env)',
-    'await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) })',
-    'const afterDeploy = await capturePiRuntimeInputs()',
+    'await assertPiWorkspaceBuildStamp({ workspaceRoot: SOURCE, inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) })',
+    'const afterDeploy = await capturePiRuntimeInputs(inputOptions)',
     'fingerprintPiRuntimeInputs(inputEvidence) === fingerprintPiRuntimeInputs(afterDeploy)',
     'const verified = await verifyPiRuntimeArtifact(runtime)',
     'const tooling = await verifyPiRuntimeToolingArtifact(runtime)',

@@ -3,6 +3,7 @@ export * from './image-preview.js';
 export * from './models.js';
 export * from './messages.js';
 export * from './sessions.js';
+export * from './session-snooze.js';
 export * from './settings.js';
 export * from './webview.js';
 export * from './aggregate-stats-view.js';

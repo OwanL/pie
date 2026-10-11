@@ -36,6 +36,8 @@ export class ExtensionUIBridge {
     this.emit = emit;
   }
 
+  hasPendingRequests(): boolean { return this.pending.size > 0; }
+
   async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
     const id = crypto.randomUUID();
     const payload: ExtensionUIRequestPayload = { id, method: 'confirm', title, message, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };

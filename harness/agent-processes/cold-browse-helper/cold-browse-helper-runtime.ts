@@ -170,7 +170,7 @@ export class ColdBrowseHelperRuntime {
           sessionPath: payload.fence.sessionPath,
           key: payload.ref.key,
           status: 'unavailable',
-          message: 'message' in found ? found.message : 'The durable detail is no longer available.',
+          message: 'message' in found && typeof found.message === 'string' ? found.message : 'The durable detail is no longer available.',
         };
       } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
         result = {

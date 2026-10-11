@@ -1,7 +1,7 @@
 import type { MessageRenderOptions, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import type { PruningResult } from "../settings/config-types.js";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { formatLatencyNote } from "../prepass/message-builders.js";
+import { formatLatencyNote } from "../prepass/message-builders.ts";
 
 /** The message shape Pi passes to this customType's registered renderer. */
 type PruningFeedbackMessageShape = Parameters<MessageRenderer<PruningResult>>[0];

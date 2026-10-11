@@ -746,6 +746,69 @@ body.session-tab-dragging {
   pointer-events: none;
 }
 
+/* Specificity keeps the viewport bounds above composer.css's later menu
+   minimums. Match the 4px margin used by useMenuViewportClamp. */
+.block-context-menu.session-tab-context-menu {
+  box-sizing: border-box;
+  min-width: min(190px, calc(100vw - 8px));
+  max-width: min(340px, calc(100vw - 8px));
+}
+
+.block-context-menu.session-tab-context-menu .context-menu-item {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Snooze uses the existing compact tab actions and menu surfaces. */
+.session-snooze-reason {
+  max-width: 240px;
+  padding: 3px 10px 6px;
+  color: var(--panel-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.block-context-menu.snoozed-sessions-menu {
+  box-sizing: border-box;
+  min-width: min(220px, calc(100vw - 8px));
+  width: min(340px, calc(100vw - 8px));
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+}
+
+.snoozed-session-item {
+  width: 100%;
+  gap: 12px;
+}
+
+.snoozed-session-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.snoozed-session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snoozed-session-details time,
+.snoozed-session-restore {
+  color: var(--panel-muted);
+  font-size: 11px;
+}
+
+.snoozed-session-details time {
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.snoozed-session-restore { flex-shrink: 0; }
+
 /* ── New tab button & connecting indicator ───────────────────────────────── */
 
 .session-tabs-actions {

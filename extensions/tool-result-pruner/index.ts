@@ -63,10 +63,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isExtensionDisabledByToggle, loadConfig } from "../../harness/tools/result-processing/config.js";
-import { recordPruning } from "../../harness/tools/result-processing/logger.js";
-import { runPipeline } from "../../harness/tools/result-processing/pipeline.js";
 import { reapPrunedRawStashes, reapSessionStashes } from "../../harness/tools/result-processing/reaper.js";
-import { countTokens } from "../../lib/tokenization.js";
 import { getRootSessionId, rootSessionAttribution } from "../../lib/session-attribution.js";
 import {
   cleanupSessionTempOutputs,
@@ -215,8 +212,28 @@ export default function (pi: ExtensionAPI) {
     await trackSdkOutput(ctx, event.toolName, event);
     if (isExtensionDisabledByToggle()) return undefined;
     const config = loadConfig();
-    const result = runPipeline(event, config);
+    // Mirror the pipeline's eligibility guards before loading its rule graph.
+    // SDK ownership tracking above must still run for disabled/ineligible results.
+    if (!config.enabled || event.isError || event.toolName === "read") return undefined;
+    if (config.tools != null && !config.tools.includes(event.toolName)) return undefined;
+    if (event.content.length !== 1 || event.content[0].type !== "text") return undefined;
+
+    let pipeline: typeof import("../../harness/tools/result-processing/pipeline.js");
+    try {
+      pipeline = await import("../../harness/tools/result-processing/pipeline.js");
+    } catch {
+      // A transformation dependency failure must not spoil successful output.
+      return undefined;
+    }
+    const result = pipeline.runPipeline(event, config);
     if (!result) return undefined;
+
+    let countTokens: typeof import("../../lib/tokenization.js").countTokens;
+    try {
+      ({ countTokens } = await import("../../lib/tokenization.js"));
+    } catch {
+      return undefined;
+    }
 
     // Assemble the final text the model sees. Lossy rewrites require a recall
     // stash before they may enter history (§7.3). The fidelity marker carries
@@ -274,6 +291,7 @@ export default function (pi: ExtensionAPI) {
     // when pruning actually changed content. Best-effort — recordPruning
     // swallows write failures so telemetry never breaks the pruning path.
     try {
+      const { recordPruning } = await import("../../harness/tools/result-processing/logger.js");
       const sessionId = getSessionId(ctx);
       recordPruning({
         event: "tool_result_pruned",

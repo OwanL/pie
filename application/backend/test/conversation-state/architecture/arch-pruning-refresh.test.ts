@@ -27,7 +27,7 @@ test('refresh is host-owned per tab, projected, cancellable, and cleared on scop
   assert.equal(selectViewState(state).pruningRefreshPending, true);
   assert.equal(selectViewState({ ...state, sessions: { ...state.sessions, activeSessionPath: '/other' } }).pruningRefreshPending, false);
   assert.equal(arm(state, false).composer.pruningRefreshPendingBySession[PATH], false);
-  const cleared = reducer(state, { kind: 'SessionScopeCleared', sessionPath: PATH }).state;
+  const cleared = reducer(state, { kind: 'SessionScopeCleared', sessionPath: PATH, removeSessionSummary: false }).state;
   assert.equal(cleared.composer.pruningRefreshPendingBySession[PATH], undefined);
   assert.equal(arm({ ...state, sessions: { ...state.sessions, openTabPaths: [] } }).composer, state.composer);
 });
@@ -39,16 +39,17 @@ test('idle nonempty composer admission captures intent; definitive rejection rea
   assert.equal(JSON.parse(result.state.operations.op.intentFingerprint!).refreshPruning, true);
   const delayed = reducer(result.state, { kind: 'SendOperationDelayed', operationId: 'op', operationAttempt: 1, sessionPath: PATH, backendGeneration: 1 }).state;
   assert.equal(delayed.composer.pruningRefreshPendingBySession[PATH], undefined);
-  const failed = reducer(result.state, { kind: 'SendResult', corrId: 'send', ok: false, error: 'rejected' }).state;
+  const failed = reducer(result.state, { kind: 'SendResult', corrId: 'send', sessionPath: PATH, ok: false, error: 'rejected' }).state;
   assert.equal(failed.composer.pruningRefreshPendingBySession[PATH], true);
 });
 test('busy followups, internal sends and empty sends never consume the refresh', () => {
   const state = arm();
-  for (const [input, cmd] of [
+  const cases: [ArchState, SendCommand][] = [
     [{ ...state, sessions: { ...state.sessions, runningSessionPaths: [PATH] } }, send()],
     [state, send({ composerSend: false })],
     [state, send({ text: '', composedText: '' })],
-  ] as const) {
+  ];
+  for (const [input, cmd] of cases) {
     const result = reducer(input, { kind: 'Command', cmd });
     assert.equal(result.state.composer.pruningRefreshPendingBySession[PATH], true);
     assert.equal(result.state.pending.ops.send.refreshPruning, false);
@@ -56,7 +57,7 @@ test('busy followups, internal sends and empty sends never consume the refresh',
 });
 test('preflight failure rearms the consumed intent after acknowledgement', () => {
   const admitted = reducer(arm(), { kind: 'Command', cmd: send() }).state;
-  const accepted = reducer(admitted, { kind: 'SendResult', corrId: 'send', ok: true, requestId: 'request' }).state;
+  const accepted = reducer(admitted, { kind: 'SendResult', corrId: 'send', sessionPath: PATH, ok: true, requestId: 'request' }).state;
   const failed = reducer(accepted, { kind: 'PreflightFailed', sessionPath: PATH, requestId: 'request', error: 'preflight rejected' }).state;
   assert.equal(failed.composer.pruningRefreshPendingBySession[PATH], true);
 });

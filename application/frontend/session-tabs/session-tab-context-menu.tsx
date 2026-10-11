@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { ActiveRunSummary, SessionSummary } from '../../lib/protocol/index.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { writeTextToClipboard } from '../lib/components/clipboard';
@@ -12,6 +12,7 @@ import { getSessionTabRunMenuItems } from './run-state';
 import type { SessionTabContextAction, SessionTabContextMenuState } from './types';
 import type { PinnedItem } from '../../lib/session-tabs/tab-behavior.js';
 import { CheckmarkIcon, CloseIcon, DuplicateIcon } from './icons';
+import { SNOOZE_PRESETS, type SnoozeDuration } from './snooze';
 
 export interface SessionTabContextMenuProps {
   tabContextMenu: SessionTabContextMenuState;
@@ -26,6 +27,8 @@ export interface SessionTabContextMenuProps {
   hasDeferredTriggers: boolean;
   /** Create a new session (the strip's existing "+" affordance). */
   onNew: () => void;
+  snoozeBlockedReason?: string;
+  onSnooze?: (path: string, duration: SnoozeDuration) => void;
   onContextAction: (action: SessionTabContextAction, tabPath: string) => void;
   onGroupPinnedTab?: (sourcePath: string, targetPath: string) => void;
   onUngroupPinnedTab?: (sourcePath: string, toItemIndex: number) => void;
@@ -40,6 +43,8 @@ export function SessionTabContextMenu({
   pinnedItems = [],
   hasDeferredTriggers,
   onNew,
+  snoozeBlockedReason,
+  onSnooze,
   onContextAction,
   onGroupPinnedTab,
   onUngroupPinnedTab,
@@ -57,15 +62,38 @@ export function SessionTabContextMenu({
   // least one pinned strip item to merge into (the leftmost one).
   const canPinAndMerge = !isPinned && !isPending && target?.kind !== 'group' && pinnedItems.length > 0;
   const runItems = getSessionTabRunMenuItems(runSummary);
+  const [snoozeView, setSnoozeView] = useState(false);
+  const snoozeReason = isPending ? 'A pending session cannot be snoozed yet.'
+    : hasDeferredTriggers ? 'Cancel pending deferred triggers before snoozing.' : snoozeBlockedReason;
   const { ref, pos } = useMenuViewportClamp({
     x: tabContextMenu.x,
     y: tabContextMenu.y,
     triggerEl: tabContextMenu.triggerEl,
     restoreFocusOnClose: true,
-    refocusKey: `${isPending}:${hasDeferredTriggers}:${isGroupMember}:${groupActions.length}:${canPinAndMerge}:${runItems.map((item) => item.action).join(',')}`,
+    refocusKey: `${snoozeView}:${snoozeReason}:${isPending}:${hasDeferredTriggers}:${isGroupMember}:${groupActions.length}:${canPinAndMerge}:${runItems.map((item) => item.action).join(',')}`,
   });
+  const snoozeItemRef = useRef<HTMLButtonElement>(null);
+  const wasSnoozeView = useRef(false);
+  useLayoutEffect(() => {
+    if (wasSnoozeView.current && !snoozeView) snoozeItemRef.current?.focus();
+    wasSnoozeView.current = snoozeView;
+  }, [snoozeView]);
   useMenuTriggerAria(tabContextMenu.triggerEl);
-  useMenuListeners(ref, onClose ?? (() => {}));
+  useMenuListeners(ref, () => {
+    if (snoozeView) setSnoozeView(false);
+    else onClose?.();
+  }, {
+    onOutsideClick: (event) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) onClose?.();
+    },
+    onResize: () => onClose?.(),
+    onKey: (event) => {
+      if (snoozeView && event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setSnoozeView(false);
+      }
+    },
+  });
 
   // Webview-local copy feedback for "Copy Session Path" (same pattern as the
   // changed-file menu's Copy path). The timer is cleared on unmount.
@@ -82,6 +110,30 @@ export function SessionTabContextMenu({
       copiedTimer.current = setTimeout(() => setCopied(false), 1100);
     });
   };
+
+  if (snoozeView) return (
+    <div ref={ref} class="block-context-menu session-tab-context-menu" role="menu"
+      aria-label={`Snooze ${ctxLabel}`} style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}
+      onMouseDown={(e) => e.stopPropagation()}>
+      <div class="session-tab-context-title" title={ctxLabel}>Snooze {ctxLabel}</div>
+      <button class="context-menu-item" role="menuitem" type="button" onClick={() => setSnoozeView(false)}>
+        <CheckmarkIcon />Back to tab actions
+      </button>
+      <div class="context-menu-separator" role="separator" />
+      {snoozeReason && <div class="session-snooze-reason">{snoozeReason}</div>}
+      {SNOOZE_PRESETS.map(({ duration, label }) => (
+        <button key={duration} class="context-menu-item" role="menuitem" type="button"
+          disabled={!!snoozeReason} title={snoozeReason}
+          onClick={() => {
+            if (snoozeReason) return;
+            onSnooze?.(tabContextMenu.tabPath, duration);
+            onClose?.();
+          }}>
+          <CheckmarkIcon />{label}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
     <div
@@ -181,6 +233,12 @@ export function SessionTabContextMenu({
         <DuplicateIcon />
         Duplicate Tab
       </button>
+      <button ref={snoozeItemRef} class="context-menu-item" role="menuitem" type="button"
+        disabled={!!snoozeReason} title={snoozeReason}
+        onClick={() => setSnoozeView(true)}>
+        <CheckmarkIcon />Snooze…
+      </button>
+      {snoozeReason && <div class="session-snooze-reason">{snoozeReason}</div>}
       <button
         class="context-menu-item"
         role="menuitem"

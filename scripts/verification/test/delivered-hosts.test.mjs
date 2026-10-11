@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ import { createOwnerRequire } from '../../lib/package-resolution.mjs';
 import { watchChildProcess, withProcessTreeIsolation } from '../../lib/process-watchdog.mjs';
 import { verificationChildEnv } from '../verification-runtime.mjs';
 import { validateBrowserExecutable } from '../qualify-delivery.mjs';
+import { payloadFingerprint as fingerprintPayloadRoot } from '../payload-fingerprint.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const vscodePreloader = path.join(repositoryRoot, 'scripts/development/test/vscode-development-stub.cjs');
@@ -71,31 +72,13 @@ async function verifiedRelease() {
   return releasePromise;
 }
 
-// Deliberately scoped to immutable delivered payload, not lifecycle metadata.
-async function payloadFingerprint(release) {
-  const hash = createHash('sha256');
-  let files = 0;
-  async function visit(relative) {
-    const absolute = path.join(release.root, relative);
-    const info = await lstat(absolute);
-    assert.equal(info.isSymbolicLink(), false, `immutable payload must not contain links: ${relative}`);
-    if (info.isDirectory()) {
-      for (const name of (await readdir(absolute)).sort()) await visit(path.join(relative, name));
-    } else {
-      assert.ok(info.isFile(), `unexpected payload type: ${relative}`);
-      hash.update(relative.replaceAll('\\', '/'));
-      hash.update('\0');
-      hash.update(await readFile(absolute));
-      hash.update('\0');
-      files += 1;
-    }
-  }
-  await visit('out');
-  await visit('package.json');
-  for (const name of (await readdir(path.join(release.root, 'runtime'))).sort()) {
-    if (name.endsWith('.cjs')) await visit(path.join('runtime', name));
-  }
-  return { sha256: hash.digest('hex'), files };
+// Full actual-byte fixture digest, independent of SDK manifest identity.
+async function payloadFingerprint(t, release, stage) {
+  const start = performance.now();
+  t.diagnostic(`Payload fingerprint ${stage} started (full out/SDK, runtime CJS and manifest).`);
+  const snapshot = await fingerprintPayloadRoot(release.root);
+  t.diagnostic(`Payload fingerprint ${stage} finished: ${Math.round(performance.now() - start)} ms, ${snapshot.files} files (v2 full-byte digest).`);
+  return snapshot;
 }
 
 async function isRegularDirectory(directory) {
@@ -466,9 +449,12 @@ test('delivered compiled standalone entry starts from one verified private relea
 
 test('delivered VS Code packaged main bootstrap activates against fake vscode and the same private release', { timeout: browserOptIn ? 210_000 : 120_000, skip: optIn ? false : skipReason }, async t => {
   const release = await verifiedRelease();
-  const immutableBefore = await payloadFingerprint(release);
+  const immutableBefore = await payloadFingerprint(t, release, 'BEFORE');
+  const profileStart = performance.now();
+  t.diagnostic('VS Code fixture create-profile started (after BEFORE snapshot).');
   const browserPort = await allocatePort();
   const profile = await createProfile(release, { adapter: 'vscode', browserPort });
+  t.diagnostic(`VS Code fixture create-profile finished: ${Math.round(performance.now() - profileStart)} ms.`);
   let childState;
   let shutdownConfirmed = false;
   let deactivationRequested = false;
@@ -479,7 +465,10 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
       label: 'delivered VS Code compiled extension fixture',
       ipc: true,
     });
+    const activationStart = performance.now();
+    t.diagnostic('VS Code fixture waiting for activated IPC.');
     const activated = await waitForMessage(childState, 'activated', 30_000);
+    t.diagnostic(`VS Code fixture activated IPC received: ${Math.round(performance.now() - activationStart)} ms; backend health not yet checked.`);
     assert.equal(activated.output, path.join(release.root, 'out'));
     assert.equal(activated.extensionPath, release.root);
     assert.equal(activated.bootstrapEntry, path.join(release.root, 'runtime', 'bootstrap.cjs'));
@@ -517,7 +506,7 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
       }
     }, shutdownConfirmed);
     assert.ok(teardown.safe, `VS Code fixture process-tree shutdown was not confirmed; profile retained at ${profile.root}.`);
-    assert.deepEqual(await payloadFingerprint(release), immutableBefore, 'packaged bootstrap must leave all out/SDK, runtime CJS and manifest bytes unchanged');
+    assert.deepEqual(await payloadFingerprint(t, release, 'AFTER teardown'), immutableBefore, 'packaged bootstrap must leave all out/SDK, runtime CJS and manifest bytes unchanged');
     t.diagnostic(`Packaged main used flat out fallback and awaited activation; watcher closed, no generation leases/selections; ${immutableBefore.files} immutable payload files unchanged. Full Electron startup remains unqualified.`);
   }
 });

@@ -127,6 +127,13 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
+export type ExtensionLoading = "jiti" | "compiled-inventory";
+
+interface CompiledInventoryPass {
+	load(path: string): Promise<ExtensionFactory> | undefined;
+	dispose(): Promise<void>;
+}
+
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 let extensionCacheCwd: string | undefined;
@@ -435,11 +442,15 @@ async function loadExtension(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	cacheToken?: ExtensionCacheToken,
+	compiledPass?: CompiledInventoryPass,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath, cacheToken);
+		// Only synchronous undefined selects Jiti. Evaluation rejection is a load error,
+		// never a retry that could repeat module side effects.
+		const compiledFactory = compiledPass?.load(resolvedPath);
+		const factory = await (compiledFactory ?? loadExtensionModule(resolvedPath, cacheToken));
 		time(`${extensionPath} module import`, "extensions");
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
@@ -484,31 +495,47 @@ async function loadExtensionsInternal(
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
 	useCache = false,
+	extensionLoading: ExtensionLoading = "jiti",
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
-	const cacheToken = useCache ? useExtensionCacheCwd(cwd) : undefined;
+	const cacheToken = useCache && extensionLoading === "jiti" ? useExtensionCacheCwd(cwd) : undefined;
 	const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const resolvedRuntime = runtime ?? createExtensionRuntime();
 
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(
-			extPath,
-			resolvedCwd,
-			resolvedEventBus,
-			resolvedRuntime,
-			cacheToken,
-		);
-
-		if (error) {
-			errors.push({ path: extPath, error });
-			continue;
+	let compiledPass: CompiledInventoryPass | undefined;
+	try {
+		if (extensionLoading === "compiled-inventory" && !("Bun" in globalThis) && paths.length > 0) {
+			// Explicit inventory-only exception: ordinary Node and Bun loading must
+			// not import the compiler or its dependencies.
+			const { prepareCompiledExtensions } = await import("./compiled-loader.ts");
+			compiledPass = await prepareCompiledExtensions(
+				paths.map((entry) => resolvePath(entry, resolvedCwd, { normalizeUnicodeSpaces: true })),
+				getAliases(),
+			);
 		}
+		for (const extPath of paths) {
+			const { extension, error } = await loadExtension(
+				extPath,
+				resolvedCwd,
+				resolvedEventBus,
+				resolvedRuntime,
+				cacheToken,
+				compiledPass,
+			);
 
-		if (extension) {
-			extensions.push(extension);
+			if (error) {
+				errors.push({ path: extPath, error });
+				continue;
+			}
+
+			if (extension) {
+				extensions.push(extension);
+			}
 		}
+	} finally {
+		await compiledPass?.dispose();
 	}
 
 	return {
@@ -532,8 +559,9 @@ export async function loadExtensionsCached(
 	cwd: string,
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
+	extensionLoading: ExtensionLoading = "jiti",
 ): Promise<LoadExtensionsResult> {
-	return loadExtensionsInternal(paths, cwd, eventBus, runtime, true);
+	return loadExtensionsInternal(paths, cwd, eventBus, runtime, true, extensionLoading);
 }
 
 interface PiManifest {

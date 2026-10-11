@@ -166,6 +166,139 @@ test('edit acknowledgement ambiguity reconciles commit evidence and semantic sta
   assert.equal(contradictory.state.operations['edit-op']?.terminal, terminal);
 });
 
+function exhaustedEdit(): ArchState {
+  let state = reducer(edit(readyState()).state, {
+    kind: 'MessageOperationDelayed', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, error: 'ack lost',
+  }).state;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    state = reducer(state, {
+      kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+      sessionPath: SESSION, backendGeneration: 7, operationAttempt: 1,
+      reconciliationAttempt: attempt, state: 'reconciliation-unavailable', error: 'status unavailable',
+    }).state;
+  }
+  assert.equal(state.operations['edit-op']?.recovery, 'restart-backend');
+  assert.equal(state.settings.notice,
+    'Pie could not confirm whether this edit operation settled. Restart the backend to reconcile safely.');
+  return state;
+}
+
+const lateEditEvidence: [string, Event][] = [
+  ['acknowledgement', {
+    kind: 'EditResult', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 7, sessionPath: SESSION, ok: true, committed: true, requestId: 'replacement-request',
+  }],
+  ['legacy start', {
+    kind: 'MessageStarted', sessionPath: SESSION, messageId: 'assistant-new',
+    requestId: 'replacement-request', operationId: 'edit-op', operationAttempt: 1, timestamp: 20,
+  }],
+  ['semantic start', {
+    kind: 'TurnSemanticEventReceived', envelope: {
+      protocolVersion: 7, sessionPath: SESSION, requestId: 'replacement-request', operationId: 'edit-op',
+      turnId: 'replacement-turn', attemptId: 'replacement-attempt',
+      occurredAt: 20, checkpointBytes: 1_000, kind: 'turn.started', seq: 1,
+      canonicalMessageId: 'assistant-new', startedAt: 20,
+    } satisfies TurnSemanticEnvelope,
+  }],
+  ['committed status', {
+    kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, operationAttempt: 1, state: 'committed', committed: true,
+  }],
+];
+
+for (const [label, event] of lateEditEvidence) {
+  test(`late correlated edit ${label} retires an exhausted reconciliation banner`, () => {
+    const settled = reducer(exhaustedEdit(), event).state;
+    assert.equal(settled.settings.notice, null);
+    assert.equal(settled.settings.noticeKind, null);
+    assert.equal(settled.settings.noticeRaw, null);
+    assert.equal(settled.settings.noticeSessionPath, null);
+    assert.equal(settled.operations['edit-op']?.commit, 'committed');
+    assert.equal(ids(settled).includes('old-user'), false);
+  });
+}
+
+test('late uncommitted acceptance retains the exhausted warning until semantic commit', () => {
+  const exhausted = exhaustedEdit();
+  const accepted = reducer(exhausted, {
+    kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, state: 'accepted', committed: false,
+  }).state;
+  assert.equal(accepted.settings.notice, exhausted.settings.notice);
+  const started = reducer(accepted, lateEditEvidence[1]![1]).state;
+  assert.equal(started.settings.notice, null);
+});
+
+test('late committed edit acknowledgement upgrades earlier acceptance after exhaustion', () => {
+  const exhausted = exhaustedEdit();
+  const owner = exhausted.operations['edit-op']!;
+  const accepted = reducer({
+    ...exhausted,
+    operations: { ...exhausted.operations, 'edit-op': { ...owner, acceptance: 'accepted' } },
+  }, lateEditEvidence[0]![1]).state;
+  assert.equal(accepted.settings.notice, null);
+  assert.equal(accepted.operations['edit-op']?.commit, 'committed');
+  assert.ok(accepted.pending.promoted['edit-corr']);
+});
+
+test('late edit settlement preserves newer notices and unresolved warnings for another session', () => {
+  const exhausted = exhaustedEdit();
+  for (const settings of [
+    { ...exhausted.settings, notice: 'A newer failure', noticeKind: 'operational-error' as const },
+    { ...exhausted.settings, noticeSessionPath: '/other.jsonl' },
+  ]) {
+    const settled = reducer({ ...exhausted, settings }, lateEditEvidence[1]![1]).state;
+    assert.deepEqual(settled.settings, settings);
+  }
+});
+
+test('settling one edit preserves another session\'s unresolved edit warning', () => {
+  const exhausted = exhaustedEdit();
+  const owner = exhausted.operations['edit-op']!;
+  const settings = { ...exhausted.settings, noticeSessionPath: '/other.jsonl' };
+  const settled = reducer({
+    ...exhausted, settings,
+    operations: {
+      ...exhausted.operations,
+      'other-edit-op': { ...owner, operationId: 'other-edit-op', session: { pendingPath: '/other.jsonl' } },
+    },
+  }, lateEditEvidence[1]![1]).state;
+  assert.deepEqual(settled.settings, settings);
+  assert.equal(settled.operations['other-edit-op']?.terminal, undefined);
+  assert.equal(settled.operations['other-edit-op']?.recovery, 'restart-backend');
+});
+
+test('edit acceptance cannot clear an unrelated acknowledgement-delay notice', () => {
+  const delayed = reducer(edit(readyState()).state, {
+    kind: 'MessageOperationDelayed', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7,
+  }).state;
+  const settings = {
+    ...delayed.settings,
+    notice: 'Interrupt acknowledgement delayed. Pie is reconciling this operation; do not retry it.',
+  };
+  const accepted = reducer({ ...delayed, settings }, {
+    kind: 'MessageOperationStatus', operationId: 'edit-op', operationKind: 'message.edit',
+    sessionPath: SESSION, backendGeneration: 7, state: 'accepted', committed: true,
+  }).state;
+  assert.deepEqual(accepted.settings, settings);
+});
+
+test('stale edit evidence cannot clear an exhausted reconciliation banner', () => {
+  const exhausted = exhaustedEdit();
+  const stale = reducer(exhausted, {
+    kind: 'EditResult', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 1,
+    backendGeneration: 6, sessionPath: SESSION, ok: true, committed: true,
+  }).state;
+  assert.equal(stale, exhausted);
+  const staleAttempt = reducer(exhausted, {
+    kind: 'EditResult', corrId: 'edit-corr', operationId: 'edit-op', operationAttempt: 2,
+    backendGeneration: 7, sessionPath: SESSION, ok: true, committed: true,
+  }).state;
+  assert.equal(staleAttempt, exhausted);
+});
+
 test('edit reconciliation policy is reducer-owned and ignores duplicate attempt observations', () => {
   const delayed = reducer(edit(readyState()).state, {
     kind: 'MessageOperationDelayed', operationId: 'edit-op', operationKind: 'message.edit',

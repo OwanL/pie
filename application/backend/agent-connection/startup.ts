@@ -3,7 +3,8 @@ import { statSync } from 'node:fs';
 
 import { BackendClient } from './client';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../conversation-state/restored-session-plan';
-import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../lib/session-tabs/tab-behavior.js';
+import { normalizeStoredSnoozes } from '../conversation-state/session-snooze.js';
+import { readStoredOpenTabPath, normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../lib/session-tabs/tab-behavior.js';
 import type { BackendLaunchPaths } from '../../lib/platform-contracts/session-platform.js';
 import { buildRuntimePrefsPayload } from '../../lib/protocol/index.js';
 import type { ChatPrefs, SessionSummary } from '../../lib/protocol/index.js';
@@ -22,6 +23,14 @@ import type { Event } from '../conversation-state/events';
 import type { SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
+
+function finishStartupTiming(stage: string, started: number, outcome: 'success' | 'failure'): void {
+  try {
+    appendPieLog('info', 'startup', 'DEBUG-startup-preflight', {
+      stage, durationMs: performance.now() - started, outcome,
+    });
+  } catch { /* Diagnostics must never replace a startup error. */ }
+}
 
 /** Drop restored paths only when the filesystem confirms they are not files
  * or are absent (ENOENT/ENOTDIR). Sharing violations and other transient stat
@@ -88,34 +97,42 @@ async function loadSessionTitlesSettingsFromService(options: StartSessionBackend
 }
 
 function computeRestorePlan(options: StartSessionBackendOptions) {
-  const storedRawTabs = options.platform.storage.get<unknown[]>('openTabPaths') ?? [];
+  const snapshot = options.platform.storage.get<{
+    openTabPaths: unknown[]; activeSessionPath?: string; pinnedTabPaths: unknown[]; pinnedTabGroups: unknown;
+    snoozedBySession: unknown;
+  }>('sessionSnoozeTabSnapshot');
+  const storedRawTabs = snapshot?.openTabPaths ?? options.platform.storage.get<unknown[]>('openTabPaths') ?? [];
+  const storedSnoozePaths = Object.keys(normalizeStoredSnoozes(snapshot?.snoozedBySession, () => true));
+  const restoredSnoozes = normalizeStoredSnoozes(snapshot?.snoozedBySession, isSessionPathRestorable);
   const storedPrivate = (options.platform.storage.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
   // Filter definitively absent paths for every restored tab, while preserving
   // tabs across transient restart/file-lock failures. Private cleanup still
   // receives the original markers and the post-reducer open tabs below.
   const { rawTabs, openTabPaths: restoredTabs, droppedPaths } = filterRestorableStoredTabs(
-    storedRawTabs,
+    storedRawTabs.filter((tab) => !storedSnoozePaths.includes(readStoredOpenTabPath(tab) ?? '')),
     isSessionPathRestorable,
   );
-  const preferredStartupPath = options.platform.storage.get<string>('activeSessionPath') ?? null;
+  const preferredStartupPath = snapshot ? snapshot.activeSessionPath ?? null : options.platform.storage.get<string>('activeSessionPath') ?? null;
   // Pinned tabs are stored as a path list (no name enrichment). Normalize
   // defensively (accept legacy string/{path} forms, drop pending/dupes), then
   // drop any pinned path that didn't survive the open-tab restore so the
   // pinned ⊆ openTabPaths invariant holds.
-  const storedRawPinned = options.platform.storage.get<unknown[]>('pinnedTabPaths') ?? [];
+  const storedRawPinned = snapshot?.pinnedTabPaths ?? options.platform.storage.get<unknown[]>('pinnedTabPaths') ?? [];
   const storedPinned = normalizeStoredTabPaths(storedRawPinned);
   const restoredPinnedTabs = storedPinned.filter((p) => restoredTabs.includes(p));
   // Pinned groups are stored as nested path arrays. Normalize defensively
   // (drop non-array/non-string/pending/dup entries); the reducer reconciles
   // them against the restored pinned tabs (drops invalid members, dissolves
   // <2, restores contiguity) when OpenTabsChanged is dispatched.
-  const storedRawGroups = options.platform.storage.get<unknown>('pinnedTabGroups');
+  const storedRawGroups = snapshot?.pinnedTabGroups ?? options.platform.storage.get<unknown>('pinnedTabGroups');
   const storedGroups = normalizeStoredPinnedTabGroups(storedRawGroups);
-  const restoredPrivate = storedPrivate.filter((sessionPath) => restoredTabs.includes(sessionPath));
+  const restoredPrivate = storedPrivate.filter((sessionPath) => restoredTabs.includes(sessionPath) || !!restoredSnoozes[sessionPath]);
   const restoredSessionPlan = buildRestoredSessionPlan(restoredTabs, preferredStartupPath);
   const { startupPath: restoredStartupPath, preloadPaths } = restoredSessionPlan;
   return {
+    storedSnoozePaths,
+    restoredSnoozes,
     storedRawTabs,
     rawTabs,
     restoredTabs,
@@ -199,8 +216,12 @@ function bootLogRestorePrepared(
 }
 
 async function resolveRuntimePaths(options: StartSessionBackendOptions): Promise<BackendLaunchPaths | null> {
+  const started = performance.now();
+  let outcome: 'success' | 'failure' = 'failure';
   try {
-    return await options.platform.backendStartup.resolveBackendLaunchPaths();
+    const paths = await options.platform.backendStartup.resolveBackendLaunchPaths();
+    outcome = 'success';
+    return paths;
   } catch (err) {
     options.dispatchArch({ kind: 'NoticeShown', notice:
       `pie setup error: ${toErrorMessage(err)}. ` +
@@ -208,6 +229,8 @@ async function resolveRuntimePaths(options: StartSessionBackendOptions): Promise
         'A verified development artifact requires PIE_DEVELOPMENT_PI_RUNTIME and PIE_ALLOW_DEVELOPMENT_RUNTIME=1.',
     });
     return null;
+  } finally {
+    finishStartupTiming('resolve-launch-paths', started, outcome);
   }
 }
 
@@ -385,55 +408,79 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   // Settings families are independent and may each hit settings.json plus
   // VS Code globalState. Keep them on the same cold-start critical-path step
   // instead of paying their I/O latency serially before the backend can spawn.
-  await Promise.all([
-    loadPruningSettingsFromService(options),
-    loadToolResultPruningSettingsFromService(options),
-    loadSessionTitlesSettingsFromService(options),
-  ]);
-
-  const {
-    storedRawTabs,
-    rawTabs,
-    restoredTabs,
-    droppedPaths,
-    preferredStartupPath,
-    restoredStartupPath,
-    preloadPaths,
-    storedPinned,
-    restoredPinnedTabs,
-    storedGroups,
-    storedPrivate,
-    restoredPrivate,
-  } = computeRestorePlan(options);
-
-  applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs, storedGroups, restoredPrivate);
-
-  // The reducer reconciles pinned tabs + groups against the restored open
-  // tabs (drops invalid members, dissolves <2, restores group contiguity).
-  // Persist the reconciled values so globalState matches archState exactly.
-  const reconciled = options.getArchState().sessions;
-  persistIfTabStateChanged(
-    options,
-    storedRawTabs,
-    rawTabs,
-    preferredStartupPath,
-    restoredStartupPath,
-    storedPinned,
-    reconciled.pinnedTabPaths,
-    storedGroups,
-    reconciled.pinnedTabGroups,
-  );
-
-  const cachedSessions = buildRestoredSessionSummaries(rawTabs, restoredTabs, workspaceCwd, new Date().toISOString());
-  if (cachedSessions.length > 0) {
-    dispatchArch({ kind: 'SessionSummariesReplaced', summaries: cachedSessions });
+  const settingsStarted = performance.now();
+  let settingsOutcome: 'success' | 'failure' = 'failure';
+  try {
+    await Promise.all([
+      loadPruningSettingsFromService(options),
+      loadToolResultPruningSettingsFromService(options),
+      loadSessionTitlesSettingsFromService(options),
+    ]);
+    settingsOutcome = 'success';
+  } finally {
+    finishStartupTiming('parallel-settings', settingsStarted, settingsOutcome);
   }
 
-  if (restoredStartupPath) {
-    dispatchArch({ kind: 'Command', cmd: { kind: 'SelectSession', corrId: `select:${Date.now()}`, sessionPath: restoredStartupPath } });
-  }
+  const restoreStarted = performance.now();
+  let restoreOutcome: 'success' | 'failure' = 'failure';
+  const { restoredStartupPath, preloadPaths, storedPrivate, storedSnoozePaths, restoredSnoozes } = (() => {
+    try {
+      const {
+        storedRawTabs,
+        rawTabs,
+        restoredTabs,
+        droppedPaths,
+        preferredStartupPath,
+        restoredStartupPath,
+        preloadPaths,
+        storedPinned,
+        restoredPinnedTabs,
+        storedGroups,
+        storedPrivate,
+        restoredPrivate,
+        restoredSnoozes,
+        storedSnoozePaths,
+      } = computeRestorePlan(options);
 
-  bootLogRestorePrepared(restoredStartupPath, cachedSessions.length, droppedPaths.length, restoredTabs.length, preloadPaths.length);
+      applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs, storedGroups, restoredPrivate);
+
+      // The reducer reconciles pinned tabs + groups against the restored open
+      // tabs (drops invalid members, dissolves <2, restores group contiguity).
+      // Persist the reconciled values so globalState matches archState exactly.
+      const reconciled = options.getArchState().sessions;
+      persistIfTabStateChanged(
+        options,
+        storedRawTabs,
+        rawTabs,
+        preferredStartupPath,
+        restoredStartupPath,
+        storedPinned,
+        reconciled.pinnedTabPaths,
+        storedGroups,
+        reconciled.pinnedTabGroups,
+      );
+
+      const cachedSessions = buildRestoredSessionSummaries(
+        [...rawTabs, ...Object.values(restoredSnoozes)],
+        [...new Set([...restoredTabs, ...Object.keys(restoredSnoozes)])], workspaceCwd, new Date().toISOString(),
+      );
+      if (cachedSessions.length > 0) {
+        dispatchArch({ kind: 'SessionSummariesReplaced', summaries: cachedSessions });
+      }
+
+      if (restoredStartupPath) {
+        dispatchArch({ kind: 'Command', cmd: { kind: 'SelectSession', corrId: `select:${Date.now()}`, sessionPath: restoredStartupPath } });
+      }
+
+      dispatchArch({ kind: 'SessionSnoozesRestored', entries: restoredSnoozes, now: Date.now() });
+
+      bootLogRestorePrepared(restoredStartupPath, cachedSessions.length, droppedPaths.length, restoredTabs.length, preloadPaths.length);
+      restoreOutcome = 'success';
+      return { restoredStartupPath, preloadPaths, storedPrivate, storedSnoozePaths, restoredSnoozes };
+    } finally {
+      finishStartupTiming('restore-preparation', restoreStarted, restoreOutcome);
+    }
+  })();
 
   const paths = await resolveRuntimePaths(options);
   if (!paths) {
@@ -509,7 +556,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   // generation-safe background requests and marker persistence.
   options.service.schedulePrivateSessionCleanup(
     storedPrivate,
-    options.getArchState().sessions.openTabPaths,
+    [...options.getArchState().sessions.openTabPaths, ...storedSnoozePaths],
   );
 
   if (restoreError) {
@@ -528,5 +575,8 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     return;
   }
 
+  // Expired snoozes return as background tabs, even when no foreground tab
+  // survived the restart. Do not let first-session fallback select them.
+  if (Object.keys(restoredSnoozes).length > 0) return;
   await listAndOpenFirstSession(options);
 }

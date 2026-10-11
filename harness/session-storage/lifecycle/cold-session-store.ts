@@ -27,6 +27,7 @@ import {
   type ColdBrowseHelperPageOptions,
 } from '../../agent-processes/cold-browse-helper/cold-browse-helper-protocol';
 import { forgetPrivateSessionArtifacts, type ForgetPrivateSessionArtifactsDeps } from './private-session-artifacts';
+import { retryAtomicPublication } from './atomic-publication';
 import {
   DurableDetailNotAddressableError,
   DurableDetailNotFoundError,
@@ -77,13 +78,13 @@ interface ColdSdkSessionManager extends SdkSessionManager {
   buildSessionContext: () => ColdSessionContext;
   getTree: () => ColdSessionTreeNode[];
   buildContextEntries?: () => SessionEntryLike[];
-  appendPieModelSettingsChange?: (
+  preparePieModelSettingsChange?: (
     provider: string | undefined,
     modelId: string | undefined,
     thinkingLevel: string | undefined,
   ) => {
-    modelChangeId?: string;
-    thinkingLevelChangeId?: string;
+    commit(): { modelChangeId?: string; thinkingLevelChangeId?: string };
+    dispose(): void;
   };
 }
 
@@ -1057,16 +1058,16 @@ export class ColdSessionStore {
   }
 
   /** Persist model/reasoning choices for an ordinary cold session without
-   * materializing an AgentSession. The SDK append methods preserve Pi's branch
-   * parentage and format; the coordinator lease makes each synchronous append
+   * materializing an AgentSession. The SDK prepared write preserves Pi's branch
+   * parentage and format; the coordinator lease makes each publication attempt
    * share the same single-writer boundary as truncate/promotion. */
-  setModelSettings(
+  async setModelSettings(
     sessionPath: string,
     updates: ColdSessionModelSettingsUpdate,
-  ): ColdSessionModelSettingsResult {
-    return this.withWriterAdmission(() => {
+  ): Promise<ColdSessionModelSettingsResult> {
+    return await this.withWriterAdmission(async () => {
       const opened = this.openManagerWithMigrationLease(sessionPath);
-      return this.applyModelSettings(opened.manager, opened.stamp, updates).result;
+      return (await this.applyModelSettings(opened.manager, opened.stamp, updates)).result;
     });
   }
 
@@ -1112,16 +1113,16 @@ export class ColdSessionStore {
    * keeps that exact manager usable; reopening the path here would make the
    * retained manager stale and accidentally change a new session into a
    * resume on promotion. */
-  setHandleModelSettings(
+  async setHandleModelSettings(
     handle: ColdSessionManagerHandle,
     updates: ColdSessionModelSettingsUpdate,
-  ): ColdSessionModelSettingsResult {
-    return this.withWriterAdmission(() => {
+  ): Promise<ColdSessionModelSettingsResult> {
+    return await this.withWriterAdmission(async () => {
       const state = this.handleStates.get(handle);
       if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
         throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
       }
-      const applied = this.applyModelSettings(
+      const applied = await this.applyModelSettings(
         handle.manager,
         state.stamp,
         updates,
@@ -1281,9 +1282,10 @@ export class ColdSessionStore {
       `.${path.basename(sessionPath)}.${crypto.randomUUID()}.tmp`,
     );
     let committed = false;
+    let stamp = opened.stamp;
     try {
       await this.fileSystem.writeFile(temporaryPath, content);
-      this.leases.commitSync(opened.stamp, () => {
+      await retryAtomicPublication(() => this.leases.commitSync(opened.stamp, () => {
         // Test-build append/truncate owner instrumentation: the coordinator's
         // cold truncate commit carries no worker lease identity.
         recordWriteOwnership({
@@ -1300,14 +1302,14 @@ export class ColdSessionStore {
         // generation ledger in this same synchronous ownership turn so no
         // post-rename failure can be misclassified as pre-commit.
         options?.onCommit?.();
-      });
-      this.invalidateBrowsePath(sessionPath);
-      this.refreshCatalog();
+        stamp = this.leases.restamp(opened.stamp);
+        this.invalidateBrowsePath(sessionPath);
+        this.refreshCatalog();
+      }));
     } finally {
       if (!committed) await this.fileSystem.removeFile(temporaryPath).catch(() => undefined);
     }
 
-    let stamp = this.leases.restamp(opened.stamp);
     const replacement = this.leases.commitSync(stamp, () => this.sdk.SessionManager.open(sessionPath));
     stamp = this.leases.restamp(stamp);
     const coldManager = replacement as ColdSdkSessionManager;
@@ -1322,14 +1324,23 @@ export class ColdSessionStore {
     let restoredModel = false;
     let restoredThinkingLevel = false;
     if ((shouldRestoreModel || shouldRestoreThinkingLevel)
-      && typeof coldManager.appendPieModelSettingsChange === 'function') {
+      && typeof coldManager.preparePieModelSettingsChange === 'function') {
       try {
-        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange!(
+        const prepared = this.leases.commitSync(stamp, () => coldManager.preparePieModelSettingsChange!(
           shouldRestoreModel ? previousModel.provider : undefined,
           shouldRestoreModel ? previousModel.modelId : undefined,
           shouldRestoreThinkingLevel ? beforeContext.thinkingLevel : undefined,
         ));
-        stamp = this.leases.restamp(stamp);
+        try {
+          await retryAtomicPublication(() => this.leases.commitSync(stamp, () => {
+            prepared.commit();
+            stamp = this.leases.restamp(stamp);
+            this.invalidateBrowsePath(sessionPath);
+            this.refreshCatalog();
+          }));
+        } finally {
+          prepared.dispose();
+        }
         restoredModel = shouldRestoreModel;
         restoredThinkingLevel = shouldRestoreThinkingLevel;
       } catch (error) {
@@ -1756,15 +1767,15 @@ export class ColdSessionStore {
     return { result: { titleChanged }, stamp };
   }
 
-  private applyModelSettings(
+  private async applyModelSettings(
     manager: SdkSessionManager,
     initialStamp: ColdSessionOwnershipStamp,
     updates: ColdSessionModelSettingsUpdate,
     onRestamp?: (stamp: ColdSessionOwnershipStamp) => void,
-  ): {
+  ): Promise<{
     result: ColdSessionModelSettingsResult;
     stamp: ColdSessionOwnershipStamp;
-  } {
+  }> {
     const coldManager = manager as ColdSdkSessionManager;
     const before = coldManager.buildSessionContext();
     let stamp = initialStamp;
@@ -1773,43 +1784,40 @@ export class ColdSessionStore {
         || before.model?.modelId !== updates.model.modelId);
     const thinkingLevelChanged = updates.thinkingLevel !== undefined
       && before.thinkingLevel !== updates.thinkingLevel;
-    let committed = false;
-
-    try {
-      if (modelChanged || thinkingLevelChanged) {
-        if (typeof coldManager.appendPieModelSettingsChange !== 'function') {
-          throw new Error('This Pi session manager does not support atomic durable model settings.');
-        }
-        // Model + reasoning is one user intent. Publish both canonical Pi
-        // entries through the SDK's crash-safe batch seam under one ownership
-        // fence, then advance the durable fingerprint exactly once. The SDK
-        // owns transient atomic-rename retries; retrying here would repeat the
-        // whole staged operation and multiply its blocking budget. This also
-        // keeps a retained create/fork handle promotable without reopening it.
-        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange!(
-          modelChanged ? updates.model!.provider : undefined,
-          modelChanged ? updates.model!.modelId : undefined,
-          thinkingLevelChanged ? updates.thinkingLevel : undefined,
-        ));
-        committed = true;
-        stamp = this.leases.restamp(stamp);
-        onRestamp?.(stamp);
+    if (modelChanged || thinkingLevelChanged) {
+      if (typeof coldManager.preparePieModelSettingsChange !== 'function') {
+        throw new Error('This Pi session manager does not support atomic durable model settings.');
       }
-
-      this.leases.assertCurrent(stamp);
-      return {
-        result: { modelChanged, thinkingLevelChanged },
-        stamp,
-      };
-    } finally {
-      if (committed) {
-        // A cached browse projection represents the pre-append fingerprint.
-        // Retire it eagerly so the host's post-write hydration cannot publish
-        // the old model over its optimistic selection.
-        this.invalidateBrowsePath(initialStamp.sessionPath);
-        this.refreshCatalog();
+      // Stage once; every publication attempt rechecks the exact ownership
+      // and fingerprint fence without repeating IDs or temporary writes.
+      const prepared = this.leases.commitSync(stamp, () => coldManager.preparePieModelSettingsChange!(
+        modelChanged ? updates.model!.provider : undefined,
+        modelChanged ? updates.model!.modelId : undefined,
+        thinkingLevelChanged ? updates.thinkingLevel : undefined,
+      ));
+      try {
+        await retryAtomicPublication(() => this.leases.commitSync(stamp, () => {
+          prepared.commit();
+          try {
+            stamp = this.leases.restamp(stamp);
+            onRestamp?.(stamp);
+          } finally {
+            // Publication already committed, even if refreshing its stamp
+            // fails. Never leave a pre-write cache authoritative afterward.
+            this.invalidateBrowsePath(initialStamp.sessionPath);
+            this.refreshCatalog();
+          }
+        }));
+      } finally {
+        prepared.dispose();
       }
     }
+
+    this.leases.assertCurrent(stamp);
+    return {
+      result: { modelChanged, thinkingLevelChanged },
+      stamp,
+    };
   }
 
   private stampResult(result: object, stamps: readonly ColdSessionOwnershipStamp[]): void {

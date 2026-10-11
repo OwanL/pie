@@ -220,6 +220,7 @@ export interface SdkImageContent {
 }
 
 export interface SdkPromptOptions {
+  refreshPruning?: boolean;
   expandPromptTemplates?: boolean;
   images?: SdkImageContent[];
   streamingBehavior?: 'steer' | 'followUp';

@@ -1480,7 +1480,23 @@
 /* Toggle state is communicated with the same neutral hierarchy as the other
    toolbar controls: active uses the standard foreground, inactive uses the
    muted foreground from the base trigger rule. */
+.pruning-refresh-trigger {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pruning-refresh-pending {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 .privacy-mode-trigger.active,
+.pruning-refresh-trigger.active,
 .autonomous-mode-trigger.active {
   border-color: transparent;
   background: var(--panel-control-surface);
@@ -1499,6 +1515,8 @@
   color: var(--panel-foreground);
 }
 
+.pruning-refresh-trigger.active:hover,
+.pruning-refresh-trigger.active:focus-visible,
 .privacy-mode-trigger.active:hover,
 .privacy-mode-trigger.active:focus-visible,
 .autonomous-mode-trigger.active:hover,

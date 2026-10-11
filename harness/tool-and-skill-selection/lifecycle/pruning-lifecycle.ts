@@ -1,15 +1,15 @@
 import path from "node:path";
 import type { BeforeAgentStartEvent } from "@earendil-works/pi-coding-agent";
-import { loadConfig } from "../settings/config.js";
+import { loadConfig } from "../settings/config.ts";
 import type { PruningConfig } from "../settings/config-types.js";
 import {
 	getConfigOverrideForTesting,
 	CONFIG_ROOT,
 	PROCESS_SESSION_ID,
-} from "../state/selector-state.js";
-import { parseJsonOrThrow } from "../../../lib/structured-logging/error-message.js";
-import { isInSubagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.js";
-import { MIN_PROMPT_LENGTH } from "../../agent-instructions/skill-selection/skill-policy.js";
+} from "../state/selector-state.ts";
+import { parseJsonOrThrow } from "../../../lib/structured-logging/error-message.ts";
+import { isInSubagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.ts";
+import { MIN_PROMPT_LENGTH } from "../../agent-instructions/skill-selection/skill-policy.ts";
 
 export function shouldSkipPruning(
 	event: BeforeAgentStartEvent,

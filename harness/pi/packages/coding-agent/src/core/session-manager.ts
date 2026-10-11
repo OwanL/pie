@@ -120,13 +120,12 @@ function sessionNeedsLineSeparator(sessionPath: string): boolean {
 	}
 }
 
-function renamePieFileWithTransientRetry(sourcePath: string, targetPath: string): void {
+function commitPieWithTransientRetry<T>(commit: () => T): T {
 	const retryDelays = [10, 25, 50, 100, 250, 500, 1000, 2000, 4000];
 	const waitArray = new Int32Array(new SharedArrayBuffer(4));
 	for (let attempt = 0; ; attempt++) {
 		try {
-			renameSync(sourcePath, targetPath);
-			return;
+			return commit();
 		} catch (error) {
 			const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
 			const delay = retryDelays[attempt];
@@ -1305,92 +1304,168 @@ export class SessionManager {
 		modelId: string | undefined,
 		thinkingLevel: string | undefined,
 	): { modelChangeId?: string; thinkingLevelChangeId?: string } {
-		return this._runPieWriteMutation("appendPieModelSettingsChange", () => {
-			if ((provider === undefined) !== (modelId === undefined)) {
-				throw new Error("appendPieModelSettingsChange requires both provider and modelId.");
-			}
-			const stagedIds = new Set(this.byId.keys());
-			const stagedEntries: SessionEntry[] = [];
-			const modelChange: ModelChangeEntry | undefined =
-				provider === undefined
-					? undefined
-					: {
-						type: "model_change",
-						id: generateId(stagedIds),
-						parentId: this.leafId,
-						timestamp: new Date().toISOString(),
-						provider,
-						modelId: modelId!,
-					};
-			if (modelChange) {
-				stagedEntries.push(modelChange);
-				stagedIds.add(modelChange.id);
-			}
-			const thinkingChange: ThinkingLevelChangeEntry | undefined =
-				thinkingLevel === undefined
-					? undefined
-					: {
-						type: "thinking_level_change",
-						id: generateId(stagedIds),
-						parentId: modelChange?.id ?? this.leafId,
-						timestamp: new Date().toISOString(),
-						thinkingLevel,
-					};
-			if (thinkingChange) stagedEntries.push(thinkingChange);
-			if (stagedEntries.length === 0) return {};
+		const prepared = this.preparePieModelSettingsChange(provider, modelId, thinkingLevel);
+		try {
+			return commitPieWithTransientRetry(() => prepared.commit());
+		} finally {
+			prepared.dispose();
+		}
+	}
 
-			const sessionFile = this.sessionFile;
-			if (this.persist && sessionFile) {
-				const temporaryPath = `${sessionFile}.pie-model-settings-${process.pid}-${randomUUID()}.tmp`;
-				let ownsTemporaryFile = false;
-				try {
-					copyPieSessionFile(sessionFile, temporaryPath);
-					ownsTemporaryFile = true;
-					const fd = openSync(temporaryPath, "a");
-					try {
-						const separator = sessionNeedsLineSeparator(temporaryPath) ? "\n" : "";
-						const suffix =
-							separator + stagedEntries.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
-						writeFileSync(fd, suffix, "utf8");
-						fsyncSync(fd);
-					} finally {
-						closeSync(fd);
-					}
-					renamePieFileWithTransientRetry(temporaryPath, sessionFile);
-					ownsTemporaryFile = false;
-
-					let directoryFd: number | undefined;
-					try {
-						directoryFd = openSync(resolve(sessionFile, ".."), "r");
-						fsyncSync(directoryFd);
-					} catch {
-						// The file fsync and rename are the commit; directory sync is best effort.
-					} finally {
-						if (directoryFd !== undefined) {
-							try {
-								closeSync(directoryFd);
-							} catch {
-								// Directory-handle cleanup is best effort after commit.
-							}
-						}
-					}
-				} finally {
-					if (ownsTemporaryFile) rmSync(temporaryPath, { force: true });
+	/** Stage once; each commit performs one ownership-checked synchronous publication attempt.
+	 * Callers must fence other writers from preparation through commit (including retries),
+	 * or verify the canonical fingerprint inside their commit fence. The manager-state
+	 * check does not detect writes made by another manager to the same canonical file.
+	 */
+	preparePieModelSettingsChange(
+		provider: string | undefined,
+		modelId: string | undefined,
+		thinkingLevel: string | undefined,
+	): { commit(): { modelChangeId?: string; thinkingLevelChangeId?: string }; dispose(): void } {
+		let prepared: ReturnType<SessionManager["preparePieModelSettingsChange"]> | undefined;
+		try {
+			return this._runPieWriteMutation("preparePieModelSettingsChange", () => {
+				if ((provider === undefined) !== (modelId === undefined)) {
+					throw new Error("appendPieModelSettingsChange requires both provider and modelId.");
 				}
-			}
+				const stagedIds = new Set(this.byId.keys());
+				const stagedEntries: SessionEntry[] = [];
+				const modelChange: ModelChangeEntry | undefined =
+					provider === undefined
+						? undefined
+						: {
+								type: "model_change",
+								id: generateId(stagedIds),
+								parentId: this.leafId,
+								timestamp: new Date().toISOString(),
+								provider,
+								modelId: modelId!,
+							};
+				if (modelChange) {
+					stagedEntries.push(modelChange);
+					stagedIds.add(modelChange.id);
+				}
+				const thinkingChange: ThinkingLevelChangeEntry | undefined =
+					thinkingLevel === undefined
+						? undefined
+						: {
+								type: "thinking_level_change",
+								id: generateId(stagedIds),
+								parentId: modelChange?.id ?? this.leafId,
+								timestamp: new Date().toISOString(),
+								thinkingLevel,
+							};
+				if (thinkingChange) stagedEntries.push(thinkingChange);
+				const sessionFile = this.sessionFile;
+				const sessionId = this.sessionId;
+				const leafId = this.leafId;
+				const fileEntries = this.fileEntries;
+				const entryCount = fileEntries.length;
+				const flushed = this.flushed;
+				const adapter = this.pieOwnershipAdapter;
+				const lease = this.pieWriteLease;
+				let temporaryPath: string | undefined;
+				let disposed = false;
+				let committed = false;
+				const result =
+					stagedEntries.length === 0
+						? {}
+						: {
+								modelChangeId: modelChange?.id,
+								thinkingLevelChangeId: thinkingChange?.id,
+							};
+				if (stagedEntries.length > 0 && this.persist && sessionFile) {
+					temporaryPath = `${sessionFile}.pie-model-settings-${process.pid}-${randomUUID()}.tmp`;
+					let ownsTemporaryFile = false;
+					try {
+						copyPieSessionFile(sessionFile, temporaryPath);
+						ownsTemporaryFile = true;
+						const fd = openSync(temporaryPath, "a");
+						try {
+							const separator = sessionNeedsLineSeparator(temporaryPath) ? "\n" : "";
+							const suffix = `${separator}${stagedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+							writeFileSync(fd, suffix, "utf8");
+							fsyncSync(fd);
+						} finally {
+							closeSync(fd);
+						}
+					} catch (error) {
+						if (ownsTemporaryFile) rmSync(temporaryPath, { force: true });
+						throw error;
+					}
+				}
 
-			// The rename is the commit point; in-memory state follows publication.
-			this.fileEntries.push(...stagedEntries);
-			for (const entry of stagedEntries) {
-				this.byId.set(entry.id, entry);
-				this.leafId = entry.id;
+				prepared = {
+					commit: () => {
+						if (committed) return result;
+						if (disposed) throw new Error("Prepared model settings change is disposed.");
+						try {
+							return this._runPieWriteMutation("appendPieModelSettingsChange", () => {
+								if (
+									this.sessionFile !== sessionFile ||
+									this.sessionId !== sessionId ||
+									this.leafId !== leafId ||
+									this.fileEntries !== fileEntries ||
+									this.fileEntries.length !== entryCount ||
+									this.flushed !== flushed ||
+									this.pieOwnershipAdapter !== adapter ||
+									this.pieWriteLease !== lease
+								) {
+									throw new StaleSessionWriteLeaseError("Prepared model settings manager state changed.");
+								}
+								if (temporaryPath && sessionFile) renameSync(temporaryPath, sessionFile);
+								// Publication succeeded. Never retry or clean up the canonical file.
+								committed = true;
+								temporaryPath = undefined;
+								this.fileEntries.push(...stagedEntries);
+								for (const entry of stagedEntries) {
+									this.byId.set(entry.id, entry);
+									this.leafId = entry.id;
+								}
+								if (stagedEntries.length > 0) this.flushed = true;
+								let directoryFd: number | undefined;
+								if (this.persist && sessionFile && stagedEntries.length > 0) {
+									try {
+										directoryFd = openSync(resolve(sessionFile, ".."), "r");
+										fsyncSync(directoryFd);
+									} catch {
+										// Directory durability is best effort after publication.
+									} finally {
+										if (directoryFd !== undefined) {
+											try {
+												closeSync(directoryFd);
+											} catch {
+												/* Postcommit cleanup is best effort. */
+											}
+										}
+									}
+								}
+								return result;
+							});
+						} catch (error) {
+							// An adapter may fail while unwinding after publication. The commit
+							// remains authoritative and must not be reported as precommit failure.
+							if (committed) return result;
+							throw error;
+						}
+					},
+					dispose: () => {
+						disposed = true;
+						if (temporaryPath) rmSync(temporaryPath, { force: true });
+						temporaryPath = undefined;
+					},
+				};
+				return prepared;
+			});
+		} catch (error) {
+			// Admission release can fail after staging, before the caller receives the handle.
+			try {
+				prepared?.dispose();
+			} catch {
+				/* Preserve the preparation failure if cleanup also fails. */
 			}
-			this.flushed = true;
-			return {
-				modelChangeId: modelChange?.id,
-				thinkingLevelChangeId: thinkingChange?.id,
-			};
-		});
+			throw error;
+		}
 	}
 
 	/** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */

@@ -12,6 +12,7 @@ import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	clearExtensionCache,
 	createExtensionRuntime,
+	type ExtensionLoading,
 	loadExtensionFromFactory,
 	loadExtensionsCached,
 } from "./extensions/loader.ts";
@@ -129,6 +130,8 @@ export interface DefaultResourceLoaderOptions {
 	additionalPromptTemplatePaths?: string[];
 	additionalThemePaths?: string[];
 	extensionFactories?: InlineExtension[];
+	/** One-use Node inventory optimization; normal sessions use Jiti. */
+	extensionLoading?: ExtensionLoading;
 	noExtensions?: boolean;
 	noSkills?: boolean;
 	noPromptTemplates?: boolean;
@@ -167,6 +170,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
 	private extensionFactories: InlineExtension[];
+	private extensionLoading: ExtensionLoading;
 	private noExtensions: boolean;
 	private noSkills: boolean;
 	private noPromptTemplates: boolean;
@@ -226,6 +230,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths ?? [];
 		this.additionalThemePaths = options.additionalThemePaths ?? [];
 		this.extensionFactories = options.extensionFactories ?? [];
+		this.extensionLoading = options.extensionLoading ?? "jiti";
 		this.noExtensions = options.noExtensions ?? false;
 		this.noSkills = options.noSkills ?? false;
 		this.noPromptTemplates = options.noPromptTemplates ?? false;
@@ -338,7 +343,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
 		resetTimings("extensions");
 
-		if (this.loaded) {
+		if (this.loaded && this.extensionLoading === "jiti") {
 			clearExtensionCache();
 		}
 
@@ -499,7 +504,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const extensionPaths = this.noExtensions
 			? cliEnabledExtensions
 			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
-		const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
+		const extensionsResult = await loadExtensionsCached(
+			extensionPaths,
+			this.cwd,
+			this.eventBus,
+			undefined,
+			this.extensionLoading,
+		);
 		if (!options.includeInlineFactories) {
 			return extensionsResult;
 		}
@@ -519,7 +530,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		preTrustExtensions: LoadExtensionsResult | undefined,
 	): Promise<LoadExtensionsResult> {
 		if (!preTrustExtensions) {
-			const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
+			const extensionsResult = await loadExtensionsCached(
+				extensionPaths,
+				this.cwd,
+				this.eventBus,
+				undefined,
+				this.extensionLoading,
+			);
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
 			extensionsResult.extensions.push(...inlineExtensions.extensions);
 			extensionsResult.errors.push(...inlineExtensions.errors);
@@ -544,6 +561,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.cwd,
 			this.eventBus,
 			preTrustExtensions.runtime,
+			this.extensionLoading,
 		);
 		const loadedByPath = new Map(preloadedByPath);
 		for (const extension of remainingExtensions.extensions) {

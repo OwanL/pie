@@ -19,6 +19,7 @@
 import { createInitialArchState } from './arch-state.js';
 import type { ArchState } from './arch-state.js';
 import type { Event } from './events.js';
+import { reduceSessionSnooze, canSnoozeSession } from './session-snooze.js';
 
 // Re-export for downstream consumers that import from './reducer'
 export type { ArchState, PendingOp, CurrentTurn } from './arch-state.js';
@@ -121,18 +122,147 @@ import {
  * Reducer: routes events to per-kind handlers.
  */
 export function reducer(state: ArchState, event: Event): ReducerResult {
+  if (event.kind === 'SessionSnoozeReleaseResult') {
+    const owner = state.sessions.snoozeReleases[event.reservationId];
+    if (!owner || owner.sessionPath !== event.sessionPath) return { state, effects: [] };
+    if (!event.ok) return handleNoticeShown(state, { kind: 'NoticeShown',
+      notice: 'Could not restore session admission. Restart the backend to retry safely.', sessionPath: event.sessionPath });
+    const snoozeReleases = { ...state.sessions.snoozeReleases };
+    delete snoozeReleases[event.reservationId];
+    const remaining = Object.values(snoozeReleases).find((release) => release.sessionPath === event.sessionPath);
+    // A path can own multiple releases (superseded reservations). Hydration
+    // waits for all matching acknowledgements, retaining its ingress token.
+    if (remaining && owner.deferredOpens?.length) snoozeReleases[remaining.reservationId] = {
+      ...remaining, deferredOpens: [...(remaining.deferredOpens ?? []), ...owner.deferredOpens],
+    };
+    const next = { ...state, sessions: { ...state.sessions, snoozeReleases } };
+    const result = state.settings.noticeSessionPath === event.sessionPath
+      && state.settings.notice === 'Could not restore session admission. Restart the backend to retry safely.'
+      && !Object.values(snoozeReleases).some((release) => release.sessionPath === event.sessionPath)
+      ? handleNoticeShown(next, { kind: 'NoticeShown', notice: null })
+      : { state: next, effects: [] };
+    return { ...result, effects: [...result.effects, ...(remaining ? [] : owner.deferredOpens ?? [])] };
+  }
+  const addressedCommand = event.kind === 'Command' ? event.cmd : null;
+  if (addressedCommand && 'sessionPath' in addressedCommand
+    && Object.values(state.sessions.snoozeReleases).some((release) => release.sessionPath === addressedCommand.sessionPath)
+    && !['SelectSession', 'OpenSession', 'Interrupt'].includes(addressedCommand.kind)) return handleNoticeShown(state, {
+      kind: 'NoticeShown', notice: 'Session admission is still being restored. Wait, or restart the backend if restoration failed.',
+    });
+  const releases: ReducerResult['effects'] = [];
+  const pendingSnoozes = { ...state.sessions.pendingSnoozes };
+  const command = event.kind === 'Command' ? event.cmd : null;
+  for (const [path, pending] of Object.entries(pendingSnoozes)) {
+    if (command && (('sessionPath' in command && command.sessionPath === path)
+      || command.kind === 'SelectSession' || command.kind === 'OpenSession' || command.kind === 'RestartBackend')) {
+      delete pendingSnoozes[path];
+      releases.push({ kind: 'ReleaseSessionSnooze', corrId: pending.reservationId, sessionPath: path, reservationId: pending.reservationId });
+    }
+  }
+  if (releases.length) state = { ...state, sessions: { ...state.sessions, pendingSnoozes } };
+  const result = reduceSnoozeAware(state, event);
+  const pendingAfter = { ...result.state.sessions.pendingSnoozes };
+  for (const [path, pending] of Object.entries(pendingAfter)) {
+    if (!canSnoozeSession(result.state, path)) {
+      delete pendingAfter[path];
+      releases.push({ kind: 'ReleaseSessionSnooze', corrId: pending.reservationId, sessionPath: path, reservationId: pending.reservationId });
+    }
+  }
+  const effects = [...releases, ...result.effects];
+  const snoozeReleases = { ...result.state.sessions.snoozeReleases };
+  if (event.kind === 'BackendReadyChanged' && event.ready) {
+    for (const release of Object.values(snoozeReleases)) effects.push({ kind: 'ReleaseSessionSnooze', corrId: release.reservationId,
+      sessionPath: release.sessionPath, reservationId: release.reservationId });
+  }
+  for (const effect of effects) if (effect.kind === 'ReleaseSessionSnooze') {
+    snoozeReleases[effect.reservationId] = { ...snoozeReleases[effect.reservationId], sessionPath: effect.sessionPath, reservationId: effect.reservationId };
+  }
+  let deferred = false;
+  const admittedEffects = effects.filter((effect) => {
+    if (effect.kind !== 'OpenSession') return true;
+    const owner = Object.values(snoozeReleases).find((release) => release.sessionPath === effect.sessionPath);
+    if (!owner) return true;
+    deferred = true;
+    snoozeReleases[owner.reservationId] = { ...owner, deferredOpens: [...(owner.deferredOpens ?? []), effect] };
+    return false;
+  });
+  if (!deferred && !effects.some((effect) => effect.kind === 'ReleaseSessionSnooze') && !releases.length) return result;
+  return { state: { ...result.state, sessions: { ...result.state.sessions, pendingSnoozes: pendingAfter, snoozeReleases } }, effects: admittedEffects };
+}
+
+function reduceSnoozeAware(state: ArchState, event: Event): ReducerResult {
+  let restoredEffects: ReducerResult['effects'] = [];
+  if (event.kind === 'BusyChanged' && event.running && state.sessions.snoozedBySession[event.sessionPath]) {
+    const restored = reduceSessionSnooze(state, { kind: 'SessionSnoozeRestoreRequested', sessionPath: event.sessionPath });
+    state = restored.state;
+    restoredEffects = restored.effects;
+  }
+  if (event.kind === 'Command' && event.cmd.kind === 'OpenSession' && state.sessions.snoozedBySession[event.cmd.sessionPath]) {
+    const restored = reduceSessionSnooze(state, { kind: 'SessionSnoozeRestoreRequested', sessionPath: event.cmd.sessionPath });
+    state = restored.state;
+    restoredEffects = restored.effects;
+  }
+  const addressed = event.kind === 'Command' ? event.cmd : event;
+  if ('sessionPath' in addressed && typeof addressed.sessionPath === 'string' && state.sessions.snoozedBySession[addressed.sessionPath]
+    && event.kind !== 'SessionSnoozeRestoreRequested' && event.kind !== 'SessionSnoozeRequested'
+    && event.kind !== 'SessionSnoozeReservationResult') return { state, effects: [] };
+  const result = reduceWithNotices(state, event);
+  const snoozes = result.state.sessions.snoozedBySession;
+  const sessions = result.state.sessions;
+  const filteredOpen = sessions.openTabPaths.filter((p) => !snoozes[p]);
+  const filteredPinned = sessions.pinnedTabPaths.filter((p) => !snoozes[p]);
+  const activeHidden = sessions.activeSessionPath !== null && !!snoozes[sessions.activeSessionPath];
+  const next = filteredOpen.length === sessions.openTabPaths.length && filteredPinned.length === sessions.pinnedTabPaths.length && !activeHidden ? result.state : {
+    ...result.state, sessions: { ...sessions, openTabPaths: filteredOpen, pinnedTabPaths: filteredPinned,
+      pinnedTabGroups: sessions.pinnedTabGroups.map((g) => g.filter((p) => !snoozes[p])).filter((g) => g.length >= 2),
+      activeSessionPath: activeHidden ? null : sessions.activeSessionPath },
+  };
+  return { state: next, effects: [...restoredEffects, ...result.effects].map((effect) => effect.kind === 'PersistTabs'
+    ? { ...effect, openTabPaths: effect.openTabPaths.filter((p) => !snoozes[p]),
+      activeSessionPath: effect.activeSessionPath && snoozes[effect.activeSessionPath] ? null : effect.activeSessionPath,
+      pinnedTabPaths: effect.pinnedTabPaths.filter((p) => !snoozes[p]),
+      pinnedTabGroups: effect.pinnedTabGroups.map((g) => g.filter((p) => !snoozes[p])).filter((g) => g.length >= 2),
+      snoozedBySession: snoozes } : effect) };
+}
+
+function reduceWithNotices(state: ArchState, event: Event): ReducerResult {
+  if (event.kind === 'PersistTabsResult' && event.corrId === 'session-snooze' && !event.ok) return handleNoticeShown(state, {
+    kind: 'NoticeShown', notice: 'Could not save session snooze state. It may not survive a host restart.',
+  });
   const result = reduceEvent(state, event);
   const next = result.state;
   const owner = next.settings.noticeSessionPath;
+  // Edit acknowledgements and semantic boundaries can arrive after bounded
+  // status polling exhausted. Retire only the unchanged warning for a
+  // reconciling edit on its owning session, never a newer/unrelated notice.
+  const editDelayNotice = 'Edit acknowledgement delayed. Pie is reconciling this operation; do not retry it.';
+  const editExhaustedNotice = 'Pie could not confirm whether this edit operation settled. Restart the backend to reconcile safely.';
+  const editNoticeResolved = next.operations !== state.operations && owner
+    && next.settings.notice === state.settings.notice
+    && next.settings.noticeSessionPath === state.settings.noticeSessionPath
+    && (next.settings.notice === editDelayNotice || next.settings.notice === editExhaustedNotice)
+    && Object.values(next.operations).some((operation) => {
+      const previous = state.operations[operation.operationId];
+      return operation.kind === 'message.edit' && previous && previous !== operation && !previous.terminal
+        && previous.reconciliation !== undefined
+        && (operation.session.pendingPath === owner || operation.session.resolvedPath === owner)
+        && (operation.terminal || (operation.acceptance === 'accepted'
+          && (next.settings.notice === editDelayNotice || operation.commit === 'committed')));
+    })
+    && !Object.values(next.operations).some((operation) => operation.kind === 'message.edit'
+      && !operation.terminal
+      && (operation.phase === 'ambiguous'
+        || (next.settings.notice === editExhaustedNotice && operation.commit !== 'committed'))
+      && (operation.session.pendingPath === owner || operation.session.resolvedPath === owner));
   // Send status polling is only one of several commit boundaries. Semantic
   // start, recovered checkpoints, queue delivery, and generation death also
   // settle the registry; none may leave a reconciliation warning behind.
-  if (next.operations !== state.operations && owner
+  if (editNoticeResolved || (next.operations !== state.operations && owner
     && (next.settings.notice?.startsWith('Send acknowledgement delayed.')
       || next.settings.notice?.startsWith('Pie could not confirm whether this send committed.'))
     && !Object.values(next.operations).some((operation) => operation.kind === 'message.send'
       && !operation.terminal
-      && (operation.session.pendingPath === owner || operation.session.resolvedPath === owner))) {
+      && (operation.session.pendingPath === owner || operation.session.resolvedPath === owner)))) {
     return {
       ...result,
       state: {
@@ -148,6 +278,13 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
 function reduceEvent(state: ArchState, event: Event): ReducerResult {
   switch (event.kind) {
+    case 'SessionSnoozeReleaseResult':
+    case 'SessionSnoozeRequested':
+    case 'SessionSnoozeReservationResult':
+    case 'SessionSnoozeRestoreRequested':
+    case 'SessionSnoozeTimerFired':
+    case 'SessionSnoozesRestored':
+      return reduceSessionSnooze(state, event);
     case 'Command': {
       return handleCommand(state, event.cmd);
     }

@@ -6,7 +6,7 @@ import {
 	type RecentConversationMessage,
 } from "./llm-scorer.js";
 import type { PruningConfig } from "../settings/config-types.js";
-import { state, getCompleteFnOverride } from "../state/selector-state.js";
+import { state, getCompleteFnOverride } from "../state/selector-state.ts";
 // Type-only import: the completion API surface the prepass lazily resolves lives
 // on pi-ai's public compat entrypoint (root pi-ai 0.80.x no longer exports
 // completeSimple; the resolution fallback policy below owns the runtime import).

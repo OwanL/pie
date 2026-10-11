@@ -5,7 +5,7 @@ import {
 	getPrunedTools,
 	getAllowedChildTools,
 	recordLoadedSkill,
-} from "../state/selector-state.js";
+} from "../state/selector-state.ts";
 import { getConfig, getSessionId } from "../lifecycle/pruning-lifecycle.js";
 import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { isAutonomousModeEnabled } from "../settings/autonomous-mode.js";
@@ -23,7 +23,7 @@ export interface PiToolSeams {
  * SDK registration adapter for the skill-pruner-owned `request_capability`
  * tool. The implementation lives in `harness/tools/request-capability` and receives
  * its dependencies through ports; this constructor wires them so the
- * selector state (../state/selector-state.js), pruning policy exposed through
+ * selector state (../state/selector-state.ts), pruning policy exposed through
  * the canonical selector lifecycle modules, and recovery
  * telemetry (../lifecycle/logger.js) remain under one lifecycle owner —
  * the extracted tool duplicates none of it.
