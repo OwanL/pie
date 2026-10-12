@@ -391,7 +391,19 @@ export interface DetailFetchPagesCommand extends CommandBase {
   rendererGeneration?: number;
 }
 
+export type { ProviderManagementCommand } from '../provider-management/state.js';
+export interface DictationIdentity extends CommandBase {
+  recordingId: string;
+  sessionPath: string;
+  rendererId: string;
+  rendererGeneration: number;
+}
+export type DictationCommand =
+  | (DictationIdentity & { kind: 'DictationStart'; draftText: string; selectionStart: number; selectionEnd: number })
+  | (DictationIdentity & { kind: 'DictationStop' })
+  | (DictationIdentity & { kind: 'DictationCancel' });
 export type Command =
+  | DictationCommand
   | { kind: 'SetPruningRefreshPending'; corrId: string; sessionPath: string; pending: boolean }
   | SendCommand
   | ContinueCommand

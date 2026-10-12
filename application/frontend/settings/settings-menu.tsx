@@ -15,6 +15,8 @@ import { TOOL_RESULT_PRUNER_SETTING_LABELS } from './settings-menu-tool-result-p
 import { BASH_SETTING_LABELS } from './settings-menu-bash';
 import { ASK_USER_SETTING_LABELS } from './settings-menu-ask-user';
 import { PROVIDER_SETTING_LABELS } from './settings-menu-providers';
+import { ProviderSetupPreview } from './provider-setup-preview';
+import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview';
 import { MCP_SETTING_LABELS } from './settings-menu-mcp';
 import { CHAT_PREF_SECTION_SEARCH_DEFS } from './settings-menu-chat-prefs';
 import { SOUND_SETTING_LABELS } from './settings-menu-sound';
@@ -81,6 +83,10 @@ export interface ComposerSettingsMenuProps {
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   providerGateStats: ProviderGateStats;
+  /** Host-controlled provider management. */
+  providerManagement?: ProviderSetupPreviewProps;
+  /** Explicit isolated-preview injection only. */
+  providerSetupPreview?: ProviderSetupPreviewProps;
   activeContextWindow?: number;
   activeModel?: { provider?: string; id: string };
   selectedModel?: string;
@@ -98,11 +104,12 @@ export interface ComposerSettingsMenuProps {
 
 /** Settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'models' | 'context' | 'subagents' | 'appearance' | 'extensions' | 'mcp';
+type SettingsTab = 'providers' | 'chat' | 'models' | 'context' | 'subagents' | 'appearance' | 'extensions' | 'mcp';
 
 const TAB_DEFS: { id: SettingsTab; label: string; description: string }[] = [
   { id: 'chat', label: 'Chat', description: 'Transcript behavior, notifications, and session titles.' },
   { id: 'models', label: 'Models', description: 'Model assignments and provider availability.' },
+  { id: 'providers', label: 'Providers', description: 'Connect providers and manage their models.' },
   { id: 'context', label: 'Context', description: 'History compaction and pruning controls.' },
   { id: 'subagents', label: 'Subagents', description: 'Delegation, nesting, and execution limits.' },
   { id: 'appearance', label: 'Appearance', description: 'Theme, layout, typography, and status visibility.' },
@@ -142,6 +149,7 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <path d="M2.5 4.5h11a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H6l-3.5 3V5.5a1 1 0 0 1 1-1z" />
         </svg>
       );
+    case 'providers':
     case 'models':
       return (
         <svg {...common}>
@@ -569,6 +577,7 @@ interface SettingsTabBodyProps {
   onSetSessionTitlesSettings: (s: Partial<SessionTitlesSettings>) => void;
   providers: string[];
   providerGateStats: ProviderGateStats;
+  providerSetupPreview?: ProviderSetupPreviewProps;
   modelEntries: ModelPickerEntry[];
   availableModels: ModelInfo[];
   availableExtensions: ExtensionInfo[];
@@ -675,11 +684,17 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
               )}
             </div>
           </div>
+
           <div class="toolbar-settings-section" data-settings-section="providers">
             <div class="toolbar-settings-section-label">Providers</div>
             <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
           </div>
         </>
+      )}
+      {effectiveTab === 'providers' && props.providerSetupPreview && (
+        <div class="toolbar-settings-section" data-settings-section="provider management">
+          <ProviderSetupPreview {...props.providerSetupPreview} presentation="tab" />
+        </div>
       )}
       {effectiveTab === 'context' && (
         <>
@@ -730,7 +745,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, providerManagement, providerSetupPreview, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -794,11 +809,12 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   // Models and Context always retain their baseline sections.
   const visibleTabs = useMemo(
     () => TAB_DEFS.filter((t) => {
+      if (t.id === 'providers') return !!(providerManagement || providerSetupPreview);
       if (t.id === 'extensions') return availableExtensions.length > 0;
       if (t.id === 'subagents') return availableExtensions.some((extension) => extension.id === 'subagent');
       return true;
     }),
-    [availableExtensions],
+    [availableExtensions, providerManagement, providerSetupPreview],
   );
 
   // Effective tab falls back to the first visible one if the active tab's
@@ -968,7 +984,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       // first, so we skip here rather than rely on the child stopping
       // propagation (stopImmediatePropagation would have no effect).
       const active = document.activeElement as HTMLElement | null;
-      if (active && active.closest('.model-picker-dropdown')) {
+      if (active && active.closest('.model-picker-dropdown, .provider-setup-preview')) {
         return;
       }
       // If the user is typing in the search box, Escape clears the query before
@@ -1129,6 +1145,10 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 availableExtensions={availableExtensions}
                 providers={providers}
                 providerGateStats={providerGateStats}
+                providerSetupPreview={(providerManagement || providerSetupPreview) && {
+                  ...(providerManagement || providerSetupPreview)!,
+                  disabled: (providerManagement || providerSetupPreview)!.disabled || !commandsAvailable,
+                }}
                 skillCatalog={skillCatalog}
                 toolCatalog={toolCatalog}
                 activeContextWindow={activeContextWindow}

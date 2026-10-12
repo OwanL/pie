@@ -100,6 +100,10 @@ type SqliteAuthorizer = (
 ) => number;
 
 interface SqliteDatabase {
+  aggregate(name: string, options: {
+    start: string;
+    step: (total: string, value: unknown) => string;
+  }): void;
   close(): void;
   enableDefensive(active: boolean): void;
   enableLoadExtension(allow: boolean): void;
@@ -506,6 +510,12 @@ export interface ProviderAggregateCostBucket {
   /** Settlements in the bucket whose effective cost is unknown or unpriced —
    * never silently dropped from temporal evidence. */
   unknownCostCount: number | string;
+  /** Exact known normalized token sums; null means no known channel in this
+   * bucket. Optional only for older read-model adapters. */
+  inputTokens?: number | string | null;
+  outputTokens?: number | string | null;
+  unknownInputCount?: number | string;
+  unknownOutputCount?: number | string;
 }
 
 export interface ProviderAggregateSeries {
@@ -530,14 +540,16 @@ export interface ProviderAggregateSeries {
    * Cost buckets and daily rollups are independent of both flags. */
   settlementTruncated?: boolean;
   executionTruncated?: boolean;
-  /** Exact cost buckets for the requested today and week ranges at the
+  /** Exact cost and normalized input/output token buckets for the requested today and week ranges at the
    * shared per-range widths (minute for today, hour for week —
    * `CANONICAL_COST_BUCKET_WIDTH_MS` in `../projections/metrics`).
    * Optional for compatibility with older read-model test adapters. Each
    * range is aggregated with its own exact settlement-time bounds, so bucket
    * sums never leak across the local calendar boundary; the ranges are
    * complete unless the matching truncated flag is set, and
-   * settlement/execution sample truncation never removes cost buckets. */
+   * settlement/execution sample truncation never removes buckets. Unknown
+   * token channels remain null when no known usage exists, with independent
+   * unknown counts; sums include only known channel evidence. */
   todayCostBuckets?: ProviderAggregateCostBucket[];
   weekCostBuckets?: ProviderAggregateCostBucket[];
   todayCostBucketsTruncated?: boolean;
@@ -3372,6 +3384,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       readOnly: this.readOnly,
     });
     try {
+      // Sum decimal strings with BigInt, just like maintained accounting:
+      // individual int64 observations can produce totals beyond int64.
+      database.aggregate('analytics_exact_token_sum', {
+        start: '',
+        step: (total, value) => value === null ? total
+          : (BigInt(total || '0') + BigInt(String(value))).toString(),
+      });
       initializeSchema(database, this.readOnly);
     } catch (error) {
       database.close();
@@ -5577,7 +5596,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       SELECT CAST(settled_at_ms AS INTEGER) / ${divisor} AS bucket_index,
         provider, effective_model,
         SUM(effective_cost_usd) AS cost,
-        COUNT(*) - COUNT(effective_cost_usd) AS unknown_cost_count
+        COUNT(*) - COUNT(effective_cost_usd) AS unknown_cost_count,
+        NULLIF(analytics_exact_token_sum(normalized_base_input_tokens), '') AS input_tokens,
+        NULLIF(analytics_exact_token_sum(normalized_output_tokens), '') AS output_tokens,
+        COUNT(*) - COUNT(normalized_base_input_tokens) AS unknown_input_count,
+        COUNT(*) - COUNT(normalized_output_tokens) AS unknown_output_count
       FROM analytics_provider_settlements
       WHERE settled_at_ms IS NOT NULL
         AND CAST(settled_at_ms AS INTEGER) >= ?
@@ -5625,6 +5648,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         existing.unknownCostCount = encodeInt64(String(
           Number(existing.unknownCostCount) + unknownCostCount,
         ));
+        for (const [field, column] of [['inputTokens', 'input_tokens'], ['outputTokens', 'output_tokens']] as const) {
+          if (row[column] !== null) {
+            existing[field] = encodeAggregateTotal(String(BigInt(existing[field] ?? 0) + BigInt(String(row[column]))));
+          }
+        }
+        existing.unknownInputCount = encodeInt64(String(BigInt(existing.unknownInputCount ?? 0) + BigInt(String(row.unknown_input_count))));
+        existing.unknownOutputCount = encodeInt64(String(BigInt(existing.unknownOutputCount ?? 0) + BigInt(String(row.unknown_output_count))));
         continue;
       }
       merged.set(key, {
@@ -5633,6 +5663,10 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         model: model === '' ? null : model,
         cost,
         unknownCostCount: encodeInt64(String(unknownCostCount)),
+        inputTokens: row.input_tokens === null ? null : encodeAggregateTotal(String(row.input_tokens)),
+        outputTokens: row.output_tokens === null ? null : encodeAggregateTotal(String(row.output_tokens)),
+        unknownInputCount: encodeInt64(String(row.unknown_input_count)),
+        unknownOutputCount: encodeInt64(String(row.unknown_output_count)),
       });
     }
     return { buckets: [...merged.values()], truncated };

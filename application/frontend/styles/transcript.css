@@ -16,7 +16,7 @@
   /* The final 10px is the deterministic overlay scrollbar hit area. Keeping
      it as explicit padding preserves the same content width as a native stable
      gutter without letting live scrollHeight changes remap an active drag. */
-  padding: var(--panel-gap-md) calc(var(--panel-gap-lg) + 10px) 10px var(--panel-gap-lg);
+  padding: var(--panel-gap-md) calc(var(--panel-gap-lg) + 10px) var(--panel-gap-lg) var(--panel-gap-lg);
   display: flex;
   flex-direction: column;
   gap: var(--panel-gap-sm);
@@ -336,6 +336,23 @@
   display: flex;
 }
 
+/* A short, fixed fade softens the transcript-to-composer edge. It is outside
+   the scroller and below navigation chrome, and never intercepts input. */
+.transcript-viewport::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 16px;
+  background: linear-gradient(to bottom, transparent, var(--panel-surface));
+  pointer-events: none;
+  z-index: 4;
+}
+
+@media (forced-colors: active) {
+  .transcript-viewport::after { display: none; }
+}
+
 /* ── Sticky user-prompt context ──────────────────────────────────────────── */
 /* The bar renders nothing while no loaded prompt governs the viewport, so an
    empty session never reserves a blank bar. The space is still reserved via
@@ -369,6 +386,57 @@
   justify-content: flex-end;
   min-width: 0;
   gap: var(--panel-gap-xs);
+}
+
+.transcript-prompt-navigation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  color: var(--panel-muted);
+}
+
+.transcript-prompt-navigation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: var(--panel-foreground-soft);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.transcript-prompt-navigation-button:hover:not(:disabled) {
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.transcript-prompt-navigation-button:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 1px;
+}
+
+.transcript-prompt-navigation-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.transcript-prompt-navigation-position {
+  font-size: 10px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (pointer: coarse) {
+  .transcript-prompt-navigation-button { width: 32px; height: 32px; }
 }
 
 .transcript-prompt-context-meta {
@@ -957,7 +1025,8 @@
   display: flex;
   align-items: center;
   min-height: var(--turn-activity-min-height);
-  margin-top: 6px;
+  /* The message shell's flex gap already separates the activity from content. */
+  margin-top: 0;
 }
 
 /* ── Loading wheel ───────────────────────────────────────────────────────── */

@@ -41,8 +41,12 @@ import { handleBackendRequest } from '../coordinator/request-handler.js';
 import type { ModelSettingsUnsetKey } from '../coordinator/request-handler-shared.js';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
-import { createBackendTools } from '../coordinator/backend-tools.js';
 import { subagentSettlementPricingResolver } from '../../model-providers/pricing/subagent-settlement-pricing';
+import { readProviderRuntimeProjection, createProviderRuntimeServices, buildProviderRuntimePricingFacts, type RuntimeSnapshot, type ProviderRuntimeReference } from '../../model-providers/runtime/index';
+import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
+import { resolveCapturedInvocationPricing } from '../../model-providers/pricing/captured-invocation-pricing';
+import type { CapturedPricingFacts } from '../../../analytics/contracts/model-pricing-facts';
+import type { SubagentSettlementPricingResolver } from '../../../analytics/contracts/transport';
 import { handleSdkSessionEvent } from './session-event-handler';
 import { reportAgentMessageProvenanceFailure } from './session-event-shared';
 import { attachAgentMessageProvenance } from './agent-message-provenance';
@@ -151,12 +155,47 @@ export interface WorkerRuntimePromotionPayload {
   modelSettings: WorkerJsonObject;
   analytics?: WorkerAnalyticsActivation;
   sdkRuntime: SdkRuntimeSelection;
+  providerRuntime?: { artifactDir: string; reference: ProviderRuntimeReference; credentialFile: string };
+}
+
+/** Adapt captured invocation pricing to the existing single analytics bridge. */
+export function capturedWorkerSettlementPricingResolver(facts: CapturedPricingFacts): SubagentSettlementPricingResolver {
+  const timestamp = (value: number | undefined): string | undefined => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  };
+  return request => {
+    const result = resolveCapturedInvocationPricing({ facts, provider: request.provider, modelId: request.model,
+      usage: { inputTokens: request.usage.input, outputTokens: request.usage.output,
+        cacheReadTokens: request.usage.cacheRead, cacheWriteTokens: request.usage.cacheWrite,
+        startedAt: timestamp(request.startedAtMs),
+        endedAt: timestamp(request.endedAtMs),
+      },
+    });
+    const snapshot = result?.rateSnapshot;
+    if (!snapshot) return undefined;
+    const { inputTokensUsdPerMillion: input, outputTokensUsdPerMillion: output,
+      cacheReadTokensUsdPerMillion: cacheRead, cacheWriteTokensUsdPerMillion: cacheWrite } = snapshot;
+    // The invocation contract permits partial evidence, but the settlement
+    // bridge requires complete rates. Missing prices stay unknown, not zero.
+    const validRate = (rate: number | undefined): rate is number =>
+      typeof rate === 'number' && Number.isFinite(rate) && rate >= 0;
+    if (!validRate(input) || !validRate(output) || !validRate(cacheRead) || !validRate(cacheWrite)) return undefined;
+    return { catalogVersion: result?.catalogVersion,
+      inputUsdPerMillionTokens: input,
+      outputUsdPerMillionTokens: output,
+      cacheReadUsdPerMillionTokens: cacheRead,
+      cacheWriteUsdPerMillionTokens: cacheWrite };
+  };
 }
 
 export interface WorkerRuntimeHostOptions {
   server: WorkerServer;
   owner: SdkWorkerOwnershipIdentity;
   sdkRuntime: SdkRuntimeSelection;
+  /** Trusted constructor seam for SDK-free host tests; never supplied by worker entry. */
+  sdkLoader?: typeof loadSdk;
 }
 
 /**
@@ -205,6 +244,9 @@ type LiveTurnCheckpointOwner = {
 
 export class WorkerRuntimeHost {
   private sdk?: SdkModule;
+  private providerSnapshot?: RuntimeSnapshot;
+  private capturedModelFacts?: CapturedPricingFacts;
+  private credentialFile?: string;
   private context?: SessionContext;
   private promotion?: Promise<void>;
   private runtimeReady = false;
@@ -756,6 +798,11 @@ export class WorkerRuntimeHost {
 
   private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {
     this.assertPromotionPayload(payload);
+    if (payload.providerRuntime) {
+      this.providerSnapshot = await readProviderRuntimeProjection(payload.providerRuntime.artifactDir, payload.providerRuntime.reference);
+      this.capturedModelFacts = buildProviderRuntimePricingFacts(this.providerSnapshot);
+      this.credentialFile = payload.providerRuntime.credentialFile;
+    }
     this.agentDir = payload.agentDir;
     this.startupCwd = payload.startupCwd;
     this.sessionDir = payload.sessionDir;
@@ -801,7 +848,7 @@ export class WorkerRuntimeHost {
         activation,
         `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
         this.analyticsWriterAdmission,
-        subagentSettlementPricingResolver(this.agentDir),
+        this.capturedModelFacts ? capturedWorkerSettlementPricingResolver(this.capturedModelFacts) : subagentSettlementPricingResolver(this.agentDir),
       );
       this.analyticsTransport.install();
     }
@@ -843,7 +890,7 @@ export class WorkerRuntimeHost {
     assertSdkRuntimeAgreement(payload.sdkPath, this.options.sdkRuntime, payload.sdkRuntime);
     const selectedSdkPath = sdkRuntimeSdkPath(this.options.sdkRuntime);
     const loadMode = sdkRuntimeLoadMode(this.options.sdkRuntime, 'full');
-    const sourceSdk: SourceArtifactSdkModule = await loadSdk(selectedSdkPath, loadMode);
+    const sourceSdk: SourceArtifactSdkModule = await (this.options.sdkLoader ?? loadSdk)(selectedSdkPath, loadMode);
     this.sdk = sourceSdk as unknown as SdkModule;
     // Isolated workers perform provider I/O but never install an independent
     // ProviderGate admission/circuit. The coordinator lease above is the sole
@@ -869,10 +916,12 @@ export class WorkerRuntimeHost {
     // SDK's fail-closed shape check intentionally compares path.resolve()
     // spellings before it delegates to the adapter (important on Windows 8.3
     // temp paths), so reopening the non-canonical grant alias would fail.
+    const { createBackendTools } = await import('../coordinator/backend-tools.js');
     const manager = this.sdk.SessionManager.open(this.currentLease.canonicalSessionPath);
     const guardedManager = this.fenceSessionManager(manager);
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        ...this.capturedProviderServices(authStorage),
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',
@@ -1032,7 +1081,11 @@ export class WorkerRuntimeHost {
       await this.applySystemPromptToggles(context, persistedPromptToggles);
     }
     if (this.autonomousMode) this.applyAutonomousModeToContext(context, true);
-    const uiBridge = new ExtensionUIBridge(sessionPath, (event, eventPayload) => this.emit(event, eventPayload));
+    const uiBridge = new ExtensionUIBridge(
+      sessionPath,
+      (event, eventPayload) => this.emit(event, eventPayload),
+      () => this.autonomousMode,
+    );
     context.uiBridge = uiBridge;
     const { newSession, fork, switchSession } = context.runtime;
     if (!newSession || !fork || !switchSession) {
@@ -1691,9 +1744,11 @@ export class WorkerRuntimeHost {
     if (!managerPath || !sameSessionPath(managerPath, this.currentLease.canonicalSessionPath)) {
       throw new Error('Runtime context manager does not match the current write lease.');
     }
+    const { createBackendTools } = await import('../coordinator/backend-tools.js');
     const authStorage = this.sdk.AuthStorage.create(this.syncedAuthPath ?? resolveAuthPath(this.agentDir));
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        ...this.capturedProviderServices(authStorage),
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',
@@ -2083,6 +2138,15 @@ export class WorkerRuntimeHost {
     return this.systemPromptModule;
   }
 
+  private capturedProviderServices(authStorage: unknown) {
+    const snapshot = this.providerSnapshot;
+    if (!snapshot) return {};
+    return { providerServices: async () => createProviderRuntimeServices(this.sdk!, snapshot, authStorage, {
+      credentialFile: this.credentialFile!,
+      legacyModelsFile: path.join(this.agentDir, 'models.json'),
+    }) };
+  }
+
   private availableModels(): ModelInfo[] {
     let models: ModelInfo[] = [];
     let registryWasRead = false;
@@ -2094,7 +2158,10 @@ export class WorkerRuntimeHost {
         // mapper dropped thinkingLevels and subagent.pricing, which made every
         // promoted session lose exact reasoning options, picker prices, and the
         // pricing resolver used by session cost tracking.
-        models = projectRegistryModels(registry.getAvailable(), this.agentDir);
+        const available = registry.getAvailable();
+        models = this.providerSnapshot
+          ? projectProviderRuntimeModels(this.providerSnapshot, available)
+          : projectRegistryModels(available, this.agentDir);
       }
     } catch {
       registryWasRead = false;
@@ -2103,6 +2170,7 @@ export class WorkerRuntimeHost {
     // Use the coordinator snapshot only when no runtime registry could be read.
     // A successfully read empty registry is authoritative (for example, no
     // configured credentials) and must not expose unavailable fallback models.
+    if (this.providerSnapshot && !registryWasRead) throw new Error('Captured provider registry is unavailable.');
     if (!registryWasRead && this.syncedCatalogModels !== undefined) return this.syncedCatalogModels;
     return models;
   }
@@ -2166,6 +2234,7 @@ export class WorkerRuntimeHost {
    * configured catalog authority. Fire-and-forget; a rejected frame is
    * retried on the next command/event cycle via the promotion report. */
   private reportRuntimeCatalog(): void {
+    if (this.providerSnapshot) return; // Session-local models never enter the global catalog.
     try {
       const models = asWorkerJson(this.availableModels());
       this.options.server.sendRuntimeReportFrame({ models });
@@ -2181,6 +2250,17 @@ export class WorkerRuntimeHost {
     assertSdkRuntimeAgreement(payload.sdkPath, this.options.sdkRuntime, payload.sdkRuntime);
     if (!payload.writeLease || typeof payload.writeLease !== 'object' || Array.isArray(payload.writeLease)) throw new Error('Invalid runtime promotion writeLease.');
     if (!payload.openedPayload || typeof payload.openedPayload !== 'object' || Array.isArray(payload.openedPayload)) throw new Error('Invalid runtime promotion openedPayload.');
+    if (payload.providerRuntime !== undefined) {
+      const runtime = payload.providerRuntime;
+      if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)
+        || !['artifactDir', 'credentialFile'].every(key => {
+          const value = runtime[key as 'artifactDir' | 'credentialFile'];
+          return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0') && path.isAbsolute(value);
+        }) || !runtime.reference || typeof runtime.reference !== 'object' || Array.isArray(runtime.reference)
+        || runtime.reference.version !== 1 || typeof runtime.reference.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(runtime.reference.sha256)) {
+        throw new Error('Invalid runtime promotion providerRuntime.');
+      }
+    }
     if (payload.analytics !== undefined) {
       const analytics = payload.analytics;
       if (!analytics || typeof analytics !== 'object' || Array.isArray(analytics)

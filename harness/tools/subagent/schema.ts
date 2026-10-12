@@ -13,12 +13,11 @@
 // the exact TypeBox instance pi-ai's tool-parameter API expects.
 import { StringEnum, Type, type Static } from "@mariozechner/pi-ai";
 
-export const BUCKET_GUIDANCE = "Choose the bucket explicitly by task complexity, not role: small for well-defined implementation, investigation, or review with limited ambiguity; medium for tasks requiring substantial judgment across interacting concerns; frontier for unusually difficult reasoning, diagnosis, or design. Judge the delegated task, not the overall project size. Escalate when the task exceeds the selected bucket.";
+export const BUCKET_GUIDANCE = "Choose the bucket explicitly by task complexity, not role: Prefer small for bounded, well-defined work; medium for tasks requiring substantial judgment across interacting concerns; frontier for unusually difficult reasoning, diagnosis, or design. Judge the delegated task, not the overall project size. Escalate when the task exceeds the selected bucket.";
 
-const BucketSchema = Type.Optional(StringEnum(["small", "medium", "frontier"] as const, {
+const BucketSchema = StringEnum(["small", "medium", "frontier"] as const, {
 	description: BUCKET_GUIDANCE,
-	default: "medium",
-}));
+});
 
 const UserContextSchema = Type.Optional(StringEnum(["latest", "all"] as const, {
 	description: "Parent prompts and ask_user clarifications only: omit for self-contained tasks; 'latest' for the current request and its clarifications; 'all' only when requirements span multiple user turns.",

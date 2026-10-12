@@ -8,7 +8,8 @@
       "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
       "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
       "@mariozechner/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.d.ts"]
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.d.ts"],
+      "ajv": ["../../../application/hosts/vscode/node_modules/ajv"]
     }
   },
   "include": ["./**/*.ts"],

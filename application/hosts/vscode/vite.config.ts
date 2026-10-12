@@ -177,6 +177,7 @@ export default defineConfig(({ mode }) => {
             'cold-browse-helper-entry': path.join(repoDir, 'harness', 'agent-processes', 'cold-browse-helper', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(repoDir, 'harness', 'agent-processes', 'context-inventory', 'initial-context-estimate-worker.ts'),
             'phase4-worker-command-extension': path.join(repoDir, 'harness', 'agent-processes', 'lib', 'sdk-integration', 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
+            'dictation-helper': path.join(repoDir, 'application', 'backend', 'dictation', 'helper-entry.ts'),
           },
           output: {
             entryFileNames: '[name].js',
@@ -190,7 +191,10 @@ export default defineConfig(({ mode }) => {
           // on masked frames >= 32 bytes (`bufferUtil$1.unmask is not a
           // function`). Keep them as runtime requires so the require throws
           // and ws falls back to its pure-JS implementation.
-          external: (id) => id === 'vscode' || id.startsWith('node:') || id === 'bufferutil' || id === 'utf-8-validate',
+          // Native wrappers must resolve from the standalone helper's runtime
+          // package graph; never bundle or load them in the VS Code/Electron host.
+          external: (id) => id === 'vscode' || id.startsWith('node:') || id === 'bufferutil' || id === 'utf-8-validate'
+            || id === '@picovoice/pvrecorder-node' || id === 'whisper-cpp-node' || id.startsWith('@whisper-cpp-node/'),
         },
       },
       ssr: {

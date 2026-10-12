@@ -56,6 +56,8 @@ import {
   DEFAULT_SESSION_TITLES_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
 } from '../../lib/protocol/index.js';
+import { createDictationState, type DictationState } from '../dictation/state.js';
+import { createProviderManagementState, type ProviderManagementState } from '../provider-management/state.js';
 import { deriveBundledExtensions } from '../settings/bundled-extensions.js';
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,7 @@ export interface TranscriptState {
   bySession: Record<string, ChatMessage[]>;
   /** System prompts keyed by session path. */
   systemPromptsBySession: Record<string, SystemPromptEntry[]>;
+  pendingPromptInventoryBySession?: Record<string, { token: string; backendGeneration: number; modelWriteFence: number }>;
   /** Transcript window (scroll/pagination state) keyed by session path. */
   windowBySession: Record<string, TranscriptWindow>;
   /** Whole-branch accounting, retained independently of bounded transcript windows. */
@@ -588,6 +591,8 @@ export interface PendingState {
  * never `Map`/`Set` — see `docs/contracts/STATE_CONTRACT.md`.
  */
 export interface ArchState {
+  dictation: DictationState;
+  providerManagement: ProviderManagementState;
   transcript: TranscriptState;
   sessions: SessionsState;
   settings: SettingsState;
@@ -603,6 +608,8 @@ export interface ArchState {
 /** Returns a fresh `ArchState` with all sub-states at their defaults. */
 export function createInitialArchState(): ArchState {
   return {
+    dictation: createDictationState(),
+    providerManagement: createProviderManagementState(),
     transcript: {
       bySession: {},
       systemPromptsBySession: {},

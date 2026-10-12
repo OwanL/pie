@@ -110,7 +110,10 @@ export default function register(pi: ExtensionAPI) {
 	});
 
 	// --- before_agent_start: skill + tool pruning ---
-	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
+	const selectCapabilities = async (event: Omit<BeforeAgentStartEvent, "type"> & { type: "before_agent_start" | "before_compaction_resume"; newUserPrompt?: boolean }, ctx: unknown) => {
+		const compactionResume = event.type === "before_compaction_resume";
+		const afterCompaction = compactionResume && getConfig().refreshAfterCompaction !== false;
+		if (compactionResume && !afterCompaction && !event.newUserPrompt) return undefined;
 		const sessionId = getSessionId(ctx);
 		const isChildSession = isInSubagentContext();
 		const childRuntimeOwner = isChildSession && sessionId !== PROCESS_SESSION_ID
@@ -142,6 +145,12 @@ export default function register(pi: ExtensionAPI) {
 		};
 		let modifiedSystemPrompt = event.systemPrompt;
 		let currentPieBasePrompt = getPieBaseSystemPrompt(ctx);
+		// A previous decision can remove the entire skills block. Rehydrate only
+		// that owned block before scoring the rebuilt post-compaction catalog.
+		if (afterCompaction && !SKILLS_BLOCK_RE.test(modifiedSystemPrompt)) {
+			const skillsBlock = currentPieBasePrompt?.match(SKILLS_BLOCK_RE)?.[0];
+			if (skillsBlock) modifiedSystemPrompt += skillsBlock;
+		}
 		let toolPromptRefreshFailed = false;
 		const refreshToolProse = () => {
 			const freshPieBasePrompt = getPieBaseSystemPrompt(ctx);
@@ -222,14 +231,14 @@ export default function register(pi: ExtensionAPI) {
 		};
 
 		const queuedCount = queuedPrompts.get(event.prompt) ?? 0;
-		if (queuedCount > 0) {
+		if (queuedCount > 0 && !afterCompaction) {
 			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
 			else queuedPrompts.set(event.prompt, queuedCount - 1);
 			return processedChildSessions.has(sessionId) || state.processedMainSessions.has(sessionId)
 				? reapplySelection()
 				: promptRefreshResult();
 		}
-		if (isChildSession && processedChildSessions.has(sessionId)) {
+		if (isChildSession && processedChildSessions.has(sessionId) && !afterCompaction) {
 			// Internal continuation/re-entry: the catalog and active-tool set from
 			// the launch decision are still authoritative. Rebuild only the skills
 			// block from that decision; never issue another prepass or reset recovery.
@@ -237,11 +246,11 @@ export default function register(pi: ExtensionAPI) {
 		}
 
 		if (isChildSession) processedChildSessions.add(sessionId);
-		const skipInfo = shouldSkipPruning(event, activeConfig);
+		const skipInfo = shouldSkipPruning({ ...event, type: "before_agent_start" }, activeConfig, afterCompaction);
 		const mainDisabled = skipInfo.skip && skipInfo.reason !== "too-short";
 		if (!isChildSession && !mainDisabled
 			&& state.processedMainSessions.get(sessionId) === activeConfig.mode
-			&& !activeConfig.followUpEnabled && !event.refreshPruning) {
+			&& !activeConfig.followUpEnabled && !event.refreshPruning && !afterCompaction) {
 			// Preserve recoveries and user changes while reconciling protections
 			// against the latest config before reapplying Pi's rebuilt skills block.
 			return reapplySelection();
@@ -253,7 +262,9 @@ export default function register(pi: ExtensionAPI) {
 		const rootSessionFields = rootSessionAttribution(ctx, sessionId);
 		// A fresh pruning decision owns a new hidden-skill catalog.
 		// Queued continuations returned above intentionally retain the current one.
+		const ongoingSkills = afterCompaction ? new Set(state.loadedSkills.get(sessionId) ?? []) : new Set<string>();
 		recordHiddenSkills(sessionId, []);
+		if (afterCompaction && ongoingSkills.size > 0) state.loadedSkills.set(sessionId, ongoingSkills);
 		const configuredTools = toolSeams.getAllTools();
 		const blockedToolNames = new Set(autonomousMode ? [ASK_USER_TOOL_NAME] : []);
 		const initialActiveToolNames = toolSeams.getActiveTools();
@@ -339,6 +350,7 @@ export default function register(pi: ExtensionAPI) {
 			if (stopIfSessionDisposed()) return undefined;
 			const { getCompleteFn, getRecentConversation, runPruningPrepass } = prepassModule;
 			const { visibleSkills, effectivePinned } = resolveVisibleSkills(skills, activeConfig);
+			for (const name of ongoingSkills) if (!effectivePinned.includes(name)) effectivePinned.push(name);
 			const contextFile = event.systemPromptOptions.contextFiles?.[0];
 
 			// Always-keep (pinned / alwaysKeep) skills and tools are never
@@ -355,6 +367,7 @@ export default function register(pi: ExtensionAPI) {
 				...(activeConfig.tools?.alwaysKeep ?? []),
 				RECOVERY_TOOL_NAME,
 				...turnProtectedToolNames,
+				...(afterCompaction ? activeToolNames : []),
 			]);
 
 			const llmInput = {
@@ -367,7 +380,7 @@ export default function register(pi: ExtensionAPI) {
 					.filter((t) => !forcedToolNames.has(t.name))
 					.map((t) => ({ name: t.name, description: t.description ?? "" })),
 				config: activeConfig,
-				recentConversation: getRecentConversation(ctx),
+				recentConversation: getRecentConversation(ctx, undefined, afterCompaction),
 				...(isChildSession ? {
 					agentContext: (subagentContext.getStore() as { agentContext?: string } | undefined)?.agentContext,
 				} : {}),
@@ -378,9 +391,9 @@ export default function register(pi: ExtensionAPI) {
 
 			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
 			const continuationFingerprint = buildPrepassFingerprint(llmInput, activeConfig, false);
-			// Manual main-session refresh must score even an identical prompt. Child
-			// launch-only behavior and queued continuations remain unchanged.
-			const refreshPruning = !isChildSession && event.refreshPruning === true;
+			// Explicit and post-compaction refreshes must score even an identical
+			// prompt; ordinary launch/sticky/queued behavior remains unchanged.
+			const refreshPruning = afterCompaction || (!isChildSession && event.refreshPruning === true);
 			let cached = refreshPruning ? null : getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
 			if (!cached && !refreshPruning) {
 				const crossSession = getCachedPrepassCrossSession(event.prompt, fingerprint);
@@ -442,7 +455,7 @@ export default function register(pi: ExtensionAPI) {
 					availableTools,
 					prunedTools,
 					activeConfig,
-					turnProtectedToolNames,
+					[...turnProtectedToolNames, ...(afterCompaction ? activeToolNames : [])],
 				);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
@@ -545,6 +558,8 @@ export default function register(pi: ExtensionAPI) {
 			recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 		}
 
+		if (afterCompaction && ongoingSkills.size > 0) state.loadedSkills.set(sessionId, ongoingSkills);
+
 		const parseFailureNote = keptAllDueToParseFailure
 			? "prepass response was non-JSON prose — kept all (parse failure)"
 			: undefined;
@@ -578,7 +593,11 @@ export default function register(pi: ExtensionAPI) {
 			return { systemPrompt: modifiedSystemPrompt, message: feedbackMessage ?? undefined };
 		}
 		return feedbackMessage ? { message: feedbackMessage } : undefined;
-	});
+	};
+	pi.on("before_agent_start", selectCapabilities);
+	// Narrow local seam also supports the installed SDK types until source bytes
+	// are rebuilt; the runtime event is owned by Pie's AgentSession.
+	(pi.on as unknown as (name: "before_compaction_resume", handler: typeof selectCapabilities) => void)("before_compaction_resume", selectCapabilities);
 
 	pi.on("tool_call", async (event: ToolCallEvent, ctx: unknown) => {
 		try {

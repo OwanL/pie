@@ -15,7 +15,7 @@ killed or prevented from producing late external side effects by this extension 
 One tool call delegates one task:
 
 ```json
-{ "agent": "worker", "task": "Implement the login form" }
+{ "agent": "worker", "task": "Implement the login form", "bucket": "small" }
 ```
 
 Use pi's native orchestration rather than a batch mode:
@@ -55,9 +55,14 @@ Starting an agent does not require confirmation. Agent invocation is routine orc
 
 ## Model Buckets
 
-Each subagent call carries a `bucket` hint — `small` (Haiku-class busywork),
-`medium` (Sonnet-class main development), or `frontier` (Opus-class hardest
-problems), defaulting to `medium`. The subagent tool picks models through a **balanced shuffled cycle** over the
+Every tool call must explicitly choose a `bucket` by the delegated task's
+complexity, not the agent role or overall project size. Prefer `small` for
+bounded, well-defined work; use `medium` for substantial judgment across
+interacting concerns, and `frontier` for unusually difficult reasoning,
+diagnosis, or design. Escalate when the task exceeds the selected bucket.
+There is no public default.
+
+The subagent tool picks models through a **balanced shuffled cycle** over the
 matching bucket's eligible model list. Every eligible model is used once per
 cycle, and each new cycle is reshuffled to avoid a fixed ordering bias.
 
@@ -239,7 +244,11 @@ otherwise-allowed caller may launch.
 
 ## Removed parameters and routes
 
-The public schema is `{ agent, task, userContext?, cwd?, bucket?, modelRequirements? }`.
+The public schema is `{ agent, task, userContext?, cwd?, bucket, modelRequirements? }`.
+Calls missing `bucket`, including resumed pending legacy calls, must be reissued
+with an explicit tier. Argument preparation does not invent a bucket. Existing
+stored results remain renderable; the internal resolver's legacy fallback is
+unchanged.
 
 - `thinkingLevel` was removed from calls and agent frontmatter. `prepareArguments` strips it from resumed legacy calls.
 - `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.

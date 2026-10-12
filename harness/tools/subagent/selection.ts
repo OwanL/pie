@@ -77,6 +77,8 @@ export function formatRequirementDiagnostic(
 
 /** Context for model selection settings and restrictions. */
 export interface SelectionContext {
+	isModelEligibleForSubagent?: (provider: string, id: string) => boolean;
+	callerProvider?: string;
 	modelConfig: SimpleModelConfig[];
 	disabledProviders: Set<string>;
 	allowedModelIds: Set<string> | undefined;
@@ -174,6 +176,13 @@ export async function resolveModel(
 	// Only bucket assignments select reasoning. Parent-model fallback inherits
 	// the immediate caller's current level; it deliberately has no implicit high.
 	const thinkingLevel = selectionCtx.callerThinkingLevel;
+	const callerEligible = !selectionCtx.isModelEligibleForSubagent ||
+		!!selectionCtx.callerProvider && selectionCtx.isModelEligibleForSubagent(selectionCtx.callerProvider, activeModelId);
+	const eligibilityError = (bucket: string): ResolvedModel => ({
+		modelOverride: "", thinkingLevel, bucket,
+		selection: { modelId: "", thinkingLevel, bucket, pool: [], fallback: true },
+		requirementDiagnostic: "The parent's active model is not eligible for subagents. Choose an eligible model or bucket.",
+	});
 
 	// Hard model requirement state. An absent/empty requirement preserves
 	// current selection behaviour (no fields are stamped on results). When
@@ -235,6 +244,7 @@ export async function resolveModel(
 	// A hard requirement is NOT weakened here: an incompatible parent produces
 	// a local selection error rather than a silent text-only dispatch.
 	if (selectionCtx.alwaysParentModel) {
+		if (!callerEligible) return eligibilityError(requestedBucket);
 		if (requirementActive && !callerSatisfiesRequirement) {
 			return { ...requirementError(requestedBucket), bucket: requestedBucket };
 		}
@@ -268,6 +278,7 @@ export async function resolveModel(
 		const downgraded = downgradeBucketForNested(bucket, allowed);
 		if (downgraded.downgraded) {
 			if (downgraded.bucket === "") {
+				if (!callerEligible) return eligibilityError(bucket);
 				// No bucket is allowed for nested subagents: the only remaining
 				// fallback is the caller's active model. A hard requirement is
 				// still enforced — an incompatible parent is a local error.
@@ -328,6 +339,7 @@ export async function resolveModel(
 	// bucket at or below the request is empty. A hard requirement is enforced
 	// here too: an incompatible active model is a local error, never a silent
 	// text-only dispatch. (A qualified active model remains a valid fallback.)
+	if (selection.fallback && !callerEligible) return { ...eligibilityError(bucket), bucketDowngradeReason };
 	if (selection.fallback && requirementActive && !callerSatisfiesRequirement) {
 		return { ...requirementError(bucket), bucketDowngradeReason };
 	}

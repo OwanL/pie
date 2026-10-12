@@ -84,6 +84,17 @@ test('mergePruningSettings: follow-up switch defaults off for legacy settings an
   assert.equal(legacy.followUpEnabled, undefined);
 });
 
+test('mergePruningSettings: refresh after history compaction defaults on and preserves false', () => {
+  const legacy = { ...base };
+  delete legacy.refreshAfterCompaction;
+  assert.equal(DEFAULT_PRUNING_SETTINGS.refreshAfterCompaction, true);
+  assert.equal(mergePruningSettings(legacy, {}).refreshAfterCompaction, true);
+  const disabled = mergePruningSettings(legacy, { refreshAfterCompaction: false });
+  assert.equal(disabled.refreshAfterCompaction, false);
+  assert.equal(mergePruningSettings(disabled, { mode: 'off' }).refreshAfterCompaction, false);
+  assert.equal(mergePruningSettings(disabled, { refreshAfterCompaction: true }).refreshAfterCompaction, true);
+});
+
 test('mergePruningSettings: treats prepassTimeoutSec null as a real value, not omitted', () => {
   const cleared = mergePruningSettings(base, { prepassTimeoutSec: null });
   assert.equal(cleared.prepassTimeoutSec, null, 'null clears the override');

@@ -2569,3 +2569,119 @@ test("context handler filters pruning-result custom messages before provider cal
 	assert.ok(result.messages.some((m) => m.role === "custom" && m.customType === "other"));
 	assert.ok(!result.messages.some((m) => m.role === "custom" && m.customType === "pruning-result"));
 });
+
+
+test("post-compaction refresh bypasses sticky/cache, includes rebuilt history, and honors disable",  async () => {
+	let calls = 0;
+	let request = "";
+	__setCompleteFn(async (_model, context) => {
+		calls++;
+		request = JSON.stringify(context);
+		return { text: '{"pruneSkills":[],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config());
+		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
+		const refresh = handlers.get("before_compaction_resume")!;
+		const event = { type: "before_compaction_resume", prompt: "Refactor this code", refreshPruning: undefined, newUserPrompt: true,
+			systemPrompt: systemPrompt(realisticSkills), systemPromptOptions: { cwd: "/repo", skills: realisticSkills } };
+		const ctx = { sessionManager: { getSessionId: () => "session-1", buildSessionContext: () => ({ messages: [
+			{ role: "compactionSummary", summary: "summary unique marker" },
+			{ role: "user", content: "retained unique marker" },
+		] }) } };
+		await refresh(event, ctx);
+		assert.equal(calls, 2);
+		assert.match(request, /summary unique marker/);
+		assert.match(request, /retained unique marker/);
+		await refresh(event, ctx);
+		assert.equal(calls, 3, "each successful compaction notification is uncached");
+		setConfigForTesting({ ...config(), refreshAfterCompaction: false });
+		await refresh(event, ctx);
+		assert.equal(calls, 3);
+		setConfigForTesting({ ...config(), mode: "off" });
+		await refresh(event, ctx);
+		assert.equal(calls, 3);
+	} finally { __setCompleteFn(null); }
+});
+
+
+test("enabled automatic compaction resume rehydrates filtered skills while rebasing tool prose", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: calls === 1
+			? JSON.stringify({ pruneSkills: realisticSkills.map((skill) => skill.name), pruneTools: ["web_search"] })
+			: '{"pruneSkills":[],"pruneTools":["web_search"]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		let activeTools = mockToolInfo.map((tool) => tool.name);
+		let base = piePrompt(realisticSkills, activeTools);
+		__setToolSeams({ getAllTools: () => mockToolInfo as any[], getActiveTools: () => activeTools,
+			setActiveTools: (names) => { activeTools = names; base = piePrompt(realisticSkills, names); } });
+		const ctx = { sessionManager: { getSessionId: () => "session-auto-rebase" },
+			[Symbol.for("pie.systemPrompt.baseAccessor")]: () => base };
+		const options = { cwd: "/repo", skills: realisticSkills };
+		const first = await handlers.get("before_agent_start")!({ type: "before_agent_start",
+			prompt: "Refactor this implementation", systemPrompt: base, systemPromptOptions: options }, ctx) as BeforeAgentStartReturn;
+		assert.doesNotMatch(first!.systemPrompt, /<available_skills>/);
+		const result = await handlers.get("before_compaction_resume")!({ type: "before_compaction_resume",
+			prompt: "", refreshPruning: undefined, newUserPrompt: false,
+			systemPrompt: `${first!.systemPrompt}\nFOREIGN SUFFIX`, systemPromptOptions: options }, ctx) as BeforeAgentStartReturn;
+		assert.equal(calls, 2);
+		assert.match(result!.systemPrompt, /<name>frontend-design<\/name>/);
+		assert.match(result!.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
+		assert.doesNotMatch(result!.systemPrompt, /web_search/);
+		assert.match(result!.systemPrompt, /FOREIGN SUFFIX/);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("disabled compaction refresh reapplies sticky skills on user turns and honors ordinary refresh", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register({ ...config(), refreshAfterCompaction: false });
+		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
+		const resume = handlers.get("before_compaction_resume")!;
+		const event = { type: "before_compaction_resume", newUserPrompt: true, prompt: "Refactor this code again",
+			systemPrompt: systemPrompt(realisticSkills), systemPromptOptions: { cwd: "/repo", skills: realisticSkills } };
+		const ctx = { sessionManager: { getSessionId: () => "session-1" } };
+		const result = await resume(event, ctx) as BeforeAgentStartReturn;
+		assert.equal(calls, 1);
+		assert.ok(!result?.systemPrompt?.includes("<name>frontend-design</name>"));
+		assert.ok(selectorState.getHiddenSkills("session-1").has("frontend-design"));
+		assert.equal(await resume({ ...event, newUserPrompt: false, systemPrompt: result!.systemPrompt }, ctx), undefined,
+			"automatic resume leaves an already filtered prompt untouched");
+		assert.equal(calls, 1);
+		await resume({ ...event, refreshPruning: true }, ctx);
+		assert.equal(calls, 2, "explicit user refresh still runs");
+		setConfigForTesting({ ...config(), refreshAfterCompaction: false, followUpEnabled: true });
+		await resume({ ...event, prompt: "Implement a different feature in this repository" }, ctx);
+		assert.equal(calls, 3, "follow-up selection still runs");
+	} finally { __setCompleteFn(null); }
+});
+
+test("post-compaction refresh preserves active tools, recovered skills, and recovery discovery", async () => {
+	__setCompleteFn(async () => ({ text: '{"pruneSkills":["frontend-design"],"pruneTools":["web_search","request_capability"]}' }));
+	try {
+		const { handlers } = register(config());
+		let activeTools = ["web_search", "request_capability"];
+		__setToolSeams({ getAllTools: () => mockToolInfo as any[], getActiveTools: () => activeTools,
+			setActiveTools: (names: string[]) => { activeTools = names; } });
+		selectorState.recordLoadedSkill("session-ongoing", "frontend-design");
+		const result = await handlers.get("before_compaction_resume")!({ type: "before_compaction_resume",
+			prompt: "", refreshPruning: true, systemPrompt: systemPrompt(realisticSkills),
+			systemPromptOptions: { cwd: "/repo", skills: realisticSkills },
+		}, { sessionManager: { getSessionId: () => "session-ongoing" } }) as BeforeAgentStartReturn;
+		assert.ok(activeTools.includes("web_search"));
+		assert.ok(activeTools.includes("request_capability"));
+		assert.ok(selectorState.getLoadedSkills("session-ongoing").has("frontend-design"));
+		assert.ok(!(result?.message?.details.excludedSkills ?? []).includes("frontend-design"));
+	} finally { __setCompleteFn(null); __setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null }); }
+});

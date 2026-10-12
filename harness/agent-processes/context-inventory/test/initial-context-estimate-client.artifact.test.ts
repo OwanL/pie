@@ -237,8 +237,8 @@ test('inventory IPC preserves complete prompt text beyond the former 256 KiB est
   assert.ok(timing.totalDurationMs >= (timing.responseDurationMs ?? 0));
   assert.deepEqual(Object.keys(timing).sort(), [
     'guardianDurationMs', 'outcome', 'preloadDurationMs', 'prewarmed', 'promptAndEstimateDurationMs',
-    'resourceDiscoveryDurationMs', 'responseDurationMs', 'sdkImportDurationMs', 'spawnDurationMs', 'stage',
-    'totalDurationMs',
+    'queueWaitDurationMs', 'requestDurationMs', 'resourceDiscoveryDurationMs', 'responseDurationMs',
+    'sdkImportDurationMs', 'spawnDurationMs', 'stage', 'totalDurationMs',
   ]);
   await client.dispose();
 });

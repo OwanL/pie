@@ -92,11 +92,6 @@
   color: color-mix(in srgb, var(--panel-foreground) 55%, var(--panel-muted));
 }
 
-.aggregate-strip-dur {
-  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
-  font-variant-numeric: tabular-nums;
-}
-
 .aggregate-strip-counts {
   color: var(--panel-muted);
   padding-left: 4px;

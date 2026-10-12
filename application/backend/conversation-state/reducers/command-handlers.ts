@@ -1,3 +1,4 @@
+import { handleDictationCommand } from './dictation-handlers.js';
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
@@ -83,6 +84,7 @@ import {
 } from './command-detail-handlers.js';
 
 export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
+  if (cmd.kind === 'DictationStart' || cmd.kind === 'DictationStop' || cmd.kind === 'DictationCancel') return handleDictationCommand(state, cmd);
   switch (cmd.kind) {
     case 'Continue': {
       return handleContinue(state, cmd);

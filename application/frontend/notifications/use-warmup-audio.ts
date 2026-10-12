@@ -5,14 +5,17 @@ import { useEffect } from 'preact/hooks';
 import { warmupCompletionSoundContext } from './completion-sound';
 
 export function useWarmupAudio() {
-  // Warm the AudioContext on the first user click so the completion sound
-  // works even when triggered from a non-gesture postMessage handler.
+  // Unlock notification audio in each client from a user gesture. Browser
+  // autoplay policy still applies even when the host requests a sound.
   useEffect(() => {
     const warmup = () => {
       warmupCompletionSoundContext();
-      document.removeEventListener('click', warmup, true);
     };
     document.addEventListener('click', warmup, true);
-    return () => document.removeEventListener('click', warmup, true);
+    document.addEventListener('keydown', warmup, true);
+    return () => {
+      document.removeEventListener('click', warmup, true);
+      document.removeEventListener('keydown', warmup, true);
+    };
   }, []);
 }

@@ -82,7 +82,7 @@ function submitSettlements(
         purpose: 'conversation',
         outcome: 'success',
         settledAtMs: entry.atMs,
-        inputTokens: 1,
+        ...(entry.cost === null ? {} : { inputTokens: 1 }),
         outputTokens: 1,
         inputIncludesCache: false,
         outputIncludesReasoning: true,
@@ -105,6 +105,45 @@ function bucketTotals(buckets: Array<{ provider: string | null; cost: number | n
   }
   return totals;
 }
+
+test('token buckets preserve exact totals above int64', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const start = Date.UTC(2026, 0, 1);
+  const end = start + 86_400_000;
+  const maximum = '4611686018427387903';
+  try {
+    recorder.prepareProviderDailyProjection('UTC', start, end);
+    recorder.submitBatch([0, 1, 2].map((index) => observation({
+      sourceKey: `overflow-${index}`,
+      invocationId: `overflow-${index}`,
+      fields: {
+        invocationId: `overflow-${index}`,
+        provider: 'alpha', dispatchedModel: 'm1', purpose: 'conversation',
+        outcome: 'success', settledAtMs: start + 1,
+        inputTokens: maximum, outputTokens: maximum,
+        inputIncludesCache: false, outputIncludesReasoning: true,
+        cacheChannelsOmittedAsZero: true, reportedCostUsd: 1, coverage: 'known',
+      },
+    })));
+    const aggregate = recorder.readProviderAggregateSummary({
+      todayStartMs: start, todayEndMs: end,
+      weekStartMs: start, weekEndMs: end, timeZone: 'UTC',
+    });
+    const expected = (BigInt(maximum) * 3n).toString();
+    assert.equal(aggregate.accounting.inputTokens.knownTotal, expected);
+    for (const buckets of [aggregate.series!.todayCostBuckets!, aggregate.series!.weekCostBuckets!]) {
+      assert.equal(buckets.length, 1);
+      assert.equal(buckets[0].inputTokens, expected);
+      assert.equal(buckets[0].outputTokens, expected);
+      assert.equal(buckets[0].unknownInputCount, 0);
+      assert.equal(buckets[0].unknownOutputCount, 0);
+    }
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
 
 test('cost buckets stay exact over every settlement when raw samples exceed 4096', () => {
   const temp = tempDatabase();
@@ -149,6 +188,11 @@ test('cost buckets stay exact over every settlement when raw samples exceed 4096
 
     const todayBuckets = series.todayCostBuckets!;
     const weekBuckets = series.weekCostBuckets!;
+    assert.equal(todayBuckets.reduce((sum, bucket) => sum + Number(bucket.inputTokens ?? 0), 0),
+      planned.length - expected.unknownCount);
+    assert.equal(todayBuckets.reduce((sum, bucket) => sum + Number(bucket.outputTokens ?? 0), 0), planned.length);
+    assert.equal(todayBuckets.reduce((sum, bucket) => sum + Number(bucket.unknownInputCount), 0), expected.unknownCount);
+    assert.equal(todayBuckets.reduce((sum, bucket) => sum + Number(bucket.unknownOutputCount), 0), 0);
     // Today aggregates at minute width: one bucket per occupied minute per
     // (provider, model) tuple; every settlement falls in [dayStart, dayEnd).
     // The week range keeps hourly width and aggregates the same settlements.

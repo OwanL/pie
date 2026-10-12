@@ -33,6 +33,12 @@ export interface RuntimeFactoryOptions {
    * callbacks retain the worker transport boundary rather than reaching into
    * the coordinator from the factory. */
   customTools?: (sessionPath: string | undefined) => ToolDefinition[];
+  /** Optional per-session NEW-chat capture seam. Undefined retains existing SDK services.
+   * The capture owner decides whether this manager carries a captured runtime reference. */
+  providerServices?: (args: { sessionManager: SdkSessionManager; agentDir: string }) => Promise<{
+    authStorage: unknown;
+    modelRegistry: unknown;
+  } | undefined>;
 }
 
 interface RuntimeModelRegistry {
@@ -212,10 +218,12 @@ export function createRuntimeFactory(
     // generation. Every admitted call still creates unique fresh services.
     let services: Record<string, unknown>;
     try {
+      const providerServices = await options.providerServices?.({ sessionManager: guardedSessionManager, agentDir });
       services = (await gate.run(() => runtimeSdk.createAgentSessionServices({
       cwd,
       agentDir,
-      authStorage,
+      authStorage: providerServices?.authStorage ?? authStorage,
+      ...(providerServices ? { modelRegistry: providerServices.modelRegistry } : {}),
       editorVersion: resolveEditorVersion(),
       resourceLoaderOptions: {
         // Pie's appended system prompt is authored centrally under the agent

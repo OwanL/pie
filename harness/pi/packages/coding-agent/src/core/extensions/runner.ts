@@ -1027,6 +1027,8 @@ export class ExtensionRunner {
 		systemPrompt: string,
 		systemPromptOptions: BuildSystemPromptOptions,
 		refreshPruning?: boolean,
+		eventType: BeforeAgentStartEvent["type"] = "before_agent_start",
+		fallbackToAgentStart = false,
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		let currentSystemPrompt = systemPrompt;
 		const ctx = Object.defineProperties(
@@ -1041,16 +1043,19 @@ export class ExtensionRunner {
 		let systemPromptModified = false;
 
 		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("before_agent_start");
+			const extensionEventType = fallbackToAgentStart && !ext.handlers.get(eventType)?.length
+				? "before_agent_start" : eventType;
+			const handlers = ext.handlers.get(extensionEventType);
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
 				try {
 					const event: BeforeAgentStartEvent = {
-						type: "before_agent_start",
+						type: extensionEventType,
 						prompt,
 						images,
 						refreshPruning,
+						newUserPrompt: fallbackToAgentStart,
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
@@ -1071,7 +1076,7 @@ export class ExtensionRunner {
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
 						extensionPath: ext.path,
-						event: "before_agent_start",
+						event: eventType,
 						error: message,
 						stack,
 					});

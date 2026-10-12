@@ -21,6 +21,7 @@ const fixtureScript = fileURLToPath(new URL('./fixtures/delivered-host-vscode.cj
 const credentialName = /API_KEY|TOKEN|SECRET|CREDENTIAL|AUTH|PASSWORD|BEARER|COOKIE|PRIVATE_KEY|LIVE_TEST|LIVE_MODEL/iu;
 const optIn = process.env.PIE_RUN_DELIVERED_HOST_TESTS === '1';
 const browserOptIn = process.env.PIE_RUN_DELIVERED_BROWSER_TESTS === '1';
+const providerOptIn = process.env.PIE_RUN_DELIVERED_PROVIDER_TESTS === '1';
 const browserFixtureScript = fileURLToPath(new URL('./fixtures/delivered-host-browser.mjs', import.meta.url));
 const SDK_SELECTORS = [
   'PI_SDK_PATH', 'PIE_SDK_PATH', 'NODE_PATH',
@@ -165,6 +166,7 @@ async function createProfile(release, { adapter, browserPort } = {}) {
     PI_CODING_AGENT_AUTH_DIR: paths.auth,
     PI_CODING_AGENT_SESSION_DIR: paths.sessions,
     PIE_DATA_DIR: paths.data,
+    PIE_PROVIDER_CONFIG_DIR: path.join(profile, 'providers'),
     PI_NODE_PATH: process.execPath,
     HOME: paths.home,
     USERPROFILE: paths.home,
@@ -184,7 +186,7 @@ async function createProfile(release, { adapter, browserPort } = {}) {
   else delete environment.PIE_VSCODE_DEVELOPMENT_BROWSER_PORT;
 
   for (const name of SDK_SELECTORS) assert.equal(environment[name], undefined, `delivered host must not inherit development or installed SDK selector ${name}.`);
-  for (const name of ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_AUTH_DIR', 'PI_CODING_AGENT_SESSION_DIR', 'PIE_DATA_DIR']) {
+  for (const name of ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_AUTH_DIR', 'PI_CODING_AGENT_SESSION_DIR', 'PIE_DATA_DIR', 'PIE_PROVIDER_CONFIG_DIR']) {
     assert.ok(isWithin(profile, environment[name]), `${name} must resolve inside the private temp profile: ${environment[name]}`);
   }
   assert.notEqual(environment.PIE_HOST_PROFILE, 'production');
@@ -273,6 +275,8 @@ async function verifyOptionalBrowserFirstPaint(t, baseUrl, profile) {
   assert.equal(isWithin(profile.root, browserFixtureRoot), false, 'browser fixture must be separate from the app profile');
   const environment = { ...profile.environment };
   delete environment.NODE_OPTIONS;
+  // Provider acceptance owns only the packaged MAIN host, not the standalone peer.
+  environment.PIE_RUN_DELIVERED_PROVIDER_TESTS = providerOptIn && profile.environment.PIE_DELIVERED_HOST_ADAPTER === 'vscode' ? '1' : '0';
   for (const name of ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'APPDATA', 'LOCALAPPDATA']) {
     environment[name] = browserFixtureRoot;
   }
@@ -286,7 +290,7 @@ async function verifyOptionalBrowserFirstPaint(t, baseUrl, profile) {
       label: 'delivered private headless browser fixture',
       ipc: true,
     });
-    result = await waitForMessage(browserChild, 'browser-result', 75_000);
+    result = await waitForMessage(browserChild, 'browser-result', environment.PIE_RUN_DELIVERED_PROVIDER_TESTS === '1' ? 135_000 : 75_000);
     const completion = await withTimeout(browserChild.completion, 10_000);
     assert.ok(completion, 'browser fixture did not exit after reporting teardown');
     assert.equal(completion.code, 0, `${result.error ?? ''}\n${browserChild.output}`);
@@ -295,7 +299,8 @@ async function verifyOptionalBrowserFirstPaint(t, baseUrl, profile) {
     browserAssetVersion ??= result.assetVersion;
     assert.equal(result.assetVersion, browserAssetVersion, 'both delivered peers must paint the same compiled renderer asset build');
     passed = true;
-    t.diagnostic('Private headless compiled empty-session UI first paint and connected/backend-ready New session control verified; composer/Settings correctly absent without open tabs. No user actions, external browser network or renderer errors.');
+    if (environment.PIE_RUN_DELIVERED_PROVIDER_TESTS === '1') t.diagnostic('Private compiled MAIN-host provider controls exercised after New session; fake loopback discovery only, no prompts or vendor authentication.');
+    else t.diagnostic('Private headless compiled empty-session UI first paint and connected/backend-ready New session control verified; composer/Settings correctly absent without open tabs. No user actions, external browser network or renderer errors.');
   } finally {
     const teardown = await closeChildTree(browserChild);
     if (passed && teardown.safe && result?.safe) await rm(browserFixtureRoot, { recursive: true, force: true });

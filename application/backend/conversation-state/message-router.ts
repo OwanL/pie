@@ -1,4 +1,6 @@
 import * as crypto from 'node:crypto';
+import { validateWebviewToHostMessage } from '../../lib/validation/protocol-validation.js';
+import { createProviderSecretTicket } from '../provider-management/secret-tickets.js';
 
 import type {
   WebviewToHostMessage,
@@ -162,6 +164,10 @@ export class MessageRouter {
     }
   }
 
+  public onProviderManagementSnapshot(snapshot: import('../../../harness/model-providers/management/contracts.js').ProviderManagementSnapshot, generation: number): void {
+    this.dispatchEvent({ kind: 'ProviderManagementSnapshotUpdated', snapshot, generation });
+  }
+
   private async routeMessage(msg: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> {
     if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
       // Read ArchState fields directly instead of running a full O(transcript)
@@ -184,6 +190,46 @@ export class MessageRouter {
     }
 
     switch (msg.type) {
+      case 'dictationStart':
+      case 'dictationStop':
+      case 'dictationCancel': {
+        if (!validateWebviewToHostMessage(msg).ok) { this.rejectBrowser(msg, context, 'invalid-dictation-request'); return; }
+        if (!context || (context.kind !== 'vscode' && context.hostMicrophoneAllowed !== true)) {
+          this.rejectBrowser(msg, context, 'host-microphone-unavailable');
+          this.dispatchEvent({ kind: 'NoticeShown', notice: 'Local dictation is available only on this computer, not through a remote browser.' });
+          return;
+        }
+        if (msg.viewGeneration !== undefined && !this.sidebarProvider.isRendererOwnerCurrent?.(context.rendererId, msg.viewGeneration, context.rendererGeneration)) return;
+        const arch = this.getArchState();
+        if (msg.type === 'dictationStart') {
+          if (!arch.dictation.available || arch.dictation.capture) return;
+          if (msg.sessionPath !== null && (arch.sessions.activeSessionPath !== msg.sessionPath || !arch.sessions.openTabPaths.includes(msg.sessionPath))) {
+            this.rejectBrowser(msg, context, 'session-not-open'); return;
+          }
+          const sessionPath = msg.sessionPath ?? this.service.createNewSession(context);
+          this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetComposerDraft', corrId: crypto.randomUUID(), sessionPath, text: msg.draftText } });
+          this.dispatchEvent({ kind: 'Command', cmd: { kind: 'DictationStart', corrId: crypto.randomUUID(), recordingId: msg.recordingId,
+            sessionPath, rendererId: context.rendererId, rendererGeneration: context.rendererGeneration,
+            draftText: msg.draftText, selectionStart: msg.selectionStart, selectionEnd: msg.selectionEnd } });
+        } else this.dispatchEvent({ kind: 'Command', cmd: { kind: msg.type === 'dictationStop' ? 'DictationStop' : 'DictationCancel',
+          corrId: crypto.randomUUID(), recordingId: msg.recordingId, sessionPath: msg.sessionPath,
+          rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } });
+        return;
+      }
+      case 'providerManagementCommand':
+      case 'providerManagementConnect':
+      case 'providerManagementAuthResponse': {
+        if (!validateWebviewToHostMessage(msg).ok) { this.rejectBrowser(msg, context, 'invalid-provider-request'); return; }
+        if (context && msg.viewGeneration !== undefined && !this.sidebarProvider.isRendererOwnerCurrent?.(context.rendererId, msg.viewGeneration, context.rendererGeneration)) return;
+        const operationId = crypto.randomUUID();
+        const generation = this.service.getBackendGeneration?.() ?? this.getArchState().providerManagement.generation;
+        const common = { corrId: operationId, operationId, generation };
+        if (msg.type === 'providerManagementCommand') this.dispatchEvent({ kind: 'Command', cmd: { kind: 'ProviderManagement', ...common, command: msg.command } });
+        else if (msg.type === 'providerManagementConnect') this.dispatchEvent({ kind: 'Command', cmd: { kind: 'ProviderManagementConnect', ...common, method: msg.method === 'signin' ? 'oauth' : msg.method,
+          ...(msg.apiKey !== undefined ? { ticket: createProviderSecretTicket(msg.apiKey, generation, operationId) } : {}) } });
+        else this.dispatchEvent({ kind: 'Command', cmd: { kind: 'ProviderManagementAuthResponse', ...common, targetOperationId: msg.operationId, promptId: msg.promptId, ticket: createProviderSecretTicket(msg.value, generation, operationId) } });
+        return;
+      }
       case 'ready':
         return this.onReady(context);
 
@@ -545,8 +591,8 @@ export class MessageRouter {
       // Codex-style continuation: an empty submit is an execution command, not
       // an empty user message. It deliberately bypasses the normal Send path,
       // so there is no optimistic user row, prompt expansion, or skill-pruning
-      // prepass. The backend remains authoritative about whether the durable
-      // tail is actually an interrupted assistant turn.
+      // prepass. The backend remains authoritative about whether the session
+      // has prior context and is idle enough to continue.
       this.dispatchEvent({
         kind: 'Command',
         cmd: {

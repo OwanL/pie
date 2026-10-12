@@ -178,7 +178,7 @@ test('accounting adaptation lives in the billable-accounting module, not the Sta
   assert.doesNotMatch(accounting, /buildSubagentUsageSamples|message-contract\.js/);
   // Pricing ownership is explicit: settlement keeps the captured-facts
   // callback and delegates through the injected provider-owned resolver.
-  assert.match(accounting, /getCapturedPricingFacts\(\)/);
+  assert.match(accounting, /getCapturedPricingFacts\(sessionPath\)/);
   assert.match(accounting, /resolveInvocationPricing\(/);
   assert.doesNotMatch(accounting, /pricingForPromptTokens|resolveApplicablePricing|capturedModelFact|function evidenceInterval\b|function calculatedCost\b/);
   assert.doesNotMatch(accounting, /harness\/model-providers\/pricing/);

@@ -47,6 +47,7 @@ import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-ta
 import { CommittedToolLeaf } from './commit-registry';
 import { subagentDisplayCosts, type SubagentDisplayCost } from './subagent-cost';
 import type { TokenPricingResolver } from '../session-tabs/token-usage';
+import { useSubagentCostFit } from './use-subagent-cost-fit';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -435,10 +436,10 @@ function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: 
   return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span>;
 }
 
-function RuntimeTelemetry({ result, displayCost }: { result: SubagentSingleResult; displayCost?: SubagentDisplayCost }) {
+function RuntimeTelemetry({ result, displayCost, costOnly = false }: { result: SubagentSingleResult; displayCost?: SubagentDisplayCost; costOnly?: boolean }) {
   const cost = displayCost;
   const retryCount = knownNonNegative(result.retryCount);
-  const recovered = result.exitCode === 0
+  const recovered = !costOnly && result.exitCode === 0
     && !isSubagentSingleResultRunning(result)
     && (retryCount !== undefined && retryCount > 0 || result.fallback === true);
   if (cost === undefined && !recovered) return null;
@@ -849,6 +850,8 @@ function SubagentSingleBlock({
       && (req.subagentCallId === toolCall.id || req.subagentCallId.startsWith(`${toolCall.id}:`)),
   );
 
+  const costFit = useSubagentCostFit(`${activityNow}:${singleResult.agent}:${singleResult.selectedModel ?? singleResult.model}:${singleResult.thinkingLevel}:${activity?.diagnostic}:${status}:${displayCost?.cost}:${singleResult.retryCount}`);
+
   // Stable id for the body region so the header can reference it via
   // `aria-controls` (only when the body is mounted, i.e. open or closing).
   const bodyId = useId();
@@ -917,7 +920,7 @@ function SubagentSingleBlock({
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
-        <div class="subagent-header-content">
+        <div class="subagent-header-content" ref={costFit.contentRef}>
           <RawToolInspector toolCall={toolCall} triggerClassName="subagent-agent-trigger">
             <span
               class="subagent-agent-name transcript-header-title-mono"
@@ -945,7 +948,17 @@ function SubagentSingleBlock({
           <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
             <ElapsedTelemetry result={singleResult} now={activityNow} />
           </span>
-          <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
+          <RuntimeTelemetry result={singleResult} />
+          {displayCost !== undefined && (
+            <span
+              ref={costFit.costRef}
+              class="subagent-inline-cost"
+              style={!costFit.fits ? { position: 'absolute', visibility: 'hidden', pointerEvents: 'none' } : undefined}
+              aria-hidden={!costFit.fits || undefined}
+            >
+              <RuntimeTelemetry result={singleResult} displayCost={displayCost} costOnly />
+            </span>
+          )}
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />

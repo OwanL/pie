@@ -124,9 +124,9 @@ export interface BrowserServerService {
   scheduleState(): void;
   /** Renderer-scoped snapshot request (handshake answers its own renderer). */
   requestState(rendererId: string): void;
-  /** Renderer-scoped imperative: targeted responses answer the INITIATING
-   *  renderer. */
-  postImperative(message: HostToWebviewMessage, rendererId: string): void;
+  /** Targeted responses answer the initiating renderer; an omitted rendererId
+   *  broadcasts best-effort notifications to all browser clients. */
+  postImperative(message: HostToWebviewMessage, rendererId?: string): void;
   /** Generation fence for renderer-owned view state. */
   isRendererOwnerCurrent(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
   /** Source-aware inline confirmation: deliver to the INITIATING

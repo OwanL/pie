@@ -14,11 +14,11 @@ interface CapturedRequest {
   payload: ExtensionUIRequestPayload;
 }
 
-function makeBridge(sessionPath = '/session/test') {
+function makeBridge(sessionPath = '/session/test', isAutonomous?: () => boolean) {
   const captured: CapturedRequest[] = [];
   const bridge = new ExtensionUIBridge(sessionPath, (_event, payload) => {
     captured.push({ payload });
-  });
+  }, isAutonomous);
   return { bridge, captured };
 }
 
@@ -32,6 +32,82 @@ function resolveLast(
   assert.ok(last, 'expected a request to have been emitted');
   bridge.resolveRequest({ id: last.payload.id, ...response });
 }
+
+test('autonomous dialogs expire at three minutes and ignore late responses', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { bridge, captured } = makeBridge(undefined, () => true);
+  const pending = [bridge.confirm('t', 'm'), bridge.select('t', ['a']), bridge.input('t')];
+  for (const { payload } of captured) assert.equal(payload.timeout, 180_000);
+  t.mock.timers.tick(179_999);
+  assert.equal(bridge.hasPendingRequests(), true);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await Promise.all(pending), [false, undefined, undefined]);
+  assert.equal(bridge.hasPendingRequests(), false);
+  for (const { payload } of captured) {
+    assert.equal(bridge.resolveRequest({ id: payload.id, confirmed: true, value: 'late' }), false);
+  }
+});
+
+for (const timeout of [10, 180_000, 300_000, 0, -1, undefined]) {
+  test(`autonomous explicit timeout ${timeout} is bounded and enforced`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { bridge, captured } = makeBridge(undefined, () => true);
+    const pending = bridge.confirm('t', 'm', { timeout });
+    const effective = timeout && timeout > 0 ? Math.min(timeout, 180_000) : 180_000;
+    assert.equal(captured[0].payload.timeout, effective);
+    t.mock.timers.tick(effective - 1);
+    assert.equal(bridge.hasPendingRequests(), true);
+    t.mock.timers.tick(1);
+    assert.equal(await pending, false);
+  });
+}
+
+for (const timeout of [undefined, 0, -1, 300_000]) {
+  test(`interactive timeout ${timeout} retains its original semantics`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { bridge, captured } = makeBridge();
+    const pending = bridge.input('t', undefined, { timeout });
+    assert.equal(captured[0].payload.timeout, timeout);
+    t.mock.timers.tick(180_000);
+    assert.equal(bridge.hasPendingRequests(), true);
+    bridge.cancelAll();
+    assert.equal(await pending, undefined);
+  });
+}
+
+test('mode callback is live for new requests, not existing deadlines', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let autonomous = false;
+  const { bridge, captured } = makeBridge(undefined, () => autonomous);
+  const interactive = bridge.input('interactive');
+  autonomous = true;
+  const bounded = bridge.input('autonomous');
+  autonomous = false;
+  const interactiveAgain = bridge.input('interactive again');
+  assert.deepEqual(captured.map(({ payload }) => payload.timeout), [undefined, 180_000, undefined]);
+  t.mock.timers.tick(180_000);
+  assert.equal(await bounded, undefined);
+  assert.equal(bridge.hasPendingRequests(), true);
+  bridge.cancelAll();
+  await Promise.all([interactive, interactiveAgain]);
+});
+
+test('autonomous early answers and aborts remain settled after the deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { bridge, captured } = makeBridge(undefined, () => true);
+  const controller = new AbortController();
+  const answered = bridge.confirm('t', 'm');
+  const aborted = bridge.select('t', ['a'], { signal: controller.signal });
+  assert.equal(bridge.resolveRequest({ id: captured[0].payload.id, confirmed: true }), true);
+  controller.abort();
+  assert.equal(await answered, true);
+  assert.equal(await aborted, undefined);
+  t.mock.timers.tick(180_000);
+  assert.equal(bridge.hasPendingRequests(), false);
+  for (const { payload } of captured) {
+    assert.equal(bridge.resolveRequest({ id: payload.id, value: 'late' }), false);
+  }
+});
 
 // ─── confirm ─────────────────────────────────────────────────────────────────
 

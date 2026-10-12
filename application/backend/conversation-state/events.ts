@@ -24,6 +24,7 @@ import type {
   SessionCatalogProgress,
   ExtensionUIRequestPayload,
   SessionOpenedPayload,
+  SessionPromptInventoryPayload,
   PruningSettings,
   SessionTitlesSettings,
   ToolResultPruningSettings,
@@ -51,7 +52,7 @@ import type { OperationalIncident } from '../../../harness/agent-processes/lib/r
 /** Wraps a `Command` so it can flow through the same event channel. */
 export interface CommandEvent {
   kind: 'Command';
-  cmd: Command;
+  cmd: Command | import('../provider-management/state.js').ProviderManagementCommand;
 }
 
 // ─── Effect result events ────────────────────────────────────────────────────
@@ -684,7 +685,14 @@ export interface ErrorEvent {
   detail?: string;
 }
 
-/** Emitted when a session is opened and its data is loaded. */
+/** Completes only the prompt metadata of a previously hydrated cold open. */
+export interface SessionPromptInventoryEvent {
+  kind: 'SessionPromptInventory';
+  payload: SessionPromptInventoryPayload;
+  backendGeneration: number;
+}
+
+/** Emitted when a session is opened and its durable data is loaded. */
 export interface SessionOpenedEvent {
   kind: 'SessionOpened';
   sessionPath: string;
@@ -734,6 +742,7 @@ export interface OptimisticMessageRemovedEvent {
 export interface BackendReadyChangedEvent {
   kind: 'BackendReadyChanged';
   ready: boolean;
+  backendGeneration?: number;
 }
 
 /**
@@ -1190,6 +1199,7 @@ export type BackendEvent =
   | IncidentReportedEvent
   | ErrorEvent
   | SessionOpenedEvent
+  | SessionPromptInventoryEvent
   | SessionClosedEvent
   | QueuedDeliveredEvent
   | AgentMessageReceivedEvent
@@ -1250,4 +1260,9 @@ export type HostEvent =
   | SessionsInterruptedEvent
   | SessionCloseResponseDeliveredEvent;
 
-export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent | import('./session-snooze.js').SessionSnoozeEvent;
+export type ProviderManagementSnapshotUpdatedEvent = Extract<import('../provider-management/state.js').ProviderManagementEvent, { kind: 'ProviderManagementSnapshotUpdated' }>;
+export type DictationEvent =
+  | { kind: 'DictationAvailabilityChanged'; available: boolean }
+  | { kind: 'DictationObserved'; id: string; sequence: number; observation: import('../../lib/protocol/dictation.js').DictationObservation }
+  | { kind: 'DictationRendererInvalidated'; rendererId: string; rendererGeneration: number };
+export type Event = DictationEvent | import('../provider-management/state.js').ProviderManagementEvent | CommandEvent | EffectResultEvent | BackendEvent | HostEvent | import('./session-snooze.js').SessionSnoozeEvent;

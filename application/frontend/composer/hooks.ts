@@ -7,6 +7,7 @@ import type {
   ComposerInputDraft,
   WebviewToHostMessage,
 } from '../../lib/protocol/index.js';
+import { dictationActive, type DictationView } from '../../lib/protocol/dictation.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { useUndo } from './use-undo';
 import { shouldHandleGlobalComposerPaste } from './affordances';
@@ -27,6 +28,7 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
 /** Idle window that groups a typing burst into a single undo checkpoint,
  * mirroring how word processors undo by word/action rather than per keystroke. */
 const CHECKPOINT_DEBOUNCE_MS = 500;
+const DICTATION_START_ACK_TIMEOUT_MS = 15_000;
 
 function mobileVisibleHeight(): number | undefined {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function'
@@ -63,8 +65,12 @@ export function useComposerInput({
   focusTrigger,
   onAddInput,
   supportsImageInputs,
+  dictation,
+  commandsAvailable,
 }: {
   busy: boolean;
+  dictation?: DictationView;
+  commandsAvailable?: boolean;
   /** Prevent both button and keyboard submission while a Stop is settling. */
   sendBlocked?: boolean;
   /** Allow a blank submit to resume an interrupted turn without a user message. */
@@ -86,8 +92,10 @@ export function useComposerInput({
   onAddInput: (input: ComposerInputDraft) => void;
   supportsImageInputs: boolean;
 }) {
-  const [text, setText] = useState('');
+  const [text, setTextState] = useState('');
+  const editGenerationRef = useRef(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [dictationStartError, setDictationStartError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftPostTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Previous active session path, used to distinguish a pending→resolved path
@@ -109,6 +117,33 @@ export function useComposerInput({
   const [history, { set: setHistory, reset: resetHistory, undo, redo, canUndo, canRedo }] =
     useUndo<string>('');
   const checkpointTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingStartRef = useRef<{ recordingId: string; baselineText: string; editGeneration: number } | null>(null);
+  const cancelledStartDraftRef = useRef<{ sessionPath: string; editGeneration: number } | null>(null);
+  const pendingStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dictationUndoRef = useRef<string | null>(null);
+  const cancelledDictationRef = useRef<string | null>(null);
+  const setText = useCallback((value: string) => {
+    editGenerationRef.current++;
+    setTextState(value);
+  }, []);
+  const clearPendingStart = useCallback(() => {
+    pendingStartRef.current = null;
+    if (pendingStartTimerRef.current) {
+      clearTimeout(pendingStartTimerRef.current);
+      pendingStartTimerRef.current = null;
+    }
+  }, []);
+  const activeDictation = dictation?.sessionPath === sessionPath && dictationActive(dictation);
+  const cancelRecording = useCallback((recordingId: string, ownerPath: string) => {
+    if (cancelledDictationRef.current === recordingId) return;
+    cancelledDictationRef.current = recordingId;
+    postMessage({ type: 'dictationCancel', sessionPath: ownerPath, recordingId });
+  }, [postMessage]);
+  const cancelDictation = useCallback(() => {
+    if (activeDictation && dictation?.recordingId && sessionPath) {
+      cancelRecording(dictation.recordingId, sessionPath);
+    }
+  }, [activeDictation, dictation, sessionPath, cancelRecording]);
 
   const clearCheckpointTimer = useCallback(() => {
     if (checkpointTimerRef.current) {
@@ -189,6 +224,12 @@ export function useComposerInput({
   // migrates it on PendingPathReplaced).
   useEffect(() => {
     const prevSessionPath = prevSessionPathRef.current;
+    const pendingStart = pendingStartRef.current;
+    const resolvedSessionPath = sessionPath;
+    const dictationResolution = resolvedSessionPath !== null && prevSessionPath === null && pendingStart !== null
+      && dictation?.recordingId === pendingStart.recordingId && dictation.sessionPath === resolvedSessionPath;
+    if (prevSessionPath !== sessionPath && !dictationResolution) clearPendingStart();
+    dictationUndoRef.current = null;
     prevSessionPathRef.current = sessionPath;
     hostDraftBaselineRef.current = { sessionPath, draftText };
 
@@ -199,6 +240,28 @@ export function useComposerInput({
       !isPendingTabPath(sessionPath)
     );
 
+    if (dictationResolution && resolvedSessionPath !== null) {
+      const locallyEdited = text !== pendingStart.baselineText
+        || editGenerationRef.current !== pendingStart.editGeneration;
+      const recordingId = pendingStart.recordingId;
+      clearPendingStart();
+      setDictationStartError(null);
+      if (locallyEdited) {
+        // Start may have been sent before the host resolved its new session path.
+        // Preserve newer local edits and make the edit undoable as one action.
+        if (text !== pendingStart.baselineText) setHistory(text, true);
+        cancelRecording(recordingId, resolvedSessionPath);
+        postMessage({ type: 'setComposerDraft', sessionPath: resolvedSessionPath, text });
+        cancelledStartDraftRef.current = { sessionPath: resolvedSessionPath, editGeneration: editGenerationRef.current };
+        dictationUndoRef.current = null;
+        return;
+      }
+      clearCheckpointTimer();
+      setHistory(draftText, true);
+      dictationUndoRef.current = recordingId;
+      setTextState(draftText);
+      return;
+    }
     if (isPendingResolution) {
       // Pending → resolved: same session, only the path string changed.
       // Preserve the live composer state (text + undo history).
@@ -216,7 +279,7 @@ export function useComposerInput({
     clearCheckpointTimer();
     // Start a fresh undo history per session — undo never crosses sessions.
     resetHistory(draftText);
-    setText(draftText);
+    setTextState(draftText);
     submitting.current = false;
     const textarea = textareaRef.current;
     if (textarea) {
@@ -227,7 +290,27 @@ export function useComposerInput({
       textarea.value = draftText;
       resizeComposerTextarea(textarea);
     }
-  }, [sessionPath]);
+  }, [sessionPath, clearPendingStart]);
+
+  useEffect(() => {
+    const pendingStart = pendingStartRef.current;
+    if (pendingStart !== null && dictation?.recordingId === pendingStart.recordingId
+      && dictation.sessionPath === sessionPath) {
+      clearPendingStart();
+      setDictationStartError(null);
+      if (editGenerationRef.current !== pendingStart.editGeneration && sessionPath !== null) {
+        cancelRecording(pendingStart.recordingId, sessionPath);
+        postMessage({ type: 'setComposerDraft', sessionPath, text });
+        cancelledStartDraftRef.current = { sessionPath, editGeneration: editGenerationRef.current };
+      }
+    }
+  }, [dictation, sessionPath, clearPendingStart, cancelRecording, postMessage, text]);
+
+  useEffect(() => {
+    if (commandsAvailable === false) clearPendingStart();
+  }, [commandsAvailable, clearPendingStart]);
+
+  useEffect(() => () => clearPendingStart(), [clearPendingStart]);
 
   // The session-path seed above handles mounts/navigation, but reconnect does
   // not necessarily remount the app or change the active path. Adopt a newer
@@ -238,18 +321,26 @@ export function useComposerInput({
   useEffect(() => {
     const previous = hostDraftBaselineRef.current;
     hostDraftBaselineRef.current = { sessionPath, draftText };
+    const cancelledStartDraft = cancelledStartDraftRef.current;
+    if (cancelledStartDraft && cancelledStartDraft.sessionPath !== sessionPath) {
+      cancelledStartDraftRef.current = null;
+    } else if (cancelledStartDraft && cancelledStartDraft.editGeneration === editGenerationRef.current) {
+      return;
+    }
     if (previous.sessionPath !== sessionPath || previous.draftText === draftText) return;
     if (text !== previous.draftText) return;
 
     clearCheckpointTimer();
-    setHistory(draftText, true);
-    setText(draftText);
+    const recordingId = dictation?.sessionPath === sessionPath ? dictation.recordingId : null;
+    setHistory(draftText, !recordingId || dictationUndoRef.current !== recordingId);
+    dictationUndoRef.current = recordingId;
+    setTextState(draftText);
     const textarea = textareaRef.current;
     if (textarea) {
       textarea.value = draftText;
       resizeComposerTextarea(textarea);
     }
-  }, [draftText]);
+  }, [draftText, dictation?.recordingId]);
 
   // Debounce-post draft text back to the host so it survives reloads and
   // session switches. A 300 ms window coalesces rapid keystrokes.
@@ -282,7 +373,7 @@ export function useComposerInput({
     // Checkpoint the restore so a single Ctrl+Z steps back to the prior state
     // (e.g. the post-send empty composer) rather than a duplicate of the text.
     setHistory(draftRestore.text, true);
-    setText(draftRestore.text);
+    setTextState(draftRestore.text);
     const textarea = textareaRef.current;
     if (textarea) {
       textarea.value = draftRestore.text;
@@ -307,7 +398,7 @@ export function useComposerInput({
   }, [pendingComposerInputsLength]);
 
   const resetComposer = useCallback(() => {
-    setText('');
+    setTextState('');
     setAttachmentError(null);
     const textarea = textareaRef.current;
     if (textarea) {
@@ -317,7 +408,7 @@ export function useComposerInput({
 
   const sendCurrentText = useCallback(() => {
     const trimmed = text.trim();
-    if (submitting.current || sendBlocked) return;
+    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return;
     if (trimmed.length === 0 && pendingComposerInputsLength === 0 && !allowEmptySend) return;
     submitting.current = true;
     if (onSend(trimmed) === false) {
@@ -339,7 +430,7 @@ export function useComposerInput({
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
-  }, [allowEmptySend, busy, sendBlocked, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
+  }, [allowEmptySend, busy, sendBlocked, activeDictation, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   // Re-send the current draft as a `retrySend` (optionally disabling
   // pruning first). Mirrors `sendCurrentText` (trim + submit-latch + clear +
@@ -350,7 +441,7 @@ export function useComposerInput({
   // would be stale once the user types).
   const sendAsRetry = useCallback((disablePruning?: boolean) => {
     const trimmed = text.trim();
-    if (submitting.current || sendBlocked) return;
+    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return;
     if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return;
     submitting.current = true;
     if (onRetrySend(trimmed, disablePruning) === false) {
@@ -361,9 +452,10 @@ export function useComposerInput({
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
-  }, [busy, sendBlocked, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
+  }, [busy, sendBlocked, activeDictation, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   const undoComposer = useCallback(() => {
+    cancelDictation();
     if (!canUndo) return;
     clearCheckpointTimer();
     const target = history.past[history.past.length - 1] ?? '';
@@ -372,9 +464,10 @@ export function useComposerInput({
     // Height is re-fit by the [text] effect above — we intentionally do NOT
     // write textarea.value directly here. Setting it before Preact commits the
     // controlled value can desync the input in real browsers.
-  }, [canUndo, clearCheckpointTimer, history.past, undo]);
+  }, [canUndo, clearCheckpointTimer, history.past, undo, cancelDictation]);
 
   const redoComposer = useCallback(() => {
+    cancelDictation();
     if (!canRedo) return;
     clearCheckpointTimer();
     const target = history.future[0] ?? '';
@@ -382,7 +475,7 @@ export function useComposerInput({
     setText(target);
     // See undoComposer: height is handled by the [text] effect, not a direct
     // textarea.value write.
-  }, [canRedo, clearCheckpointTimer, history.future, redo]);
+  }, [canRedo, clearCheckpointTimer, history.future, redo, cancelDictation]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -418,10 +511,12 @@ export function useComposerInput({
 
   const handleInput = useCallback((e: Event) => {
     const target = e.target as HTMLTextAreaElement;
-    setText(target.value);
+    cancelDictation();
+    if (pendingStartRef.current) editGenerationRef.current++;
+    setTextState(target.value);
     resizeComposerTextarea(target);
     scheduleCheckpoint(target.value);
-  }, [scheduleCheckpoint]);
+  }, [scheduleCheckpoint, cancelDictation]);
 
   const applyComposerTransfer = useCallback(async (dataTransfer: DataTransfer | null, source: 'drop' | 'paste') => {
     const { inputs, unsupportedInputs, rejectedFiles } = await extractComposerInputs(dataTransfer, source);
@@ -467,11 +562,46 @@ export function useComposerInput({
     }
   }, []);
 
+  const toggleDictation = useCallback(() => {
+    if (activeDictation) {
+      if (dictation?.available && dictation.phase !== 'finalizing' && dictation.recordingId && sessionPath) {
+        postMessage({ type: 'dictationStop', sessionPath, recordingId: dictation.recordingId });
+      }
+      return;
+    }
+    if (pendingStartRef.current || sendBlocked || commandsAvailable === false) return;
+    if (!dictation?.available) return;
+    if (draftPostTimeoutRef.current) {
+      clearTimeout(draftPostTimeoutRef.current);
+      draftPostTimeoutRef.current = null;
+    }
+    clearCheckpointTimer();
+    setHistory(text);
+    hostDraftBaselineRef.current = { sessionPath, draftText };
+    if (sessionPath) postMessage({ type: 'setComposerDraft', sessionPath, text });
+    const recordingId = crypto.randomUUID();
+    pendingStartRef.current = { recordingId, baselineText: text, editGeneration: editGenerationRef.current };
+    setDictationStartError(null);
+    pendingStartTimerRef.current = setTimeout(() => {
+      pendingStartTimerRef.current = null;
+      if (pendingStartRef.current?.recordingId !== recordingId) return;
+      pendingStartRef.current = null;
+      setDictationStartError('Dictation did not start. Try again.');
+    }, DICTATION_START_ACK_TIMEOUT_MS);
+    dictationUndoRef.current = null;
+    const textarea = textareaRef.current;
+    postMessage({ type: 'dictationStart', sessionPath, recordingId, draftText: text,
+      selectionStart: textarea?.selectionStart ?? text.length,
+      selectionEnd: textarea?.selectionEnd ?? text.length });
+  }, [commandsAvailable, sendBlocked, activeDictation, dictation, sessionPath, postMessage, text, clearCheckpointTimer, setHistory]);
+
   return {
+    toggleDictation,
     text,
     setText,
     textareaRef,
     attachmentError,
+    dictationStartError,
     sendCurrentText,
     sendAsRetry,
     handleKeyDown,

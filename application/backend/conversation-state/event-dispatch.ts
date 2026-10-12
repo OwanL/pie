@@ -25,6 +25,7 @@ import type {
   SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
+  SessionPromptInventoryPayload,
   ToolFinishedPayload,
   ToolProgressPayload,
   ToolStartedPayload,
@@ -62,6 +63,7 @@ import {
   isSessionCloseResponseDeliveredPayload,
   isSessionListChangedPayload,
   isSessionOpenedPayload,
+  isSessionPromptInventoryPayload,
   isToolFinishedPayload,
   isToolProgressPayload,
   isToolStartedPayload,
@@ -78,6 +80,7 @@ import {
 
 export interface SessionBackendEventHandlers {
   onSessionOpened(payload: SessionOpenedPayload): void;
+  onSessionPromptInventory?(payload: SessionPromptInventoryPayload): void;
   /** Typed coordinator→host close bridge request. Optional so standalone
    *  handler/test fakes without the bridge stay valid; guarded at dispatch. */
   onSessionCloseRequested?(payload: SessionCloseRequestedPayload): void;
@@ -158,6 +161,11 @@ export function dispatchSessionBackendEvent(
       return;
     case 'live.lifecycle':
       dispatch(event, isLiveLifecycleWatermark, handlers.onLiveLifecycle);
+      return;
+    case 'session.promptInventory':
+      if (handlers.onSessionPromptInventory) {
+        dispatch(event, isSessionPromptInventoryPayload, handlers.onSessionPromptInventory);
+      }
       return;
     case 'session.opened':
       dispatch(event, isSessionOpenedPayload, handlers.onSessionOpened);

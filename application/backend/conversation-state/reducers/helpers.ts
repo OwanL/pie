@@ -306,6 +306,7 @@ export function evictSession(
   // ── Per-session keyed maps (always cleared, including expandedBySession) ──
   const { [sp]: _t, ...remainingTranscripts } = state.transcript.bySession;
   const { [sp]: _sp, ...remainingSystemPrompts } = state.transcript.systemPromptsBySession;
+  const { [sp]: _inventory, ...remainingPromptInventory } = state.transcript.pendingPromptInventoryBySession ?? {};
   const { [sp]: _w, ...remainingWindows } = state.transcript.windowBySession;
   const { [sp]: _usage, ...remainingSessionUsage } = state.transcript.sessionUsageBySession ?? {};
   const { [sp]: _e, ...remainingEditing } = state.transcript.editingMessageIdBySession;
@@ -453,6 +454,7 @@ export function evictSession(
         ...state.transcript,
         bySession: remainingTranscripts,
         systemPromptsBySession: remainingSystemPrompts,
+        pendingPromptInventoryBySession: remainingPromptInventory,
         windowBySession: remainingWindows,
         sessionUsageBySession: remainingSessionUsage,
         editingMessageIdBySession: remainingEditing,

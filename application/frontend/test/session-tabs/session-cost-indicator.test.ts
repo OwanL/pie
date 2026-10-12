@@ -11,6 +11,10 @@ import {
   extractSubagentCostSummaryFromSnapshot,
   extractSubagentDirectCost,
   formatCostUsd,
+  effectivePricing,
+  costFromUsage,
+  costBreakdownFromUsage,
+  resolveUsageCost,
   type SessionTokenUsageSummary,
 } from '../../session-tabs/token-usage';
 import {
@@ -20,6 +24,32 @@ import {
 } from '../../../../analytics/usage-accounting/session-usage';
 import { buildSessionUsageSnapshot } from '../../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation';
+
+test('per-record pricing preserves tier boundaries and provider evidence through the public entry point', () => {
+  const tier = { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, inputTokensAbove: 6 };
+  const pricing = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, tiers: [tier] };
+  const usage = { inputTokens: 1, outputTokens: 4, cacheReadTokens: 2, cacheWriteTokens: 3, totalTokens: 10 };
+  assert.equal(effectivePricing(usage, pricing), pricing);
+  const above = { ...usage, inputTokens: 2, totalTokens: 11 };
+  assert.equal(effectivePricing(above, pricing), tier);
+  assert.equal(costFromUsage(above, pricing), costBreakdownFromUsage(above, pricing).total);
+  assert.equal(costFromUsage(above, pricing, false), costBreakdownFromUsage(above, { ...pricing, tiers: [] }).total);
+  assert.deepEqual(resolveUsageCost(above, pricing, 0), {
+    cost: 0, hasKnownCost: true, unpricedTokens: 0, catalogBreakdown: null,
+  });
+  for (const incomplete of [
+    { ...above, tokenChannelsKnown: false },
+    { ...above, totalTokens: 12 },
+    { ...above, tokenChannelPresence: { input: true, output: true, cacheRead: false, cacheWrite: true } },
+  ]) {
+    assert.deepEqual(resolveUsageCost(incomplete, pricing, Number.NaN), {
+      cost: 0, hasKnownCost: false, unpricedTokens: incomplete.totalTokens, catalogBreakdown: null,
+    });
+  }
+  assert.deepEqual(resolveUsageCost(above, pricing, undefined, false), {
+    cost: costFromUsage(above, pricing, false), hasKnownCost: true, unpricedTokens: 0, catalogBreakdown: null,
+  });
+});
 
 function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTokenUsageSummary {
   return {

@@ -512,7 +512,10 @@ export interface DuplicateSessionEffect extends EffectBase {
   backendGeneration?: number;
 }
 
+export type DictationControlEffect = { kind: 'DictationControl'; action: 'start' | 'stop' | 'cancel'; recordingId: string };
 export type Effect =
+  | DictationControlEffect
+  | import('../../provider-management/state.js').ProviderManagementEffect
   | SendRpcEffect
   | ContinueRpcEffect
   | GenerateSessionTitleEffect

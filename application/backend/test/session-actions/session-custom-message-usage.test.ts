@@ -80,12 +80,14 @@ test('onCustomMessage does not forward unrelated custom messages as pruning usag
 test('onExtensionUIRequest preserves notify severity instead of routing every notification as an error', () => {
   const events: Array<Record<string, unknown>> = [];
   let renderCount = 0;
+  let questionCount = 0;
   const dispatchArch = (event: unknown): void => {
     events.push(event as Record<string, unknown>);
   };
   const backendErrors: string[] = [];
   const deps = {
-    platform: {} as never,
+    platform: { requestWindowAttention: () => undefined } as never,
+    onQuestionRequested: () => { questionCount += 1; },
     dispatchArch,
     runObserver: {
       ...NOOP_RUN_OBSERVER,
@@ -117,4 +119,11 @@ test('onExtensionUIRequest preserves notify severity instead of routing every no
   ]);
   assert.deepEqual(backendErrors, ['EXTENSION_NOTIFICATION_ERROR']);
   assert.equal(renderCount, 3);
+  assert.equal(questionCount, 0, 'notify messages never chime');
+  onExtensionUIRequest({
+    id: 'question', method: 'confirm', title: 'Continue?', message: 'Continue?', sessionPath: '/workspace/session.jsonl',
+  }, deps);
+  assert.equal(questionCount, 1);
+  assert.equal(renderCount, 4);
+  assert.equal(events.at(-1)?.kind, 'ExtensionUIRequest');
 });

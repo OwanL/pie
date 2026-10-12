@@ -510,6 +510,12 @@ pi.on("session_shutdown", async (event, ctx) => {
 
 ### Agent Events
 
+#### before_compaction_resume (Pie)
+
+A successful history compaction schedules this hook once before the next model request, including automatic continuation. No hook runs merely because the session is idle. It accepts the same prompt/result shape as `before_agent_start`; handlers can refresh capability selection and return a chained system prompt and custom messages. Active-tool changes apply to that request. Failed/cancelled compaction does not schedule it.
+
+On a new user request it replaces `before_agent_start` for extensions that register this hook; other extensions still receive their ordinary startup hook. Automatic continuation invokes only resume handlers. `newUserPrompt` distinguishes those cases; `refreshPruning` retains explicit refresh intent on user requests. Selection policy and its opt-out are owned by the skill pruner.
+
 #### before_agent_start
 
 Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.

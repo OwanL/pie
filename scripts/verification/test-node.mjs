@@ -408,6 +408,7 @@ export function runNodeTests(files, {
       options: parsedFlags.options,
       reporterNames: parsedFlags.reporterNames,
       reporterDestinations: parsedFlags.reporterDestinations,
+      waitForOwnership: true,
     }));
   } catch (error) {
     rmSync(configRoot, { recursive: true, force: true });
@@ -421,7 +422,7 @@ export function runNodeTests(files, {
       child = spawnImpl(process.execPath, buildNodeArgs(configPath, nodeFlags), withProcessTreeIsolation({
         cwd,
         env,
-        stdio: 'inherit',
+        stdio: ['pipe', 'inherit', 'inherit'],
         windowsHide: true,
       }));
     } catch (error) {
@@ -448,6 +449,7 @@ export function runNodeTests(files, {
       return;
     }
     child.on('error', (error) => { child.spawnError = error; });
+    child.stdin?.on('error', (error) => { child.spawnError = error; });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch((error) => ({
         gone: false,
@@ -498,6 +500,14 @@ export function runNodeTests(files, {
       if (child.spawnError) reject(child.spawnError);
       else resolve({ code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1), teardownConfirmed: true });
     });
+    // watchChildProcess completes its bounded live census before returning.
+    // Never release a short suite on failed or aborted ownership capture.
+    if (watchdog.ownershipReady === true && !watchdog.terminationStarted) {
+      child.stdin.end();
+    } else {
+      child.spawnError = new Error('Node test watchdog ownership startup handshake failed');
+      void watchdog.settle().catch(() => {});
+    }
   });
 }
 

@@ -22,6 +22,7 @@ interface HandlerDeps {
   state: SessionServiceState;
   scheduleRender: () => void;
   onSessionCompleted?: OnSessionCompleted;
+  onQuestionRequested?: () => void;
   requireEventSessionPath: (eventName: string, sessionPath: string | undefined) => string | null;
 }
 
@@ -87,6 +88,7 @@ export function onExtensionUIRequest(payload: ExtensionUIRequestPayload, deps: H
     return;
   }
   deps.dispatchArch({ kind: 'ExtensionUIRequest', sessionPath: payload.sessionPath || '', request: payload });
+  deps.onQuestionRequested?.();
 
   // Flash the host window to draw the user's attention to the question. The
   // platform adapter owns the host-specific attention mechanism.

@@ -172,7 +172,8 @@ test('busy windows chart from exact cost buckets instead of a daily diagonal', a
       groups: providerGroupRows([
         { provider: 'alpha', todayCost: 4, weekCost: 11 },
         { provider: 'beta', todayCost: 1, weekCost: 1 },
-      ]),
+      ]).map((row) => ({ ...row, today_input: row.provider === 'alpha' ? '40' : '10',
+        today_output: row.provider === 'alpha' ? '8' : '2' })),
       series: {
         settlements: [],
         executions: [],
@@ -190,7 +191,8 @@ test('busy windows chart from exact cost buckets instead of a daily diagonal', a
           runCount: 7,
           sessionCount: 2,
         }],
-        todayCostBuckets: bucketsFor(todayStart, todayPlanned, CANONICAL_COST_BUCKET_WIDTH_MS.today),
+        todayCostBuckets: bucketsFor(todayStart, todayPlanned, CANONICAL_COST_BUCKET_WIDTH_MS.today)
+          .map((bucket) => ({ ...bucket, inputTokens: String(bucket.cost! * 10), outputTokens: String(bucket.cost! * 2) })),
         weekCostBuckets: bucketsFor(weekStart, weekPlanned, CANONICAL_COST_BUCKET_WIDTH_MS.week),
         todayCostBucketsTruncated: false,
         weekCostBucketsTruncated: false,
@@ -205,6 +207,13 @@ test('busy windows chart from exact cost buckets instead of a daily diagonal', a
     await harness.recompute();
     const stats = harness.service.getAggregateStats();
 
+    assert.ok(stats.todayInputTokenSeries.length >= 6);
+    assert.ok(stats.todayTokenSeries.length >= 6);
+    assert.deepEqual(stats.todayInputTokenSeries.at(-1)!.byModel.map((segment) =>
+      [segment.provider, segment.model, segment.value]),
+    [['alpha', 'alpha-model', 40], ['beta', 'beta-model', 10]]);
+    assert.deepEqual(stats.todayTokenSeries.at(-1)!.byProvider.map((segment) => [segment.key, segment.value]),
+      [['alpha', 8], ['beta', 2]]);
     // Today's stacked chart is granular, not a two-point daily diagonal.
     assert.ok(stats.todayCostSeries.length >= 6, `expected minute granularity, got ${stats.todayCostSeries.length}`);
     const todayAlpha = stats.todayCostSeries.map((point) =>
@@ -234,10 +243,6 @@ test('busy windows chart from exact cost buckets instead of a daily diagonal', a
       [['alpha', 11], ['beta', 1]],
     );
     assert.ok(stats.weekCostSeries.length >= stats.todayCostSeries.length - 1);
-    // Token semantics stay independent: with truncated settlement samples the
-    // token charts remain honestly unavailable.
-    assert.equal(stats.todayInputTokenSeries.length, 0);
-    assert.equal(stats.todayTokenSeries.length, 0);
     // Execution evidence was not truncated, so run counts stay exact.
     assert.equal(stats.todayRunCount, 7);
   } finally {

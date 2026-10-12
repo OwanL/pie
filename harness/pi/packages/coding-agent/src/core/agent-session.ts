@@ -527,7 +527,41 @@ export class AgentSession {
 		};
 	}
 
+	private _pendingCompactionSelectionRefresh: string | undefined;
+
 	private _installAgentNextTurnRefresh(): void {
+		// Automatic continuation skips before_agent_start; defer until a request.
+		const previousPrepareRequest = this.agent.prepareModelRequest;
+		this.agent.prepareModelRequest = async (context, signal) => {
+			context = await previousPrepareRequest?.(context, signal) ?? context;
+			if (this._pendingCompactionSelectionRefresh
+				&& getLatestCompactionEntry(this.sessionManager.getBranch())?.id !== this._pendingCompactionSelectionRefresh) {
+				this._pendingCompactionSelectionRefresh = undefined;
+			}
+			if (this._pendingCompactionSelectionRefresh && !signal?.aborted) {
+				this._pendingCompactionSelectionRefresh = undefined;
+				const user = [...context.messages].reverse().find((message) => message.role === "user");
+				const prompt = typeof user?.content === "string" ? user.content
+					: user?.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
+				const result = await this._extensionRunner.emitBeforeAgentStart(
+					prompt, undefined, this._systemPromptOverride ?? this._baseSystemPrompt,
+					this._baseSystemPromptOptions, true, "before_compaction_resume",
+				);
+				if (result?.systemPrompt !== undefined) {
+					this._systemPromptOverride = result.systemPrompt;
+					this.agent.state.systemPrompt = result.systemPrompt;
+				}
+				for (const message of result?.messages ?? []) {
+					const appMessage = { role: "custom" as const, ...message, content: message.content ?? [], timestamp: Date.now() };
+					this.agent.state.messages.push(appMessage);
+					this.sessionManager.appendCustomMessageEntry(message.customType, appMessage.content, message.display, message.details);
+					this._emit({ type: "message_start", message: appMessage });
+					this._emit({ type: "message_end", message: appMessage });
+				}
+				context = { ...context, systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt, tools: this.agent.state.tools.slice() };
+			}
+			return context;
+		};
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
 			(this.agent.prepareNextTurn
@@ -1296,13 +1330,20 @@ export class AgentSession {
 			}
 			this._pendingNextTurnMessages = [];
 
-			// Emit before_agent_start extension event
+			// A new user prompt consumes an idle compaction refresh here, before ordinary
+			// selection can clear recovery protections. Automatic continuation still
+			// consumes it at the model-request boundary.
+			const afterCompaction = this._pendingCompactionSelectionRefresh !== undefined
+				&& getLatestCompactionEntry(this.sessionManager.getBranch())?.id === this._pendingCompactionSelectionRefresh;
+			this._pendingCompactionSelectionRefresh = undefined;
 			const result = await this._extensionRunner.emitBeforeAgentStart(
 				expandedText,
 				currentImages,
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 				options?.refreshPruning,
+				afterCompaction ? "before_compaction_resume" : "before_agent_start",
+				afterCompaction,
 			);
 			// Add all custom messages from extensions
 			if (result?.messages) {
@@ -1977,11 +2018,12 @@ export class AgentSession {
 			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
+			const savedCompactionEntry = [...newEntries].reverse().find((e) => e.type === "compaction" && e.summary === summary) as
 				| CompactionEntry
 				| undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
+				this._pendingCompactionSelectionRefresh = savedCompactionEntry.id;
 				await this._extensionRunner.emit({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
@@ -2334,11 +2376,12 @@ export class AgentSession {
 			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
+			const savedCompactionEntry = [...newEntries].reverse().find((e) => e.type === "compaction" && e.summary === summary) as
 				| CompactionEntry
 				| undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
+				this._pendingCompactionSelectionRefresh = savedCompactionEntry.id;
 				await this._extensionRunner.emit({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,

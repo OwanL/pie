@@ -93,7 +93,7 @@ exports.runPruningPrepass = () => { throw new Error('must not call a provider');
       }
       const first = registration(), second = registration();
       for (const item of [first, second]) {
-        assert.deepEqual([...item.hooks.keys()], ['context', 'session_shutdown', 'input', 'before_agent_start', 'tool_call']);
+        assert.deepEqual([...item.hooks.keys()], ['context', 'session_shutdown', 'input', 'before_agent_start', 'before_compaction_resume', 'tool_call']);
         assert.ok([...item.hooks.values()].every(fn => typeof fn === 'function'));
         assert.deepEqual(item.renderers, [{name: 'pruning-result', type: 'function'}]);
         assert.equal(item.tools.length, 1);

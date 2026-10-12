@@ -98,6 +98,10 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       ? pruning.followUpEnabled
       : DEFAULT_PRUNING_SETTINGS.followUpEnabled;
 
+    const refreshAfterCompaction = typeof pruning.refreshAfterCompaction === 'boolean'
+      ? pruning.refreshAfterCompaction
+      : DEFAULT_PRUNING_SETTINGS.refreshAfterCompaction;
+
     const prepassTimeoutSec = typeof pruning.prepassTimeoutSec === 'number' && Number.isFinite(pruning.prepassTimeoutSec) && pruning.prepassTimeoutSec > 0
       ? pruning.prepassTimeoutSec
       : DEFAULT_PRUNING_SETTINGS.prepassTimeoutSec;
@@ -114,6 +118,7 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       mainAgentEnabled,
       subagentEnabled,
       followUpEnabled,
+      refreshAfterCompaction,
       prepassTimeoutSec,
     };
   } catch {
@@ -181,6 +186,7 @@ export async function writePruningSettings(
     if (updates.mainAgentEnabled !== undefined) pruning.mainAgentEnabled = updates.mainAgentEnabled;
     if (updates.subagentEnabled !== undefined) pruning.subagentEnabled = updates.subagentEnabled;
     if (updates.followUpEnabled !== undefined) pruning.followUpEnabled = updates.followUpEnabled;
+    if (updates.refreshAfterCompaction !== undefined) pruning.refreshAfterCompaction = updates.refreshAfterCompaction;
     if (updates.prepassTimeoutSec !== undefined) pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
 
     return { ...existing, pruning };

@@ -20,6 +20,7 @@ import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverr
 import { hasBillableSessionActivity } from '../workers/session-activity';
 import { BackendLiveTurnAccumulator } from '../workers/live-turn-accumulator';
 import { BackendError } from './server-io.js';
+import { isProviderManagementRequest } from '../../model-providers/management/validation';
 import { backendLog } from '../../../lib/structured-logging/backend-log.js';
 import {
   getBackendLivePipelineTraceHealth,
@@ -850,6 +851,17 @@ const handlers: Record<string, RequestHandler> = {
   ...SESSION_REQUEST_HANDLERS,
   ...MESSAGE_REQUEST_HANDLERS,
   'extension_ui.response': handleExtensionUiResponse,
+  'providers.manage': async (deps, request) => {
+    if (!isProviderManagementRequest(request.params)) {
+      throw new BackendError('INVALID_PARAMS', 'Invalid provider management request.');
+    }
+    markRequestValidated(deps);
+    if (!deps.providerManagement) {
+      throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
+    }
+    try { return await deps.providerManagement.request(request.params); }
+    catch { throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.'); }
+  },
   'models.list': handleModelsList,
   'settings.get': handleSettingsGet,
   'settings.set': handleSettingsSet,

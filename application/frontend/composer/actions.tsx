@@ -1,7 +1,11 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { dictationActive, type DictationView } from '../../lib/protocol/dictation.js';
+
 export interface ComposerActionsProps {
+  dictation?: DictationView;
+  onToggleDictation?: () => void;
   /** Capability-projected billable activity for the selected session. */
   busy: boolean;
   /** Capability-projected eligibility for the Stop command. */
@@ -54,6 +58,8 @@ function SubmitIcon({ queued }: { queued: boolean }) {
 }
 
 export function ComposerActions({
+  dictation,
+  onToggleDictation,
   busy,
   canInterrupt = busy,
   interrupting,
@@ -65,6 +71,12 @@ export function ComposerActions({
   canSend,
   continueMode = false,
 }: ComposerActionsProps) {
+  const dictating = dictationActive(dictation);
+  const recording = commandsAvailable && dictation?.available && dictation.phase === 'recording';
+  const micBusy = dictation?.available && (dictation.phase === 'preparing' || dictation.phase === 'finalizing');
+  const rawLevel = dictation?.audioLevel ?? 0;
+  const level = Number.isFinite(rawLevel) ? Math.min(1, Math.sqrt(Math.max(0, rawLevel)) * 2) : 0;
+  const micLabel = dictation?.phase === 'preparing' ? 'Preparing — stop dictation' : dictation?.phase === 'finalizing' ? 'Finalizing dictation' : dictating ? 'Stop dictation' : 'Start dictation';
   const submitTitle = interrupting
     ? 'Wait for the current stop to finish'
     : busy
@@ -110,11 +122,28 @@ export function ComposerActions({
         </button>
       )}
       <button
+        class={`action-btn composer-action-icon composer-action-mic${recording ? ' is-active' : ''}${micBusy ? ' is-busy' : ''}`}
+        style={recording ? { '--mic-halo': `${2 + level * 3}px`, '--mic-halo-opacity': `${20 + level * 25}%` } : undefined}
+        type="button"
+        aria-label={micLabel}
+        aria-pressed={!!recording}
+        aria-busy={micBusy || undefined}
+        title={recording ? 'Stop dictation — stops after 10 seconds of silence. Editing cancels dictation.' : micLabel}
+        disabled={!dictation?.available || dictation.phase === 'finalizing' || (!commandsAvailable && !dictating)}
+        onClick={onToggleDictation}
+        data-action="dictation"
+      >
+        {micBusy ? <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 2h8M4 14h8M5 2v3l6 6v3M11 2v3l-6 6v3" /></svg> : <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+          <rect x="5.5" y="1.5" width="5" height="8" rx="2.5" />
+          <path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2M5.5 14.5h5" />
+        </svg>}
+      </button>
+      <button
         class={`action-btn primary composer-action-icon composer-action-submit${busy ? ' is-queue' : ''}${interrupting ? ' is-waiting' : ''}`}
         type="button"
         title={submitTitle}
         onClick={sendCurrentText}
-        disabled={!canSend || interrupting || !commandsAvailable}
+        disabled={!canSend || interrupting || !commandsAvailable || dictating}
         aria-label={submitLabel}
         data-action={busy ? 'queue' : continueMode ? 'continue' : 'send'}
       >

@@ -131,6 +131,50 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
+		const runner = (session as any)._extensionRunner;
+		const refresh = vi.spyOn(runner, "emitBeforeAgentStart").mockResolvedValue({ systemPrompt: "refreshed catalog" });
+		expect(refresh).not.toHaveBeenCalled(); // no idle scorer
+		const context = { systemPrompt: "old catalog", messages: [], tools: [] };
+		const next = await session.agent.prepareModelRequest!(context);
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(refresh.mock.calls[0][5]).toBe("before_compaction_resume");
+		expect(next.systemPrompt).toBe("refreshed catalog");
+		await session.agent.prepareModelRequest!(context);
+		expect(refresh).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([false, true])("consumes idle compaction refresh once on the latest user prompt (explicit refresh: %s)", async (refreshPruning) => {
+		sessionManager.appendMessage({ role: "user", content: "old task", timestamp: Date.now() });
+		const entry = sessionManager.appendCompaction("summary", sessionManager.getLeafId()!, 100);
+		(session as any)._pendingCompactionSelectionRefresh = entry;
+		const refresh = vi.spyOn((session as any)._extensionRunner, "emitBeforeAgentStart")
+			.mockResolvedValue({ systemPrompt: "protected catalog" });
+		vi.spyOn(session as any, "_runAgentPrompt").mockImplementation(async () => {
+			const next = await session.agent.prepareModelRequest!({ systemPrompt: "protected catalog", messages: [], tools: [] });
+			expect(next.systemPrompt).toBe("protected catalog");
+		});
+		await session.prompt("latest user task", { refreshPruning });
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(refresh.mock.calls[0][0]).toBe("latest user task");
+		expect(refresh.mock.calls[0][4]).toBe(refreshPruning);
+		expect(refresh.mock.calls[0][5]).toBe("before_compaction_resume");
+		expect(refresh.mock.calls[0][6]).toBe(true);
+	});
+
+	it("does not arm selection refresh for cancelled or failed compaction", async () => {
+		sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "old task" }], timestamp: Date.now() - 1000 });
+		sessionManager.appendMessage(fauxAssistantMessage("old response"));
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+		const runner = (session as any)._extensionRunner;
+		const refresh = vi.spyOn(runner, "emitBeforeAgentStart");
+		const beforeCompact = vi.spyOn(session as any, "_emitBeforeCompact").mockResolvedValue({ cancel: true });
+		await (session as any)._runAutoCompaction("threshold", false);
+		await session.agent.prepareModelRequest!({ systemPrompt: "Test", messages: [], tools: [] });
+		expect(refresh).not.toHaveBeenCalled();
+		beforeCompact.mockRejectedValue(new Error("summary failed"));
+		await (session as any)._runAutoCompaction("threshold", false);
+		await session.agent.prepareModelRequest!({ systemPrompt: "Test", messages: [], tools: [] });
+		expect(refresh).not.toHaveBeenCalled();
 	});
 
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {

@@ -187,6 +187,8 @@ export interface PruningSettings {
   subagentEnabled?: boolean;
   /** Enables follow-up pruning; defaults to false for legacy settings. */
   followUpEnabled?: boolean;
+  /** Refreshes tool and skill pruning after history compaction; defaults to true. */
+  refreshAfterCompaction?: boolean;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
 }
@@ -520,6 +522,7 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   mainAgentEnabled: true,
   subagentEnabled: true,
   followUpEnabled: false,
+  refreshAfterCompaction: true,
   prepassTimeoutSec: null,
 };
 
@@ -636,6 +639,8 @@ export function mergePruningSettings(
       updates.subagentEnabled ?? current.subagentEnabled ?? DEFAULT_PRUNING_SETTINGS.subagentEnabled,
     followUpEnabled:
       updates.followUpEnabled ?? current.followUpEnabled ?? DEFAULT_PRUNING_SETTINGS.followUpEnabled,
+    refreshAfterCompaction:
+      updates.refreshAfterCompaction ?? current.refreshAfterCompaction ?? DEFAULT_PRUNING_SETTINGS.refreshAfterCompaction,
     prepassTimeoutSec:
       updates.prepassTimeoutSec !== undefined ? updates.prepassTimeoutSec : current.prepassTimeoutSec,
   };

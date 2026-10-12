@@ -80,7 +80,11 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
     server.initialContextEstimateClient = {
       discover: async () => { inventoryDiscoveries += 1; return null; },
     };
-    server.emit = () => undefined;
+    let completeInventory!: () => void;
+    const inventoryPublished = new Promise<void>((resolve) => { completeInventory = resolve; });
+    server.emit = (event: string) => {
+      if (event === 'session.promptInventory') completeInventory();
+    };
     server.emitSessionListChanged = async () => undefined;
     await server.handleRequest({
       v: 1,
@@ -108,7 +112,8 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
     await server.handleRequest({
       v: 1, id: 'open', method: 'session.open', params: { sessionPath: created.sessionPath },
     });
-    assert.equal(inventoryDiscoveries, discoveriesBeforeOpen + 1, 'public cold opens retain fresh inventory');
+    await inventoryPublished;
+    assert.equal(inventoryDiscoveries, discoveriesBeforeOpen + 1, 'public cold opens deliver fresh inventory after transcript publication');
 
     const discoveriesBeforeSettings = inventoryDiscoveries;
     await assert.rejects(server.handleRequest({

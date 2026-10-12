@@ -122,7 +122,19 @@ function summarizeMessageContent(content: unknown): string {
  * The current turn's prompt is not yet persisted at before_agent_start time, so
  * it is naturally excluded — it is already supplied separately as `userPrompt`.
  */
-export function getRecentConversation(ctx: unknown, maxMessages = RECENT_CONVERSATION_MAX): RecentConversationMessage[] {
+export function getRecentConversation(ctx: unknown, maxMessages = RECENT_CONVERSATION_MAX, afterCompaction = false): RecentConversationMessage[] {
+	if (afterCompaction) {
+		const manager = (ctx as { sessionManager?: { buildSessionContext?: () => { messages: unknown[] } } })?.sessionManager;
+		const messages = manager?.buildSessionContext?.().messages ?? [];
+		const summary = messages.find((message) => (message as { role?: string }).role === "compactionSummary") as { summary?: string } | undefined;
+		const recent = messages.flatMap((message) => {
+			const msg = message as { role?: string; content?: unknown };
+			if (msg.role !== "user" && msg.role !== "assistant") return [];
+			const text = summarizeMessageContent(msg.content).slice(0, RECENT_MESSAGE_TEXT_LIMIT);
+			return text ? [{ role: msg.role, text }] : [];
+		}).slice(-maxMessages);
+		return summary?.summary ? [{ role: "user", text: `History compaction summary:\n${summary.summary}` }, ...recent] : recent;
+	}
 	const sessionManager = (ctx as { sessionManager?: unknown })?.sessionManager as {
 		getLeafEntry?: () => unknown;
 		getEntry?: (id: string) => unknown;

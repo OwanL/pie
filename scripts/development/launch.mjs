@@ -16,7 +16,7 @@ export async function prepareDevelopment({ repositoryRoot = root, profileRoot, s
   const identity = createHash('sha256').update(path.resolve(repositoryRoot).toLowerCase()).digest('hex').slice(0, 12);
   const base = sourceEnvironment.LOCALAPPDATA || path.join(os.homedir(), '.local/share');
   const profile = profileRoot ?? path.join(base, 'Pie', 'development', identity);
-  const dirs = { agent: 'agent', auth: 'auth', data: 'data', sessions: 'data/sessions', sessionSettings: 'data/state/session-settings', legacySessionSettings: 'agent/data/outcomes/session-reviews', home: 'home', temp: 'temp', vscode: 'vscode-user', extensions: 'vscode-extensions' };
+  const dirs = { providers: 'providers', agent: 'agent', auth: 'auth', data: 'data', sessions: 'data/sessions', sessionSettings: 'data/state/session-settings', legacySessionSettings: 'agent/data/outcomes/session-reviews', home: 'home', temp: 'temp', vscode: 'vscode-user', extensions: 'vscode-extensions' };
   for (const value of Object.values(dirs)) await mkdir(path.join(profile, value), { recursive: true });
   const env = withoutPiHarnessEnv(withoutGitRepositoryEnv(sourceEnvironment));
   const productionPort = Number(sourceEnvironment.PIE_HOST_COORDINATOR_PORT) || 1996;
@@ -33,6 +33,7 @@ export async function prepareDevelopment({ repositoryRoot = root, profileRoot, s
     PI_CODING_AGENT_AUTH_DIR: path.join(profile, dirs.auth),
     PI_CODING_AGENT_SESSION_DIR: path.join(profile, dirs.sessions),
     PIE_DATA_DIR: path.join(profile, dirs.data),
+    PIE_PROVIDER_CONFIG_DIR: path.join(profile, dirs.providers),
     // Match the neutral settings authority and keep migration fallback private
     // and initially empty; never read or scrub installed-host sidecars.
     PIE_SESSION_SETTINGS_DIR: path.join(profile, dirs.sessionSettings),

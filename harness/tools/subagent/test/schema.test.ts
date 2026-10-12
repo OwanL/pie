@@ -4,9 +4,9 @@ import { Value } from "typebox/value";
 import { BUCKET_GUIDANCE, SubagentParams, prepareSubagentArguments } from "../schema.js";
 
 test("BUCKET_GUIDANCE selects buckets by delegated task complexity", () => {
-	assert.equal(BUCKET_GUIDANCE, "Choose the bucket explicitly by task complexity, not role: small for well-defined implementation, investigation, or review with limited ambiguity; medium for tasks requiring substantial judgment across interacting concerns; frontier for unusually difficult reasoning, diagnosis, or design. Judge the delegated task, not the overall project size. Escalate when the task exceeds the selected bucket.");
+	assert.equal(BUCKET_GUIDANCE, "Choose the bucket explicitly by task complexity, not role: Prefer small for bounded, well-defined work; medium for tasks requiring substantial judgment across interacting concerns; frontier for unusually difficult reasoning, diagnosis, or design. Judge the delegated task, not the overall project size. Escalate when the task exceeds the selected bucket.");
 	assert.match(BUCKET_GUIDANCE, /task complexity, not role/);
-	assert.match(BUCKET_GUIDANCE, /well-defined implementation, investigation, or review with limited ambiguity/);
+	assert.match(BUCKET_GUIDANCE, /Prefer small for bounded, well-defined work/);
 	assert.match(BUCKET_GUIDANCE, /substantial judgment across interacting concerns/);
 	assert.match(BUCKET_GUIDANCE, /unusually difficult reasoning, diagnosis, or design/);
 	assert.match(BUCKET_GUIDANCE, /Judge the delegated task, not the overall project size/);
@@ -15,7 +15,7 @@ test("BUCKET_GUIDANCE selects buckets by delegated task complexity", () => {
 
 test("SubagentParams exposes one required task shape without a reasoning override", () => {
 	assert.equal(SubagentParams.type, "object");
-	assert.deepEqual(SubagentParams.required, ["agent", "task"]);
+	assert.deepEqual(SubagentParams.required, ["agent", "task", "bucket"]);
 	const props = SubagentParams.properties as Record<string, unknown>;
 	assert.deepEqual(Object.keys(props), [
 		"agent", "task", "userContext", "cwd", "bucket", "modelRequirements",
@@ -40,10 +40,10 @@ test("cwd guidance documents project-agent discovery and the session-cwd default
 	assert.match(description, /defaults to the current session cwd/);
 });
 
-test("SubagentParams enum and default metadata remain intact", () => {
+test("SubagentParams requires an explicit bucket and exposes all tiers without a default", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket.enum, ["small", "medium", "frontier"]);
-	assert.equal(props.bucket.default, "medium");
+	assert.equal(props.bucket.default, undefined);
 	assert.equal(props.thinkingLevel, undefined);
 	assert.deepEqual(props.userContext.enum, ["latest", "all"]);
 	assert.equal(props.userContext.default, undefined);
@@ -61,14 +61,21 @@ test("userContext guidance binds each mode to its condition within its prompt bu
 	assert.ok(description.length <= 200, "userContext guidance must remain within its permanent 200-character prompt budget");
 });
 
-test("SubagentParams accepts a valid single task", () => {
-	assert.equal(Value.Check(SubagentParams, {
-		agent: "worker",
-		task: "do work",
-		userContext: "latest",
-		cwd: "/repo",
-		bucket: "medium",
-	}), true);
+test("SubagentParams accepts a valid single task with each explicit bucket tier", () => {
+	for (const bucket of ["small", "medium", "frontier"]) {
+		assert.equal(Value.Check(SubagentParams, {
+			agent: "worker",
+			task: "do work",
+			userContext: "latest",
+			cwd: "/repo",
+			bucket,
+		}), true);
+	}
+});
+
+test("missing bucket remains invalid after argument preparation", () => {
+	const prepared = prepareSubagentArguments({ agent: "worker", task: "do work" });
+	assert.equal(Value.Check(SubagentParams, prepared), false);
 });
 
 test("prepareSubagentArguments migrates only one-item legacy batches", () => {
@@ -104,35 +111,35 @@ test("prepareSubagentArguments strips legacy overrides", () => {
 });
 
 test("SubagentParams rejects removed routes and malformed values", () => {
-	assert.equal(Value.Check(SubagentParams, { tasks: [{ agent: "worker", task: "a" }] }), false);
-	assert.equal(Value.Check(SubagentParams, { chain: [{ agent: "worker", task: "a" }] }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", tasks: [] }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", tasks: [{ agent: "worker", task: "a" }] }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", chain: [{ agent: "worker", task: "a" }] }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", tasks: [] }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "huge" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", userContext: "full" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "high" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "xhigh" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "max" }), false);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", confirmProjectAgents: true }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", userContext: "full" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", thinkingLevel: "high" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", thinkingLevel: "xhigh" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", thinkingLevel: "max" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", confirmProjectAgents: true }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);
 	assert.equal(Value.Check(SubagentParams, { task: "a" }), false);
 });
 
 test("modelRequirements accepts image inputKinds and is optional", () => {
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] } }), true);
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: {} }), true, "empty object preserves behaviour");
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: [] } }), true, "empty inputKinds preserves behaviour");
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a" }), true, "absent preserves behaviour");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: ["image"] } }), true);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: {} }), true, "empty object preserves behaviour");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: [] } }), true, "empty inputKinds preserves behaviour");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium" }), true, "absent preserves behaviour");
 });
 
 test("modelRequirements rejects unknown or malformed requirements", () => {
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: ["video"] } }), false, "unknown input kind");
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { foo: 1 } }), false, "unknown property");
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: "image" } }), false, "non-array inputKinds");
-	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: [] }), false, "non-object requirements");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: ["video"] } }), false, "unknown input kind");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: { foo: 1 } }), false, "unknown property");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: "image" } }), false, "non-array inputKinds");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "medium", modelRequirements: [] }), false, "non-object requirements");
 });
 
 test("prepareSubagentArguments passes modelRequirements through", () => {
-	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] } }), {
-		agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] },
+	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: ["image"] } }), {
+		agent: "worker", task: "a", bucket: "medium", modelRequirements: { inputKinds: ["image"] },
 	});
 });

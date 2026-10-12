@@ -91,6 +91,12 @@ const NON_COMMAND_TYPES: ReadonlySet<string> = new Set([
  *  fields `viewGeneration` (all types) and `clientCommandId` (application
  *  commands only) are appended programmatically. */
 const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
+  dictationStart: ['type', 'sessionPath', 'recordingId', 'draftText', 'selectionStart', 'selectionEnd'],
+  dictationStop: ['type', 'sessionPath', 'recordingId'],
+  dictationCancel: ['type', 'sessionPath', 'recordingId'],
+  providerManagementCommand: ['type', 'command'],
+  providerManagementConnect: ['type', 'method', 'apiKey'],
+  providerManagementAuthResponse: ['type', 'operationId', 'promptId', 'value'],
   ready: ['type', 'assetVersion', 'buildId'],
   refreshState: ['type', 'assetVersion', 'buildId'],
   requestSnapshot: ['type', 'assetVersion', 'buildId', 'sessionPath'],
@@ -560,6 +566,18 @@ export function validateBrowserToHostMessage(
 
   // Per-type closed-schema checks beyond the shared validator.
   switch (type) {
+    case 'dictationStart':
+      if (value.sessionPath !== null && (!boundedString(value.sessionPath, BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes) || value.sessionPath.length === 0)) {
+        return fail('dictationStart: invalid or oversized sessionPath');
+      }
+      if (!boundedString(value.recordingId, 128) || value.recordingId.length === 0) return fail('dictationStart: invalid recordingId');
+      if (!boundedString(value.draftText, 256 * 1024)) return fail('dictationStart: invalid or oversized draftText');
+      return { ok: true, value: value as unknown as WebviewToHostMessage };
+    case 'dictationStop':
+    case 'dictationCancel':
+      if (!boundedString(value.sessionPath, BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes) || value.sessionPath.length === 0) return fail(`${type}: invalid or oversized sessionPath`);
+      if (!boundedString(value.recordingId, 128) || value.recordingId.length === 0) return fail(`${type}: invalid recordingId`);
+      return { ok: true, value: value as unknown as WebviewToHostMessage };
     case 'addComposerInput':
       return validateAddComposerInput(value);
     case 'editMessage':

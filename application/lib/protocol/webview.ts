@@ -10,6 +10,7 @@ import type {
 } from '../../../analytics/contracts/working-time.js';
 import type { LiveTurnPhase } from './live-pipeline.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
+import type { DictationView } from './dictation.js';
 import type { TokenRateIndicatorState } from './token-rate.js';
 import type {
   DetailChecksum,
@@ -201,6 +202,10 @@ export interface RendererCommandContext {
    *  exactly one `rejected` decision + ack.
    *  Set per routing call by the gate; absent for the trusted sidebar. */
   onBrowserCommandRejected?(type: string, reason: string): void;
+  /** True only when the trusted browser-server transport has established
+   *  that this browser is loopback-local and the host permits microphone use.
+   *  Never populated from renderer JSON. */
+  hostMicrophoneAllowed?: boolean;
 }
 
 export interface RenderEvidenceBase {
@@ -462,6 +467,9 @@ export interface ViewState {
    *  webview boundary. Cleared alongside `notice` on dismiss/replace. */
   noticeRaw?: string | null;
   /** True once the backend process has started and emitted `backend.ready`. */
+  providerManagement?: import('./provider-setup-preview.js').ProviderSetupPreviewView;
+  /** Optional host-owned local dictation projection; absent for legacy hosts. */
+  dictation?: DictationView;
   backendReady: boolean;
   workspaceCwd: string | null;
   systemPrompts: SystemPromptEntry[];
@@ -662,12 +670,15 @@ export type HostToWebviewMessage =
       retryable: boolean;
     })
   | {
-      /** Posted by the host when a session completes under the completion-
-       *  notification policy (paired with the window-flash alert). Fire-and-
-       *  forget: a dropped delivery (e.g. webview not ready) does not force a
-       *  state re-post. The webview's AudioContext warmup lets this play from
-       *  the non-gesture postMessage context. */
+      /** Broadcast to all clients on completion, regardless of host focus.
+       *  Fire-and-forget: unavailable clients do not replay sounds on reconnect.
+       *  Shares the notification volume and user-gesture AudioContext warmup. */
       type: 'playCompletionSound';
+      volume: number;
+    }
+  | {
+      /** Broadcast when an agent requests user input, not on snapshot replay. */
+      type: 'playQuestionSound';
       volume: number;
     }
   // ── Browser-server transport. The four variants below are
@@ -744,6 +755,12 @@ type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number; 
 export type WebviewToHostMessage = WithViewGeneration<WebviewToHostMessagePayload>;
 
 type WebviewToHostMessagePayload =
+  | { type: 'dictationStart'; sessionPath: string | null; recordingId: string; draftText: string; selectionStart: number; selectionEnd: number }
+  | { type: 'dictationStop'; sessionPath: string; recordingId: string }
+  | { type: 'dictationCancel'; sessionPath: string; recordingId: string }
+  | { type: 'providerManagementCommand'; command: import('./provider-setup-preview.js').ProviderSetupCommand }
+  | { type: 'providerManagementConnect'; method: 'signin' | 'api-key' | 'local'; apiKey?: string }
+  | { type: 'providerManagementAuthResponse'; operationId: string; promptId: string; value: string }
   | { type: 'ready'; assetVersion?: string; buildId?: string; viewGeneration?: number }
   | { type: 'refreshState'; assetVersion?: string; buildId?: string; viewGeneration?: number }
   | {

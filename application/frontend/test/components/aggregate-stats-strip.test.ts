@@ -193,12 +193,12 @@ test('aggregate strip separates all scrollable metrics from the persistent chara
   const status = html.match(/<div class="aggregate-strip-status-cluster">([\s\S]*)/)?.[1];
   assert.ok(metrics, 'metrics have their own scroll container');
   assert.ok(status, 'live status is a separate sibling row');
-  for (const segment of ['today', 'wk', 'aggregate-strip-tokens', 'last', 'aggregate-strip-providers', 'aggregate-strip-deferred']) {
+  for (const segment of ['tdy', 'wk', 'aggregate-strip-tokens', 'aggregate-strip-providers', 'aggregate-strip-deferred']) {
     assert.ok(metrics.includes(segment), `${segment} stays in the reachable metrics row`);
   }
-  for (const provider of providers) assert.ok(metrics.includes(provider.provider));
+  for (const provider of providers.filter((p) => p.activeRequests > 0)) assert.ok(metrics.includes(provider.provider));
   assert.match(metrics, /\$0\.0123/);
-  assert.match(metrics, /\$0\.0045/);
+  assert.doesNotMatch(metrics, /\$0\.0045|\blast\b|>today /);
   assert.match(metrics, /<button[^>]*aria-label="1 pending wakeup timer/);
   assert.doesNotMatch(metrics, /aggregate-strip-user-input|aggregate-strip-counts/);
   assert.match(status, /≥1\.4k<\/span> chars/);
@@ -206,27 +206,55 @@ test('aggregate strip separates all scrollable metrics from the persistent chara
   assert.doesNotMatch(status, /aggregate-strip-cost|aggregate-strip-providers|aggregate-strip-deferred/);
 });
 
-test('provider concurrency uses a compact infinity symbol for unlimited capacity', () => {
+test('provider concurrency hides idle and unlimited capacity, including queued or paused providers', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: {
       ...EMPTY_AGGREGATE_STATS,
       ready: true,
       providerGate: {
         enabled: true,
-        providers: [0, 2].map((limit) => ({
-          provider: `provider-${limit}`, activeRequests: 0, queuedRequests: 0,
-          maxConcurrentRequests: limit, afterburnSeconds: 0, paused: false,
+        providers: [0, 2, Infinity].flatMap((limit) => [0, 1].map((active) => ({
+          provider: `provider-${limit}-${active}`, activeRequests: active, queuedRequests: 3,
+          maxConcurrentRequests: limit, afterburnSeconds: 0, paused: true,
           pausedUntilMs: 0, strikeCount: 0,
-        })),
+        }))),
       },
     },
     deferredTriggers: [],
     onOpenDeferredMenu: () => {},
   }));
 
-  assert.match(html, /0\/∞/);
-  assert.match(html, /0\/2/);
-  assert.doesNotMatch(html, /Unlimited/);
+  assert.match(html, /1\/2/);
+  assert.match(html, /provider-2-1/);
+  assert.doesNotMatch(html, /provider-0-|provider-Infinity-|provider-2-0|∞|0\/2/);
+});
+
+test('provider segment and its separator disappear when no capacity is visible or the gate is disabled', () => {
+  for (const enabled of [true, false]) {
+    const html = renderToString(h(AggregateStatsStrip, {
+      stats: {
+        ...EMPTY_AGGREGATE_STATS,
+        ready: true,
+        providerGate: {
+          enabled,
+          providers: [{
+            provider: 'idle', activeRequests: enabled ? 0 : 1, queuedRequests: 2,
+            maxConcurrentRequests: 2, afterburnSeconds: 0, paused: true,
+            pausedUntilMs: 0, strikeCount: 1,
+          }, {
+            provider: 'unlimited', activeRequests: 5, queuedRequests: 0,
+            maxConcurrentRequests: 0, afterburnSeconds: 0, paused: false,
+            pausedUntilMs: 0, strikeCount: 0,
+          }],
+        },
+      },
+      deferredTriggers: [],
+      onOpenDeferredMenu: () => {},
+    }));
+    assert.doesNotMatch(html, /aggregate-strip-providers|Provider concurrency:/);
+    assert.equal((html.match(/class="aggregate-strip-sep"/g) ?? []).length, 3,
+      'only cost/token separators and the status-cluster separator remain');
+  }
 });
 
 test('aggregate informational rich-tooltip triggers are keyboard-focusable and labelled', () => {
@@ -266,12 +294,14 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
 
   const segmentTags = [...html.matchAll(/<span[^>]*class="[^"]*aggregate-strip-seg[^"]*"[^>]*>/g)].map((match) => match[0]);
   const focusableSegments = segmentTags.filter((tag) => tag.includes('tabindex="0"') && tag.includes('aria-label="'));
-  assert.equal(focusableSegments.length, 7, 'today, week, tokens, last, provider gate, user input, and work are focusable');
+  assert.equal(focusableSegments.length, 6, 'today, week, tokens, provider gate, user input, and work are focusable');
   for (const tag of focusableSegments) assert.ok(tag.length > 80, 'each segment has a meaningful label');
   assert.match(html, /Today's estimated token cost/);
   assert.match(html, /Estimated token cost this week/);
   assert.match(html, /Today's tokens:/);
-  assert.match(html, /Latest completed run across all sessions/);
+  assert.doesNotMatch(html, /Latest completed run|\blast\b/);
+  assert.match(html, />tdy /);
+  assert.doesNotMatch(html, />today /);
   assert.match(html, /Provider concurrency:/);
   assert.match(html, /Today's adjusted user input: 0 characters, fully tracked\. Focus for Today and 7-day character-volume details\./);
   assert.match(html, /Focus for 14-day work trend/);
@@ -406,25 +436,10 @@ test('aggregate memo signature includes interior redistribution and new token/we
     inputTokens: 1, outputTokens: 2,
     turnSeries: [{ ms: 1, outputTokens: 5 }, { ms: 2, outputTokens: 7 }],
   };
-  assert.notEqual(
+  assert.equal(
+    aggregateStatsSignature(base),
     aggregateStatsSignature({ ...base, lastRun }),
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeries: [{ ms: 1, outputTokens: 5 }, { ms: 2, outputTokens: 9 }] } }),
-    'last-run sparkline interior turn values must participate in the memo signature',
-  );
-  assert.notEqual(
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, usageCoverage: 'partial' } }),
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, usageCoverage: undefined } }),
-    'last-run usage coverage changes must participate in the memo signature',
-  );
-  assert.notEqual(
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, attributionCoverage: 'mixed' } }),
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, attributionCoverage: undefined } }),
-    'last-run attribution coverage changes must participate in the memo signature',
-  );
-  assert.notEqual(
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: 'unavailable' } }),
-    aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: undefined } }),
-    'last-run turn coverage changes must participate in the memo signature',
+    'removed last-run detail does not invalidate the strip memo signature',
   );
 });
 

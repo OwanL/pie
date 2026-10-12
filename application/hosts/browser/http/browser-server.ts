@@ -36,6 +36,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { RendererRegistration } from '../../lib/renderer-delivery/types';
 import { RendererHub } from '../../lib/renderer-delivery/renderer-hub';
 import type { HostToWebviewMessage } from '../../../lib/protocol/index.js';
+import { dictationForRenderer } from '../../../lib/protocol/dictation.js';
 import {
   BROWSER_SERVER_POLICY,
   isAllowedBrowserRemoteAddress,
@@ -88,6 +89,8 @@ export class BrowserServer implements BrowserServerService {
   private readonly registrations: Record<string, RendererRegistration> = {};
   /** Per-renderer transports, for shutdown close + client-count accounting. */
   private readonly transports: Record<string, BrowserRendererTransport> = {};
+  /** Attested by the accepted socket, never by renderer JSON. */
+  private readonly hostMicrophoneRenderers: Record<string, boolean> = {};
   private state: BrowserServerState = {
     running: false,
     url: null,
@@ -124,8 +127,12 @@ export class BrowserServer implements BrowserServerService {
       clock: this.clock,
       hostInstanceId: options.hostInstanceId,
       getViewState: options.getViewState,
+      overlayViewState: (view, rendererId) => {
+        const dictation = dictationForRenderer(view.dictation, rendererId, this.hostMicrophoneRenderers[rendererId] === true);
+        return dictation === view.dictation ? view : { ...view, dictation };
+      },
       getRunningSessionCount: options.getRunningSessionCount,
-      onMessage: (msg, context) => void this.gate.route(msg, context),
+      onMessage: (msg, context) => void this.gate.route(msg, { ...context, hostMicrophoneAllowed: this.hostMicrophoneRenderers[context.rendererId] === true }),
       onRendererInvalidated: options.onRendererInvalidated,
     });
     this.confirmations = new InlineConfirmationService({
@@ -165,9 +172,9 @@ export class BrowserServer implements BrowserServerService {
     return this.hub.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration);
   }
 
-  /** Renderer-scoped imperative: lazy-detail
-   *  responses and other targeted imperatives answer the INITIATING renderer. */
-  postImperative(message: HostToWebviewMessage, rendererId: string): void {
+  /** Targeted responses answer the initiating renderer; omitted target
+   *  broadcasts best-effort notifications to every browser client. */
+  postImperative(message: HostToWebviewMessage, rendererId?: string): void {
     this.hub.postImperative(message, rendererId);
   }
 
@@ -489,10 +496,11 @@ export class BrowserServer implements BrowserServerService {
       });
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => this.onBrowserConnection(ws));
+    const microphoneAllowed = isAllowedBrowserRemoteAddress(req.socket.remoteAddress, false);
+    wss.handleUpgrade(req, socket, head, (ws) => this.onBrowserConnection(ws, microphoneAllowed));
   }
 
-  private onBrowserConnection(socket: WebSocket): void {
+  private onBrowserConnection(socket: WebSocket, microphoneAllowed: boolean): void {
     const transport = new BrowserRendererTransport(socket, {
       assetVersion: this.staticAssets.getAssetVersion(),
       now: () => this.clock.now(),
@@ -503,6 +511,7 @@ export class BrowserServer implements BrowserServerService {
     const registration = this.hub.registerRenderer(transport);
     this.registrations[registration.rendererId] = registration;
     this.transports[registration.rendererId] = transport;
+    this.hostMicrophoneRenderers[registration.rendererId] = microphoneAllowed;
     transport.start(registration);
     this.emit({ kind: 'client-connected', rendererId: registration.rendererId });
   }
@@ -515,6 +524,7 @@ export class BrowserServer implements BrowserServerService {
       delete this.registrations[rendererId];
     }
     delete this.transports[rendererId];
+    delete this.hostMicrophoneRenderers[rendererId];
     // Disconnect cancels every pending inline confirmation for this renderer.
     this.confirmations.cancelForRenderer(rendererId);
     this.emit({ kind: 'client-closed', rendererId, code, reason });

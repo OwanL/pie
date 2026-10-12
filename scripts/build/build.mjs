@@ -72,6 +72,7 @@ const requiredBuildFiles = Object.freeze([
   'worker-entry.js',
   'analytics-recorder-worker.js',
   'analytics-query-worker.js',
+  'dictation-helper.js',
   path.join(webviewRelativeDir, '.vite', 'manifest.json'),
 ]);
 

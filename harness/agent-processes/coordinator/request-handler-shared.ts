@@ -70,6 +70,7 @@ export function formatInterruptWatchdogDuration(watchdogMs: number): string {
 }
 
 export interface BackendRequestHandlerDeps {
+  providerManagement?: import('../../model-providers/management/contracts').ProviderManagementPort;
   sdkPath: string;
   /** Process generation used to reject stale operation-status reconciliation. */
   backendGeneration?: number;
@@ -156,6 +157,8 @@ export interface BackendRequestHandlerDeps {
     publicRequestId?: string,
     includeInitialContextInventory?: boolean,
   ): Promise<SessionOpenedPayload>;
+  /** Assign an inventory token synchronously, then resolve cold prompt metadata later. */
+  deferSessionPromptInventory?(payload: SessionOpenedPayload): void;
   /** Build from the replacement installed by the transition currently owning
    * this path; bypasses joining that transition's own promise. */
   buildTransitionSessionOpenedPayload?(sessionPath: string): Promise<SessionOpenedPayload>;

@@ -16,6 +16,8 @@
  * a deliberate decision, not a default.
  */
 
+import { handleDictationEvent, reconcileDictation } from './reducers/dictation-handlers.js';
+import { handleProviderManagement } from './reducers/provider-management-handlers.js';
 import { createInitialArchState } from './arch-state.js';
 import type { ArchState } from './arch-state.js';
 import type { Event } from './events.js';
@@ -40,6 +42,7 @@ import {
   handleSessionClosed,
   handleSessionListChanged,
   handleSessionOpened,
+  handleSessionPromptInventory,
   handleSessionNameDerived,
   handleAgentSettled,
   handleBusyChanged,
@@ -122,6 +125,12 @@ import {
  * Reducer: routes events to per-kind handlers.
  */
 export function reducer(state: ArchState, event: Event): ReducerResult {
+  return reconcileDictation(state, reduceOrdinary(state, event), event);
+}
+
+function reduceOrdinary(state: ArchState, event: Event): ReducerResult {
+  if (event.kind === 'ProviderManagementSnapshotUpdated' || event.kind === 'ProviderManagementResult') return handleProviderManagement(state, event);
+  if (event.kind === 'Command' && (event.cmd.kind === 'ProviderManagement' || event.cmd.kind === 'ProviderManagementConnect' || event.cmd.kind === 'ProviderManagementAuthResponse')) return handleProviderManagement(state, event.cmd);
   if (event.kind === 'SessionSnoozeReleaseResult') {
     const owner = state.sessions.snoozeReleases[event.reservationId];
     if (!owner || owner.sessionPath !== event.sessionPath) return { state, effects: [] };
@@ -160,7 +169,21 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     }
   }
   if (releases.length) state = { ...state, sessions: { ...state.sessions, pendingSnoozes } };
-  const result = reduceSnoozeAware(state, event);
+  let result = reduceSnoozeAware(state, event);
+  if (event.kind === 'BackendReadyChanged') {
+    if (event.ready && !state.settings.backendReady) {
+      const p = result.state.providerManagement;
+      const generation = event.backendGeneration ?? p.generation + 1;
+      const operationId = `provider-startup:${generation}`;
+      const refreshFence = p.refreshFence + 1;
+      result = { state: { ...result.state, providerManagement: { ...p, generation, refreshFence, operationId, authOperationId: null,
+        snapshot: { ...p.snapshot, revision: -1, auth: undefined }, status: p.draft ? 'idle' : 'loading' } }, effects: [...result.effects,
+        { kind: 'ProviderManagementRpc', request: { type: 'read', operationId }, generation, fence: refreshFence, selectedId: p.selectedId }] };
+    } else if (!event.ready) {
+      const p = result.state.providerManagement;
+      result = { ...result, state: { ...result.state, providerManagement: { ...p, refreshFence: p.refreshFence + 1, operationId: null, authOperationId: null, status: 'idle' } } };
+    }
+  }
   const pendingAfter = { ...result.state.sessions.pendingSnoozes };
   for (const [path, pending] of Object.entries(pendingAfter)) {
     if (!canSnoozeSession(result.state, path)) {
@@ -278,6 +301,10 @@ function reduceWithNotices(state: ArchState, event: Event): ReducerResult {
 
 function reduceEvent(state: ArchState, event: Event): ReducerResult {
   switch (event.kind) {
+    case 'DictationAvailabilityChanged':
+    case 'DictationObserved':
+    case 'DictationRendererInvalidated':
+      return handleDictationEvent(state, event);
     case 'SessionSnoozeReleaseResult':
     case 'SessionSnoozeRequested':
     case 'SessionSnoozeReservationResult':
@@ -286,7 +313,15 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
     case 'SessionSnoozesRestored':
       return reduceSessionSnooze(state, event);
     case 'Command': {
-      return handleCommand(state, event.cmd);
+      const cmd = event.cmd;
+      if (cmd.kind === 'ProviderManagement' || cmd.kind === 'ProviderManagementConnect' || cmd.kind === 'ProviderManagementAuthResponse') return handleProviderManagement(state, cmd);
+      if ((cmd.kind === 'Send' || cmd.kind === 'Edit' || cmd.kind === 'Continue' || cmd.kind === 'Compact')
+        && state.transcript.pendingPromptInventoryBySession?.[cmd.sessionPath]) {
+        const pending = { ...state.transcript.pendingPromptInventoryBySession };
+        delete pending[cmd.sessionPath];
+        state = { ...state, transcript: { ...state.transcript, pendingPromptInventoryBySession: pending } };
+      }
+      return handleCommand(state, cmd);
     }
 
     // ─── Effect result events ─────────────────────────────────────────
@@ -369,6 +404,8 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
       return handleSessionNameDerived(state, event);
     }
 
+    case 'SessionPromptInventory':
+      return handleSessionPromptInventory(state, event);
     case 'SessionOpened': {
       // Kept inline for now (matches handleSessionOpened in session-handlers)
       return handleSessionOpened(state, event);
@@ -630,6 +667,10 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
     case 'BackendRestartOldGenerationDied': {
       return handleBackendRestartOldGenerationDied(state, event);
     }
+
+    case 'ProviderManagementSnapshotUpdated':
+    case 'ProviderManagementResult':
+      return handleProviderManagement(state, event);
 
     case 'BackendRestartResult': {
       return handleBackendRestartResult(state, event);

@@ -58,6 +58,7 @@ import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../
 import { DetailSubscriptionService } from '../transcript-delivery/detail-subscriptions';
 import { PrivateSessionCleanup } from './private-session-cleanup';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
+import type { ProviderManagementRequest, ProviderManagementResponse } from '../../../harness/model-providers/management/contracts.js';
 import type { HostDisposable, SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
 
 /** Host-owned identities the detail subscription service fences its
@@ -118,6 +119,7 @@ export class SessionService implements HostDisposable {
     private readonly runObserver: RunObserver = NOOP_RUN_OBSERVER,
     private readonly detailHostInfo: DetailHostInfo = DEFAULT_DETAIL_HOST_INFO,
     private readonly getAnalyticsBackendDescriptor: () => AnalyticsBackendDescriptor | undefined = () => undefined,
+    onQuestionRequested?: () => void,
   ) {
     this.getArchState = getArchState;
     this.dispatchArch = dispatchArch;
@@ -220,6 +222,7 @@ export class SessionService implements HostDisposable {
       platform: this.platform,
       scheduleRender,
       onSessionCompleted,
+      onQuestionRequested,
       runObserver,
       state: this.state,
       dispatchArch,
@@ -229,6 +232,7 @@ export class SessionService implements HostDisposable {
       onSessionCloseResponseDelivered: (payload) => this.onSessionCloseResponseDelivered(payload),
       onSessionControlSettingsRequested: (payload) => this.onSessionControlSettingsRequested(payload),
       onDetailStream: (message) => this.detailSubscriptions.handleStream(message),
+      getBackendGeneration: () => this.backend.getGeneration(),
     });
     this.tabs = new SessionTabActions({
       scheduleRender,
@@ -279,7 +283,9 @@ export class SessionService implements HostDisposable {
         this.triggers.onSessionOpened(sessionPath);
       },
       getArchState: this.getArchState,
-      dispatchArch: this.dispatchArch,
+      dispatchArch: (event) => this.dispatchArch(event.kind === 'BackendReadyChanged'
+        ? { ...event, backendGeneration: this.backend.getGeneration() }
+        : event),
       getAnalyticsBackendDescriptor: this.getAnalyticsBackendDescriptor,
     });
   }
@@ -357,7 +363,7 @@ export class SessionService implements HostDisposable {
     // failure transition that owns their optimistic rollback.
     this.state.failPendingCreateOperations('PI backend generation ended while the session was being created.');
     this.dispatchArch({ kind: 'RunningSessionsChanged', sessionPaths: [] });
-    this.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
+    this.dispatchArch({ kind: 'BackendReadyChanged', ready: false, backendGeneration: this.backend.getGeneration() });
     this.dispatchArch({ kind: 'NoticeShown', notice: null });
     this.scheduleRender();
     onOldGenerationDeathConfirmed?.();
@@ -384,6 +390,32 @@ export class SessionService implements HostDisposable {
 
   getBackendGeneration(): number {
     return this.state.getBackendGeneration();
+  }
+
+  /** Request a provider-management operation through the private backend RPC. */
+  async providerManagement(request: ProviderManagementRequest): Promise<ProviderManagementResponse> {
+    const backendGeneration = this.backend.getGeneration();
+    try {
+      return await this.backend.request<ProviderManagementResponse>(
+        'providers.manage',
+        request,
+        { timeoutMs: request.type === 'connect' ? 10 * 60_000 : 20_000 },
+      );
+    } catch (error) {
+      if (request.type === 'connect' && this.backend.getGeneration() === backendGeneration) {
+        try {
+          await this.backend.request<ProviderManagementResponse>(
+            'providers.manage',
+            { type: 'cancel', operationId: `${request.operationId}:cancel`, targetOperationId: request.operationId },
+            { timeoutMs: 20_000 },
+          );
+        } catch {
+          // This is only best-effort cleanup; the original connect failure
+          // remains the result owned by the EffectRunner.
+        }
+      }
+      throw error;
+    }
   }
 
   // ─── Detail subscription ownership (public routing) ────────────────

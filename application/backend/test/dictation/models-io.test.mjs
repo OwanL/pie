@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { ensureModels } from '../../dictation/models.mjs';
+const payload = Buffer.from('pinned synthetic model');
+const asset = { name: 'synthetic.bin', bytes: payload.length, sha256: createHash('sha256').update(payload).digest('hex'), url: 'https://example.invalid/model' };
+test('assets are verified once cached, atomically published, and never clobbered', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pie-dictation-model-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; return new Response(payload); });
+  const paths = await ensureModels(root, () => {}, undefined, [asset]);
+  assert.deepEqual(await readFile(paths[0]), payload);
+  await ensureModels(root, () => {}, undefined, [asset]);
+  assert.equal(requests, 1);
+  assert.deepEqual(await readdir(join(root, asset.sha256)), [asset.name]);
+  const corrupt = Buffer.from('existing durable corrupt data');
+  await writeFile(paths[0], corrupt);
+  await assert.rejects(ensureModels(root, () => {}, undefined, [asset]), /size mismatch/);
+  assert.deepEqual(await readFile(paths[0]), corrupt);
+  assert.equal(requests, 1);
+});
+test('oversized downloads clean only owned temporary files', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pie-dictation-model-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, asset.sha256);
+  await mkdir(directory);
+  await writeFile(join(directory, '.other-owner.download'), 'untouched');
+  t.mock.method(globalThis, 'fetch', async () => new Response(Buffer.alloc(asset.bytes + 1)));
+  await assert.rejects(ensureModels(root, () => {}, undefined, [asset]), /exceeds pinned size/);
+  assert.deepEqual(await readdir(directory), ['.other-owner.download']);
+});
+test('checksum failure is not published', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pie-dictation-model-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.mock.method(globalThis, 'fetch', async () => new Response(Buffer.alloc(asset.bytes)));
+  await assert.rejects(ensureModels(root, () => {}, undefined, [asset]), /checksum mismatch/);
+  assert.deepEqual(await readdir(join(root, asset.sha256)), []);
+});

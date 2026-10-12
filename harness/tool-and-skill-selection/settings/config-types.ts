@@ -74,6 +74,8 @@ export interface PruningConfig {
 	subagentEnabled?: boolean;
 	/** Enable follow-up pruning. Omitted values default to false. */
 	followUpEnabled?: boolean;
+	/** Refresh selection once before the next request after successful history compaction. */
+	refreshAfterCompaction?: boolean;
 	skills: SkillPruningConfig;
 	tools?: ToolPruningConfig;
 	prepass?: PrepassConfig;

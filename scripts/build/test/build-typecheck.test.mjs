@@ -121,7 +121,7 @@ test('delivery build preflight resolves moved extension source through the owner
     const id = '0123456789abcdefabcd';
     fs.mkdirSync(out, { recursive: true });
     if (process.argv.includes('node')) {
-      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
+      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js']) {
         fs.writeFileSync(path.join(out, name), '');
       }
       fs.writeFileSync(path.join(out, 'pie-build-id.txt'), id);

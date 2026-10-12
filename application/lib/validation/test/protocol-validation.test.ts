@@ -896,6 +896,15 @@ test('validateWebviewToHostMessage accepts only boolean follow-up pruning update
   }
 });
 
+test('validateWebviewToHostMessage validates refresh after history compaction updates', () => {
+  for (const refreshAfterCompaction of [true, false, undefined]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPruningSettings', settings: { refreshAfterCompaction } }).ok, true);
+  }
+  for (const refreshAfterCompaction of ['true', 1, null, [], {}]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPruningSettings', settings: { refreshAfterCompaction } }).ok, false);
+  }
+});
+
 test('validateWebviewToHostMessage accepts independent pruning-agent switches', () => {
   assert.equal(validateWebviewToHostMessage({
     type: 'setPruningSettings',

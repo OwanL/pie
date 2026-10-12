@@ -8,6 +8,7 @@ import type { RendererRegistration, RendererTransport } from '../../lib/renderer
 import type { StateDeliveryClock } from '../../lib/renderer-delivery/state-delivery-controller';
 import type { StateDeliveryRecoveryReason } from '../../lib/renderer-delivery/state-delivery-controller';
 import type { HostToWebviewMessage, RendererCommandContext, ViewState, WebviewToHostMessage } from '../../../lib/protocol/index.js';
+import { dictationForRenderer } from '../../../lib/protocol/dictation.js';
 
 type ResolvedWebviewHtml = Awaited<ReturnType<typeof resolveWebviewHtml>>;
 
@@ -68,6 +69,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     this.hub = new RendererHub({
       clock,
       getViewState,
+      overlayViewState: (view, rendererId) => {
+        const dictation = dictationForRenderer(view.dictation, rendererId);
+        return dictation === view.dictation ? view : { ...view, dictation };
+      },
       onMessage,
       onRendererInvalidated: options.onRendererInvalidated,
       getRunningSessionCount,

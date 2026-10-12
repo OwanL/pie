@@ -179,6 +179,41 @@ export function handleSessionListChanged(state: ArchState, event: Extract<Event,
   };
 }
 
+export function handleSessionPromptInventory(state: ArchState, event: Extract<Event, { kind: 'SessionPromptInventory' }>): ReducerResult {
+  const { sessionPath, token } = event.payload;
+  const owner = state.transcript.pendingPromptInventoryBySession?.[sessionPath];
+  if (!owner || owner.token !== token) return { state, effects: [] };
+  const pending = { ...state.transcript.pendingPromptInventoryBySession };
+  delete pending[sessionPath];
+  const consumed = { ...state, transcript: { ...state.transcript, pendingPromptInventoryBySession: pending } };
+  const blocked = owner.backendGeneration !== event.backendGeneration
+    || owner.backendGeneration !== state.settings.modelBackendGeneration
+    || owner.modelWriteFence !== state.settings.modelWriteFence
+    || !state.sessions.openTabPaths.includes(sessionPath)
+    || state.sessions.runningSessionPaths.includes(sessionPath)
+    || !!state.livePipeline.turnsBySession[sessionPath]
+    || Object.values(state.operations).some((op) => !op.terminal
+      && (op.session.resolvedPath ?? op.session.pendingPath) === sessionPath
+      && (op.kind === 'session.close' || op.kind.startsWith('message.')))
+    || Object.values(state.pending.ops).some((op) => op.sessionPath === sessionPath)
+    || Object.values(state.pending.promoted).some((op) => op.sessionPath === sessionPath);
+  if (blocked) return { state: consumed, effects: [] };
+  const canEstimate = !(state.transcript.bySession[sessionPath] ?? []).some((row) => row.role === 'user')
+    && !state.transcript.windowBySession[sessionPath]?.hasUserMessages
+    && !state.settings.contextUsageBySession[sessionPath]
+    && !(state.transcript.sessionUsageBySession?.[sessionPath]?.samples.length);
+  return { state: {
+    ...consumed,
+    transcript: { ...consumed.transcript, systemPromptsBySession: {
+      ...state.transcript.systemPromptsBySession, [sessionPath]: event.payload.systemPrompts,
+    } },
+    settings: { ...state.settings, initialContextEstimateBySession: {
+      ...state.settings.initialContextEstimateBySession,
+      [sessionPath]: canEstimate ? event.payload.initialContextEstimate ?? null : null,
+    } },
+  }, effects: [] };
+}
+
 export function handleSessionOpened(state: ArchState, event: Extract<Event, { kind: 'SessionOpened' }>): ReducerResult {
   const { sessionPath, payload } = event;
   let next: ArchState = state;
@@ -359,6 +394,20 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     delete nextDeferredWindowReplacements[sessionPath];
   }
 
+  const pendingPromptInventoryBySession = { ...state.transcript.pendingPromptInventoryBySession };
+  delete pendingPromptInventoryBySession[sessionPath];
+  const pendingColdInventory = payload.runtimeReady === false
+    && !payload.snapshotUnavailable
+    && !!payload.promptInventoryToken
+    && !staleModelOwnership
+    && !inFlightSetModel;
+  if (pendingColdInventory) {
+    pendingPromptInventoryBySession[sessionPath] = {
+      token: payload.promptInventoryToken!, backendGeneration: event.backendGeneration,
+      modelWriteFence: state.settings.modelWriteFence,
+    };
+  }
+
   const coldPromptDisabledIds = payload.systemPromptDisabledEntries !== undefined
     ? new Set(payload.systemPromptDisabledEntries)
     : undefined;
@@ -371,7 +420,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   const coldPromptDiscoveryFailed = payload.runtimeReady === false
     && payload.systemPrompts === undefined
     && payload.snapshotUnavailable === undefined;
-  const reconciledSystemPrompts = payload.systemPrompts ?? (
+  const reconciledSystemPrompts = pendingColdInventory ? [] : payload.systemPrompts ?? (
     coldPromptDiscoveryFailed
       ? []
       : coldPromptDisabledIds
@@ -431,7 +480,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
       }),
       initialContextEstimateBySession: {
         ...next.settings.initialContextEstimateBySession,
-        [sessionPath]: payload.runtimeReady === false
+        [sessionPath]: !pendingColdInventory && payload.runtimeReady === false
           && (payload.sessionUsage?.samples.length ?? 0) === 0
           ? payload.initialContextEstimate ?? null
           : null,
@@ -448,6 +497,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         [sessionPath]: resolvedWindow,
       },
       deferredWindowReplacementBySession: nextDeferredWindowReplacements,
+      pendingPromptInventoryBySession,
       ...(payload.sessionUsage && {
         sessionUsageBySession: {
           ...next.transcript.sessionUsageBySession,

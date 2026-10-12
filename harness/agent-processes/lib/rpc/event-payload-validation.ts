@@ -47,6 +47,7 @@ import type {
   SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
+  SessionPromptInventoryPayload,
   ToolFinishedPayload,
   ToolProgressPayload,
   ToolStartedPayload,
@@ -201,6 +202,8 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isBoolean(value.busy)
     && isSessionCapabilityFacts(value.capabilities)
     && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
+    && (value.promptInventoryToken === undefined
+      || (isString(value.promptInventoryToken) && value.promptInventoryToken.length > 0))
     && (value.systemPromptDisabledEntries === undefined
       || (Array.isArray(value.systemPromptDisabledEntries)
         && value.systemPromptDisabledEntries.every(isString)))
@@ -214,6 +217,20 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && (value.workerGeneration === undefined
       || (Number.isInteger(value.workerGeneration) && (value.workerGeneration as number) >= 1))
   );
+}
+
+export function isSessionPromptInventoryPayload(value: unknown): value is SessionPromptInventoryPayload {
+  return isObject(value)
+    && isString(value.sessionPath) && value.sessionPath.length > 0
+    && isString(value.token) && value.token.length > 0
+    && Array.isArray(value.systemPrompts)
+    && value.systemPrompts.every((entry) => isObject(entry)
+      && ['provider', 'harness', 'user'].includes(entry.source as string)
+      && ['available', 'missing', 'hidden', 'unknown'].includes(entry.availability as string)
+      && isString(entry.title) && isString(entry.text) && isString(entry.summary)
+      && isOptionalString(entry.id) && isOptionalString(entry.tooltip)
+      && isOptionalBoolean(entry.disabled) && isOptionalBoolean(entry.toggleable))
+    && isOptionalInitialContextEstimate(value.initialContextEstimate);
 }
 
 export function isSessionListChangedPayload(value: unknown): value is SessionListChangedPayload {

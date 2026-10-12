@@ -200,6 +200,21 @@ test('follow-up pruning reads legacy defaults and persists updates without distu
     },
   };
   try {
+    assert.equal((await readPruningSettings()).refreshAfterCompaction, true);
+    for (const refreshAfterCompaction of [undefined, 'true', 1, null, false, true]) {
+      writeFileSync(settingsPath, JSON.stringify({ ...original, pruning: { ...original.pruning, refreshAfterCompaction } }));
+      assert.equal((await readPruningSettings()).refreshAfterCompaction, refreshAfterCompaction !== false);
+    }
+    for (const refreshAfterCompaction of [false, true]) {
+      writeFileSync(settingsPath, JSON.stringify(original));
+      assert.equal((await writePruningSettings({ refreshAfterCompaction })).refreshAfterCompaction, refreshAfterCompaction);
+      assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), {
+        ...original, pruning: { ...original.pruning, refreshAfterCompaction },
+      });
+      await writePruningSettings({});
+      assert.equal((await readPruningSettings()).refreshAfterCompaction, refreshAfterCompaction);
+    }
+    writeFileSync(settingsPath, JSON.stringify(original));
     assert.equal((await readPruningSettings()).followUpEnabled, false);
     for (const followUpEnabled of [undefined, 'true', 1, null, false, true]) {
       writeFileSync(settingsPath, JSON.stringify({ ...original, pruning: { ...original.pruning, followUpEnabled } }));

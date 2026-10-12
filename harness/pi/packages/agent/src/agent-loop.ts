@@ -295,11 +295,13 @@ async function streamAssistantResponse(
 	const llmMessages = await config.convertToLlm(messages);
 
 	// Build LLM context
-	const llmContext: Context = {
+	let llmContext: Context = {
 		systemPrompt: context.systemPrompt,
 		messages: llmMessages,
 		tools: context.tools,
 	};
+
+	if (config.prepareModelRequest) llmContext = await config.prepareModelRequest(llmContext, signal);
 
 	const streamFunction = streamFn || streamSimple;
 

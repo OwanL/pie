@@ -15,11 +15,12 @@
     "baseUrl": ".",
     "paths": {
       "yaml": ["../../../application/hosts/vscode/node_modules/yaml"],
+      "ajv": ["../../../application/hosts/vscode/node_modules/ajv"],
       "@earendil-works/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
       "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
       "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
     }
   },
-  "include": ["./**/*.ts"],
+  "include": ["./**/*.ts", "../management/**/*.ts"],
   "exclude": ["node_modules"]
 }

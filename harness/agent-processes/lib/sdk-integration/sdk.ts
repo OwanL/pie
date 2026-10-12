@@ -1,11 +1,15 @@
 import * as path from 'node:path';
-import { realpath } from 'node:fs/promises';
+import * as nodeModule from 'node:module';
+import { createPiProviderAuth } from '../../../model-providers/management/pi-auth';
+import type { ProviderManagementAuthPort } from '../../../model-providers/management/auth-port';
+import type { getModels as PublicGetModels } from '@earendil-works/pi-ai/compat';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import type { PiRuntimeTarget } from '../../../../lib/pi-runtime/artifact.mjs';
 import { verifySdkRuntimeArtifactDescriptor } from './sdk-runtime-artifact';
 import { verifyWorkspaceDevelopmentSdkRoot } from './sdk-runtime-selection';
 import { createSourceSdkPolicyAdapter, type SourceSdkPolicyFactoryResult } from './source-sdk-policy';
 import type * as SourceSdk from '@earendil-works/pi-coding-agent';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   HISTORY_COMPACTION_ENV,
@@ -437,10 +441,21 @@ export interface SdkModelRegistry {
     baseUrl?: string;
   }>;
   find: (provider: string, modelId: string) => unknown;
+  getApiKeyAndHeaders?: (model: { provider: string; id: string }) => Promise<import('../../../model-providers/runtime/services').RuntimeRequestAuth>;
+  getApiKeyForProvider?: (providerId: string) => Promise<string | undefined>;
+  hasConfiguredAuth?: (model: { provider: string; id: string }) => boolean;
+  isUsingOAuth?: (model: { provider: string; id: string }) => boolean;
 }
 
 export interface SdkAuthStorage {
   reload?: () => void;
+  get?: (providerId: string) => import('../../../model-providers/management/auth-port').StagedProviderCredential | undefined;
+  getApiKey?: (providerId: string, options?: { includeFallback?: boolean }) => Promise<string | undefined>;
+  getProviderEnv?: (providerId: string) => Record<string, string> | undefined;
+  hasAuth?: (providerId: string) => boolean;
+  getAuthStatus?: (providerId: string) => { configured: boolean; source?: string; label?: string };
+  getOAuthProviders?: () => { id: string; name: string }[];
+  drainErrors?: () => Error[];
 }
 
 export interface SdkSessionInfo {
@@ -459,11 +474,17 @@ export interface SdkModule {
   compact?: typeof SourceSdk.compact;
   getAgentDir: () => string;
   formatSkillsForPrompt?: (skills: SdkSkill[]) => string;
+  getProviderRuntimeBuiltinModel?: (provider: string, id: string) => import('../../../model-providers/runtime/contracts').NativeRuntimeModel | undefined;
+  createProviderManagementAuth?: (credentialFile: string) => ProviderManagementAuthPort;
   AuthStorage: {
     create: (filePath?: string) => SdkAuthStorage;
+    /** Native isolated storage, required only for captured provider runtimes. */
+    inMemory?: () => SdkAuthStorage;
   };
   ModelRegistry?: {
     create: (authStorage: SdkAuthStorage, modelsJsonPath?: string) => SdkModelRegistry;
+    /** No legacy models.json or live OAuth endpoint overlay. */
+    inMemory?: (authStorage: SdkAuthStorage) => SdkModelRegistry;
   };
   SessionManager: {
     /** Public class prototype, exposed for contract inspection only. */
@@ -517,7 +538,7 @@ export interface SdkModule {
  * AgentSession implementation. */
 export type ColdCoordinatorSdkModule = Pick<
   SdkModule,
-  'VERSION' | 'getAgentDir' | 'AuthStorage' | 'SessionManager'
+  'VERSION' | 'getAgentDir' | 'AuthStorage' | 'SessionManager' | 'createProviderManagementAuth' | 'getProviderRuntimeBuiltinModel'
 > & { ModelRegistry: NonNullable<SdkModule['ModelRegistry']> };
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
@@ -525,6 +546,32 @@ export type ColdCoordinatorSdkModule = Pick<
 const dynamicImport = new Function('specifier', 'return import(specifier)') as (
   specifier: string,
 ) => Promise<unknown>;
+
+// Node's pinned runtime (>=22.19) provides this native ESM-aware resolver,
+// though older ambient @types/node versions do not declare it.
+type NativeFindPackageJSON = (specifier: string, parentURL?: string | URL) => string | undefined;
+const nativeFindPackageJSON = (nodeModule as typeof nodeModule & {
+  findPackageJSON?: NativeFindPackageJSON;
+}).findPackageJSON;
+
+/** Resolve a package export only when its canonical target is an ordinary file inside the package. */
+export async function resolveContainedPackageImport(packageDir: string, targetUrl: URL): Promise<string> {
+  if (targetUrl.protocol !== 'file:') {
+    throw new Error('Package import export must resolve to a file.');
+  }
+  const packageRoot = path.resolve(packageDir);
+  const canonicalPackageDir = await realpath(packageRoot);
+  const targetPath = path.resolve(fileURLToPath(targetUrl));
+  const isContained = (root: string, entry: string) => {
+    const relative = path.relative(root, entry);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  if (!isContained(packageRoot, targetPath)) throw new Error('Package import export escapes its package directory.');
+  const canonicalTargetPath = await realpath(targetPath);
+  if (!isContained(canonicalPackageDir, canonicalTargetPath)) throw new Error('Package import export escapes its canonical package directory.');
+  if (!(await stat(canonicalTargetPath)).isFile()) throw new Error('Package import export does not resolve to a file.');
+  return canonicalTargetPath;
+}
 
 interface HistoryCompactionUsage {
   tokens: number | null;
@@ -539,18 +586,16 @@ type CompactionPolicySession = Pick<SourceSdk.AgentSession,
 export type InterruptedContinuationTail =
   | 'aborted-assistant'
   | 'overflow-assistant'
+  | 'failed-assistant'
+  | 'dangling-assistant'
   | 'open-provider-turn'
   | 'completed-assistant';
 
-/** Classify the transcript boundaries a zero-prompt continuation can resume
- * from. If the provider had started a response, agent-core retains an aborted
- * assistant. If interruption won before the next response started (including
- * after tools completed), the context still ends at a user/tool-result message.
- * A settled turn can also end at a normal completed assistant reply (a stop, or
- * a length stop with delivered output and no dangling tool calls); continuing
- * keeps that reply in the provider context instead of removing it. All are
- * valid zero-prompt continuation points. Arbitrary provider errors that are
- * not classified as context overflow remain non-continuable. */
+/** Any nonempty idle context can continue without a new user message.
+ * Failed or dangling assistant tails are omitted through the public source
+ * decision API; completed replies and custom-message tails remain in context.
+ * Provider transformation can synthesize orphan tool results, but dropping the
+ * dangling tail instead retries from the last valid state without replaying it. */
 export function classifyInterruptedContinuationTail(
   messages: unknown,
   contextWindow?: number,
@@ -560,13 +605,13 @@ export function classifyInterruptedContinuationTail(
   if (!last || typeof last !== 'object') return undefined;
   const role = (last as { role?: unknown }).role;
   if (role === 'user' || role === 'toolResult') return 'open-provider-turn';
-  if (role !== 'assistant') return undefined;
+  if (role !== 'assistant') return 'open-provider-turn';
   const assistant = last as ContinuationAssistantMessage;
   if (assistant.stopReason === 'aborted') return 'aborted-assistant';
   if (isContextOverflowMessage(assistant as MessageLike, contextWindow)) return 'overflow-assistant';
-  if ((assistant.stopReason === 'stop' || assistant.stopReason === 'length')
-      && !hasAssistantToolCall(assistant)) return 'completed-assistant';
-  return undefined;
+  if (assistant.stopReason === 'error') return 'failed-assistant';
+  if (hasAssistantToolCall(assistant)) return 'dangling-assistant';
+  return 'completed-assistant';
 }
 
 function readLiveHistoryCompactionSettings(): HistoryCompactionSettings | undefined {
@@ -745,6 +790,9 @@ async function createCustomizedCompaction(
 /** Source factories preserve authoritative typed ownership and policy options. */
 export type SourceArtifactSdkModule = Omit<typeof SourceSdk,
   'createAgentSession' | 'createAgentSessionFromServices' | 'createAgentSessionRuntime'> & {
+  getProviderRuntimeBuiltinModel?: (provider: string, id: string) => import('../../../model-providers/runtime/contracts').NativeRuntimeModel | undefined;
+  /** Loader-owned facade, preserving the verified artifact's native AuthStorage. */
+  createProviderManagementAuth?: (credentialFile: string) => ProviderManagementAuthPort;
   createAgentSession: (options?: SourceSdk.CreateAgentSessionOptions) => Promise<SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>>;
   createAgentSessionFromServices: (options: SourceSdk.CreateAgentSessionFromServicesOptions) => Promise<SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>>;
   createAgentSessionRuntime: (factory: SourceSdk.CreateAgentSessionRuntimeFactory, options: SourceSdk.CreateAgentSessionRuntimeOptions) =>
@@ -884,7 +932,38 @@ async function loadSelectedSdk(sdkPath: string, mode: SdkLoadMode): Promise<Sour
       };
     },
   });
-  const adapted = { ...exports, SessionManager: managerFacade };
+  // Resolve the public model API from this verified SDK's own dependency graph.
+  // require.resolve uses CommonJS conditions, but this public entry is import-only.
+  if (typeof nativeFindPackageJSON !== 'function') {
+    throw new Error('The running Node.js does not provide native module.findPackageJSON (requires Node.js >=22.19).');
+  }
+  const aiPackageJson = nativeFindPackageJSON('@earendil-works/pi-ai', pathToFileURL(path.join(verifiedPath, 'package.json')));
+  if (!aiPackageJson) throw new Error('Verified SDK dependency graph is missing @earendil-works/pi-ai package metadata.');
+  const aiMetadata = JSON.parse(await readFile(aiPackageJson, 'utf8')) as {
+    exports?: { './compat'?: { import?: unknown } };
+  };
+  const compatTarget = aiMetadata.exports?.['./compat']?.import;
+  if (typeof compatTarget !== 'string' || !compatTarget.startsWith('./')) {
+    throw new Error('Verified SDK @earendil-works/pi-ai must declare a relative ./compat import export.');
+  }
+  const compatUrl = new URL(compatTarget, pathToFileURL(aiPackageJson));
+  let canonicalCompatPath: string;
+  try {
+    canonicalCompatPath = await resolveContainedPackageImport(path.dirname(aiPackageJson), compatUrl);
+  } catch (error) {
+    throw new Error(`Invalid verified SDK @earendil-works/pi-ai ./compat export: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const publicAi = await dynamicImport(pathToFileURL(canonicalCompatPath).href) as { getModels: typeof PublicGetModels };
+  const NativeAuthStorage = exports.AuthStorage as typeof SourceSdk.AuthStorage;
+  const adapted = { ...exports, SessionManager: managerFacade,
+    getProviderRuntimeBuiltinModel: (provider: string, id: string) => {
+      const model = publicAi.getModels(provider as Parameters<typeof PublicGetModels>[0]).find(model => model.provider === provider && model.id === id);
+      return model ? structuredClone(model) : undefined;
+    },
+    createProviderManagementAuth: (credentialFile: string): ProviderManagementAuthPort =>
+      createPiProviderAuth(NativeAuthStorage, credentialFile,
+        provider => provider === 'github-copilot' ? publicAi.getModels('github-copilot') : []),
+  };
   if (mode.surface === 'cold') return adapted as unknown as ColdCoordinatorSdkModule;
   const source = exports as unknown as typeof SourceSdk;
   if (typeof source.createAgentSession !== 'function'

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { toErrorMessage } from '../../../lib/structured-logging/error-message.js';
 import { BackendError } from './server-io.js';
+import { replayOperation } from './operation-replay.js';
 
 export interface InterruptOperationResult {
   interrupted: boolean;
@@ -42,10 +43,7 @@ export class InterruptOperationLedger {
   ): Promise<InterruptOperationResult> {
     const existing = this.entries.get(operationId);
     if (existing) {
-      this.assertIntent(operationId, existing.intentFingerprint, intentFingerprint);
-      if (existing.state === 'pending') return existing.promise;
-      if (existing.state === 'accepted') return Promise.resolve(existing.result);
-      return Promise.reject(new BackendError(existing.code, existing.message));
+      return replayOperation(operationId, intentFingerprint, existing, 'interrupt');
     }
 
     const promise = Promise.resolve().then(execute).then((result) => {
@@ -83,13 +81,6 @@ export class InterruptOperationLedger {
     };
   }
 
-  private assertIntent(operationId: string, expected: string, actual: string): void {
-    if (expected === actual) return;
-    throw new BackendError(
-      'OPERATION_INTENT_MISMATCH',
-      `Operation ${operationId} was already used for a different interrupt intent.`,
-    );
-  }
 }
 
 export function canonicalInterruptIntentFingerprint(sessionPath: string): string {

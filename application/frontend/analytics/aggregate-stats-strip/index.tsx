@@ -8,7 +8,6 @@ import { useState } from 'preact/hooks';
 import { PROVIDER_UNLIMITED_CONCURRENCY } from '../../../lib/protocol/provider-concurrency.js';
 import { concurrencySourceLabel } from '../../../../lib/concurrency-config.js';
 import type {
-  AggregateLastRun,
   AggregateProductivityStats,
   AggregateProviderCost,
   AggregateSeriesPoint,
@@ -20,7 +19,6 @@ import { formatCompactTokens } from '../../lib/formatting/format-tokens';
 import { cx } from '../../lib/components/cx';
 import { Tooltip } from '../../lib/components/tooltip';
 import { StackedAreaChart } from '../stacked-area-chart';
-import { Sparkline } from '../sparkline';
 import { colorsFor } from '../chart-colors';
 import { Num } from './num';
 
@@ -28,11 +26,11 @@ import { Num } from './num';
  * Thin status strip anchored at the bottom of the panel (below the composer).
  * Focused on **recent + current** activity over long-term totals:
  *
- *   today $X · wk $Y · N tabs
+ *   tdy $X · wk $Y · N open
  *
  * Each segment's tooltip is a **rich** tooltip (JSX rendered into an
  * out-of-tree host via the `Tooltip` component's `contentNode`): the numeric
- * segments (today/week cost, tokens, last run, sessions) carry a
+ * segments (today/week cost, tokens, sessions) carry a
  * small timeseries graph — a stacked-area chart with per-provider bands and a
  * per-model breakdown on hover — while the live-state segments (provider gate)
  * use richly-formatted text. Custom tooltips are used
@@ -63,10 +61,13 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     todayOutputTokens,
     runningSessionCount,
     openTabCount,
-    lastRun,
   } = stats;
 
   const running = runningSessionCount > 0;
+  const visibleProviders = stats.providerGate.providers.filter((p) =>
+    p.activeRequests > 0
+    && p.maxConcurrentRequests !== PROVIDER_UNLIMITED_CONCURRENCY
+    && Number.isFinite(p.maxConcurrentRequests));
 
   return (
     <div
@@ -81,7 +82,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
             tabIndex={0}
             aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
           >
-            today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+            tdy <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
           </span>
         </Tooltip>
         <Sep />
@@ -105,31 +106,16 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
             {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
           </span>
         </Tooltip>
-        {lastRun && (
-          <>
-            <Sep />
-            <Tooltip contentNode={lastRunTooltipNode(lastRun)} placement="top" freezeWhileVisible richRole="region">
-              <span
-                class="aggregate-strip-seg"
-                tabIndex={0}
-                aria-label={`Latest completed run across all sessions: cost ${formatLastRunCost(lastRun.cost)}, duration ${formatLastRunDuration(lastRun.durationMs)}. Focus for model, token, and timing details.`}
-              >
-                last <span class="aggregate-strip-num aggregate-strip-cost">{formatLastRunCost(lastRun.cost)}</span>
-                <span class="aggregate-strip-num aggregate-strip-dur">{formatLastRunDuration(lastRun.durationMs)}</span>
-              </span>
-            </Tooltip>
-          </>
-        )}
-        {stats.providerGate.enabled && stats.providerGate.providers.length > 0 && (
+        {stats.providerGate.enabled && visibleProviders.length > 0 && (
           <>
             <Sep />
             <Tooltip contentNode={providerGateTooltipNode(stats.providerGate)} placement="top" freezeWhileVisible richRole="region">
               <span
                 class="aggregate-strip-seg aggregate-strip-providers"
                 tabIndex={0}
-                aria-label={`Provider concurrency: ${stats.providerGate.providers.map((p) => `${p.provider} ${p.activeRequests} of ${providerLimitLabel(p.maxConcurrentRequests)} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
+                aria-label={`Provider concurrency: ${visibleProviders.map((p) => `${p.provider} ${p.activeRequests} of ${providerLimitLabel(p.maxConcurrentRequests)} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
               >
-                {stats.providerGate.providers.map((p, i) => (
+                {visibleProviders.map((p, i) => (
                   <span
                     key={p.provider}
                     class={cx(
@@ -293,7 +279,6 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     seriesSignature(s.todayInputTokenSeries),
     seriesSignature(s.todayTokenSeries),
     seriesSignature(s.weekCostSeries),
-    s.lastRun ? `${s.lastRun.generationId ?? ''}:${s.lastRun.executionId ?? ''}:${s.lastRun.rootSessionId ?? ''}:${s.lastRun.sourceKey ?? ''}:${s.lastRun.outcome ?? ''}:${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.startedAt}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.provider}:${s.lastRun.inputTokens}:${s.lastRun.outputTokens}:${s.lastRun.usageCoverage ?? ''}:${s.lastRun.attributionCoverage ?? ''}:${s.lastRun.turnSeriesCoverage ?? ''}:${s.lastRun.turnSeries.map((t) => `${t.ms}:${t.outputTokens}`).join(',')}` : '',
     s.providerGate.enabled,
     s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.maxConcurrentRequestsSource ?? ''}:${p.afterburnSeconds}:${p.queueWaitSeconds ?? ''}:${p.paused}:${p.pausedUntilMs}:${p.strikeCount}`).join(','),
     s.providerGate.subagentConcurrency ? [
@@ -340,37 +325,6 @@ function userInputCharsNode(p: AggregateProductivityStats): JSX.Element {
 function userInputSegmentAriaLabel(p: AggregateProductivityStats): string {
   const coverage = userInputTrackingKnown(p) ? 'fully tracked' : 'a lower bound because coverage is incomplete';
   return `Today's adjusted user input: ${userInputCharsLabel(p)} characters, ${coverage}. Focus for Today and 7-day character-volume details.`;
-}
-
-/** Compact duration: `45s` / `1.2m` / `2.3h` (0 → `0s`). */
-function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '0s';
-  const sec = ms / 1000;
-  if (sec < 60) return `${Math.round(sec)}s`;
-  const min = sec / 60;
-  if (min < 60) return `${trimDec(min)}m`;
-  const hr = min / 60;
-  return `${trimDec(hr)}h`;
-}
-
-function formatLastRunCost(cost: number | null): string {
-  return cost === null ? '—' : formatCostAdaptive(cost);
-}
-
-function formatLastRunDuration(durationMs: number | null): string {
-  return durationMs === null ? '—' : formatDuration(durationMs);
-}
-
-function formatLastRunTokens(tokens: number | string | null): string {
-  if (tokens === null) return '—';
-  if (typeof tokens === 'number') return formatCompactTokens(tokens);
-  try {
-    const parsed = BigInt(tokens);
-    const safe = Number(parsed);
-    return Number.isSafeInteger(safe) ? formatCompactTokens(safe) : parsed.toString();
-  } catch {
-    return '—';
-  }
 }
 
 function trimDec(n: number): string {
@@ -611,31 +565,6 @@ function TokensTooltip({ stats }: { stats: AggregateStats }): JSX.Element {
           models: modelValuesForProvider(series, provider.provider, formatCompactTokens),
         }))} />
       )}
-    </div>
-  );
-}
-
-function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
-  const modelLine = r.modelId
-    ? `${r.modelId}  (${r.provider ?? 'provider unavailable'})`
-    : `Provider: ${r.provider ?? 'unavailable'}`;
-  const coverageLine = [
-    r.usageCoverage ? `usage ${r.usageCoverage}` : null,
-    r.attributionCoverage ? `attribution ${r.attributionCoverage}` : null,
-    r.turnSeriesCoverage === 'unavailable' ? 'turn series unavailable' : null,
-  ].filter((line): line is string => line !== null).join(' · ');
-  const sourceBounds = [r.startedAt, r.endedAt].every((value) => value !== null)
-    ? `${r.startedAt} → ${r.endedAt}`
-    : 'source timing unavailable';
-  return (
-    <div class="rich-tooltip">
-      <div class="rich-tooltip-head">
-        <span>Latest completed run · all sessions</span>
-        <span class="rich-tooltip-head-value">{formatLastRunCost(r.cost)}</span>
-      </div>
-      <div class="rich-tooltip-sub">{formatLastRunDuration(r.durationMs)}  ·  ↓{formatLastRunTokens(r.inputTokens)} in  ↑{formatLastRunTokens(r.outputTokens)} out</div>
-      {r.turnSeries.length > 0 && <Sparkline data={r.turnSeries.map((t) => ({ ms: t.ms, value: t.outputTokens }))} />}
-      <div class="rich-tooltip-sub">{[modelLine, sourceBounds, coverageLine].filter(Boolean).join('\n')}</div>
     </div>
   );
 }

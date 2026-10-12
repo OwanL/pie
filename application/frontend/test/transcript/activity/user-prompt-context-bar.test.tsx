@@ -95,6 +95,154 @@ function previewButton(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+test('sequential navigation follows target starts while preview remains offscreen-only', () => {
+  const container = document.createElement('div');
+  const metrics = { scrollTop: 0, scrollHeight: 700, clientHeight: 100 };
+  const element = makeScrollElement(metrics);
+  element.style.paddingTop = '6px';
+  const rows = [
+    messageRow(userMessage('first', 'first')),
+    messageRow(userMessage('assistant', '', { role: 'assistant' })),
+    messageRow(userMessage('image', '', { userParts: [{ kind: 'image', dataBase64: 'abc', mimeType: 'image/png' }] })),
+    messageRow(userMessage('queued', 'queued', { status: 'queued' })),
+  ];
+  const located: number[] = [];
+  const button = (name: string) => {
+    const result = container.querySelector<HTMLButtonElement>(`button[aria-label="${name} prompt"]`);
+    assert.ok(result);
+    assert.equal(result.title, `${name} prompt`);
+    return result;
+  };
+  renderBar(container, {
+    rows, metrics, scrollElement: element,
+    measurements: [{ start: 0, end: 40 }, { start: 50, end: 90 }, { start: 100, end: 140 }, { start: 200, end: 240 }],
+    onLocate: (index) => {
+      located.push(index);
+      metrics.scrollTop = [0, 50, 100, 200][index]!;
+      element.dispatchEvent(new Event('scroll'));
+    },
+  });
+  assert.equal(button('Previous').disabled, true);
+  assert.equal(button('Next').disabled, false);
+  assert.equal(container.querySelector('.transcript-prompt-context-preview'), null, 'first visible prompt is not duplicated');
+  assert.equal(container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim(), '1 / 3');
+  act(() => button('Next').click());
+  assert.deepEqual(located, [2]);
+  assert.equal(previewButton(container).textContent, 'first');
+  assert.equal(container.querySelector('.transcript-prompt-navigation-position')?.getAttribute('aria-label'), 'Prompt 2 of 3');
+  act(() => button('Next').click());
+  assert.deepEqual(located, [2, 3]);
+  assert.equal(previewButton(container).textContent, '(1 image)', 'queued target is still visible');
+  assert.equal(button('Next').disabled, true);
+  assert.equal(button('Previous').disabled, false);
+  assert.equal(container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim(), '3 / 3');
+  act(() => button('Previous').click());
+  assert.equal(previewButton(container).textContent, 'first');
+  act(() => button('Previous').click());
+  assert.deepEqual(located, [2, 3, 2, 0]);
+  assert.equal(button('Previous').disabled, true, 'loaded beginning bound');
+  assert.equal(container.querySelector('.transcript-prompt-context-preview'), null);
+  render(null, container);
+});
+
+for (const clientHeight of [100, 400]) {
+  test(`clamped navigation retains requested identity with viewport height ${clientHeight}`, () => {
+    const container = document.createElement('div');
+    const metrics = { scrollTop: 0, scrollHeight: 300, clientHeight };
+    const element = makeScrollElement(metrics);
+    const viewport = document.createElement('div');
+    viewport.className = 'transcript-viewport';
+    viewport.append(element);
+    const rail = document.createElement('button');
+    viewport.append(rail);
+    const rows = ['first', 'second', 'last'].map((id) => messageRow(userMessage(id, id)));
+    const measurements = [{ start: 0, end: 40 }, { start: 100, end: 140 }, { start: 250, end: 290 }];
+    const located: number[] = [];
+    const options = {
+      rows, measurements, metrics, scrollElement: element,
+      onLocate: (index: number) => {
+        located.push(index);
+        metrics.scrollTop = Math.max(0, Math.min(measurements[index]!.start, metrics.scrollHeight - clientHeight));
+        element.dispatchEvent(new Event('scroll'));
+      },
+    };
+    renderBar(container, options);
+    const button = (direction: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${direction} prompt"]`)!;
+    const position = () => container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim();
+    const click = (direction: string) => act(() => button(direction).click());
+    click('Next');
+    assert.equal(position(), '2 / 3');
+    click('Next');
+    assert.equal(position(), '3 / 3');
+    click('Next');
+    assert.deepEqual(located, [1, 2], 'ending bound does not repeat the clamped target');
+    if (clientHeight === 400) assert.equal(container.querySelector('.transcript-prompt-context-preview'), null);
+    else assert.equal(previewButton(container).textContent, 'second', 'preview remains metrics based');
+    click('Previous');
+    click('Previous');
+    click('Previous');
+    assert.deepEqual(located, [1, 2, 1, 0], 'beginning bound');
+    assert.equal(position(), '1 / 3');
+
+    for (const event of [new Event('wheel'), new Event('touchstart'), new Event('pointerdown'), new KeyboardEvent('keydown', { key: 'PageDown' })]) {
+      click('Next');
+      click('Next');
+      assert.equal(position(), '3 / 3');
+      act(() => { rail.dispatchEvent(event); });
+      assert.equal(position(), clientHeight === 400 ? '1 / 3' : '2 / 3', 'manual viewport input clears cursor');
+      act(() => {
+        metrics.scrollTop = 0;
+        element.dispatchEvent(new Event('scroll'));
+      });
+      assert.equal(position(), '1 / 3', 'subsequent manual scroll follows metrics');
+    }
+    click('Next');
+    click('Next');
+    renderBar(container, { ...options, rows: rows.slice(0, 2) });
+    assert.equal(position(), clientHeight === 400 ? '1 / 2' : '2 / 2', 'removed identity invalidates cursor');
+    render(null, container);
+  });
+}
+
+test('Enter clears the prompt cursor only for viewport activations, including the rail', () => {
+  const container = document.createElement('div');
+  const metrics: ElementMetrics = { scrollTop: 0, scrollHeight: 400, clientHeight: 100 };
+  const element = makeScrollElement(metrics);
+  const viewport = document.createElement('div');
+  viewport.className = 'transcript-viewport';
+  viewport.append(element, container);
+  const latest = document.createElement('button');
+  const rail = document.createElement('button');
+  const input = document.createElement('input');
+  viewport.append(latest, rail, input);
+  const rows = ['first', 'second', 'last'].map((id) => messageRow(userMessage(id, id)));
+  const measurements = [{ start: 0, end: 40 }, { start: 100, end: 140 }, { start: 250, end: 290 }];
+  renderBar(container, { rows, measurements, metrics, scrollElement: element });
+  const navigateToLast = () => {
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Next prompt"]')!.click());
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Next prompt"]')!.click());
+    assert.equal(container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim(), '3 / 3');
+  };
+  const position = () => container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim();
+  const enter = (target: HTMLElement) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+
+  navigateToLast();
+  metrics.scrollTop = 0;
+  enter(input);
+  assert.equal(position(), '3 / 3', 'typing Enter does not discard the explicit prompt target');
+
+  enter(latest);
+  assert.equal(position(), '1 / 3', 'Enter activation of Jump to latest clears the explicit target');
+
+  navigateToLast();
+  metrics.scrollTop = 0;
+  enter(rail);
+  assert.equal(position(), '1 / 3', 'Enter activation of a rail marker clears the explicit target');
+
+  render(null, container);
+  container.remove();
+});
+
 test('same-range scrolling never duplicates a visible prompt and the preview locates it', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -134,6 +282,8 @@ test('same-range scrolling never duplicates a visible prompt and the preview loc
     element.dispatchEvent(new Event('scroll'));
   });
   assert.match(previewButton(container).textContent ?? '', /first prompt/);
+  assert.equal(container.querySelector('.transcript-prompt-navigation-position')?.textContent?.trim(), '2 / 2', 'same-range navigation changes even with unchanged context');
+  assert.equal(container.querySelector<HTMLButtonElement>('button[aria-label="Next prompt"]')?.disabled, true);
 
   // Once the second prompt is fully above the viewport, it becomes the context.
   act(() => {
@@ -306,7 +456,23 @@ test('initial positioning keeps the bar reserved but hidden while a prompt exist
   assert.ok(bar, 'positioning with a selected prompt reserves the bar');
   assert.ok(bar.classList.contains('is-hidden'));
   assert.equal(bar.getAttribute('aria-hidden'), 'true');
+  assert.equal(bar.querySelectorAll('button').length, 3);
+  for (const button of bar.querySelectorAll('button')) assert.equal(button.disabled, true);
   assert.equal(bar.querySelector('.transcript-header-label'), null, 'the user-style bubble needs no redundant heading');
+
+  metrics.scrollTop = 0;
+  const navigationOnlyHidden = renderBar(container, {
+    rows: [messageRow(userMessage('first', 'first')), messageRow(userMessage('second', 'second'))],
+    measurements: [{ start: 0, end: 40 }, { start: 100, end: 140 }],
+    metrics,
+    hidden: true,
+    scrollElement: makeScrollElement(metrics),
+  });
+  assert.ok(navigationOnlyHidden, 'navigation controls reserve the hidden bar');
+  assert.ok(navigationOnlyHidden.classList.contains('is-hidden'));
+  assert.equal(navigationOnlyHidden.querySelector('.transcript-prompt-context-preview'), null);
+  assert.equal(navigationOnlyHidden.querySelectorAll('button').length, 2);
+  for (const button of navigationOnlyHidden.querySelectorAll('button')) assert.equal(button.disabled, true);
 
   const emptyHidden = renderBar(container, {
     rows: [],
@@ -341,6 +507,7 @@ test('short prompts compact the original row while long prompts keep its full he
       if (this.classList.contains('transcript-prompt-context-preview')) {
         return (this.textContent?.length ?? 0) * 8 + 16;
       }
+      if (this.classList.contains('transcript-prompt-navigation')) return 100;
       return 0;
     },
   });
@@ -353,6 +520,14 @@ test('short prompts compact the original row while long prompts keep its full he
       scrollElement: element,
     });
     assert.ok(shortBar?.classList.contains('is-compact'));
+
+    const controlsBar = renderBar(container, {
+      rows: [messageRow(userMessage('medium', 'A medium prompt'))],
+      measurements: [{ start: 0, end: 40 }],
+      metrics,
+      scrollElement: element,
+    });
+    assert.equal(controlsBar?.classList.contains('is-compact'), false, 'navigation width counts toward compact threshold');
 
     const longBar = renderBar(container, {
       rows: [messageRow(userMessage('long', 'A prompt long enough to occupy well over half of the available context row width.'))],

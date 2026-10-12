@@ -14,6 +14,7 @@ import { MIN_PROMPT_LENGTH } from "../../agent-instructions/skill-selection/skil
 export function shouldSkipPruning(
 	event: BeforeAgentStartEvent,
 	activeConfig: PruningConfig,
+	afterCompaction = false,
 ): { skip: boolean; reason?: "disabled-by-toggle" | "off" | "too-short" | "subagent" | "main-agent-disabled" } {
 	if (isExtensionDisabledByToggle("skill-pruner")) {
 		return { skip: true, reason: "disabled-by-toggle" };
@@ -29,7 +30,7 @@ export function shouldSkipPruning(
 	if (!isInSubagentContext() && activeConfig.mainAgentEnabled === false) {
 		return { skip: true, reason: "main-agent-disabled" };
 	}
-	if (event.prompt.trim().length < MIN_PROMPT_LENGTH && !(event.refreshPruning && !isInSubagentContext())) {
+	if (event.prompt.trim().length < MIN_PROMPT_LENGTH && !afterCompaction && !(event.refreshPruning && !isInSubagentContext())) {
 		return { skip: true, reason: "too-short" };
 	}
 	return { skip: false };
@@ -56,6 +57,7 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 		mainAgentEnabled: input.mainAgentEnabled ?? true,
 		subagentEnabled: input.subagentEnabled ?? true,
 		followUpEnabled: input.followUpEnabled ?? false,
+		refreshAfterCompaction: input.refreshAfterCompaction ?? true,
 		skills: {
 			strategy: input.skills.strategy,
 			ceiling: input.skills.ceiling,

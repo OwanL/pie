@@ -87,6 +87,11 @@ export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, tool
           checked={pruningSettings.followUpEnabled ?? false}
           onChange={() => onSetPruningSettings({ followUpEnabled: !(pruningSettings.followUpEnabled ?? false) })}
         />
+        <SettingCheckbox
+          label="Refresh tool/skill pruning after history compaction"
+          checked={pruningSettings.refreshAfterCompaction ?? true}
+          onChange={() => onSetPruningSettings({ refreshAfterCompaction: !(pruningSettings.refreshAfterCompaction ?? true) })}
+        />
         <Stepper
           label="Skill limit"
           value={pruningSettings.skillCeiling}

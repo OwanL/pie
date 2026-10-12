@@ -35,6 +35,7 @@ import type {
   WebviewToHostMessage,
   HostDetailRoute,
   HostToWebviewMessage,
+  RendererCommandContext,
 } from '../protocol/index.js';
 import { isThinkingLevel, THINKING_LEVEL_SET } from '../protocol/thinking-level.js';
 import { isFiniteNumber } from '../../../lib/validation/type-guards.js';
@@ -70,6 +71,14 @@ export type ValidationResult<T> =
   | { ok: true; value: T }
   | { ok: false; reason: string };
 
+/** Host microphone capability is transport context, never a renderer field.
+ *  VS Code is a native host surface; browsers require explicit loopback-server
+ *  authorization supplied by the trusted transport. */
+export function isDictationMicrophoneAllowed(context: RendererCommandContext | undefined): boolean {
+  return context?.kind === 'vscode'
+    || (context?.kind === 'browser' && context.hostMicrophoneAllowed === true);
+}
+
 function fail(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
 }
@@ -80,6 +89,28 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isString(value: unknown): value is string {
   return typeof value === 'string';
+}
+
+function boundedProviderString(value: unknown, max = 4096): value is string { return typeof value === 'string' && utf8ByteLength(value) <= max; }
+function isProviderSetupCommand(value: unknown): boolean {
+  if (!isObject(value) || !isString(value.type)) return false;
+  const keys: Record<string, string[]> = {
+    open: [], close: [], back: [], add: [], save: [], cancel: [], reload: [],
+    choose: ['kind', 'definitionId'], 'auth-method': ['method'], models: ['id'], edit: ['id'], refresh: ['id'],
+    change: ['field', 'value'], enabled: ['value'], credential: ['value'],
+    'model-preference': ['id', 'field', 'value'], 'manual-model-add': ['id'],
+  };
+  if (!Object.hasOwn(keys, value.type) || !hasOnlyKeys(value, ['type', ...keys[value.type]])) return false;
+  switch (value.type) {
+    case 'choose': return ['chatgpt', 'openai', 'anthropic', 'copilot', 'custom'].includes(value.kind as string) && (value.definitionId === undefined || boundedProviderString(value.definitionId, 128));
+    case 'auth-method': return ['oauth', 'api-key', 'local'].includes(value.method as string);
+    case 'models': case 'edit': case 'refresh': case 'manual-model-add': return boundedProviderString(value.id, 256) && value.id.length > 0;
+    case 'change': return ['id', 'api', 'baseUrl', 'environmentName'].includes(value.field as string) && boundedProviderString(value.value);
+    case 'enabled': return typeof value.value === 'boolean';
+    case 'credential': return ['default', 'saved', 'environment'].includes(value.value as string);
+    case 'model-preference': return boundedProviderString(value.id, 256) && ['visible', 'subagentEligible'].includes(value.field as string) && ['unset', 'yes', 'no'].includes(value.value as string);
+    default: return true;
+  }
 }
 
 function isOptionalString(value: unknown): value is string | undefined {
@@ -474,7 +505,7 @@ function validatePruningSettingsPatch(value: unknown): value is Partial<PruningS
       if (v !== undefined && (typeof v !== 'string' || v.length === 0)) return false;
     } else if (key === 'thinkingLevel') {
       if (v !== undefined && (typeof v !== 'string' || !THINKING_LEVEL_SET.has(v as ThinkingLevel))) return false;
-    } else if (key === 'mainAgentEnabled' || key === 'subagentEnabled' || key === 'followUpEnabled') {
+    } else if (key === 'mainAgentEnabled' || key === 'subagentEnabled' || key === 'followUpEnabled' || key === 'refreshAfterCompaction') {
       if (v !== undefined && typeof v !== 'boolean') return false;
     } else {
       return false;
@@ -658,6 +689,32 @@ export function validateWebviewToHostMessage(
   if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail(`${type}: invalid \`viewGeneration\``);
 
   switch (type) {
+    case 'dictationStart':
+      if (!hasOnlyKeys(value, ['type', 'sessionPath', 'recordingId', 'draftText', 'selectionStart', 'selectionEnd', 'viewGeneration', 'clientCommandId'])) return fail('dictationStart: unknown fields');
+      if (!(value.sessionPath === null || (isString(value.sessionPath) && value.sessionPath.length > 0))) return fail('dictationStart: invalid `sessionPath`');
+      if (!isString(value.recordingId) || value.recordingId.length === 0 || utf8ByteLength(value.recordingId) > 128) return fail('dictationStart: invalid `recordingId`');
+      if (!isString(value.draftText) || utf8ByteLength(value.draftText) > 256 * 1024) return fail('dictationStart: invalid `draftText`');
+      if (!isNonNegativeSafeInteger(value.selectionStart) || !isNonNegativeSafeInteger(value.selectionEnd)
+        || value.selectionStart > value.selectionEnd || value.selectionEnd > value.draftText.length) return fail('dictationStart: invalid selection');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'dictationStop':
+    case 'dictationCancel':
+      if (!hasOnlyKeys(value, ['type', 'sessionPath', 'recordingId', 'viewGeneration', 'clientCommandId'])) return fail(`${type}: unknown fields`);
+      if (!isString(value.sessionPath) || value.sessionPath.length === 0) return fail(`${type}: invalid \`sessionPath\``);
+      if (!isString(value.recordingId) || value.recordingId.length === 0 || utf8ByteLength(value.recordingId) > 128) return fail(`${type}: invalid \`recordingId\``);
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'providerManagementCommand':
+      if (!hasOnlyKeys(value, ['type', 'command', 'viewGeneration', 'clientCommandId']) || !isProviderSetupCommand(value.command)) return fail('providerManagementCommand: invalid command');
+      return { ok: true, value: value as WebviewToHostMessage };
+    case 'providerManagementConnect':
+      if (!hasOnlyKeys(value, ['type', 'method', 'apiKey', 'viewGeneration', 'clientCommandId']) || !['signin', 'api-key', 'local'].includes(value.method as string)
+        || !(value.apiKey === undefined || boundedProviderString(value.apiKey, 16384)) || (value.method !== 'api-key' && value.apiKey !== undefined)) return fail('providerManagementConnect: invalid request');
+      return { ok: true, value: value as WebviewToHostMessage };
+    case 'providerManagementAuthResponse':
+      if (!hasOnlyKeys(value, ['type', 'operationId', 'promptId', 'value', 'viewGeneration', 'clientCommandId']) || !boundedProviderString(value.operationId, 128) || !boundedProviderString(value.promptId, 128) || !boundedProviderString(value.value, 16384)) return fail('providerManagementAuthResponse: invalid request');
+      return { ok: true, value: value as WebviewToHostMessage };
     case 'ready':
     case 'refreshState':
       if (!isOptionalString(value.assetVersion)) return fail(`${type}: invalid \`assetVersion\``);

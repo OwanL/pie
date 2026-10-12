@@ -3,6 +3,7 @@ import * as path from 'node:path';
 
 import { FileDiffService } from '../file-changes/file-diff-service.js';
 import { MessageRouter } from '../conversation-state/message-router.js';
+import { DictationService } from '../dictation/service.js';
 
 import { getDataOutcomesRootPath } from '../../../analytics/legacy/run-analytics/storage.js';
 import type { BackendClient } from '../agent-connection/client.js';
@@ -141,6 +142,7 @@ export class HostRuntime {
 
   private startupPromise: Promise<void> | null = null;
   private shutdownRequested = false;
+  private dictationPrewarmRequested = false;
   private shutdownPromise: Promise<void> | null = null;
   /** Coalesce command-palette, notice-action, and browser requests that can
    * arrive before the first restart projection disables renderer controls. */
@@ -193,6 +195,11 @@ export class HostRuntime {
     const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: process.env.PI_CODING_AGENT_DIR,
+    });
+    this.dictationService = new DictationService({
+      resolveLaunch: () => this.platform.backendStartup.resolveBackendLaunchPaths(),
+      helperScript: path.join(this.platform.getRuntimeOutputDirectory(), 'dictation-helper.js'),
+      cacheDirectory: path.join(dataPaths.cacheDir, 'speech-models'),
     });
     const analyticsWorkspaceId = this.platform.getWorkspaceAnalyticsId();
     const analyticsProcessGeneration = crypto.randomUUID();
@@ -548,6 +555,7 @@ export class HostRuntime {
           || this.browserServer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration),
       },
       () => this.analyticsRuntime.backendDescriptor(),
+      () => this.handleQuestionRequested(),
     );
 
     this.liveMembershipSync = new HostLiveMembershipSync(this.archState, {
@@ -642,8 +650,7 @@ export class HostRuntime {
       getViewState: () => this.buildViewState(),
       getRunningSessionCount: () => this.archState.sessions.runningSessionPaths.length,
       routeMessage: (msg, context) => this.messageRouter.handle(msg, context),
-      onRendererInvalidated: (rendererId, rendererGeneration) =>
-        this.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
+      onRendererInvalidated: (rendererId, rendererGeneration) => this.invalidateRenderer(rendererId, rendererGeneration),
       onLifecycle: (event) => this.handleBrowserServerLifecycle(event),
     });
 
@@ -784,13 +791,27 @@ export class HostRuntime {
         },
       },
       service: this.service,
+      getProviderManagementState: () => this.archState.providerManagement,
+      dictation: this.dictationService,
+      isDictationOwnerCurrent: (id) => !this.shutdownRequested && this.archState.dictation.recordingId === id && this.archState.dictation.capture !== null,
       statsService: this.statsService,
       dispatch: (event) => this.dispatchArchEvent(event),
       dispatchCommand: (event) => this.dispatchArchEvent(event),
       dispatchEvent: (event) => this.dispatchArchEvent(event),
     });
+    // Availability is host-owned initial state, not a runtime event: dispatching
+    // here schedules every renderer surface before standalone has wired its
+    // facade. Seed the pure state directly so the first snapshot is correct.
+    this.archState = {
+      ...this.archState,
+      dictation: {
+        ...this.archState.dictation,
+        available: process.platform === 'win32' && process.arch === 'x64',
+      },
+    };
   }
 
+  private readonly dictationService: DictationService;
   private readonly hooks: HostRuntimeHooks;
   private readonly tokenRateService: TokenRateService;
   private readonly aggregateStatsService: AggregateStatsService;
@@ -981,6 +1002,13 @@ export class HostRuntime {
     }
     const result = dispatch(this.archState, event);
     this.archState = result.state;
+    if (!stateBefore.settings.backendReady && this.archState.settings.backendReady
+      && !this.dictationPrewarmRequested && this.archState.dictation.available && !this.shutdownRequested) {
+      this.dictationPrewarmRequested = true;
+      void Promise.resolve().then(() => {
+        if (!this.shutdownRequested) return this.dictationService.prewarm();
+      }).catch(() => { /* Optional background preparation never changes host readiness. */ });
+    }
     if (traceEnabled) {
       const trace = eventTraceMetadata(event);
       recordLivePipelineTrace({
@@ -1023,7 +1051,8 @@ export class HostRuntime {
    * pure projection).
    */
   buildViewState(): ViewState {
-    const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
+    const traceEnabled = isLivePipelineTraceEnabled();
+    const traceStartedAt = traceEnabled ? performance.now() : 0;
     // Spread (do NOT mutate) so the memoized projection returned by
     // selectViewState is never corrupted: `tokenRateBySession` is host-side
     // and varies every tick independently of the cached signature, so override
@@ -1071,7 +1100,7 @@ export class HostRuntime {
       // `tokenRateBySession` so the pure projection stays service-free.
       deferredTriggers: this.service.getDeferredTriggers(),
     };
-    if (isLivePipelineTraceEnabled()) {
+    if (traceEnabled) {
       recordLivePipelineTrace({
         process: 'host',
         stage: 'host.projection.completed',
@@ -1081,7 +1110,19 @@ export class HostRuntime {
         transcriptCount: viewState.transcript.length,
       });
     }
-    return compactRendererViewState(viewState);
+    const compactionStartedAt = traceEnabled ? performance.now() : 0;
+    const rendererViewState = compactRendererViewState(viewState);
+    if (traceEnabled) {
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.renderer.compacted',
+        kind: 'success',
+        identifiers: viewState.activeSession?.path ? { session: viewState.activeSession.path } : undefined,
+        durationMs: Math.max(0, performance.now() - compactionStartedAt),
+        transcriptCount: rendererViewState.transcript.length,
+      });
+    }
+    return rendererViewState;
   }
 
   private projectBrowserServerViewState(): BrowserServerViewState {
@@ -1246,6 +1287,11 @@ export class HostRuntime {
   }
 
   /** Route an inbound renderer message through the message router. */
+  invalidateRenderer(rendererId: string, rendererGeneration: number): void {
+    this.service.unsubscribeRendererDetails(rendererId, rendererGeneration);
+    this.dispatchArchEvent({ kind: 'DictationRendererInvalidated', rendererId, rendererGeneration });
+  }
+
   async handleWebviewMessage(msg: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> {
     await this.messageRouter.handle(msg, context);
   }
@@ -1317,6 +1363,11 @@ export class HostRuntime {
     const suppressNotifications = this.archState.settings.prefs.suppressCompletionNotifications;
     const windowFocused = this.platform.notifications.isWindowFocused();
 
+    const volume = this.archState.settings.prefs.completionSoundVolume;
+    if (!suppressNotifications && volume > 0) {
+      this.broadcastNotificationSound({ type: 'playCompletionSound', volume });
+    }
+
     if (!shouldShowCompletionNotification({
       suppressNotifications,
       windowFocused,
@@ -1324,19 +1375,23 @@ export class HostRuntime {
       return;
     }
 
+    this.platform.requestWindowAttention();
+  }
+
+  private handleQuestionRequested(): void {
     const volume = this.archState.settings.prefs.completionSoundVolume;
     if (volume > 0) {
-      // Pair the completion chime with the window-flash alert. Fire-and-
-      // forget: a dropped delivery (webview hidden/not ready) is acceptable.
-      // The webview warms its AudioContext on the first user click so this
-      // plays from the non-gesture postMessage context.
-      this.platform.renderer.postImperative({
-        type: 'playCompletionSound',
-        volume,
-      });
+      this.broadcastNotificationSound({ type: 'playQuestionSound', volume });
     }
+  }
 
-    this.platform.requestWindowAttention();
+  private broadcastNotificationSound(message: HostToWebviewMessage): void {
+    this.platform.renderer.postImperative(message);
+    // VS Code has an independent sidebar renderer. Standalone's renderer
+    // facade already broadcasts through the browser hub, so don't double-send.
+    if (this.platform.supportsBrowserServerToggle === true) {
+      this.browserServer.postImperative(message);
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -1365,6 +1420,10 @@ export class HostRuntime {
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / renderer after dispose.
       this.effectRunner.dispose();
+      // Drain local microphone/model ownership before allowing runtime collection.
+      // A failed drain must not prevent the other owned services from cleaning up.
+      let dictationShutdownError: unknown;
+      try { await this.dictationService.shutdown(); } catch (error) { dictationShutdownError = error; }
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 
@@ -1392,6 +1451,9 @@ export class HostRuntime {
       // Coordinator exit still permits stop/manual restart, but forced or
       // unknown descendant teardown must not release immutable runtime files.
       // Report only after other owned teardown, including analytics, finishes.
+      if (dictationShutdownError || !this.dictationService.isLifetimeTeardownConfirmed()) {
+        throw new Error('Dictation runtime lifetime teardown is unconfirmed; generation lease must be retained.');
+      }
       if (!this.backend.isRuntimeLifetimeTeardownConfirmed()) {
         throw new Error('Backend runtime lifetime teardown is unconfirmed; generation lease must be retained.');
       }

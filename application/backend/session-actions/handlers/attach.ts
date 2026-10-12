@@ -488,6 +488,7 @@ interface AttachDeps {
 
 export function attach(
   backend: {
+    getGeneration: () => number;
     onEvent: (handler: (event: EventEnvelope) => void) => HostDisposable;
     onExit: (handler: (info: { code: number | null; stderr: string }) => void) => HostDisposable;
   },
@@ -539,7 +540,9 @@ export function attach(
       runningSessionPaths,
     });
     for (const event of backendExitEvents(runningSessionPaths, code, stderr, Date.now(), activityBySession)) {
-      deps.dispatchArch(event);
+      deps.dispatchArch(event.kind === 'BackendReadyChanged'
+        ? { ...event, backendGeneration: backend.getGeneration() }
+        : event);
     }
     deps.scheduleRender();
   });

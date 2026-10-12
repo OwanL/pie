@@ -177,6 +177,7 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFn: StreamFn;
+	public prepareModelRequest?: AgentLoopConfig["prepareModelRequest"];
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -454,6 +455,7 @@ export class Agent {
 					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
+			prepareModelRequest: this.prepareModelRequest,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {

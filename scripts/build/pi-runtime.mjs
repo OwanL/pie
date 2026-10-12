@@ -428,6 +428,12 @@ ${resolveNativeModifierHelper.toString()}
 assert.throws(()=>fetch('https://network-denied.invalid'),/Network denied/);
 const root=path.resolve(process.argv[2]), require=createRequire(path.join(root,'smoke-owner.cjs'));
 const resolve=(name,from=root)=>fileURLToPath(import.meta.resolve(name,pathToFileURL(path.join(from,'smoke-owner.mjs')).href));
+const within=(file,base)=>{const rel=path.relative(base,file);return rel===''||(!rel.startsWith('..'+path.sep)&&rel!=='..'&&!path.isAbsolute(rel));};
+function nativePackage(name,version){const entry=realpathSync(require.resolve(name));assert.ok(within(entry,root),name+' resolved outside runtime');let directory=path.dirname(entry);while(within(directory,root)){const manifest=path.join(directory,'package.json');if(existsSync(manifest)){const pkg=JSON.parse(require('node:fs').readFileSync(manifest,'utf8'));if(pkg.name===name){assert.equal(pkg.version,version,name+' version');return {entry,require:createRequire(entry)};}}const parent=path.dirname(directory);if(parent===directory)break;directory=parent;}throw new Error('Cannot resolve package manifest for '+name);}
+nativePackage('@picovoice/pvrecorder-node','1.2.9');
+const whisper=nativePackage('whisper-cpp-node','0.2.12');
+const strictNative=process.platform==='win32'&&process.arch==='x64';
+if(strictNative){const binary=realpathSync(whisper.require.resolve('@whisper-cpp-node/win32-x64/whisper.node'));assert.ok(within(binary,root),'Whisper binary resolved outside runtime');}
 const names=${JSON.stringify(PI_RUNTIME_PACKAGES)};const loaded={};
 for(const name of [...names,'@earendil-works/pi-ai/compat','@earendil-works/pi-ai/oauth','@earendil-works/pi-ai/providers/openai','typebox','typebox/compile','typebox/value']){const entry=resolve(name);assert.ok(entry.startsWith(root+path.sep),entry);loaded[name]=await import(pathToFileURL(entry).href);}
 const sdk=path.join(root,'node_modules/@earendil-works/pi-coding-agent');

@@ -201,14 +201,14 @@ test('wrapped source factory installs policies before context creation and adapt
   assert.strictEqual(receivedDecisions.at(-1), explicitDecision, 'typed source decisions remain supported');
 });
 
-test('wrapped continuation rejects unsupported Pie tails through the source decision API', async () => {
+test('wrapped continuation omits ordinary provider errors through the source decision API', async () => {
   const ordinaryError = assistant('error', 'provider rejected the request');
   const sourceSession = {
     messages: [ordinaryError],
     model: { contextWindow: 100 },
     sessionManager: { getBranch: () => [messageEntry('error-entry', ordinaryError)] },
     async continueAfterInterruption(decision: ContinueAfterInterruptionDecision) {
-      if (decision.type === 'unsupported') throw new Error(decision.reason);
+      assert.deepEqual(decision, { type: 'continue', omitEntryIds: ['error-entry'] });
     },
   } as unknown as AgentSession;
   const adapter = createSourceSdkPolicyAdapter({
@@ -218,5 +218,5 @@ test('wrapped continuation rejects unsupported Pie tails through the source deci
   const factory = adapter.wrapFactory(async () => ({ session: sourceSession }));
   const created = await factory({});
 
-  await assert.rejects(created.session.continueAfterInterruption(), /supported continuation point/u);
+  await created.session.continueAfterInterruption();
 });

@@ -33,7 +33,9 @@ import type {
   WebviewToHostMessage,
   WorkingTimeState,
 } from '../../lib/protocol/index.js';
+import { dictationActive, type DictationView } from '../../lib/protocol/dictation.js';
 import type { TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
+import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview.js';
 import { describeComposerInputSummary } from '../composer/inputs';
 import { ComposerAttachments } from '../composer/attachments';
 import { ComposerToolbar } from '../composer/toolbar';
@@ -51,6 +53,7 @@ export { SessionTabs } from '../session-tabs';
 export { AggregateStatsStrip } from '../analytics/aggregate-stats-strip';
 
 interface ComposerProps {
+  dictation?: DictationView;
   busy: boolean;
   capabilities?: SessionCapabilities;
   /** Optimistic one-frame "stopping…" mirror of an in-flight
@@ -85,6 +88,7 @@ interface ComposerProps {
   toolResultPruningSettings: ToolResultPruningSettings;
   sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
+  providerManagement?: ProviderSetupPreviewProps;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
@@ -146,6 +150,7 @@ interface ComposerProps {
 }
 
 function ComposerView({
+  dictation,
   busy,
   capabilities,
   interrupting,
@@ -173,6 +178,7 @@ function ComposerView({
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
+  providerManagement,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -263,8 +269,10 @@ function ComposerView({
 
   const {
     text,
+    toggleDictation,
     textareaRef,
     attachmentError,
+    dictationStartError,
     sendCurrentText,
     sendAsRetry,
     handleKeyDown,
@@ -274,6 +282,8 @@ function ComposerView({
     applyComposerTransfer,
     submitting,
   } = useComposerInput({
+    dictation,
+    commandsAvailable,
     busy: executionBusy,
     sendBlocked: interrupting || !commandsAvailable || operationBlocksSend,
     allowEmptySend: canContinue,
@@ -368,7 +378,9 @@ function ComposerView({
   const continueMode = canContinue
     && text.trim().length === 0
     && pendingComposerInputs.length === 0;
+  const visibleDictation = dictation?.sessionPath === sessionPath || !dictationActive(dictation) ? dictation : undefined;
   const canSend = commandsAvailable
+    && !dictationActive(visibleDictation)
     && !operationBlocksSend
     && (text.trim().length > 0 || pendingComposerInputs.length > 0 || continueMode)
     && !submitting.current;
@@ -378,6 +390,12 @@ function ComposerView({
   );
   const showAttachmentSummary = pendingComposerInputs.length > 1;
   const composerPlaceholder = 'Ask anything…';
+  const recording = commandsAvailable && dictation?.available && dictation.phase === 'recording'
+    && !!sessionPath && dictation.sessionPath === sessionPath;
+  // Ordinary speech is well below full-scale PCM. Expand quiet levels visually
+  // without changing the host's normalized RMS or its endpoint decisions.
+  const rawLevel = dictation?.audioLevel ?? 0;
+  const level = Number.isFinite(rawLevel) ? Math.min(1, Math.sqrt(Math.max(0, rawLevel)) * 2) : 0;
 
   return (
     <div class="composer-area flex shrink-0 flex-col gap-1.5 border-t border-border/50 bg-surface px-3 py-2 pb-2.5" ref={composerAreaRef}>
@@ -393,6 +411,7 @@ function ComposerView({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {recording && <div class="dictation-edge" aria-hidden="true" style={{ opacity: 0.22 + level * 0.58, '--dictation-position': `${20 + level * 60}%`, '--dictation-angle': `${90 + level * 40}deg` }} />}
         {retryStatus && (
           <div class="composer-retry-row flex items-center gap-2" role="status" aria-live="polite">
             <span class="composer-retry-label flex items-center gap-1.5">
@@ -449,6 +468,7 @@ function ComposerView({
             toolResultPruningSettings={toolResultPruningSettings}
             sessionTitlesSettings={sessionTitlesSettings}
             providerGateStats={providerGateStats}
+            providerManagement={providerManagement}
             onSetPrefs={onSetPrefs}
             mcpServers={mcpServers}
             mcpServersStatus={mcpServersStatus}
@@ -488,6 +508,8 @@ function ComposerView({
             onCompact={onCompact}
           />
           <ComposerActions
+            dictation={visibleDictation}
+            onToggleDictation={toggleDictation}
             busy={executionBusy}
             canInterrupt={canInterrupt}
             interrupting={interrupting}
@@ -502,8 +524,13 @@ function ComposerView({
         </div>
       </div>
 
-      {attachmentError && (
-        <div class="composer-hint composer-hint-error" role="status">{attachmentError}</div>
+      {visibleDictation && (visibleDictation.phase === 'preparing' || visibleDictation.error) && (
+        <div class={`composer-hint${visibleDictation.error ? ' composer-hint-error' : ''}`} role="status" aria-live="polite">
+          {visibleDictation.error || `Preparing dictation…${visibleDictation.detail ? ` ${visibleDictation.detail}` : ''}`}
+        </div>
+      )}
+      {(dictationStartError || attachmentError) && (
+        <div class="composer-hint composer-hint-error" role="status">{dictationStartError || attachmentError}</div>
       )}
     </div>
   );

@@ -476,6 +476,7 @@ test('session.open echoes stable operation identity on its authoritative opened 
 
   assert.deepEqual(buildArgs, [
     '/cold.jsonl', 'selection-open', undefined, undefined, 'open-operation', 2,
+    undefined, undefined, undefined,
   ]);
   assert.deepEqual(response, { ok: true, sessionPath: '/cold.jsonl' });
   assert.equal((harness.emitted.find((entry) => entry.event === 'session.opened')?.payload as { operationId?: string }).operationId, 'open-operation');
@@ -1372,7 +1373,7 @@ test('message.continue accepts a repeated provider-forced context overflow', asy
   assert.equal(continueCalls, 1);
 });
 
-test('message.continue keeps busy, empty, and non-overflow error guards', async () => {
+test('message.continue keeps busy and empty-history guards', async () => {
   const unavailableCases = [
     {
       name: 'busy completed reply',
@@ -1385,13 +1386,6 @@ test('message.continue keeps busy, empty, and non-overflow error guards', async 
     {
       name: 'empty history',
       sessionOverrides: { messages: [] },
-      code: 'CONTINUATION_NOT_AVAILABLE',
-    },
-    {
-      name: 'non-overflow assistant error',
-      sessionOverrides: {
-        messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'provider request failed', content: [] }],
-      },
       code: 'CONTINUATION_NOT_AVAILABLE',
     },
   ] as const;
@@ -1417,6 +1411,27 @@ test('message.continue keeps busy, empty, and non-overflow error guards', async 
     assert.equal(harness.context.activeRequest, undefined, unavailable.name);
     assert.deepEqual(harness.busyEvents, [], unavailable.name);
   }
+});
+
+test('message.continue accepts a non-overflow assistant error tail', async () => {
+  let continueCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'provider request failed', content: [] }],
+      continueAfterInterruption: async () => { continueCalls += 1; },
+    },
+  });
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'continue-non-overflow-error',
+    method: 'message.continue',
+    params: { sessionPath: harness.context.sessionPath },
+  }) as { requestId?: string };
+
+  assert.equal(typeof result.requestId, 'string');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(continueCalls, 1);
+  assert.ok(harness.context.activeRequest, 'accepted continuation owns the live request lifecycle');
 });
 
 test('message.continue rejects a runtime without the continuation seam', async () => {

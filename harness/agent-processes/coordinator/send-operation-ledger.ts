@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { ComposerInput } from '../lib/rpc/message-contract.js';
 import type { SessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import { BackendError } from './server-io.js';
+import { replayOperation } from './operation-replay.js';
 
 export interface SendOperationAcceptance {
   operationId: string;
@@ -70,10 +71,7 @@ export class SendOperationLedger {
   ): Promise<SendOperationAcceptance> {
     const existing = this.entries.get(operationId);
     if (existing) {
-      this.assertIntent(operationId, existing.intentFingerprint, intentFingerprint);
-      if (existing.state === 'pending') return existing.promise;
-      if (existing.state === 'accepted') return Promise.resolve(existing.result);
-      return Promise.reject(new BackendError(existing.code, existing.message));
+      return replayOperation(operationId, intentFingerprint, existing, 'message mutation');
     }
 
     const pending: Extract<Entry, { state: 'pending' }> = {
@@ -187,13 +185,6 @@ export class SendOperationLedger {
     };
   }
 
-  private assertIntent(operationId: string, expected: string, actual: string): void {
-    if (expected === actual) return;
-    throw new BackendError(
-      'OPERATION_INTENT_MISMATCH',
-      `Operation ${operationId} was already used for a different message mutation intent.`,
-    );
-  }
 }
 
 function canonicalFingerprint(value: unknown): string {

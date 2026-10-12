@@ -12,6 +12,7 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'mcp.setServerEnabled',
   'mcp.setSessionServerEnabled',
   'provider_gate.metrics',
+  'providers.manage',
   'runtimePrefs.set',
   'session.list',
   'session.create',

@@ -48,6 +48,33 @@ function imageLabel(count: number): string {
   return `${count} image${count === 1 ? '' : 's'}`;
 }
 
+/** Navigation follows jump-controller row starts, not fully offscreen row ends.
+ * Do not subtract content padding: jumps align measurement.start with scrollTop.
+ */
+function navigationIndex(
+  entries: readonly UserPromptEntry[],
+  virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>,
+  scrollTop: number | null,
+): number {
+  if (entries.length === 0) return -1;
+  if (scrollTop === null || !Number.isFinite(scrollTop)) return 0;
+  let low = 0;
+  let high = entries.length - 1;
+  let selected = 0;
+  while (low <= high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const start = virtualizer.measurementsCache[entries[middle]!.rowIndex]?.start;
+    if (start === undefined || !Number.isFinite(start)) return selected;
+    if (start <= scrollTop) {
+      selected = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return selected;
+}
+
 /** A non-scrolling context bar for the user prompt owning the viewport. */
 export function UserPromptContextBar({
   entries,
@@ -68,6 +95,11 @@ export function UserPromptContextBar({
   const [, setPromptRevision] = useState(0);
   const [isCompact, setIsCompact] = useState(false);
   const selectedMessageIdRef = useRef<string | null>(null);
+  const navigationMessageIdRef = useRef<string | null>(null);
+  const requestedMessageIdRef = useRef<string | null>(null);
+  if (requestedMessageIdRef.current !== null && !entries.some((entry) => entry.messageId === requestedMessageIdRef.current)) {
+    requestedMessageIdRef.current = null;
+  }
   const scrollSelectRef = useRef<(() => void) | null>(null);
   const contextRowRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLButtonElement | null>(null);
@@ -82,8 +114,11 @@ export function UserPromptContextBar({
       contentOriginPx,
     });
     const nextId = next?.messageId ?? null;
-    if (selectedMessageIdRef.current === nextId) return;
+    const nextNavigationId = requestedMessageIdRef.current
+      ?? entries[navigationIndex(entries, virtualizer, element.scrollTop)]?.messageId ?? null;
+    if (selectedMessageIdRef.current === nextId && navigationMessageIdRef.current === nextNavigationId) return;
     selectedMessageIdRef.current = nextId;
+    navigationMessageIdRef.current = nextNavigationId;
     setPromptRevision((revision) => revision + 1);
   };
 
@@ -91,8 +126,37 @@ export function UserPromptContextBar({
     const element = scrollRef.current;
     if (!element) return;
     const onScroll = () => scrollSelectRef.current?.();
+    // Capture manual intent before rail/scrollbar/latest handlers initiate a
+    // programmatic jump. Scroll events alone must not discard clamped targets.
+    const viewport = element.closest('.transcript-viewport') ?? element;
+    const onManualNavigation = () => {
+      requestedMessageIdRef.current = null;
+      scrollSelectRef.current?.();
+    };
+    const onKeyDown = (event: Event) => {
+      const keyboardEvent = event as KeyboardEvent;
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(keyboardEvent.key)) {
+        onManualNavigation();
+        return;
+      }
+      if (keyboardEvent.key !== 'Enter' || !(event.target instanceof Element)) return;
+      const activation = event.target.closest('button, [role="button"], a[href]');
+      if (!activation || !viewport.contains(activation)) return;
+      if (activation instanceof HTMLButtonElement && activation.disabled) return;
+      onManualNavigation();
+    };
     element.addEventListener('scroll', onScroll, { passive: true });
-    return () => element.removeEventListener('scroll', onScroll);
+    viewport.addEventListener('wheel', onManualNavigation, { passive: true, capture: true });
+    viewport.addEventListener('touchstart', onManualNavigation, { passive: true, capture: true });
+    viewport.addEventListener('pointerdown', onManualNavigation, true);
+    viewport.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      element.removeEventListener('scroll', onScroll);
+      viewport.removeEventListener('wheel', onManualNavigation, true);
+      viewport.removeEventListener('touchstart', onManualNavigation, true);
+      viewport.removeEventListener('pointerdown', onManualNavigation, true);
+      viewport.removeEventListener('keydown', onKeyDown, true);
+    };
   }, [scrollRef]);
 
   const getRowEnd = useCallback(
@@ -109,6 +173,19 @@ export function UserPromptContextBar({
     fallbackScrollOffset: virtualizer.scrollOffset ?? null,
     contentOriginPx,
   });
+
+  const selectedIndex = requestedMessageIdRef.current === null
+    ? navigationIndex(entries, virtualizer,
+      readPromptMetrics(scrollRef.current)?.scrollTop ?? virtualizer.scrollOffset ?? null)
+    : entries.findIndex((entry) => entry.messageId === requestedMessageIdRef.current);
+  const navigate = (prompt: UserPromptEntry | undefined) => {
+    if (hidden || !prompt) return;
+    requestedMessageIdRef.current = prompt.messageId;
+    setPromptRevision((revision) => revision + 1);
+    onLocate(prompt.rowIndex);
+  };
+  const previousPrompt = entries[selectedIndex - 1];
+  const nextPrompt = selectedIndex < 0 ? undefined : entries[selectedIndex + 1];
 
   // Normalized text and image count are derived for the selected prompt only.
   // A streaming snapshot re-creates message objects, so the memo keys on the
@@ -134,9 +211,11 @@ export function UserPromptContextBar({
     const measure = () => {
       const metadata = row.querySelector<HTMLElement>('.transcript-prompt-context-meta');
       const parsedGap = Number.parseFloat(window.getComputedStyle(row).columnGap);
+      const navigation = row.querySelector<HTMLElement>('.transcript-prompt-navigation');
       const occupiedWidth = preview.scrollWidth
         + (metadata?.scrollWidth ?? 0)
-        + (metadata && Number.isFinite(parsedGap) ? parsedGap : 0);
+        + (navigation?.scrollWidth ?? 0)
+        + ((metadata ? 1 : 0) + (navigation ? 1 : 0)) * (Number.isFinite(parsedGap) ? parsedGap : 0);
       const next = row.clientWidth > 0 && occupiedWidth <= row.clientWidth * 0.5;
       setIsCompact((previous) => previous === next ? previous : next);
     };
@@ -145,29 +224,34 @@ export function UserPromptContextBar({
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(row);
     observer?.observe(preview);
+    const navigation = row.querySelector<HTMLElement>('.transcript-prompt-navigation');
+    if (navigation) observer?.observe(navigation);
     return () => observer?.disconnect();
-  }, [selected?.messageId, selected?.isAutoResume, selected?.isQueued, selectedDetails?.plainText]);
+  }, [selected?.messageId, selected?.isAutoResume, selected?.isQueued, selectedDetails?.plainText, entries.length]);
 
   // Data and measurement updates can change the render-time selection without
   // a scroll event. Keep the listener's comparison baseline aligned with what
   // is actually rendered so the next same-range scroll cannot be ignored.
   selectedMessageIdRef.current = selected?.messageId ?? null;
+  navigationMessageIdRef.current = entries[selectedIndex]?.messageId ?? null;
 
   const locateDescriptionId = useId();
   const locate = useCallback(() => {
-    if (selected) onLocate(selected.rowIndex);
-  }, [onLocate, selected]);
+    if (selected && !hidden) {
+      requestedMessageIdRef.current = selected.messageId;
+      setPromptRevision((revision) => revision + 1);
+      onLocate(selected.rowIndex);
+    }
+  }, [onLocate, selected, hidden]);
 
-  // No governing prompt: render no bar at all, so genuinely empty sessions or
-  // a loaded window with no preceding prompt never reserve a blank bar. The
-  // hidden passthrough still reserves space (visibility: hidden) during
-  // initial positioning while a prompt is selected, keeping the virtualizer's
-  // viewport height stable.
-  if (selected === null || selectedDetails === null) {
+  // Multiple loaded prompts retain navigation even when there is no offscreen
+  // context. Never duplicate the visible prompt just to provide controls.
+  if (selected === null && entries.length < 2) {
     return null;
   }
 
-  const hasMetadata = selectedDetails.imageCount > 0 || selected.isQueued || selected.isAutoResume;
+  const hasMetadata = selectedDetails !== null && selected !== null
+    && (selectedDetails.imageCount > 0 || selected.isQueued || selected.isAutoResume);
 
   return (
     <section
@@ -180,7 +264,7 @@ export function UserPromptContextBar({
         Locate this user prompt in the transcript
       </span>
       <div class="transcript-prompt-context-row" ref={contextRowRef}>
-        {hasMetadata && (
+        {hasMetadata && selectedDetails && selected && (
           <div class="transcript-prompt-context-meta" aria-label="Prompt metadata">
             {selectedDetails.imageCount > 0 && (
               <span title={`${selectedDetails.imageCount} image attachment${selectedDetails.imageCount === 1 ? '' : 's'}`}>
@@ -191,16 +275,45 @@ export function UserPromptContextBar({
             {selected.isAutoResume && <span>Auto-resume</span>}
           </div>
         )}
-        <button
+        {selectedDetails && <button
           type="button"
           class="transcript-prompt-context-preview"
           ref={previewRef}
           aria-describedby={locateDescriptionId}
           title="Locate user prompt in transcript"
+          disabled={hidden}
           onClick={locate}
         >
           {selectedDetails.plainText}
-        </button>
+        </button>}
+        <div class="transcript-prompt-navigation">
+          <button
+            type="button"
+            class="transcript-prompt-navigation-button"
+            aria-label="Previous prompt"
+            title="Previous prompt"
+            disabled={hidden || !previousPrompt}
+            onClick={() => navigate(previousPrompt)}
+          >
+            ‹
+          </button>
+          <span
+            class="transcript-prompt-navigation-position"
+            aria-label={`Prompt ${selectedIndex + 1} of ${entries.length}`}
+          >
+            {selectedIndex + 1} / {entries.length}
+          </span>
+          <button
+            type="button"
+            class="transcript-prompt-navigation-button"
+            aria-label="Next prompt"
+            title="Next prompt"
+            disabled={hidden || !nextPrompt}
+            onClick={() => navigate(nextPrompt)}
+          >
+            ›
+          </button>
+        </div>
       </div>
     </section>
   );

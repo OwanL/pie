@@ -109,7 +109,7 @@ export interface BillableAccountingDeps {
    *  owner and handed across the boundary; settlement accounting never
    *  resolves runtime catalogs itself. Absent facts leave rows explicitly
    *  unpriced. */
-  getCapturedPricingFacts: () => CapturedPricingFacts | undefined;
+  getCapturedPricingFacts: (sessionPath: string) => CapturedPricingFacts | undefined;
   resolveInvocationPricing: InvocationPricingResolver;
   isPrivateSession: (sessionPath: string) => boolean;
   sessionIdentity: (
@@ -707,45 +707,50 @@ export class BillableAccounting {
     this.currentBranchLeafBySession[sessionPath] = snapshot.branchId;
     this.currentBranchDepthBySession[sessionPath] = entries.length > 0 ? entries.length : undefined;
     if (canonicalAuthority) return;
-    for (const sample of snapshot.samples) {
-      // Retry classification is host-only and older transcripts contain
-      // aggregate compatibility rows. Source identity prevents either from
-      // duplicating already-settled per-invocation evidence on replay.
-      if (existingSourceIds.has(sample.sourceId)) continue;
-      let migrationSample = sample;
-      if ((sample.kind === 'assistant' || sample.kind === 'conversation')
-        && (sample.constituentSourceIds?.length ?? 0) > 1) {
-        const constituentIds = new Set(sample.constituentSourceIds);
-        const covered = existingRecords.filter((record) => constituentIds.has(record.sourceId));
-        if (covered.length > 0) {
-          const sum = (read: (record: BillableInvocationRecord) => number | undefined): number => covered
-            .reduce((total, record) => total + (read(record) ?? 0), 0);
-          const residualCost = sample.reportedCostUsd === undefined ? undefined : Math.max(
-            0,
-            sample.reportedCostUsd - sum((record) => record.providerReportedCostUsd
-              ?? record.pricing?.calculatedCostUsd),
-          );
-          const residualTotal = Math.max(0, sample.totalTokens - sum((record) => record.providerTotalTokens));
-          migrationSample = {
-            ...sample,
-            inputTokens: Math.max(0, sample.inputTokens - sum((record) => record.inputTokens)),
-            outputTokens: Math.max(0, sample.outputTokens - sum((record) => record.outputTokens)),
-            cacheReadTokens: Math.max(0, sample.cacheReadTokens - sum((record) => record.cacheReadTokens)),
-            cacheWriteTokens: Math.max(0, sample.cacheWriteTokens - sum((record) => record.cacheWriteTokens)),
-            totalTokens: residualTotal,
-            providerTotalTokens: residualTotal,
-            ...(residualCost !== undefined ? { reportedCostUsd: residualCost } : {}),
-          };
-          if (migrationSample.totalTokens === 0 && residualCost === undefined) continue;
+    // Historical snapshot replay is synchronous. Group the reentrant ledger
+    // and timeline locks, not the commits: each row still performs its own
+    // privacy checks, durable append, activity write, and pending-write handling.
+    this.invocationLedger.transaction(() => {
+      for (const sample of snapshot.samples) {
+        // Retry classification is host-only and older transcripts contain
+        // aggregate compatibility rows. Source identity prevents either from
+        // duplicating already-settled per-invocation evidence on replay.
+        if (existingSourceIds.has(sample.sourceId)) continue;
+        let migrationSample = sample;
+        if ((sample.kind === 'assistant' || sample.kind === 'conversation')
+          && (sample.constituentSourceIds?.length ?? 0) > 1) {
+          const constituentIds = new Set(sample.constituentSourceIds);
+          const covered = existingRecords.filter((record) => constituentIds.has(record.sourceId));
+          if (covered.length > 0) {
+            const sum = (read: (record: BillableInvocationRecord) => number | undefined): number => covered
+              .reduce((total, record) => total + (read(record) ?? 0), 0);
+            const residualCost = sample.reportedCostUsd === undefined ? undefined : Math.max(
+              0,
+              sample.reportedCostUsd - sum((record) => record.providerReportedCostUsd
+                ?? record.pricing?.calculatedCostUsd),
+            );
+            const residualTotal = Math.max(0, sample.totalTokens - sum((record) => record.providerTotalTokens));
+            migrationSample = {
+              ...sample,
+              inputTokens: Math.max(0, sample.inputTokens - sum((record) => record.inputTokens)),
+              outputTokens: Math.max(0, sample.outputTokens - sum((record) => record.outputTokens)),
+              cacheReadTokens: Math.max(0, sample.cacheReadTokens - sum((record) => record.cacheReadTokens)),
+              cacheWriteTokens: Math.max(0, sample.cacheWriteTokens - sum((record) => record.cacheWriteTokens)),
+              totalTokens: residualTotal,
+              providerTotalTokens: residualTotal,
+              ...(residualCost !== undefined ? { reportedCostUsd: residualCost } : {}),
+            };
+            if (migrationSample.totalTokens === 0 && residualCost === undefined) continue;
+          }
         }
+        this.appendUsageSample(sessionPath, migrationSample, {
+          branchId: snapshot.branchId ?? null,
+          migration: true,
+          sessionId: sessionId ?? null,
+        });
+        existingSourceIds.add(sample.sourceId);
       }
-      this.appendUsageSample(sessionPath, migrationSample, {
-        branchId: snapshot.branchId ?? null,
-        migration: true,
-        sessionId: sessionId ?? null,
-      });
-      existingSourceIds.add(sample.sourceId);
-    }
+    });
   }
 
   observeBranchEntry(
@@ -1105,7 +1110,7 @@ export class BillableAccounting {
     const pricing = gap || !channelsKnown
       || sample.provenance === 'unpriced' || sample.provenance === 'unknown'
       ? undefined : this.deps.resolveInvocationPricing({
-        facts: this.deps.getCapturedPricingFacts(),
+        facts: this.deps.getCapturedPricingFacts(sessionPath),
         modelId: model,
         provider,
         usage: sample,

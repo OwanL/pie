@@ -21,6 +21,7 @@ import type { ViewState, ChatMessage, HostToWebviewMessage, ExtensionUIRequestPa
 import { DEFAULT_CHAT_PREFS, EMPTY_TRANSCRIPT_WINDOW } from '../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../lib/build-identity.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
+import { buildIdleSessionCapabilities } from '../../../../harness/agent-processes/workers/session-activity.js';
 import type { ClientTransport } from '../../transport/client-transport';
 
 /** Minimal in-memory transport: records outbound, forwards inbound. Mirrors
@@ -213,6 +214,12 @@ test('App does not keep the transcript loader for a loaded empty session', () =>
     'Should stop showing the transcript loader once an empty session has loaded',
   );
   assert.ok(container.querySelector('textarea'), 'Composer should remain available for an empty session');
+  const submit = container.querySelector('[data-action="send"]') as HTMLButtonElement;
+  assert.ok(submit);
+  assert.equal(submit.disabled, true, 'the first prompt cannot be empty');
+  const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+  act(() => { textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+  assert.equal(adapter.messages.some((message) => message.type === 'send'), false);
 });
 
 test('an empty submit continues an interrupted response without an optimistic user message', () => {
@@ -343,6 +350,31 @@ test('a completed provider response after tools exposes backend-authorized empty
   assert.equal(container.querySelectorAll('[data-message-id]').length, messageCountBefore);
 });
 
+for (const tail of [
+  { role: 'assistant', stopReason: 'error', content: [], errorMessage: 'provider failed' },
+  { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }] },
+  { role: 'custom', customType: 'note', content: 'extension context' },
+]) {
+  test(`empty Send works for an idle ${tail.stopReason ?? tail.role} tail`, () => {
+    const adapter = makeAdapter();
+    const idle = sessionViewState({
+      sessionCapabilitiesBySession: {
+        '/session/a': buildIdleSessionCapabilities([{ role: 'user', content: 'work' }, tail]),
+      },
+    });
+    adapter.initialState = idle;
+    act(() => render(h(App, { adapter }), container));
+    act(() => { window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, idle) })); });
+    const submit = container.querySelector('[data-action="continue"]') as HTMLButtonElement;
+    assert.ok(submit);
+    assert.equal(submit.disabled, false);
+    const before = container.querySelectorAll('[data-message-id]').length;
+    act(() => submit.click());
+    assert.equal(adapter.messages.filter((message) => message.type === 'send' && message.text === '').length, 1);
+    assert.equal(container.querySelectorAll('[data-message-id]').length, before);
+  });
+}
+
 test('empty continuation fails closed without backend capability even for a completed reply', () => {
   const adapter = makeAdapter();
   adapter.initialState = sessionViewState();
@@ -433,7 +465,8 @@ test('App suppresses the session-tab connecting wheel while the transcript surfa
     html.includes('transcript-loading') || html.includes('transcript-suspense'),
     'main transcript area should show a loading wheel',
   );
-  assert.ok(html.includes('loading-ellipsis'), 'a status indicator should accompany the wheel');
+  assert.ok(html.includes('loading-wheel'), 'the loading surface should render its spinner');
+  assert.ok(!html.includes('loading-ellipsis'), 'the spinner-only loading surface should not add an ellipsis status indicator');
   // The session-tab connecting wheel is suppressed to avoid two wheels at once.
   assert.ok(!html.includes('session-tabs-connecting'), 'tabs should not show a competing connecting wheel while the main area is loading');
   assert.equal(

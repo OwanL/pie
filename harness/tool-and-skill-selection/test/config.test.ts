@@ -415,3 +415,12 @@ test("loadConfig allows zero for retry/backoff budgets", () => {
 	assert.equal(result.prepass?.transportBackoffBaseMs, 0);
 	assert.equal(result.prepass?.oauthRaceBackoffMs, 0);
 });
+
+
+test("post-compaction selection refresh defaults on and validates boolean overrides", () => {
+	assert.equal(DEFAULT_CONFIG.refreshAfterCompaction, true);
+	assert.equal(loadConfig(tempSettings(JSON.stringify({ pruning: { refreshAfterCompaction: false } }))).refreshAfterCompaction, false);
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({ pruning: { refreshAfterCompaction: "false" } }))));
+	assert.equal(result.refreshAfterCompaction, true);
+	assert.ok(warnings.some((warning) => warning.includes("refreshAfterCompaction")));
+});

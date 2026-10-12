@@ -17,6 +17,7 @@ import type { ProviderTransportObservation } from '../../../model-providers/traf
 import { BackendLiveTurnAccumulator } from '../live-turn-accumulator';
 import { WorkerRuntimeHost } from '../worker-runtime-host';
 import type { SessionOpenedPayload } from '../../lib/rpc/session-events.js';
+import type { ExtensionUIRequestPayload } from '../../lib/rpc/extension-ui.js';
 import {
   WORKER_IPC_MAX_FRAME_BYTES,
   WORKER_IPC_VERSION,
@@ -342,8 +343,9 @@ test('worker fails closed and disposes on an unexpected durable admission failur
   assert.equal(unsubscribed, 1);
 });
 
-test('initial session attach applies a previously synced root-session autonomous override', async () => {
-  const { host } = makeHost();
+test('initial session attach applies a previously synced root-session autonomous override and live approval deadlines', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { host, sent } = makeHost();
   const internals = getInternals(host);
   internals.sdk = {};
   internals.getSystemPromptModule = async () => ({ buildSystemPrompt: () => '' });
@@ -384,6 +386,32 @@ test('initial session attach applies a previously synced root-session autonomous
     assert.equal(internals.autonomousMode, true, 'the root override takes precedence over the synced default');
     assert.equal(process.env[AUTONOMOUS_MODE_ENV], '1');
     assert.ok(!activeTools.includes('ask_user'), 'initial attach applies the resolved root mode to tools');
+
+    const bridge = context.uiBridge!;
+    const lastRequest = () => sent.filter((frame) => frame.event === 'extension_ui.request').at(-1)!.payload as ExtensionUIRequestPayload;
+    const autonomousApproval = bridge.confirm('Allow?', 'Approval after initial attach');
+    assert.equal(lastRequest().timeout, 180_000);
+    t.mock.timers.tick(180_000);
+    assert.equal(await autonomousApproval, false);
+    assert.equal(bridge.hasPendingRequests(), false);
+
+    host.applySync('runtimePrefs', 2, {
+      values: { autonomousModeBySession: { [rootPath]: false } },
+    });
+    const interactiveApproval = bridge.confirm('Allow?', 'Approval after opting out');
+    assert.equal(lastRequest().timeout, undefined);
+    t.mock.timers.tick(180_000);
+    assert.equal(bridge.hasPendingRequests(), true);
+    bridge.cancelAll();
+    assert.equal(await interactiveApproval, false);
+
+    host.applySync('runtimePrefs', 3, {
+      values: { autonomousModeBySession: { [rootPath]: true } },
+    });
+    const nextAutonomousApproval = bridge.confirm('Allow?', 'Approval after opting back in');
+    assert.equal(lastRequest().timeout, 180_000);
+    t.mock.timers.tick(180_000);
+    assert.equal(await nextAutonomousApproval, false);
   } finally {
     if (previousAutonomousMode === undefined) delete process.env[AUTONOMOUS_MODE_ENV];
     else process.env[AUTONOMOUS_MODE_ENV] = previousAutonomousMode;

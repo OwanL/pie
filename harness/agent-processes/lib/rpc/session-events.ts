@@ -209,12 +209,15 @@ export interface SessionOpenedPayload {
    *  contextUsage, modelSettings, availableModels, session summary). Set only
    *  in response to a `session.open` whose `transcript` param was `'skip'`. */
   transcriptSkipped?: boolean;
+  /** Opaque ownership token for deferred cold-open prompt discovery. The
+   * transcript is authoritative immediately; a later session.promptInventory
+   * result may update only prompt metadata under this token. */
+  promptInventoryToken?: string;
   /** Complete prompt catalog discovered from a hot-equivalent isolated runtime.
-   * Cold public opens carry this without promoting the durable session; hot
-   * snapshots build it from their owning runtime. An ordinary `runtimeReady:
-   * false` snapshot that omits this field authoritatively reports discovery
-   * failure and clears an older host catalog. `snapshotUnavailable` is the
-   * explicit slim omission whose existing-field semantics remain unchanged. */
+   * Cold opens may deliver it separately under promptInventoryToken, without
+   * promoting the durable session. While pending, older prompt text is cleared.
+   * An ordinary cold snapshot without a catalog or token reports discovery
+   * failure. snapshotUnavailable preserves the existing catalog. */
   systemPrompts?: SystemPromptEntry[];
   /** Authoritative disabled-id set persisted for a cold session. It accompanies
    * both successful discovery and its authoritative failure result. The slim
@@ -231,6 +234,16 @@ export interface SessionOpenedPayload {
   initialContextEstimate?: InitialContextEstimate;
   /** Complete durable billable usage for the branch, independent of the loaded transcript window. */
   sessionUsage?: SessionUsageSnapshot;
+}
+
+/** Metadata-only completion of a cold open's deferred inventory. An empty
+ * catalog authoritatively represents failure or successful empty discovery.
+ * This event never owns session selection, transcript or execution state. */
+export interface SessionPromptInventoryPayload {
+  sessionPath: string;
+  token: string;
+  systemPrompts: SystemPromptEntry[];
+  initialContextEstimate?: InitialContextEstimate;
 }
 
 /** How much transcript the host wants in a `session.open` response.

@@ -76,7 +76,8 @@ function historyEntryForTail(session: AgentSession): SessionEntry | undefined {
 function continuationDecision(session: AgentSession): ContinueAfterInterruptionDecision {
   const tail = classifyInterruptedContinuationTail(session.messages, session.model?.contextWindow);
   if (!tail) return { type: 'unsupported', reason: UNSUPPORTED_CONTINUATION };
-  if (tail !== 'aborted-assistant' && tail !== 'overflow-assistant') return { type: 'continue' };
+  if (tail !== 'aborted-assistant' && tail !== 'overflow-assistant'
+    && tail !== 'failed-assistant' && tail !== 'dangling-assistant') return { type: 'continue' };
 
   const entry = historyEntryForTail(session);
   if (!entry) return { type: 'unsupported', reason: UNSUPPORTED_CONTINUATION };

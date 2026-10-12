@@ -312,6 +312,9 @@ async function handleSessionOpen(
         undefined,
         params.operationId,
         params.operationAttempt,
+        undefined,
+        undefined,
+        deps.deferSessionPromptInventory ? false : undefined,
       );
       runtimeReady = openPayload.runtimeReady;
     } catch (error) {
@@ -328,6 +331,9 @@ async function handleSessionOpen(
     }
     const emitStartedAt = performance.now();
     try {
+      if (openPayload.runtimeReady === false && !openPayload.snapshotUnavailable) {
+        deps.deferSessionPromptInventory?.(openPayload);
+      }
       deps.emit('session.opened', openPayload);
     } catch (error) {
       failureStage = 'session_opened_emit';
@@ -447,6 +453,11 @@ async function handleSessionPreload(
     undefined,
     'tail',
     { kind: 'response', requestId: request.id },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
   );
 }
 

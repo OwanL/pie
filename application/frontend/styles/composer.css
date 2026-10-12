@@ -1,6 +1,24 @@
 /* ── Run action button ───────────────────────────────────────────────────── */
 /* Primary CTA in the composer toolbar */
 
+/* Keep recording cues above the generic icon hover/focus styles below. */
+.composer-actions .composer-action-icon.composer-action-mic.is-active:not(:disabled) {
+  color: var(--panel-accent);
+  background: color-mix(in srgb, var(--panel-accent) 24%, transparent);
+  box-shadow: inset 0 0 0 1.5px currentColor, 0 0 var(--mic-halo, 2px) var(--mic-halo, 2px) color-mix(in srgb, var(--panel-accent) var(--mic-halo-opacity, 20%), transparent);
+  transition: box-shadow 160ms ease, background 160ms ease;
+}
+
+.composer-action-mic.is-active svg rect { fill: currentColor; }
+.composer-actions .composer-action-icon.composer-action-mic.is-busy { color: var(--panel-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-actions .composer-action-icon.composer-action-mic.is-active:not(:disabled) {
+    transition: none;
+    box-shadow: inset 0 0 0 1.5px currentColor, 0 0 3px 2px color-mix(in srgb, var(--panel-accent) 25%, transparent);
+  }
+}
+
 .context-window-indicator-anchor {
   display: inline-flex;
   align-items: center;
@@ -22,8 +40,42 @@
 }
 
 .composer-shell {
+  position: relative;
+  isolation: isolate;
   border-color: transparent;
   box-shadow: none;
+}
+
+/* A short inward fade behind input and toolbar, outside layout/scroll flow.
+   Round only the edge itself so toolbar popups and focus rings stay unclipped. */
+.composer-shell > .dictation-edge {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(var(--dictation-angle, 90deg), color-mix(in srgb, var(--panel-accent) 45%, transparent), var(--panel-accent), color-mix(in srgb, var(--panel-accent) 45%, transparent));
+  background-size: 200% 200%;
+  background-position: var(--dictation-position, 20%) 50%;
+  mask-image: linear-gradient(to right, #000, transparent 12px), linear-gradient(to left, #000, transparent 12px), linear-gradient(to bottom, #000, transparent 12px), linear-gradient(to top, #000, transparent 12px);
+  transition: opacity 160ms ease, background-position 160ms ease;
+  animation: dictation-drift 8s ease-in-out infinite;
+}
+
+/* Keep a quiet recording visibly alive without moving the input or its mask.
+   RMS still sets the brightness, angle and centre of this slow drift. */
+@keyframes dictation-drift {
+  0%, 100% { background-position: calc(var(--dictation-position, 20%) - 20%) 35%; }
+  50% { background-position: calc(var(--dictation-position, 20%) + 20%) 65%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-shell > .dictation-edge {
+    animation: none;
+    transition: none;
+    opacity: 0.4 !important;
+    background: var(--panel-accent);
+  }
 }
 
 .composer-shell:hover,

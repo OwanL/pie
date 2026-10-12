@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 
-import { playCompletionSound } from '../../notifications/completion-sound';
+import { playCompletionSound, playQuestionSound } from '../../notifications/completion-sound';
 import { validateViewState } from '../../../lib/validation/view-state';
 import { clearCollapsibleCache } from '../../transcript/use-collapsible-open';
 import {
@@ -77,6 +77,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   notice: null,
   noticeSessionPath: null,
   noticeKind: null,
+  providerManagement: { mode: 'management', providers: [], definitions: [], protocols: [], draft: null, loaded: false, status: 'idle', flow: { open: false, screen: 'manage' } },
   backendReady: false,
   workspaceCwd: null,
   systemPrompts: [],
@@ -576,6 +577,10 @@ type HostMessageHandler = (msg: HostToWebviewMessage, ctx: HostMessageContext) =
 const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
   state: handleStateMessage,
   playCompletionSound: (msg, _ctx) => handlePlayCompletionSound(msg),
+  playQuestionSound: (msg) => {
+    const m = msg as Extract<HostToWebviewMessage, { type: 'playQuestionSound' }>;
+    playQuestionSound(m.volume);
+  },
   sendRejected: handleSendRejectedMessage,
   // Exactly-one host decision/ack. The pending-command store
   // resolves the entry; the optimistic overlay is merged/removed by the next

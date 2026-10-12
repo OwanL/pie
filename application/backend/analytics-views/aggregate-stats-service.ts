@@ -621,8 +621,8 @@ function canonicalAccountingOverlay(
   // alone, so the settlement samples cannot safely be treated as a complete
   // cumulative stream. The exact daily projection is still a valid cost
   // series; use it as a coarse fallback rather than dropping the graph. It
-  // deliberately applies only to cost: the recorder exposes no exact daily
-  // token rollup, so token charts must retain their honest missingness.
+  // deliberately applies only to cost. Token charts use exact known-channel
+  // sums in the minute buckets below, never fabricate unknown usage.
   const todayCostSamples = filterCanonicalSeriesSamples(costSamples, todayStartMs, nowMs);
   const weekCostSamples = filterCanonicalSeriesSamples(costSamples, weekStartMs, nowMs);
   // Cost charts prefer the recorder's exact per-range buckets (minute width
@@ -667,13 +667,17 @@ function canonicalAccountingOverlay(
         { timeZone, targetTotals: seriesTarget(rows, 'today', 'cost'), roundValues: true },
       );
   const todayInputTokenSeries = buildCumulativeSeries(
-    filterCanonicalSeriesSamples(inputSamples, todayStartMs, nowMs),
+    canonicalBucketSeriesSamples(series?.todayCostBuckets, series?.todayCostBucketsTruncated === true,
+      todayStartMs, nowMs, CANONICAL_COST_BUCKET_WIDTH_MS.today, 'inputTokens')
+      ?? filterCanonicalSeriesSamples(inputSamples, todayStartMs, nowMs),
     nowMs,
     undefined,
     { timeZone, targetTotals: seriesTarget(rows, 'today', 'input') },
   );
   const todayTokenSeries = buildCumulativeSeries(
-    filterCanonicalSeriesSamples(outputSamples, todayStartMs, nowMs),
+    canonicalBucketSeriesSamples(series?.todayCostBuckets, series?.todayCostBucketsTruncated === true,
+      todayStartMs, nowMs, CANONICAL_COST_BUCKET_WIDTH_MS.today, 'outputTokens')
+      ?? filterCanonicalSeriesSamples(outputSamples, todayStartMs, nowMs),
     nowMs,
     undefined,
     { timeZone, targetTotals: seriesTarget(rows, 'today', 'output') },
@@ -862,20 +866,21 @@ function canonicalBucketSeriesSamples(
   rangeStartMs: number,
   rangeEndMs: number,
   bucketWidthMs: number,
+  field: 'cost' | 'inputTokens' | 'outputTokens' = 'cost',
 ): CanonicalSeriesSample[] | null {
-  if (buckets === undefined || truncated) return null;
+  if (buckets === undefined || truncated || buckets.some((bucket) => bucket[field] === undefined)) return null;
   const samples: CanonicalSeriesSample[] = [];
   for (const bucket of buckets) {
     const bucketStartMs = canonicalTimestamp(bucket.ms, 'cost bucket start');
     if (bucketStartMs === null) continue;
     const bucketEndMs = Math.min(bucketStartMs + bucketWidthMs, rangeEndMs);
     if (bucketEndMs <= rangeStartMs || bucketStartMs >= rangeEndMs) continue;
-    if (bucket.cost === null) continue;
+    if (bucket[field] === null) continue;
     samples.push({
       ms: bucketEndMs,
       provider: bucket.provider?.trim() || 'unknown',
       model: bucket.model?.trim() || 'unknown',
-      value: metricNumber(bucket.cost, 'series cost bucket'),
+      value: metricNumber(bucket[field], `series ${field} bucket`),
     });
   }
   return samples.sort((left, right) => left.ms - right.ms);

@@ -1,77 +1,68 @@
-/**
- * Shared AudioContext that persists across calls so that the autoplay
- * policy doesn't block sound triggered from non-user-gesture contexts
- * (e.g. a postMessage handler). Once warmed from a user click (Test
- * button or any interaction), subsequent plays work from any context,
- * including when the VS Code window is minimized.
- */
+/** Shared notification AudioContext, unlocked by a user gesture in each client. */
 let sharedCtx: AudioContext | null = null;
 
 function getAudioContext(): AudioContext {
-  if (sharedCtx && sharedCtx.state !== 'closed') {
-    return sharedCtx;
-  }
+  if (sharedCtx && sharedCtx.state !== 'closed') return sharedCtx;
   sharedCtx = new AudioContext();
   return sharedCtx;
 }
 
-/**
- * Warm up the AudioContext during a user gesture so it enters the
- * 'running' state. Call this from any click handler (e.g. the Test
- * button). Subsequent calls to playCompletionSound from non-gesture
- * contexts (postMessage) will reuse the already-running context.
- */
+/** Warm both notification sounds from a click or keyboard interaction. */
 export function warmupCompletionSoundContext(): void {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') {
-    void ctx.resume();
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => undefined);
+  } catch {
+    // Audio is optional in clients without Web Audio support.
   }
 }
 
-/**
- * Plays a completion notification sound using the Web Audio API.
- * Synthesizes a pleasant two-tone chime.
- * @param volume 0–100 (0 = silent / off, 100 = full volume)
- */
-export function playCompletionSound(volume: number): void {
-  if (volume <= 0) return;
+function playChime(volume: number, firstFrequency: number, secondFrequency: number): void {
+  if (!Number.isFinite(volume) || volume <= 0) return;
+  try {
+    const ctx = getAudioContext();
+    const play = () => {
+      const normalizedVolume = Math.min(100, volume) / 100;
+      const start = ctx.currentTime;
+      const first = ctx.createOscillator();
+      const firstGain = ctx.createGain();
+      first.type = 'sine';
+      first.frequency.setValueAtTime(firstFrequency, start);
+      firstGain.gain.setValueAtTime(normalizedVolume * 0.4, start);
+      firstGain.gain.exponentialRampToValueAtTime(0.001, start + 0.3);
+      first.connect(firstGain);
+      firstGain.connect(ctx.destination);
+      first.start(start);
+      first.stop(start + 0.3);
 
-  const ctx = getAudioContext();
-
-  const play = () => {
-    const normalizedVolume = Math.min(100, Math.max(1, volume)) / 100;
-
-    // First tone — a soft "ding"
-    const osc1 = ctx.createOscillator();
-    const gain1 = ctx.createGain();
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(880, ctx.currentTime); // A5
-    gain1.gain.setValueAtTime(normalizedVolume * 0.4, ctx.currentTime);
-    gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    osc1.connect(gain1);
-    gain1.connect(ctx.destination);
-    osc1.start(ctx.currentTime);
-    osc1.stop(ctx.currentTime + 0.3);
-
-    // Second tone — slightly higher, delayed
-    const osc2 = ctx.createOscillator();
-    const gain2 = ctx.createGain();
-    osc2.type = 'sine';
-    osc2.frequency.setValueAtTime(1174.66, ctx.currentTime + 0.15); // D6
-    gain2.gain.setValueAtTime(0.001, ctx.currentTime);
-    gain2.gain.setValueAtTime(normalizedVolume * 0.3, ctx.currentTime + 0.15);
-    gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-    osc2.connect(gain2);
-    gain2.connect(ctx.destination);
-    osc2.start(ctx.currentTime + 0.15);
-    osc2.stop(ctx.currentTime + 0.5);
-  };
-
-  if (ctx.state === 'suspended') {
-    void ctx.resume().then(play).catch(() => {
-      // AudioContext.resume() may reject under autoplay policies; non-fatal.
-    });
-  } else {
-    play();
+      const second = ctx.createOscillator();
+      const secondGain = ctx.createGain();
+      second.type = 'sine';
+      second.frequency.setValueAtTime(secondFrequency, start + 0.15);
+      secondGain.gain.setValueAtTime(0.001, start);
+      secondGain.gain.setValueAtTime(normalizedVolume * 0.3, start + 0.15);
+      secondGain.gain.exponentialRampToValueAtTime(0.001, start + 0.5);
+      second.connect(secondGain);
+      secondGain.connect(ctx.destination);
+      second.start(start + 0.15);
+      second.stop(start + 0.5);
+    };
+    if (ctx.state === 'suspended') {
+      void ctx.resume().then(play).catch(() => undefined);
+    } else {
+      play();
+    }
+  } catch {
+    // Unsupported Web Audio or autoplay restrictions must not disrupt host sync.
   }
+}
+
+/** Existing rising completion chime. Volume 0–100; 0 is silent. */
+export function playCompletionSound(volume: number): void {
+  playChime(volume, 880, 1174.66);
+}
+
+/** Distinct lower, descending chime for an agent question. */
+export function playQuestionSound(volume: number): void {
+  playChime(volume, 659.25, 523.25);
 }

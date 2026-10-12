@@ -18,11 +18,78 @@ import {
   type SessionAnalyticsFactors,
   type SessionCapabilities,
   type SessionOpenedPayload,
+  type SessionPromptInventoryPayload,
   type ToolFinishedPayload,
   type ViewState,
   type WebviewToHostMessage,
   EMPTY_AGGREGATE_STATS,
 } from '../../application/lib/protocol/index.js';
+
+test('local dictation owns only its captured draft span and never sends', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /dictation never auto-sends/iu);
+  assert.match(contract, /ten seconds of VAD silence/u);
+  assert.match(contract, /pending-path rekeys cannot lose a Stop/u);
+  const { createInitialArchState, reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const initial = createInitialArchState();
+  const owner = { corrId: 'dictation-contract', recordingId: 'voice-contract', sessionPath: 'pending:voice', rendererId: 'local', rendererGeneration: 1 };
+  let state: typeof initial = { ...initial,
+    sessions: { ...initial.sessions, activeSessionPath: owner.sessionPath, openTabPaths: [owner.sessionPath] },
+    composer: { ...initial.composer, draftTextBySession: { [owner.sessionPath]: 'before OLD after' } } };
+  state = reducer(state, { kind: 'DictationAvailabilityChanged', available: true }).state;
+  const start = reducer(state, { kind: 'Command', cmd: { ...owner, kind: 'DictationStart', draftText: 'before OLD after', selectionStart: 7, selectionEnd: 10 } });
+  assert.deepEqual(start.effects, [{ kind: 'DictationControl', action: 'start', recordingId: owner.recordingId }]);
+  state = reducer(start.state, { kind: 'DictationObserved', id: owner.recordingId, sequence: -0.5, observation: { kind: 'level', level: 0.5 } }).state;
+  state = reducer(state, { kind: 'DictationObserved', id: owner.recordingId, sequence: 0, observation: { kind: 'status', phase: 'recording' } }).state;
+  const activity = reducer(state, { kind: 'DictationObserved', id: owner.recordingId, sequence: 1, observation: { kind: 'level', level: 0.5 } });
+  assert.equal(activity.state.dictation.audioLevel, 0.5);
+  assert.equal(activity.state.composer, state.composer);
+  assert.deepEqual(activity.effects, []);
+  state = reducer(activity.state, { kind: 'DictationObserved', id: owner.recordingId, sequence: 2, observation: { kind: 'transcript', text: 'provisional', final: false } }).state;
+  assert.equal(selectViewState(state).draftText, 'before provisional after');
+  state = reducer(state, { kind: 'PendingPathReplaced', oldPendingPath: owner.sessionPath, newSessionPath: 'resolved:voice' }).state;
+  const stop = reducer(state, { kind: 'Command', cmd: { ...owner, kind: 'DictationStop' } });
+  assert.deepEqual(stop.effects, [{ kind: 'DictationControl', action: 'stop', recordingId: owner.recordingId }]);
+  const final = reducer(stop.state, { kind: 'DictationObserved', id: owner.recordingId, sequence: 3, observation: { kind: 'transcript', text: 'revised', final: true } });
+  assert.equal(selectViewState(final.state).draftText, 'before revised after');
+  assert.equal(final.state.dictation.capture, null);
+  assert.deepEqual(final.effects, []);
+  assert.deepEqual(selectViewState(final.state).transcript, []);
+});
+
+test('provider management is host-global, credential-free and separate from chat activation', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /## Provider Management State/u);
+  assert.match(contract, /one-use opaque tickets/u);
+  assert.match(contract, /does not activate chat catalogs/u);
+  const { initialArchState, reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const { isProviderManagementSnapshot } = await import('../../harness/model-providers/management/validation.js');
+  const state = { ...initialArchState, settings: { ...initialArchState.settings, backendReady: true },
+    providerManagement: { ...initialArchState.providerManagement, generation: 1 } };
+  const result = reducer(state, { kind: 'Command', cmd: { kind: 'ProviderManagement', corrId: 'provider-contract',
+    operationId: 'provider-contract-open', generation: 1, command: { type: 'open' } } });
+  assert.equal(selectViewState(result.state).providerManagement?.mode, 'management');
+  assert.equal(result.state.sessions, state.sessions);
+  assert.equal(result.state.settings, state.settings);
+  assert.equal(result.effects[0]?.kind, 'ProviderManagementRpc');
+  const snapshot = { revision: 0, configRevision: null, loaded: true, providers: [], definitions: [], protocols: [] };
+  assert.equal(isProviderManagementSnapshot(snapshot), true);
+  assert.equal(isProviderManagementSnapshot({ ...snapshot, apiKey: 'synthetic-private-input' }), false);
+  assert.equal(isProviderManagementSnapshot({ ...snapshot, auth: { kind: 'progress', operationId: 'op',
+    message: 'Connecting…', access: 'synthetic-private-input' } }), false);
+});
+
+test('notification sound contract broadcasts completion and question chimes without focus arbitration', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Notification sounds are host-owned broadcasts/u);
+  assert.match(contract, /regardless of focus or visibility/u);
+  assert.match(contract, /never queued for reconnect or replayed from snapshots/u);
+  const completion: HostToWebviewMessage = { type: 'playCompletionSound', volume: 50 };
+  const question: HostToWebviewMessage = { type: 'playQuestionSound', volume: 50 };
+  assert.equal(completion.volume, question.volume);
+});
 
 // ---------------------------------------------------------------------------
 // Protocol contract: PROTOCOL_VERSION is a positive integer that the host and
@@ -186,7 +253,7 @@ test('host artifact delivery binds Pi to verified output and distinguishes stand
 test('agent session-control docs track current selectors, outcomes, provenance, titles, and deferred scope', async () => {
   const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');
   const titleContract = await readFile(new URL('../../docs/contracts/SESSION-TITLES.md', import.meta.url), 'utf8');
-  assert.match(agentContract, /create.*Requires `title` \(a non-empty single line of 1–25 characters after trimming\); optional `cwd`, `prompt`, and `settings`/u);
+  assert.match(agentContract, /`create` \| Requires `title` \(a non-empty single line of 1–25 characters after trimming\) and `bucket` \(`small`, `medium`, or `frontier`\); optional `cwd`, `prompt`, and `settings`/u);
   assert.match(agentContract, /exactly one of `title`, `self: true`, or `replyTo`/u);
   assert.match(agentContract, /`settings.get`.*`model: \{provider,id\}`.*`disabledSystemPromptEntries`/u);
   assert.match(agentContract, /A configuration failure.*prevents that call's prompt from being sent/u);
@@ -666,9 +733,9 @@ test('typed agent close bridge: stop-cleanup mode, coordinator-side fence, typed
   assert.match(contract, /restores the surviving tab without stealing focus or reissuing the close, while committed deletions are never restored/u);
 });
 
-test('completed and interrupted replies project explicit continuation capability without creating user input', async () => {
+test('all idle conversation tails project explicit continuation capability without creating user input', async () => {
   const { buildIdleSessionCapabilities } = await import('../../harness/agent-processes/workers/session-activity.js');
-  for (const stopReason of ['stop', 'length', 'aborted']) {
+  for (const stopReason of ['stop', 'length', 'aborted', 'error', 'toolUse']) {
     const capabilities: SessionCapabilities = buildIdleSessionCapabilities([
       { role: 'user', content: 'work' },
       { role: 'assistant', stopReason, content: [{ type: 'text', text: 'answer' }] },
@@ -676,9 +743,18 @@ test('completed and interrupted replies project explicit continuation capability
     assert.equal(capabilities.canContinue, true);
     assert.equal(capabilities.billableActivity, false);
   }
+  assert.equal(buildIdleSessionCapabilities([
+    { role: 'user', content: 'work' },
+    { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }] },
+  ]).canContinue, true);
+  assert.equal(buildIdleSessionCapabilities([
+    { role: 'user', content: 'work' }, { role: 'custom', customType: 'note', content: 'extension context' },
+  ]).canContinue, true);
   assert.equal(buildIdleSessionCapabilities([]).canContinue, false);
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /completed assistant reply preserves that reply in provider context/u);
+  assert.match(contract, /any idle session with nonempty conversation context/u);
+  assert.match(contract, /first prompt requires text or an attachment/u);
   assert.match(contract, /without adding a user message/u);
 });
 
@@ -753,7 +829,34 @@ test('SessionOpenedPayload can carry structured analytics factors', () => {
   assert.equal(payload.analyticsFactors?.selectedToolIds[0], 'read');
 });
 
-test('cold SessionOpenedPayload carries complete prompt catalog, disabled state, and optional estimate together', () => {
+test('cold opens publish the conversation independently of token-fenced prompt inventory', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /publishes the durable conversation and acknowledges without waiting for prompt\/tool inventory/u);
+  assert.match(contract, /Background `session.preload` loads the durable snapshot without inventory/u);
+  const { isSessionPromptInventoryPayload, isSessionOpenedPayload } = await import('../../harness/agent-processes/lib/rpc/event-payload-validation.js');
+  const opened: SessionOpenedPayload = {
+    session: { path: '/cold.jsonl', name: 'Cold', cwd: '/workspace', modifiedAt: '', messageCount: 0 },
+    transcript: [],
+    transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    busy: false, runtimeReady: false,
+    capabilities: { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true },
+    promptInventoryToken: 'inventory:1',
+  };
+  assert.equal(isSessionOpenedPayload(opened), true);
+  assert.equal(opened.systemPrompts, undefined);
+  const inventory: SessionPromptInventoryPayload = {
+    sessionPath: opened.session.path, token: opened.promptInventoryToken!,
+    systemPrompts: [{ source: 'harness', availability: 'available', title: 'Harness',
+      text: 'Complete prompt text.', summary: 'Complete prompt text.', disabled: true }],
+    initialContextEstimate: { tokens: 123, contextWindow: 200_000 },
+  };
+  assert.equal(isSessionPromptInventoryPayload(inventory), true);
+  assert.equal(isSessionPromptInventoryPayload({ ...inventory, token: '' }), false);
+  assert.equal(isSessionPromptInventoryPayload({ ...inventory, systemPrompts: [{ title: 'Incomplete' }] }), false);
+  assert.equal(isSessionPromptInventoryPayload({ ...inventory, initialContextEstimate: { tokens: -1, contextWindow: 200_000 } }), false);
+});
+
+test('cold mutation SessionOpenedPayload carries complete prompt catalog, disabled state, and optional estimate together', () => {
   const payload: SessionOpenedPayload = {
     session: {
       path: '/workspace/session.jsonl', name: 'Session', cwd: '/workspace',

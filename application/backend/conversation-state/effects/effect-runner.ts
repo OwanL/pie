@@ -117,7 +117,11 @@ export interface OpenFileSink {
   openFile(path: string, options?: { reference?: string; workingDirectory?: string }): Promise<void>;
 }
 
+import { createProviderManagementState } from '../../provider-management/state.js';
+import { consumeProviderSecretTicket, discardProviderSecretTicket } from '../../provider-management/secret-tickets.js';
+
 export interface SessionServiceLike {
+  providerManagement?(request: import('../../../../harness/model-providers/management/contracts.js').ProviderManagementRequest): Promise<import('../../../../harness/model-providers/management/contracts.js').ProviderManagementResponse>;
   openSession?(sessionPath: string): void;
   hydrateModelState(sessionPath: string, metadata?: {
     hydrationRevision?: number;
@@ -287,6 +291,14 @@ export interface EffectRunnerDeps {
   /** Host sink for the generic path-opening effect. */
   openFile: OpenFileSink;
   service: SessionServiceLike;
+  getProviderManagementState?: () => import('../../provider-management/state.js').ProviderManagementState;
+  /** Lazy local audio capability. No native dependencies load in this runner. */
+  dictation?: {
+    start(id: string, observe: (observation: import('../../../lib/protocol/dictation.js').DictationObservation) => void): Promise<void>;
+    stop(id: string): Promise<void>;
+    cancel(id: string): Promise<void>;
+  };
+  isDictationOwnerCurrent?: (id: string) => boolean;
   statsService: StatsServiceLike;
   /** Called with each `*Result` event the runner produces. */
   dispatch: (event: EffectResultEvent) => void;
@@ -365,6 +377,9 @@ export class EffectRunner {
    * provider toggles cannot complete out of order and restore stale settings.
    * This queue is deliberately independent of session lifecycle work. */
   private prefsQueue: Promise<void> = Promise.resolve();
+  private dictationQueue: Promise<void> = Promise.resolve();
+  private dictationSequence = 0;
+  private disposed = false;
 
   /** Global MCP config mutations and list reads need FIFO ordering with each
    * other, but must not sit behind unrelated preference or session-runtime
@@ -412,6 +427,9 @@ export class EffectRunner {
       // Session operations delegate as one domain. Generic truncate, queue,
       // and extension-UI RPCs retain the direct session-FIFO path below.
       SendRpc: (e) => this.sessionOperations.runSendRpc(e),
+      DictationControl: (e) => this.handleDictationControl(e),
+      ProviderManagementRpc: (e) => this.handleProviderManagementRpc(e),
+      ProviderManagementDiscardTicket: (e) => { discardProviderSecretTicket(e.ticket); },
       GenerateSessionTitle: (e) => this.handleGenerateSessionTitle(e),
       EditRpc: (e) => this.sessionOperations.runEditRpc(e),
       ReplaceQueueRpc: (e) => this.runReplaceQueueRpc(e),
@@ -545,6 +563,60 @@ export class EffectRunner {
    * "what did the reducer ask the side-effect layer to do" without adding
    * bespoke logs to every individual handler.
    */
+  private readonly providerCancellationResources = new Map<number, Promise<boolean>>();
+
+  private async handleProviderManagementRpc(effect: Extract<Effect, { kind: 'ProviderManagementRpc' }>): Promise<void> {
+    const secret = effect.ticket ? consumeProviderSecretTicket(effect.ticket, effect.generation, effect.request.operationId) : undefined;
+    const request = effect.request;
+    for (const generation of this.providerCancellationResources.keys()) if (generation !== effect.generation) this.providerCancellationResources.delete(generation);
+    const owner = this.deps.getProviderManagementState?.();
+    if (owner && (owner.generation !== effect.generation || request.type !== 'cancel' && request.type !== 'auth-response'
+      && (owner.operationId !== request.operationId || owner.refreshFence !== effect.fence))) return;
+    if (owner && request.type === 'auth-response' && owner.authOperationId !== request.targetOperationId) return;
+    if (this.deps.service.getBackendGeneration && this.deps.service.getBackendGeneration() !== effect.generation) return;
+    if (effect.ticket && secret === undefined) return;
+    let response: import('../../../../harness/model-providers/management/contracts.js').ProviderManagementResponse;
+    try {
+      if (!this.deps.service.providerManagement) throw new Error('unavailable');
+      const privateRequest = request.type === 'connect' ? { ...request, ...(secret !== undefined ? { apiKey: secret } : {}) }
+        : request.type === 'auth-response' ? { ...request, value: secret ?? '' } : request;
+      if (request.type !== 'cancel' && request.type !== 'auth-response') {
+        const cancellation = this.providerCancellationResources.get(effect.generation);
+        if (cancellation && !await cancellation) throw new Error('cancellation-unconfirmed');
+      }
+      const current = this.deps.getProviderManagementState?.();
+      if (current && request.type !== 'cancel' && request.type !== 'auth-response'
+        && (current.operationId !== request.operationId || current.refreshFence !== effect.fence || current.generation !== effect.generation)) return;
+      if (this.deps.service.getBackendGeneration && this.deps.service.getBackendGeneration() !== effect.generation) return;
+      const pending = this.deps.service.providerManagement(privateRequest);
+      if (request.type === 'cancel') {
+        const cancellation = pending.then(result => result.status === 'ok' || result.status === 'cancelled', () => false);
+        this.providerCancellationResources.set(effect.generation, cancellation);
+        void cancellation.then(confirmed => { if (confirmed && this.providerCancellationResources.get(effect.generation) === cancellation) this.providerCancellationResources.delete(effect.generation); });
+      }
+      response = await pending;
+    } catch {
+      response = { operationId: request.operationId, status: 'error', snapshot: { ...createProviderManagementState().snapshot, error: 'Provider management is unavailable.' } };
+    }
+    this.deps.dispatchEvent({ kind: 'ProviderManagementResult', response, generation: effect.generation, fence: effect.fence, selectedId: effect.selectedId, requestType: request.type, ...('targetOperationId' in request ? { targetOperationId: request.targetOperationId } : {}), ...(request.type === 'auth-response' ? { promptId: request.promptId } : {}) });
+  }
+
+  private handleDictationControl(effect: Extract<Effect, { kind: 'DictationControl' }>): void {
+    const observe = (observation: import('../../../lib/protocol/dictation.js').DictationObservation): void => {
+      if (!this.disposed) this.deps.dispatchEvent({ kind: 'DictationObserved', id: effect.recordingId,
+        sequence: ++this.dictationSequence, observation });
+    };
+    this.dictationQueue = this.dictationQueue.then(async () => {
+      if (this.disposed) return;
+      const capability = this.deps.dictation;
+      if (!capability) throw new Error('Local dictation is unavailable');
+      if (effect.action === 'start') {
+        if (this.deps.isDictationOwnerCurrent?.(effect.recordingId) === false) return;
+        await capability.start(effect.recordingId, observe);
+      } else await capability[effect.action](effect.recordingId);
+    }).catch(() => observe({ kind: 'error', message: 'Local dictation could not complete. Check the microphone permissions and GPU driver.' }));
+  }
+
   private logEffectDispatch(effect: Effect): void {
     const payload: Record<string, unknown> = { kind: effect.kind };
     if ('corrId' in effect) payload.corrId = effect.corrId;
@@ -1555,6 +1627,7 @@ export class EffectRunner {
 
   /** Dispose of every opaque execution resource owned below this façade. */
   dispose(): void {
+    this.disposed = true;
     this.clearBackendReadyWatchdog();
     if (this.sessionSnoozeTimer !== null) this.timer.cancel(this.sessionSnoozeTimer);
     this.sessionSnoozeTimer = null;

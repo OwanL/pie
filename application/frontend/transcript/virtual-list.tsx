@@ -199,13 +199,12 @@ function useTranscriptVirtualizer(
       measureElement: (element, entry, instance) => measureTranscriptElement(rows, element, entry, instance),
       onChange: scheduleVirtualRender,
     });
-  }
-
-  const virtualizer = virtualizerRef.current;
-
-  useLayoutEffect(() => {
-    virtualizer.setOptions({
-      ...virtualizer.options,
+  } else {
+    // Render consumes virtual items immediately below. Synchronize row indexes
+    // and keys before that read, not after it in the layout effect. Leave the
+    // constructor's initial measurements intact until the first render reads them.
+    virtualizerRef.current.setOptions({
+      ...virtualizerRef.current.options,
       count: rows.length,
       getScrollElement: () => scrollRef.current,
       estimateSize: (index) => estimateTranscriptRowSize(rows[index] ?? fallbackTranscriptRow(rows)),
@@ -219,6 +218,11 @@ function useTranscriptVirtualizer(
       measureElement: (element, entry, instance) => measureTranscriptElement(rows, element, entry, instance),
       onChange: scheduleVirtualRender,
     });
+  }
+
+  const virtualizer = virtualizerRef.current;
+
+  useLayoutEffect(() => {
     virtualizer._willUpdate();
   }, [rangeExtractor, rows, scheduleVirtualRender, virtualizer]);
 
@@ -338,7 +342,8 @@ const VirtualRow = memo(function VirtualRow({
       ref={measureRowElement}
       class={cx(
         'absolute start-0 top-0 box-border flex w-full flex-col items-start',
-        isRoleTransition ? 'pb-4' : 'pb-1.5',
+        // Inter-row separation belongs between rows, not below the tail.
+        row === lastRow ? 'pb-0' : isRoleTransition ? 'pb-4' : 'pb-1.5',
       )}
       style={{ transform: `translateY(${virtualRow.start}px)` }}
     >
@@ -589,12 +594,12 @@ export function TranscriptVirtualList({
           <button
             type="button"
             class="transcript-jump-latest"
-            aria-label="Jump to bottom"
-            title="Jump to bottom"
+            aria-label="Jump to latest"
+            title="Jump to latest"
             onClick={jumpToLatest}
           >
             <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
-            <span>Bottom</span>
+            <span>Latest</span>
           </button>
         )}
         <MessageRail

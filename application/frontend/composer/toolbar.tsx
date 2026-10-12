@@ -17,6 +17,7 @@ import { BrowserServerMenu } from './browser-server-menu';
 import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ContextWindowBreakdownChart } from '../context-inspector/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-inspector/breakdown';
+import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview.js';
 import type { TokenRateIndicatorState } from '../analytics/use-token-rate';
 import type { WorkingTimeIndicatorState } from '../analytics/use-working-time';
 import type {
@@ -81,6 +82,7 @@ interface ComposerToolbarProps {
   toolResultPruningSettings: ToolResultPruningSettings;
   sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
+  providerManagement?: ProviderSetupPreviewProps;
   privacyMode?: boolean;
   browserServer?: BrowserServerViewState;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
@@ -138,6 +140,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
+  providerManagement,
   privacyMode = false,
   browserServer,
   onSetPrefs,
@@ -167,7 +170,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   contextBreakdown,
   sessionCostIndicator,
   canonicalActivitySummary,
-  tokenRateIndicator,
   workingTimeIndicator,
   runStatus,
   compacting,
@@ -227,7 +229,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         : '. Applies to your next idle, nonempty send, not an empty continuation.');
   const pinnedControls = (
     <>
-      <ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+      <ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} providerManagement={providerManagement} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
       {filteredModels.length > 0 ? (
         <ModelPicker
           label={selectedModelLabel}
@@ -392,20 +394,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         />
       ),
     }] : []),
-    ...(tokenRateIndicator.label !== '—' && tokenRateIndicator.label && !prefs.hideTokenRate ? [{
-      key: 'token-rate',
-      kind: 'indicator' as const,
-      content: (
-        <ToolbarIndicatorChip
-          kind="speed"
-          state={tokenRateIndicator.paused ? 'paused' : null}
-          ariaLabel={tokenRateIndicator.ariaLabel}
-          tooltip={tokenRateIndicator.tooltip}
-          label={tokenRateIndicator.label}
-          freezeWhileVisible
-        />
-      ),
-    }] : []),
+
     ...(workingTimeIndicator.label ? [{
       key: 'working-time',
       kind: 'indicator' as const,

@@ -60,6 +60,7 @@ export const SessionControlParameters = Type.Object(
      *  title). Exactly one of title or self is required on read, settings, and
      *  close; message may instead use an identity-bound replyTo reference. */
     self: Type.Optional(Type.Boolean({ description: 'Use true to target this calling session instead of title. Not valid for list or create.' })),
+    bucket: Type.Optional(StringEnum(['small', 'medium', 'frontier'] as const, { description: 'create only, required: small for simple tasks, medium for well-defined substantial tasks, frontier for hard reasoning.' })),
     cwd: Type.Optional(Type.String({ maxLength: 16 * 1024, description: 'create only: working directory; omission inherits the caller’s directory.' })),
     direction: Type.Optional(StringEnum(['older', 'newer', 'latest'] as const)),
     cursor: Type.Optional(TranscriptCursor),
@@ -125,7 +126,7 @@ export function createSessionControlTool(request: SessionControlToolRequest): To
       'Include the task, ownership boundaries, and expected handoff in the initial prompt. Send session messages when another agent needs a result, finding, decision, or scope change to proceed correctly. Omit routine acknowledgements and progress chatter. Reply only when it advances the work; receiving a message does not itself require a reply.',
       'list exposes live sessions with their assigned titles (field `title`) and provisional `name` labels; only assigned titles address existing sessions.',
       "read, settings, and close require an explicit target: set `self` for the caller's own session or `title` for another live session; message may instead use replyTo.",
-      "create requires a 1-25-character title (trimmed), inherits the creator's saved model/reasoning, system-prompt toggles, and execution settings, and configures them before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
+      "create requires a 1-25-character title (trimmed) and an explicit bucket: small for simple tasks, medium for well-defined substantial tasks, frontier for hard reasoning. Bucket selection uses the caller's provider policy and bucket reasoning unless settings.reasoning overrides it; settings.model is not accepted. System-prompt toggles and execution settings are inherited and configured before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
       'Cancellation or a lost mutation acknowledgement does not prove the coordinator stopped; its outcome is unknown and it may continue. Do not automatically repeat create, message, settings, or close requests after such an error.',
       'Use read direction latest for the first page, then pass the returned cursor with direction older or newer. Tool bodies are bounded previews; renderer diagnostics and image bytes are omitted.',
       "message uses ordinary send semantics: an idle target wakes and a busy target receives Pie's normal queued-send behavior. replyTo resolves only while the original sender is live.",
@@ -142,7 +143,7 @@ export function createSessionControlTool(request: SessionControlToolRequest): To
       const action = typedParams.action;
       const allowed: Record<SessionControlArguments['action'], readonly string[]> = {
         list: ['action'],
-        create: ['action', 'title', 'cwd', 'prompt', 'settings'],
+        create: ['action', 'title', 'bucket', 'cwd', 'prompt', 'settings'],
         read: ['action', 'title', 'self', 'direction', 'cursor', 'limit'],
         message: ['action', 'title', 'self', 'replyTo', 'prompt', 'settings'],
         'settings.get': ['action', 'title', 'self'],
@@ -154,6 +155,12 @@ export function createSessionControlTool(request: SessionControlToolRequest): To
       if (invalidField) return failure(`${action} does not accept ${invalidField}.`);
 
       if (action === 'create') {
+        if (!['small', 'medium', 'frontier'].includes(typedParams.bucket ?? '')) {
+          return failure('create requires bucket: small, medium, or frontier.');
+        }
+        if (typedParams.settings && Object.hasOwn(typedParams.settings, 'model')) {
+          return failure('create.settings.model is not accepted; use bucket to select the model.');
+        }
         if (typeof typedParams.title !== 'string' || !typedParams.title.trim()) {
           return failure('create requires a title of 1-25 characters.');
         }
@@ -172,6 +179,7 @@ export function createSessionControlTool(request: SessionControlToolRequest): To
         }
         const payload: WorkerJsonObject = {
           title: typedParams.title.trim(),
+          bucket: typedParams.bucket!,
           ...(typeof typedParams.cwd === 'string' && typedParams.cwd.trim() ? { cwd: typedParams.cwd.trim() } : {}),
           ...(typedParams.prompt !== undefined ? { prompt: typedParams.prompt } : {}),
           ...(typedParams.settings !== undefined

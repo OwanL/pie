@@ -27,6 +27,7 @@ export const LIVE_PIPELINE_TRACE_STAGES = [
   'host.operation.transition',
   'host.incident.reported',
   'host.projection.completed',
+  'host.renderer.compacted',
   'host.snapshot.built',
   'host.post.started',
   'host.post.settled',

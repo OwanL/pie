@@ -20,7 +20,7 @@ export function withProcessTreeIsolation(options, platform = process.platform) {
   return { ...options, detached: platform !== 'win32' };
 }
 
-function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync, rootPid, timeoutMs = 5_000) {
+function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync, rootPid, timeoutMs = 5_000, verifyRootPid) {
   const unavailable = (reason) => ({ rows: [], available: false, reason });
   try {
     if (platform === 'win32') {
@@ -29,7 +29,10 @@ function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync
       // CreationDate in its raw DMTF form: PowerShell's DateTime formatting is
       // culture-dependent and discards the provider's sub-second precision.
       const filter = Number.isInteger(rootPid) && rootPid > 0 ? ` WHERE ProcessId=${rootPid}` : '';
-      const script = `$ErrorActionPreference='Stop'; $q=[wmisearcher]'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process${filter}'; try { foreach ($p in $q.Get()) { '{0}|{1}|{2}' -f $p.ProcessId,$p.ParentProcessId,$p.CreationDate } } finally { $q.Dispose() }`;
+      const query = (where) => `$q=[wmisearcher]'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process${where}'; try { foreach ($p in $q.Get()) { '{0}|{1}|{2}' -f $p.ProcessId,$p.ParentProcessId,$p.CreationDate } } finally { $q.Dispose() };`;
+      // Avoid a second shell startup between the census and live root check.
+      const bracket = Number.isInteger(verifyRootPid) && verifyRootPid > 0;
+      const script = `$ErrorActionPreference='Stop'; ${query(filter)}${bracket ? `'PIE_ROOT_CHECK'; ${query(` WHERE ProcessId=${verifyRootPid}`)}` : ''}`;
       const result = spawnSyncImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8', windowsHide: true, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
       });
@@ -37,13 +40,17 @@ function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync
         const detail = result?.error?.message ?? `status ${String(result?.status)}`;
         return unavailable(detail);
       }
-      const rows = result.stdout.split(/\r?\n/u).flatMap((line) => {
+      const sections = result.stdout.split(/(?:^|\r?\n)PIE_ROOT_CHECK\r?\n/u);
+      const parseRows = (text) => text.split(/\r?\n/u).flatMap((line) => {
         const [pid, ppid, rawCreationDate] = line.trim().split('|');
         if (!(Number(pid) > 0)) return [];
         const creationDate = rawCreationDate?.trim() || null;
         return [{ pid: Number(pid), ppid: Number(ppid), identity: creationDate, creationDate }];
       });
-      return { rows, available: true, reason: null };
+      const rows = parseRows(sections[0]);
+      return { rows, available: true, reason: null,
+        verification: bracket && sections.length === 2
+          ? { rows: parseRows(sections[1]), available: true, reason: null } : undefined };
     }
     const result = spawnSyncImpl('ps', ['-e', '-o', 'pid=,ppid=,lstart='], {
       encoding: 'utf8', timeout: 5_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
@@ -116,13 +123,13 @@ function captureWindowsOwnership(child, options) {
   const retainedUnknown = windowsUnprovenOwnership.get(child) ?? [];
   const beforeClosed = childClosed(child);
   const captureDeadline = Date.now() + 5_000;
-  const first = options.enumeration ?? queryProcessRows('win32', options.spawnSyncImpl);
+  const first = options.enumeration ?? queryProcessRows('win32', options.spawnSyncImpl, undefined, 5_000, beforeClosed ? undefined : pid);
   const firstRoot = first.rows.find((row) => row.pid === pid);
   const remainingMs = captureDeadline - Date.now();
   const verification = !options.enumeration && !beforeClosed && firstRoot?.identity != null
-    ? remainingMs > 0
+    ? first.verification ?? (remainingMs > 0
       ? queryProcessRows('win32', options.spawnSyncImpl, pid, remainingMs)
-      : { rows: [], available: false, reason: 'ownership capture budget exhausted' }
+      : { rows: [], available: false, reason: 'ownership capture budget exhausted' })
     : first;
   const enumeration = { ...first, available: first.available && verification.available,
     reason: first.reason ?? verification.reason };
@@ -187,7 +194,8 @@ function captureWindowsOwnership(child, options) {
   for (const entry of retainedUnknown) {
     if (!unknown.some((prior) => prior.pid === entry.pid && prior.identity === entry.identity)) unknown.push(entry);
   }
-  return { owned, unknown, enumeration, ownershipUnknown: windowsOwnershipUncertain.has(child) };
+  return { owned, unknown, enumeration, ownershipReady: consistent && !windowsOwnershipUncertain.has(child),
+    ownershipUnknown: windowsOwnershipUncertain.has(child) };
 }
 
 function isAlive(pid, killImpl = process.kill) {
@@ -408,8 +416,10 @@ export function watchChildProcess(child, {
   const startedAt = Date.now();
   // Capture once while the root is live; retain proven generations through
   // close so cleanup can identify genuine leaks without inferring ancestry.
+  let ownershipReady = platform !== 'win32';
   if (platform === 'win32' && killTree === killProcessTree && Number.isInteger(child?.pid)) {
-    captureWindowsOwnership(child, { spawnSyncImpl });
+    const capture = captureWindowsOwnership(child, { spawnSyncImpl });
+    ownershipReady = capture.ownershipReady;
   }
   let timedOut = false;
   let aborted = false;
@@ -438,6 +448,7 @@ export function watchChildProcess(child, {
     signal?.removeEventListener('abort', onAbort);
   };
   return {
+    get ownershipReady() { return ownershipReady; },
     get timedOut() { return timedOut; },
     get aborted() { return aborted; },
     get terminationStarted() { return terminationStarted; },

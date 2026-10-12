@@ -141,7 +141,19 @@ test('fresh discovery import and metadata registration never evaluate the execut
     assert.equal(tool.name, 'subagent');
     assert.match(tool.description, /not sandboxing/);
     assert.ok(tool.promptSnippet && tool.promptGuidelines.length);
-    assert.deepEqual(tool.parameters.required, ['agent', 'task']);
+    assert.deepEqual(tool.parameters.required, ['agent', 'task', 'bucket']);
+    assert.equal(tool.parameters.properties.bucket.default, undefined);
+    assert.match(tool.parameters.properties.bucket.description, /Prefer small for bounded, well-defined work/);
+    const missingBucket = tool.prepareArguments({agent:'worker',task:'work'});
+    assert.throws(() => legacyAi.validateToolArguments(tool, {
+      type:'toolCall', id:'missing-bucket', name:'subagent', arguments:missingBucket,
+    }), /bucket/);
+    for (const bucket of ['small', 'medium', 'frontier']) {
+      const args = {agent:'worker', task:'work', bucket};
+      assert.deepEqual(legacyAi.validateToolArguments(tool, {
+        type:'toolCall', id:'explicit-bucket', name:'subagent', arguments:tool.prepareArguments(args),
+      }), args);
+    }
     assert.deepEqual(tool.prepareArguments({tasks: [{agent:'worker',task:'work'}]}), {agent:'worker',task:'work'});
     assert.equal(typeof tool.execute, 'function');
     assert.equal(typeof tool.renderCall, 'function');

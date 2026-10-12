@@ -39,6 +39,7 @@ export type {
   SessionCloseRequestedPayload,
   SessionCloseResponseDeliveredPayload,
   SessionOpenedPayload,
+  SessionPromptInventoryPayload,
   SessionUsageSnapshot,
   SystemPromptAvailability,
   SystemPromptEntry,

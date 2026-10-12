@@ -485,24 +485,55 @@ test('test wrappers and runner config survive unconfirmed process-tree teardown'
 
   let confirmedConfigPath;
   let confirmedEntry;
+  let captureComplete = false;
   const completed = await runNodeTests([source], {
     spawnImpl(_executable, args) {
       confirmedConfigPath = args.at(-1);
-      confirmedEntry = JSON.parse(readFileSync(confirmedConfigPath, 'utf8')).files[0];
+      const config = JSON.parse(readFileSync(confirmedConfigPath, 'utf8'));
+      confirmedEntry = config.files[0];
+      assert.equal(config.waitForOwnership, true);
       const child = new EventEmitter();
+      child.stdin = new EventEmitter();
+      child.stdin.end = () => { assert.equal(captureComplete, true); };
       queueMicrotask(() => child.emit('close', 0));
       return child;
     },
-    watchChildProcessImpl: () => ({
-      timedOut: false,
-      aborted: false,
-      settle: async () => ({ gone: true }),
-    }),
+    watchChildProcessImpl: () => {
+      captureComplete = true;
+      return {
+        ownershipReady: true,
+        timedOut: false,
+        aborted: false,
+        settle: async () => ({ gone: true }),
+      };
+    },
   });
   assert.equal(completed.teardownConfirmed, true);
   assert.equal(existsSync(confirmedConfigPath), false, 'the runner config is removed after confirmed teardown');
   assert.equal(existsSync(confirmedEntry), false, 'the CJS entry is removed after confirmed teardown');
   assert.equal(existsSync(path.dirname(confirmedConfigPath)), false, 'the temporary runner directory is removed after confirmed teardown');
+});
+
+test('failed ownership startup capture never releases the short suite', async () => {
+  let released = false;
+  let settled = false;
+  await assert.rejects(runNodeTests([], {
+    spawnImpl(_executable, args, options) {
+      assert.deepEqual(options.stdio, ['pipe', 'inherit', 'inherit']);
+      assert.equal(JSON.parse(readFileSync(args.at(-1), 'utf8')).waitForOwnership, true);
+      const child = new EventEmitter();
+      child.stdin = new EventEmitter();
+      child.stdin.end = () => { released = true; };
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    },
+    watchChildProcessImpl: () => ({
+      ownershipReady: false,
+      settle: async () => { settled = true; return { gone: true }; },
+    }),
+  }), /ownership startup handshake failed/u);
+  assert.equal(released, false);
+  assert.equal(settled, true);
 });
 
 test('unconfirmed native SDK teardown retains its reader registration', async (t) => {

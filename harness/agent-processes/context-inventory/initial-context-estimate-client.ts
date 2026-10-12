@@ -36,6 +36,11 @@ export interface InitialContextEstimateTimingSample extends InitialContextEstima
   readonly guardianDurationMs?: number;
   readonly preloadDurationMs?: number;
   readonly responseDurationMs?: number;
+  /** FIFO time from discover() enqueue until this request begins service. */
+  readonly queueWaitDurationMs?: number;
+  /** End-to-end time from discover() enqueue through discovery and cleanup. */
+  readonly requestDurationMs?: number;
+  /** Service time through cleanup, excluding FIFO wait. */
   readonly totalDurationMs: number;
   readonly prewarmed?: boolean;
   readonly outcome: 'success' | 'failure';
@@ -185,10 +190,11 @@ export class InitialContextEstimateClient {
       return Promise.resolve(undefined);
     }
     this.queuedDiscoveries += 1;
+    const enqueuedAt = performance.now();
     let succeeded = false;
     const result = this.discoveryQueue.then(async () => {
       if (this.disposed) return undefined;
-      const inventory = await this.discoverOne(input);
+      const inventory = await this.discoverOne(input, enqueuedAt);
       succeeded = inventory !== undefined;
       return inventory;
     });
@@ -249,8 +255,9 @@ export class InitialContextEstimateClient {
     cwd: string;
     agentDir: string;
     model: { provider: string; id: string };
-  }): Promise<InitialContextInventory | undefined> {
+  }, enqueuedAt: number): Promise<InitialContextInventory | undefined> {
     const startedAt = performance.now();
+    const queueWaitDurationMs = Math.max(0, startedAt - enqueuedAt);
     let active: ActiveChild | undefined;
     let responseDurationMs: number | undefined;
     let workerTimings: InitialContextEstimateWorkerTimings | undefined;
@@ -297,9 +304,12 @@ export class InitialContextEstimateClient {
           // Failed cleanup remains the sole tracked process; never spawn over it.
         }
       }
+      const completedAt = performance.now();
       this.recordTiming({
         stage: 'discover',
-        totalDurationMs: elapsedMs(startedAt),
+        queueWaitDurationMs,
+        requestDurationMs: Math.max(0, completedAt - enqueuedAt),
+        totalDurationMs: Math.max(0, completedAt - startedAt),
         ...(active ? this.startupTiming(active) : {}),
         ...(active ? { prewarmed: active.purpose === 'prewarm' } : {}),
         ...(responseDurationMs !== undefined ? { responseDurationMs } : {}),

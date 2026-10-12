@@ -190,6 +190,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Request-boundary refresh, also invoked for first/continued requests. */
+	prepareModelRequest?: (context: Context, signal?: AbortSignal) => Promise<Context>;
+
 	/**
 	 * Resolves an API key dynamically for each LLM call.
 	 *

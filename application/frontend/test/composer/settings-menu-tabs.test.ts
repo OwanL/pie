@@ -94,7 +94,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="chat"].active'), 'Chat tab should be active by default');
   const chatText = menu.querySelector('.toolbar-settings-menu-body')!.textContent!;
   assert.match(chatText, /Transcript/);
-  assert.match(chatText, /Completion notifications/);
+  assert.match(chatText, /Notification sounds/);
   assert.match(chatText, /Sound volume/);
   assert.match(chatText, /Diagnostics/);
   assert.doesNotMatch(chatText, /Hide bottom usage strip/);

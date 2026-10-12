@@ -8,10 +8,16 @@ import DOMPurify from 'dompurify';
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 import renderToString from 'preact-render-to-string';
-import { TurnActivityStrip } from '../../transcript/turn-activity-strip';
+import { TurnActivityStrip, activityToneToStripTone } from '../../transcript/turn-activity-strip';
 import { CompactionSummary } from '../../transcript/compaction-summary';
 
 DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
+
+test('routine processing stays neutral rather than masquerading as a warning', () => {
+  assert.equal(activityToneToStripTone('processing'), 'neutral');
+  assert.equal(activityToneToStripTone('neutral'), 'neutral');
+  assert.equal(activityToneToStripTone('active'), 'accent');
+});
 
 test('activity preserves phase, motion semantics, tone and full accessible detail', () => {
   for (const tone of ['accent', 'warning', 'error'] as const) {
@@ -77,12 +83,30 @@ test('history compaction missing metrics stay truthful, never invented', () => {
   }
 });
 
+test('composer edge fade stays fixed, short and transparent to input', () => {
+  const css = readFileSync('application/frontend/styles/transcript.css', 'utf8');
+  const fade = css.match(/\.transcript-viewport::after\s*\{([^}]+)\}/)?.[1];
+  assert.ok(fade);
+  assert.match(fade, /position: absolute/);
+  assert.match(fade, /bottom: 0/);
+  assert.match(fade, /height: 16px/);
+  assert.match(fade, /linear-gradient\(to bottom, transparent, var\(--panel-surface\)\)/);
+  assert.match(fade, /pointer-events: none/);
+  assert.match(fade, /z-index: 4/);
+  assert.match(css, /@media \(forced-colors: active\)\s*\{\s*\.transcript-viewport::after \{ display: none;/);
+});
+
 test('status CSS is readable, detail shrinks first and spinner is compact inline', () => {
   const css = readFileSync('application/frontend/styles/transcript.css', 'utf8');
   const block = (selector: string) => css.slice(css.indexOf(`${selector} {`)).split('}')[0];
   assert.match(block('.turn-activity-strip'), /font-family: var\(--panel-font-sans\)/);
   assert.match(block('.turn-activity-strip'), /font-size: 11px/);
   assert.match(block('.turn-activity-strip-label'), /flex: 0 0 auto/);
+  assert.match(block('.message-activity-footer'), /margin-top: 0/);
+  assert.match(block('.transcript'), /\) var\(--panel-gap-lg\) var\(--panel-gap-lg\)/);
+  const listSource = readFileSync('application/frontend/transcript/virtual-list.tsx', 'utf8');
+  assert.match(listSource, /row === lastRow \? 'pb-0'/);
+  assert.match(listSource, /aria-label="Jump to latest"/);
   assert.match(block('.turn-activity-strip-detail'), /flex: 0 1 auto/);
   assert.match(block('.turn-activity-strip-detail'), /min-width: 0/);
   assert.doesNotMatch(block('.turn-activity-strip-detail'), /opacity:/);

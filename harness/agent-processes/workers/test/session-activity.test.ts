@@ -66,7 +66,7 @@ test('hot and cold continuation capabilities recognize completed assistant repli
   }
 });
 
-test('continuation capability still rejects busy, empty, and non-overflow error tails', () => {
+test('continuation capability still rejects busy and empty sessions', () => {
   const completedReply = { role: 'assistant', content: [{ type: 'text', text: 'finished normally' }], stopReason: 'stop' };
   const busy = contextWith({ messages: [completedReply], isStreaming: true });
   assert.deepEqual(buildSessionCapabilities(busy), {
@@ -78,9 +78,21 @@ test('continuation capability still rejects busy, empty, and non-overflow error 
 
   assert.equal(buildSessionCapabilities(contextWith()).canContinue, false, 'empty hot history');
   assert.equal(buildIdleSessionCapabilities([], undefined).canContinue, false, 'empty cold history');
-  const failedReply = { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'provider request failed' };
-  assert.equal(buildSessionCapabilities(contextWith({ messages: [failedReply] })).canContinue, false);
-  assert.equal(buildIdleSessionCapabilities([failedReply]).canContinue, false);
+});
+
+test('hot and cold idle sessions continue after errors, dangling tools, and custom tails', () => {
+  const tails = [
+    { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'provider request failed' },
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }], stopReason: 'toolUse' },
+    { role: 'custom', content: 'extension context', customType: 'note' },
+    { role: 'compactionSummary', summary: 'earlier conversation' },
+  ];
+  for (const tail of tails) {
+    const messages = [{ role: 'user', content: 'work' }, tail];
+    assert.equal(buildSessionCapabilities(contextWith({ messages })).canContinue, true);
+    assert.equal(buildIdleSessionCapabilities(messages).canContinue, true);
+    assert.equal(buildSessionCapabilities(contextWith({ messages, isStreaming: true })).canContinue, false);
+  }
 });
 
 test('idle continuation classification uses the supplied complete backend context', () => {

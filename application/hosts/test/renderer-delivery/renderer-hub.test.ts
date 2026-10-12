@@ -474,6 +474,20 @@ test('replacing one renderer does not reset the other renderer', async () => {
   hub.dispose();
 });
 
+test('notification sounds are not replayed when a client becomes ready', async () => {
+  const clock = new FakeClock();
+  const { hub } = createHub(clock, []);
+  const client = new FakeRendererTransport('browser');
+  const registration = hub.registerRenderer(client);
+  for (const type of ['playCompletionSound', 'playQuestionSound'] as const) {
+    hub.postImperative({ type, volume: 50 });
+  }
+  await ready(client, registration);
+  await settle();
+  assert.equal(client.posted.filter((m) => m.type === 'playCompletionSound' || m.type === 'playQuestionSound').length, 0);
+  hub.dispose();
+});
+
 test('targeted imperatives reach only the target renderer; broadcast reaches all', async () => {
   const clock = new FakeClock();
   const routed: WebviewToHostMessage[] = [];
@@ -490,10 +504,13 @@ test('targeted imperatives reach only the target renderer; broadcast reaches all
   assert.equal(a.posted.filter((m) => m.type === 'sendRejected').length, 1);
   assert.equal(b.posted.filter((m) => m.type === 'sendRejected').length, 0);
 
-  hub.postImperative({ type: 'playCompletionSound', volume: 50 });
-  await settle();
-  assert.equal(a.posted.filter((m) => m.type === 'playCompletionSound').length, 1);
-  assert.equal(b.posted.filter((m) => m.type === 'playCompletionSound').length, 1);
+  regB.setVisible(false);
+  for (const type of ['playCompletionSound', 'playQuestionSound'] as const) {
+    hub.postImperative({ type, volume: 50 });
+    await settle();
+    assert.equal(a.posted.filter((m) => m.type === type).length, 1);
+    assert.equal(b.posted.filter((m) => m.type === type).length, 1, 'hidden ready clients also receive sounds');
+  }
 
   hub.postImperative({ type: 'sendRejected', sessionPath: '/sessions/a', text: 'x' }, 'unknown-renderer');
   await settle();

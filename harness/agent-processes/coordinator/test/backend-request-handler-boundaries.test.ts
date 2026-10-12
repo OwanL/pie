@@ -46,6 +46,7 @@ const EXPECTED_BACKEND_ROUTES = [
   ...EXPECTED_SESSION_ROUTES,
   ...EXPECTED_MESSAGE_ROUTES,
   'extension_ui.response',
+  'providers.manage',
   'models.list',
   'settings.get',
   'settings.set',

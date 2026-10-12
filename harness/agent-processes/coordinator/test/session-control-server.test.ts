@@ -91,6 +91,8 @@ function installSessionControlSettingsHarness(
       readDurableSessionMetadata(path: string, modelSettings: unknown): Promise<unknown>;
     };
     assertSessionControlModelAvailable(model: unknown): Promise<void>;
+    runtimePrefs: unknown;
+    sessionModelCatalog(path: string): Promise<unknown>;
     acknowledgeHostSessionControlSettings(acknowledgement: SessionControlSettingsAcknowledgement): Promise<unknown>;
   };
   internal.buildSessionOpenedPayload = async (sessionPath) => ({
@@ -115,6 +117,11 @@ function installSessionControlSettingsHarness(
       cwd: '/workspace', modelId: 'gpt-test', provider: 'openai', thinkingLevel: 'high',
     }),
   });
+  internal.runtimePrefs = { subagentBuckets: { small: [], medium: [], frontier: [] }, providerToggles: {} };
+  internal.sessionModelCatalog = async () => ({ ok: true, models: [{
+    provider: 'openai', id: 'gpt-test', reasoning: true,
+    thinkingLevelMap: { minimal: 'minimal', low: 'low', medium: 'medium', high: 'high' },
+  }] });
   internal.assertSessionControlModelAvailable = async () => undefined;
   server.emit = (event, payload) => {
     observedEvents.push({ event, payload });
@@ -289,7 +296,7 @@ test('provisional membership refresh does not negate title readiness or block un
   );
   assert.equal((assignedTarget.result.message as Record<string, unknown>).status, 'accepted');
   const created = await server.handleWorkerSessionControl(
-    frame('create', { title: 'New plan' }), currentPath,
+    frame('create', { bucket: 'medium', title: 'New plan' }), currentPath,
   );
   assert.equal((created.result.creation as Record<string, unknown>).status, 'created');
   assert.ok(requests.some((request) => request.method === 'session.create'));
@@ -742,7 +749,7 @@ test('session-control server delegates cold-session creation with an idempotent 
   };
 
   const created = await server.handleWorkerSessionControl(
-    frame('create', { title: 'New plan', cwd: '/workspace/project' }),
+    frame('create', { bucket: 'medium', title: 'New plan', cwd: '/workspace/project' }),
     '/workspace/current.jsonl',
   );
   assert.equal((created.result.creation as Record<string, unknown>).status, 'created');
@@ -822,6 +829,9 @@ test('hot session-control settings and create cwd capture use durable metadata u
     readModelSettings(): Promise<unknown>;
   };
   internal.initializeColdSessionStore = () => store;
+  (server as unknown as { sessionModelCatalog(path: string): Promise<unknown> }).sessionModelCatalog = async () => ({
+    ok: true, models: [{ provider: 'saved-provider', id: 'saved-model', reasoning: true }],
+  });
   internal.readModelSettings = async () => ({
     defaultModel: 'fresh-default-model', defaultProvider: 'fresh-default-provider', defaultThinkingLevel: 'low',
   });
@@ -849,7 +859,7 @@ test('hot session-control settings and create cwd capture use durable metadata u
     'without an explicit durable entry the fresh saved default wins over the SDK context fallback');
   assert.equal(managerOpens, 2);
 
-  await server.handleWorkerSessionControl(frame('create', { title: 'Durable cwd' }), currentPath);
+  await server.handleWorkerSessionControl(frame('create', { bucket: 'medium', title: 'Durable cwd' }), currentPath);
   assert.equal((requests[0]?.params as { cwd?: string }).cwd, '/durable/project');
   const settingsWrite = requests.find((request) => request.method === 'settings.set')?.params as Record<string, unknown>;
   assert.equal(settingsWrite.defaultModel, 'saved-model');
@@ -869,7 +879,7 @@ test('create inheritance failure explicitly reports that no session was created'
   internal.captureSessionControlSettings = async () => { throw new Error('saved settings unavailable'); };
   const writes: string[] = [];
   server.handleRequest = async (request) => { writes.push(request.method); return {}; };
-  const result = await server.handleWorkerSessionControl(frame('create', {
+  const result = await server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Preflight failed', prompt: 'must not send',
   }), currentPath);
   assert.equal((result.result.creation as { status: string }).status, 'not_created');
@@ -884,10 +894,135 @@ test('agent create rejects unconfigured providers before durable creation', asyn
   installSessionControlSettingsHarness(server);
   const writes: string[] = [];
   server.handleRequest = async (request) => { writes.push(request.method); return {}; };
-  await assert.rejects(server.handleWorkerSessionControl(frame('create', {
+  await assert.rejects(server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Provider test', settings: { subagentProviderChoices: { forged: true } },
   }), currentPath), (error: { code?: string }) => error.code === 'INVALID_PARAMS');
   assert.deepEqual(writes, []);
+});
+
+test('agent create validates the selected custom model against the creation-time catalog before durable writes', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-creation-model-catalog-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  installSessionControlSettingsHarness(server);
+  const model = { provider: 'custom-provider', id: 'runtime-only-model' };
+  const callerModel = {
+    ...model, reasoning: true, thinkingLevels: ['high'], subagent: { eligible: true },
+  };
+  const internal = server as unknown as {
+    captureSessionControlSettings(path: string): Promise<unknown>;
+    sessionModelCatalog(path: string): Promise<unknown>;
+    creationModelCatalog(): Promise<unknown>;
+    assertSessionControlModelAvailable(model: unknown, sessionPath?: string, reasoning?: string): Promise<void>;
+  };
+  const prototype = BackendServer.prototype as unknown as {
+    assertSessionControlModelAvailable(
+      this: BackendServer, model: unknown, sessionPath?: string, reasoning?: string,
+    ): Promise<void>;
+  };
+  // installSessionControlSettingsHarness stubs this method for unrelated tests;
+  // restore the production implementation for this regression.
+  internal.assertSessionControlModelAvailable = prototype.assertSessionControlModelAvailable.bind(
+    server as unknown as BackendServer,
+  );
+  internal.captureSessionControlSettings = async () => ({
+    settings: {
+      model, reasoning: 'high', autonomousMode: true, subagentProviderChoices: { 'custom-provider': true },
+      disabledSystemPromptEntries: [],
+    },
+    cwd: '/workspace',
+  });
+  let callerCatalogReads = 0;
+  internal.sessionModelCatalog = async () => {
+    callerCatalogReads += 1;
+    return { ok: true, models: [callerModel] };
+  };
+  const writes: string[] = [];
+  server.handleRequest = async (request) => { writes.push(request.method); return {}; };
+
+  for (const creationModel of [
+    { ...callerModel, subagent: { eligible: false } },
+    { ...callerModel, thinkingLevels: ['low'] },
+  ]) {
+    let creationCatalogReads = 0;
+    internal.creationModelCatalog = async () => {
+      creationCatalogReads += 1;
+      return { ok: true, models: [creationModel] };
+    };
+    const result = await server.handleWorkerSessionControl(
+      frame('create', { bucket: 'medium', title: 'Custom model validation' }), currentPath,
+    );
+    assert.equal((result.result.creation as { status: string }).status, 'not_created');
+    assert.equal((result.result.configuration as { status: string }).status, 'not_started');
+    assert.equal(creationCatalogReads, 1, 'creation validates against the creation-time catalog');
+    assert.deepEqual(writes, [], 'ineligible or unsupported creation models are rejected before durable writes');
+  }
+  assert.equal(callerCatalogReads, 2, 'selection uses the caller catalog for the same custom model identity');
+});
+
+test('agent create preflight honors explicit reasoning over caller bucket reasoning', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-reasoning-preflight-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  installSessionControlSettingsHarness(server);
+  const internal = server as unknown as {
+    runtimePrefs: unknown;
+    sessionModelCatalog(path: string): Promise<unknown>;
+    creationModelCatalog(): Promise<unknown>;
+    assertSessionControlModelAvailable(model: unknown, sessionPath?: string, reasoning?: string): Promise<void>;
+  };
+  const prototype = BackendServer.prototype as unknown as {
+    assertSessionControlModelAvailable(
+      this: BackendServer, model: unknown, sessionPath?: string, reasoning?: string,
+    ): Promise<void>;
+  };
+  // Restore the production validator because the shared harness stubs it.
+  internal.assertSessionControlModelAvailable = prototype.assertSessionControlModelAvailable.bind(
+    server as unknown as BackendServer,
+  );
+  internal.runtimePrefs = {
+    providerToggles: {},
+    subagentBuckets: { small: [], medium: [{ model: 'openai/gpt-test', thinkingLevel: 'high' }], frontier: [] },
+  };
+  internal.sessionModelCatalog = async () => ({ ok: true, models: [
+    { provider: 'openai', id: 'gpt-test', reasoning: true, thinkingLevels: ['high'] },
+  ] });
+  internal.creationModelCatalog = async () => ({ ok: true, models: [
+    { provider: 'openai', id: 'gpt-test', reasoning: true, thinkingLevels: ['low'] },
+  ] });
+  const writes: string[] = [];
+  let configuredReasoning: unknown;
+  server.handleRequest = async (request) => {
+    writes.push(request.method);
+    if (request.method === 'settings.set') {
+      configuredReasoning = (request.params as { defaultThinkingLevel?: unknown }).defaultThinkingLevel;
+    }
+    return request.method === 'session.create'
+      ? { sessionPath: '/workspace/reasoning-created.jsonl', title: 'Reasoning worker' }
+      : mockSettingsReply(request);
+  };
+
+  const created = await server.handleWorkerSessionControl(frame('create', {
+    bucket: 'medium', title: 'Reasoning worker', settings: { reasoning: 'low' },
+  }), currentPath);
+  assert.equal((created.result.creation as { status: string }).status, 'created');
+  assert.deepEqual(created.result.modelSelection, {
+    model: { provider: 'openai', id: 'gpt-test' },
+    reasoning: 'high', requestedBucket: 'medium', effectiveBucket: 'medium',
+    pool: ['openai/gpt-test'], fallback: false,
+  });
+  const settingsWrite = writes.includes('settings.set');
+  assert.equal(settingsWrite, true);
+  assert.equal((writes.includes('systemPromptToggles.set')), true);
+  assert.equal((created.result.configuration as { status: string }).status, 'succeeded');
+  assert.equal(configuredReasoning, 'low', 'the explicit override is persisted despite the high bucket selection');
+  assert.equal((created.result.modelSelection as { reasoning: string }).reasoning, 'high');
+
+  writes.length = 0;
+  const rejected = await server.handleWorkerSessionControl(frame('create', {
+    bucket: 'medium', title: 'No override',
+  }), currentPath);
+  assert.equal((rejected.result.creation as { status: string }).status, 'not_created');
+  assert.equal((rejected.result.configuration as { status: string }).status, 'not_started');
+  assert.deepEqual(writes, [], 'unsupported inherited high reasoning is rejected before durable writes');
 });
 
 test('agent create inherits durable cwd rather than stale host or startup cwd', async () => {
@@ -906,7 +1041,7 @@ test('agent create inherits durable cwd rather than stale host or startup cwd', 
     requests.push(request);
     return request.method === 'session.create' ? { sessionPath: '/workspace/new.jsonl', title: 'Durable cwd' } : {};
   };
-  await server.handleWorkerSessionControl(frame('create', { title: 'Durable cwd' }), currentPath);
+  await server.handleWorkerSessionControl(frame('create', { bucket: 'medium', title: 'Durable cwd' }), currentPath);
   assert.equal((requests[0]?.params as { cwd?: string }).cwd, '/durable/project');
 });
 
@@ -915,7 +1050,7 @@ test('created session-control sends stop after confirmed close during gated conf
   const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
   const targetPath = '/workspace/created-race.jsonl';
   const events: Array<{ event: string; payload?: unknown }> = [];
-  server.emit = (event, payload) => events.push({ event, payload });
+  installSessionControlSettingsHarness(server, events);
   const internal = server as unknown as {
     captureSessionControlSettings(path: string): Promise<unknown>;
     assertSessionControlModelAvailable(model: unknown): Promise<void>;
@@ -967,7 +1102,7 @@ test('created session-control sends stop after confirmed close during gated conf
     return { accepted: true };
   };
 
-  const creating = server.handleWorkerSessionControl(frame('create', {
+  const creating = server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Created race', prompt: 'send only if still live',
   }), currentPath);
   await configurationStarted;
@@ -1073,7 +1208,7 @@ test('combined create captures settings once, honors explicit overrides, then se
     return { ok: true, sessionPath: createdPath, title: 'Combined worker' };
   };
 
-  const outcome = await server.handleWorkerSessionControl(frame('create', {
+  const outcome = await server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Combined worker',
     prompt: 'start after configuration',
     settings: {
@@ -1162,7 +1297,7 @@ test('combined create reports partial configuration failure and never sends afte
     if (request.method === 'settings.set') throw new Error('target is busy');
     return { accepted: true };
   };
-  const outcome = await server.handleWorkerSessionControl(frame('create', {
+  const outcome = await server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Partial worker', prompt: 'must not be sent',
   }), currentPath);
   assert.equal((outcome.result.creation as Record<string, unknown>).status, 'created');
@@ -1181,13 +1316,106 @@ test('create validates the complete explicit settings patch before durable creat
   installSessionControlSettingsHarness(server, events);
   let requests = 0;
   server.handleRequest = async () => { requests += 1; return { ok: true }; };
-  await assert.rejects(server.handleWorkerSessionControl(frame('create', {
+  await assert.rejects(server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Invalid worker',
     settings: { reasoning: 'unsupported' },
   }), currentPath), (error: { code?: string }) => error.code === 'INVALID_PARAMS');
   assert.equal(requests, 0);
   assert.deepEqual(events, []);
 });
+
+for (const payload of [
+  { title: 'Missing bucket' },
+  { title: 'Invalid bucket', bucket: 'large' },
+  { title: 'Model override', bucket: 'medium', settings: { model: { provider: 'openai', id: 'gpt-test' } } },
+]) {
+  test(`create rejects ${payload.title} before capture`, async (t) => {
+    const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-bucket-validation-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const { server, currentPath } = await readyServerWithMembers(dir);
+    const events: Array<{ event: string; payload?: unknown }> = [];
+    installSessionControlSettingsHarness(server, events);
+    let writes = 0;
+    server.handleRequest = async () => { writes += 1; return {}; };
+    await assert.rejects(server.handleWorkerSessionControl(frame('create', payload), currentPath),
+      (error: { code?: string }) => error.code === 'INVALID_PARAMS');
+    assert.equal(writes, 0);
+    assert.deepEqual(events, []);
+  });
+}
+
+for (const scenario of ['configured', 'downgrade', 'fallback', 'filtered', 'failure'] as const) {
+  test(`create bucket selection: ${scenario}`, async (t) => {
+    const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-bucket-selection-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const { server, currentPath } = await readyServerWithMembers(dir);
+    installSessionControlSettingsHarness(server);
+    const internal = server as unknown as {
+      runtimePrefs: unknown;
+      sessionModelCatalog(path: string): Promise<unknown>;
+    };
+    const assignment = { model: 'openai/bucket-model', thinkingLevel: 'medium' };
+    internal.runtimePrefs = {
+      providerToggles: scenario === 'failure' ? { openai: false } : {},
+      subagentBuckets: {
+        small: scenario === 'downgrade' ? [assignment] : [],
+        medium: scenario === 'configured' ? [assignment] : scenario === 'filtered'
+          ? [{ model: 'anthropic/blocked-model', thinkingLevel: 'high' }] : [],
+        frontier: [],
+      },
+    };
+    internal.sessionModelCatalog = async (source) => {
+      assert.equal(source, currentPath);
+      return { ok: true, models: [
+        { provider: 'openai', id: 'gpt-test', reasoning: true },
+        { provider: 'openai', id: 'bucket-model', reasoning: true },
+        { provider: 'anthropic', id: 'blocked-model', reasoning: true },
+      ] };
+    };
+    // Explicit caller choices, not the create patch, constrain model selection.
+    const originalEmit = server.emit;
+    server.emit = (event, payload) => {
+      if (event === SESSION_CONTROL_SETTINGS_REQUEST_EVENT
+        && (payload as SessionControlSettingsRequest).action === 'capture') {
+        const request = payload as SessionControlSettingsRequest;
+        void (server as unknown as {
+          acknowledgeHostSessionControlSettings(ack: SessionControlSettingsAcknowledgement): Promise<unknown>;
+        }).acknowledgeHostSessionControlSettings({
+          requestId: request.requestId, sessionPath: request.sessionPath, action: 'capture',
+          outcome: 'succeeded', settings: { autonomousMode: true, subagentProviderChoices: { openai: true, anthropic: false } },
+        });
+      } else originalEmit(event, payload);
+    };
+    const requests: Array<{ method: string; params?: unknown }> = [];
+    server.handleRequest = async (request) => {
+      requests.push(request);
+      return request.method === 'session.create'
+        ? { sessionPath: '/workspace/bucket-created.jsonl', title: 'Bucket worker' }
+        : mockSettingsReply(request);
+    };
+    const outcome = await server.handleWorkerSessionControl(frame('create', {
+      bucket: 'medium', title: 'Bucket worker',
+      ...(scenario === 'failure' ? { prompt: 'never send' } : {}),
+      ...(scenario === 'filtered' ? { settings: { subagentProviderChoices: { anthropic: true } } } : {}),
+    }), currentPath);
+    if (scenario === 'failure') {
+      assert.equal((outcome.result.creation as { status: string }).status, 'not_created');
+      assert.equal((outcome.result.message as { status: string }).status, 'not_sent');
+      assert.deepEqual(requests, []);
+      return;
+    }
+    const selected = scenario === 'configured' || scenario === 'downgrade';
+    assert.deepEqual(outcome.result.modelSelection, {
+      model: { provider: 'openai', id: selected ? 'bucket-model' : 'gpt-test' },
+      reasoning: selected ? 'medium' : 'high',
+      requestedBucket: 'medium', effectiveBucket: scenario === 'downgrade' ? 'small' : 'medium',
+      pool: selected ? ['openai/bucket-model'] : [], fallback: !selected,
+    });
+    const settings = requests.find((request) => request.method === 'settings.set')?.params as Record<string, unknown>;
+    assert.equal(settings.defaultModel, selected ? 'bucket-model' : 'gpt-test');
+    assert.equal(settings.defaultThinkingLevel, selected ? 'medium' : 'high');
+  });
+}
 
 test('settings inspection and update use target-session settings authorities', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-settings-'));
@@ -1257,7 +1485,7 @@ test('agent create fails closed while the title namespace is not hydrated', asyn
   };
 
   await assert.rejects(
-    server.handleWorkerSessionControl(frame('create', { title: 'New plan' }), '/workspace/current.jsonl'),
+    server.handleWorkerSessionControl(frame('create', { bucket: 'medium', title: 'New plan' }), '/workspace/current.jsonl'),
     (error: { code?: string }) => error.code === 'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
   );
 });
@@ -1414,7 +1642,7 @@ test('session-control server addresses a newly created retained cold session des
   };
 
   const created = await server.handleWorkerSessionControl(
-    frame('create', { title: 'New plan' }),
+    frame('create', { bucket: 'medium', title: 'New plan' }),
     '/workspace/current.jsonl',
   );
   assert.equal((created.result.creation as Record<string, unknown>).sessionPath, newSessionPath);

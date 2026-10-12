@@ -262,14 +262,23 @@ function setupModelSelection(
 	const subagentProviderToggles = resolveTreeSubagentProviderToggles(runtimeCtx, sessionPath);
 	const subagentDisabled = getDisabledProviders(subagentProviderToggles);
 	for (const provider of subagentDisabled) disabledProviders.add(provider);
-	const availableModels = ctx.modelRegistry.getAvailable();
+	const registry = ctx.modelRegistry as typeof ctx.modelRegistry & {
+		isModelEligibleForSubagent?(provider: string, id: string): boolean;
+	};
+	const isModelEligibleForSubagent = registry.isModelEligibleForSubagent?.bind(registry);
+	const eligible = (model: { provider: string; id: string }) =>
+		isModelEligibleForSubagent?.(model.provider, model.id) !== false;
+	const availableModels = ctx.modelRegistry.getAvailable().filter(eligible);
 	const enabledModels = availableModels.filter((m) => !disabledProviders.has(m.provider));
 	// Minimal test/runtime registries may only expose getAvailable(). Fall back to
 	// that snapshot when the broader registry enumeration is unavailable.
 	const enabledRegistryModels = (ctx.modelRegistry.getAll?.() ?? availableModels)
-		.filter((model) => !disabledProviders.has(model.provider));
+		.filter((model) => !disabledProviders.has(model.provider) && eligible(model));
 	const allowedModelIds = new Set<string>(
-		enabledModels.flatMap((m) => [m.id, qualifiedModelSpec(m.provider, m.id)]),
+		enabledModels.flatMap((m) => [
+			...(ctx.model?.provider && isModelEligibleForSubagent?.(ctx.model.provider, m.id) === false
+				? [] : [m.id]), qualifiedModelSpec(m.provider, m.id),
+		]),
 	);
 	// Prefer exact runtime support for provider-qualified bucket entries. Include
 	// every enabled declaration that execution resolution can choose via getAll(),
@@ -307,7 +316,10 @@ function setupModelSelection(
 		: undefined;
 
 	return {
-		modelConfig,
+		modelConfig: modelConfig.filter((model) => !model.provider ||
+			isModelEligibleForSubagent?.(model.provider, model.id) !== false),
+		isModelEligibleForSubagent,
+		callerProvider: ctx.model?.provider,
 		disabledProviders,
 		allowedModelIds,
 		bucketAssignments,

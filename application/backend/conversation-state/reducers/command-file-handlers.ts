@@ -89,7 +89,7 @@ export function handleSetFileRead(state: ArchState, cmd: Extract<Command, { kind
   };
 }
 
-/** `SetSystemPromptToggles` — no host state mutation. The backend owns the
+/** `SetSystemPromptToggles` — invalidate delayed discovery before writing toggles. The backend owns the
  *  toggle set and re-emits `session.opened` with updated `disabled` flags on
  *  each `SystemPromptEntry`; that re-emit (routed through `SessionOpened`) is
  *  what updates `systemPromptsBySession`. This reducer only emits the RPC
@@ -98,8 +98,10 @@ export function handleSetSystemPromptToggles(
   _state: ArchState,
   cmd: Extract<Command, { kind: 'SetSystemPromptToggles' }>,
 ): ReducerResult {
+  const pending = { ..._state.transcript.pendingPromptInventoryBySession };
+  delete pending[cmd.sessionPath];
   return {
-    state: _state,
+    state: { ..._state, transcript: { ..._state.transcript, pendingPromptInventoryBySession: pending } },
     effects: [
       {
         kind: 'SetSystemPromptTogglesRpc',

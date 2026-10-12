@@ -2,12 +2,14 @@
 /** @jsxImportSource preact */
 
 import { memo } from 'preact/compat';
+import type { DictationView } from '../../lib/protocol/dictation.js';
 import type {
   ViewState,
   ChatMessage,
   WebviewToHostMessage,
   ProviderGateStats,
 } from '../../lib/protocol/index.js';
+import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview.js';
 import { ExtensionUIPrompt } from './extension-ui-prompt';
 import { Composer } from '../shell/ui';
 import type { AppHandlers } from '../shell/use-app-handlers';
@@ -49,6 +51,8 @@ export interface BottomSectionProps {
   toolResultPruningSettings: ViewState['toolResultPruningSettings'];
   sessionTitlesSettings: ViewState['sessionTitlesSettings'];
   providerGateStats: ProviderGateStats;
+  providerManagement?: ProviderSetupPreviewProps;
+  dictation?: DictationView;
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
@@ -106,6 +110,8 @@ export const BottomSection = memo(function BottomSection({
   toolResultPruningSettings,
   sessionTitlesSettings,
   providerGateStats,
+  providerManagement,
+  dictation,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -163,6 +169,8 @@ export const BottomSection = memo(function BottomSection({
         toolResultPruningSettings={toolResultPruningSettings}
         sessionTitlesSettings={sessionTitlesSettings}
         providerGateStats={providerGateStats}
+        providerManagement={providerManagement}
+        dictation={dictation}
         systemPrompts={systemPrompts}
         transcript={transcript}
         transcriptWindow={transcriptWindow}

@@ -93,19 +93,44 @@ test('session_control forwards settings inspection/update, identity-bound replie
     replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9',
     prompt: 'answer',
   }, undefined, undefined);
+  const { model: _model, ...createSettings } = settings;
   await tool.execute('create-combined', {
     action: 'create',
     title: 'New worker',
+    bucket: 'medium',
     prompt: 'start this task',
-    settings,
+    settings: createSettings,
   }, undefined, undefined);
 
   assert.deepEqual(calls, [
     { kind: 'session.control', action: 'settings.get', payload: { title: 'Research' } },
     { kind: 'session.control', action: 'settings.set', payload: { self: true, settings } },
     { kind: 'session.control', action: 'message', payload: { replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer' } },
-    { kind: 'session.control', action: 'create', payload: { title: 'New worker', prompt: 'start this task', settings } },
+    { kind: 'session.control', action: 'create', payload: { title: 'New worker', bucket: 'medium', prompt: 'start this task', settings: createSettings } },
   ]);
+});
+
+test('session_control validates create buckets and model conflicts before IPC', async () => {
+  const calls: WorkerToCoordinatorRequestBody[] = [];
+  const tool = createSessionControlTool(async (body) => { calls.push(body); return response({}); });
+  for (const bucket of [undefined, 'large', '', null, 1]) {
+    const result = await tool.execute('invalid-bucket', { action: 'create', title: 'A', bucket } as never, undefined, undefined);
+    assert.equal('isError' in result && result.isError, true);
+  }
+  const conflict = await tool.execute('model-conflict', {
+    action: 'create', title: 'A', bucket: 'medium', settings: { model: { provider: 'openai', id: 'test' } },
+  }, undefined, undefined);
+  assert.equal('isError' in conflict && conflict.isError, true);
+  for (const action of ['list', 'read', 'message', 'settings.get', 'settings.set', 'close']) {
+    const result = await tool.execute('non-create-bucket', { action, bucket: 'small' } as never, undefined, undefined);
+    assert.equal('isError' in result && result.isError, true);
+  }
+  assert.deepEqual(calls, []);
+  for (const bucket of ['small', 'medium', 'frontier']) {
+    const result = await tool.execute('valid-bucket', { action: 'create', title: 'A', bucket } as never, undefined, undefined);
+    assert.equal('isError' in result && result.isError, false);
+    assert.deepEqual(calls.at(-1), { kind: 'session.control', action: 'create', payload: { title: 'A', bucket } });
+  }
 });
 
 test('session_control requires an explicit title or self target and rejects conflicting targets', async () => {
@@ -138,12 +163,12 @@ test('session_control requires a bounded create title and forwards it with the c
   };
   const tool = createSessionControlTool(request);
 
-  const missing = await tool.execute('create-missing', { action: 'create', cwd: '/workspace/project' }, undefined, undefined);
+  const missing = await tool.execute('create-missing', { action: 'create', bucket: 'small', cwd: '/workspace/project' }, undefined, undefined);
   assert.equal('isError' in missing && missing.isError, true, 'create requires a title');
 
   const created = await tool.execute(
     'create-ok',
-    { action: 'create', title: 'Research notes', cwd: '/workspace/project' },
+    { action: 'create', bucket: 'small', title: 'Research notes', cwd: '/workspace/project' },
     undefined,
     undefined,
   );
@@ -151,14 +176,14 @@ test('session_control requires a bounded create title and forwards it with the c
   assert.deepEqual(calls[0]?.body, {
     kind: 'session.control',
     action: 'create',
-    payload: { title: 'Research notes', cwd: '/workspace/project' },
+    payload: { title: 'Research notes', bucket: 'small', cwd: '/workspace/project' },
   });
 });
 
 test('session_control marks lost mutation acknowledgements unknown without implying remote cancellation', async () => {
   const tool = createSessionControlTool(async () => { throw new Error('request cancelled'); });
   for (const params of [
-    { action: 'create', title: 'Disposable' },
+    { action: 'create', bucket: 'frontier', title: 'Disposable' },
     { action: 'message', self: true, prompt: 'body' },
     { action: 'settings.set', self: true, settings: { reasoning: 'low' } },
     { action: 'close', self: true },
@@ -214,12 +239,12 @@ test('session_control rejects action-inapplicable inputs instead of silently dis
   const tool = createSessionControlTool(async (body) => { calls.push(body); return response({}); });
   for (const params of [
     { action: 'list', title: 'ignored target' },
-    { action: 'create', title: 'A', self: true },
+    { action: 'create', bucket: 'small', title: 'A', self: true },
     { action: 'settings.get', self: true, settings: { autonomousMode: false } },
     { action: 'close', self: true, prompt: 'ignored instruction' },
     { action: 'read', self: true, replyTo: 'ignored reply' },
-    { action: 'create', title: 'A', cwd: '  ' },
-    { action: 'create', title: 'a'.repeat(26) },
+    { action: 'create', bucket: 'small', title: 'A', cwd: '  ' },
+    { action: 'create', bucket: 'small', title: 'a'.repeat(26) },
   ]) {
     const result = await tool.execute('invalid', params as never, undefined, undefined);
     assert.equal('isError' in result && result.isError, true, JSON.stringify(params));
@@ -239,7 +264,7 @@ test('session_control exposes its identity, schema, and collaboration guidance',
     'Include the task, ownership boundaries, and expected handoff in the initial prompt. Send session messages when another agent needs a result, finding, decision, or scope change to proceed correctly. Omit routine acknowledgements and progress chatter. Reply only when it advances the work; receiving a message does not itself require a reply.',
     'list exposes live sessions with their assigned titles (field `title`) and provisional `name` labels; only assigned titles address existing sessions.',
     "read, settings, and close require an explicit target: set `self` for the caller's own session or `title` for another live session; message may instead use replyTo.",
-    "create requires a 1-25-character title (trimmed), inherits the creator's saved model/reasoning, system-prompt toggles, and execution settings, and configures them before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
+    "create requires a 1-25-character title (trimmed) and an explicit bucket: small for simple tasks, medium for well-defined substantial tasks, frontier for hard reasoning. Bucket selection uses the caller's provider policy and bucket reasoning unless settings.reasoning overrides it; settings.model is not accepted. System-prompt toggles and execution settings are inherited and configured before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
     'Cancellation or a lost mutation acknowledgement does not prove the coordinator stopped; its outcome is unknown and it may continue. Do not automatically repeat create, message, settings, or close requests after such an error.',
     'Use read direction latest for the first page, then pass the returned cursor with direction older or newer. Tool bodies are bounded previews; renderer diagnostics and image bytes are omitted.',
     "message uses ordinary send semantics: an idle target wakes and a busy target receives Pie's normal queued-send behavior. replyTo resolves only while the original sender is live.",
@@ -253,11 +278,12 @@ test('session_control exposes its identity, schema, and collaboration guidance',
   const properties = SessionControlParameters.properties as Record<string, { type?: string; enum?: string[] }>;
   assert.deepEqual([...SessionControlParameters.required ?? []].sort(), ['action']);
   assert.deepEqual(properties.action?.enum, ['list', 'create', 'read', 'message', 'settings.get', 'settings.set', 'close']);
+  assert.deepEqual(properties.bucket?.enum, ['small', 'medium', 'frontier']);
   assert.deepEqual(properties.direction?.enum, ['older', 'newer', 'latest']);
   // Paths are never accepted: addressing uses title, self, or an identity-bound
   // reply reference; settings use a closed patch schema.
   assert.deepEqual(
     Object.keys(properties).sort(),
-    ['action', 'cursor', 'cwd', 'delete', 'direction', 'limit', 'prompt', 'replyTo', 'self', 'settings', 'title'],
+    ['action', 'bucket', 'cursor', 'cwd', 'delete', 'direction', 'limit', 'prompt', 'replyTo', 'self', 'settings', 'title'],
   );
 });

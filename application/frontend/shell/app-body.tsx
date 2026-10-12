@@ -6,6 +6,7 @@ import type {
   ViewState,
   WebviewToHostMessage,
 } from '../../lib/protocol/index.js';
+import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview.js';
 import { ContextMenu, type ContextMenuState } from '../lib/components/context-menu';
 import { NoticeBanner } from '../notifications/notice-banner';
 import { SessionTabs } from './ui';
@@ -54,6 +55,26 @@ export function AppBody({ adapter }: AppBodyProps) {
     (message: WebviewToHostMessage) => connectionState === 'connected' && transport.postMessage(message),
     [connectionState, transport],
   );
+  const onProviderSetupCommand = useCallback<ProviderSetupPreviewProps['onCommand']>(
+    (command) => postApplicationCommand({ type: 'providerManagementCommand', command }),
+    [postApplicationCommand],
+  );
+  const onProviderSetupConnect = useCallback<NonNullable<ProviderSetupPreviewProps['onConnect']>>(
+    (request) => postApplicationCommand({ type: 'providerManagementConnect', ...request }),
+    [postApplicationCommand],
+  );
+  const onProviderSetupAuthResponse = useCallback<NonNullable<ProviderSetupPreviewProps['onAuthResponse']>>(
+    (request) => postApplicationCommand({ type: 'providerManagementAuthResponse', ...request }),
+    [postApplicationCommand],
+  );
+  const providerManagement = useMemo<ProviderSetupPreviewProps | undefined>(() =>
+    viewState.providerManagement ? {
+      view: viewState.providerManagement,
+      onCommand: onProviderSetupCommand,
+      onConnect: onProviderSetupConnect,
+      onAuthResponse: onProviderSetupAuthResponse,
+    } : undefined,
+  [viewState.providerManagement, onProviderSetupCommand, onProviderSetupConnect, onProviderSetupAuthResponse]);
 
   const snoozeCommands = useSnoozeCommands(postApplicationCommand);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -345,6 +366,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         toolResultPruningSettings={viewState.toolResultPruningSettings}
         sessionTitlesSettings={viewState.sessionTitlesSettings}
         providerGateStats={viewState.aggregateStats.providerGate}
+        providerManagement={providerManagement}
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
         transcriptWindow={viewState.transcriptWindow}
@@ -353,6 +375,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         canonicalActivityBySessionTruncated={viewState.canonicalActivityBySessionTruncated}
         draftRestore={draftRestore}
         draftText={viewState.draftText}
+        dictation={viewState.dictation}
         sendRetryDraftRef={sendRetryDraftRef}
         pendingComposerInputs={viewState.pendingComposerInputs}
         activeRunSummary={viewState.activeRunSummary}

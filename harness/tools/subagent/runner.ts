@@ -26,6 +26,7 @@ import { formatSubagentPrompt, type UserContextMode } from "./user-context.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
+import { createSubagentModelRegistryView } from "./model-registry-eligibility.js";
 import { formatRequirementDiagnostic, requirementIsActive } from "./selection.js";
 import { reportedUsageCost } from "./usage-evidence.js";
 import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample, TokenChannelPresence } from "./types.js";
@@ -1312,6 +1313,26 @@ export async function runSingleAgent(
 		});
 		return currentResult;
 	}
+	const guardedRegistry = modelRegistry as ModelRegistry & {
+		isModelEligibleForSubagent?(provider: string, id: string): boolean;
+		authStorage?: CreateAgentSessionOptions["authStorage"];
+	};
+	if (guardedRegistry.isModelEligibleForSubagent && (!resolvedModel ||
+		!guardedRegistry.isModelEligibleForSubagent(resolvedModel.provider, resolvedModel.id))) {
+		const diagnostic = "The resolved model is not eligible for subagents. Choose an eligible model or bucket.";
+		currentResult.exitCode = 1;
+		currentResult.stopReason = "error";
+		currentResult.stderr = diagnostic;
+		currentResult.errorMessage = diagnostic;
+		currentResult.activityPhase = "failed";
+		currentResult.activityDetail = diagnostic;
+		currentResult.completedAt = Date.now();
+		return currentResult;
+	}
+	// Keep the parent's registry untouched; only child SDK discovery/auth sees
+	// the provider-qualified eligibility view. Legacy registries are returned by
+	// identity when they do not provide the policy predicate.
+	const childModelRegistry = createSubagentModelRegistryView(modelRegistry);
 	const streamingTextRef = { value: "" };
 	const streamingReasoningRef = { value: "" };
 	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef, _toolCallId);
@@ -1442,7 +1463,8 @@ export async function runSingleAgent(
 		attachRootSessionId(childSessionManager, childSessionRootId);
 		createSessionPromise = sdk.createSession({
 			cwd: sessionCwd,
-			modelRegistry,
+			modelRegistry: childModelRegistry,
+			authStorage: guardedRegistry.authStorage,
 			model: resolvedModel,
 			thinkingLevel,
 			tools: effectiveTools,

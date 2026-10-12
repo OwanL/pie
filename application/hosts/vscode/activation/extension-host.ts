@@ -88,7 +88,7 @@ export class PieExtension implements vscode.Disposable {
         // responses answer the INITIATING browser renderer.
         onForeignPostImperative: (rendererId, message) => this.runtime.browserServer.postImperative(message, rendererId),
         onRendererInvalidated: (rendererId, rendererGeneration) =>
-          this.runtime.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
+          this.runtime.invalidateRenderer(rendererId, rendererGeneration),
       },
     );
     const platform = createVscodeHostRuntimePlatform(

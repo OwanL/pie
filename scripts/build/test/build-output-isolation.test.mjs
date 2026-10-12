@@ -189,8 +189,9 @@ async function makeFixture(t) {
       fs.writeFileSync(process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME, 'mutated during build');
     }
     if (nodeMode) {
-      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
-        if (name === 'standalone.js' && process.env.PIE_TEST_OMIT_STANDALONE === '1') continue;
+      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js']) {
+        if ((name === 'standalone.js' && process.env.PIE_TEST_OMIT_STANDALONE === '1')
+          || (name === 'dictation-helper.js' && process.env.PIE_TEST_OMIT_DICTATION_HELPER === '1')) continue;
         fs.writeFileSync(path.join(outDir, name), 'fixture');
       }
       fs.writeFileSync(path.join(outDir, 'pie-build-id.txt'), buildId + '\\n');
@@ -285,7 +286,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   });
   assertBuildSucceeded(result);
 
-  for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'pie-build-id.txt']) {
+  for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'pie-build-id.txt']) {
     assert.ok(existsSync(path.join(output, name)), `missing isolated host output ${name}`);
   }
   assert.ok(existsSync(path.join(output, 'webview', 'panel', '.vite', 'manifest.json')));
@@ -336,6 +337,19 @@ test('build rejects missing standalone output before materializing the selected 
   assert.equal(existsSync(path.join(output, 'pi-runtime')), false, 'the selected SDK is rejected before it is copied into output');
   assert.equal((await verifyPiRuntimeArtifact(fixture.sourceArtifact)).identity, fixture.runtime.identity,
     'rejecting incomplete build output leaves the caller-owned SDK intact');
+});
+
+test('build rejects missing dictation helper output before materializing the selected SDK', async (t) => {
+  const fixture = await makeFixture(t);
+  const output = path.join(fixture.outputRoot, 'missing-dictation-helper');
+  const result = runBuild(fixture, ['--output-dir', output, '--pi-runtime', fixture.sourceArtifact, '--skip-typecheck'], {
+    PIE_TEST_OMIT_DICTATION_HELPER: '1',
+  });
+
+  assertBuildRejected(result);
+  assert.match(`${result.stdout}\n${result.stderr}`, /dictation-helper\.js/u);
+  assert.equal(existsSync(path.join(output, 'dictation-helper.js')), false);
+  assert.equal(existsSync(path.join(output, 'pi-runtime')), false);
 });
 
 test('build clears inherited output override for the default child output path', async (t) => {
@@ -722,6 +736,7 @@ test('actual copied Vite config builds a tiny fixture into the override with run
     'harness/agent-processes/cold-browse-helper/cold-browse-helper-entry.ts',
     'harness/agent-processes/context-inventory/initial-context-estimate-worker.ts',
     'harness/agent-processes/lib/sdk-integration/test/fixtures/phase4-worker-command-extension.ts',
+    'application/backend/dictation/helper-entry.ts',
     'application/frontend/shell/panel.tsx',
   ];
   for (const entry of entries) write(fixture.repo, entry, 'export const fixtureEntry = 1;\n');
@@ -736,6 +751,7 @@ test('actual copied Vite config builds a tiny fixture into the override with run
     'worker-entry.js',
     'analytics-recorder-worker.js',
     'analytics-query-worker.js',
+    'dictation-helper.js',
     'cold-browse-helper-entry.js',
     'initial-context-estimate-worker.js',
     'phase4-worker-command-extension.js',

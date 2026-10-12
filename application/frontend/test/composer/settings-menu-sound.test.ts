@@ -25,6 +25,8 @@ for (const [volume, label] of [[0, 'Off'], [35, '35%']] as const) {
       assert.equal(value.textContent, label);
       assert.equal(range.getAttribute('aria-valuetext'), label);
       assert.equal(preview.disabled, volume === 0);
+      assert.equal(controls.querySelector<HTMLButtonElement>('[aria-label="Test question sound"]')!.disabled, volume === 0);
+      assert.equal(range.getAttribute('aria-label'), 'Notification sound volume');
       assert.deepEqual(patches, []);
       act(() => {
         range.value = '60';

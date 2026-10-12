@@ -18,6 +18,7 @@ const {
   options,
   reporterNames,
   reporterDestinations,
+  waitForOwnership,
 } = JSON.parse(readFileSync(configPath, 'utf8'));
 
 async function resolveReporter(name) {
@@ -75,6 +76,17 @@ function workerExecArgv() {
     }
   }
   return args;
+}
+
+// Keep this root alive through the watchdog's live ownership census. stdin EOF
+// is the private release protocol also used by the isolated pnpm launcher.
+if (waitForOwnership) {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Node test ownership startup handshake timed out')), 30_000);
+    process.stdin.once('error', error => { clearTimeout(timer); reject(error); });
+    process.stdin.once('end', () => { clearTimeout(timer); resolve(); });
+    process.stdin.resume();
+  });
 }
 
 const selectedReporters = reporterNames.length > 0

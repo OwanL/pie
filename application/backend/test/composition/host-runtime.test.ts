@@ -18,6 +18,13 @@ import { readFile } from 'node:fs/promises';
 import { BackendClient } from '../../agent-connection/client';
 import { BrowserServer } from '../../../hosts/browser/http/browser-server';
 import { HostRuntime } from '../../composition/host-runtime.js';
+import { DictationService } from '../../dictation/service.js';
+import {
+  getLivePipelineTraceHealth,
+  setLivePipelineTraceEnabled,
+} from '../../../lib/live-pipeline-trace-runtime.js';
+import type { LivePipelineTraceEvent } from '../../../../lib/structured-logging/live-pipeline-trace.js';
+import { LivePipelineTraceStore } from '../../../../lib/structured-logging/live-pipeline-trace-store.js';
 import type {
   HostRuntimePlatform,
   HostRendererSurface,
@@ -25,6 +32,130 @@ import type {
 import type { HostToWebviewMessage, RendererCommandContext, WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { selectRuntimeSetting } from '../../../lib/platform-contracts/session-platform.js';
 import type { FileDiffCoreLike } from '../../file-changes/file-diff-service';
+
+test('host prewarms only on qualified readiness once, without awaiting or starting after shutdown', async t => {
+  useTempDataRoot();
+  let calls = 0;
+  t.mock.method(DictationService.prototype, 'prewarm', () => { calls++; return new Promise<void>(() => {}); });
+  const createReadinessFixture = () => {
+    const { platform } = createPlatformFixture({ browserServerEnabled: false });
+    const runtime = new HostRuntime(platform, new BackendClient());
+    const internal = runtime as unknown as {
+      archState: { dictation: { available: boolean }; settings: { backendReady: boolean } };
+      dispatchArchEvent(event: unknown): void;
+      effectRunner: { run(effect: unknown): void };
+    };
+    // Immer freezes reducer input subtrees: detach shared initial-state objects
+    // so this fixture cannot freeze later runtimes' directly seeded test state.
+    internal.archState = structuredClone(internal.archState);
+    // Keep the real reducer/readiness hook without launching unrelated backend
+    // and settings effects whose callbacks can outlive this fixture.
+    t.mock.method(internal.effectRunner, 'run', () => {});
+    return { runtime, internal };
+  };
+  try {
+    for (const available of [false, true]) {
+      const { runtime, internal } = createReadinessFixture();
+      internal.archState.dictation.available = available;
+      assert.equal(calls, 0);
+      internal.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: true });
+      assert.equal(internal.archState.settings.backendReady, true);
+      await Promise.resolve();
+      assert.equal(calls, available ? 1 : 0);
+      internal.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: false });
+      internal.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: true });
+      await Promise.resolve();
+      assert.equal(calls, available ? 1 : 0);
+      await runtime.shutdown();
+    }
+    calls = 0;
+    const { runtime, internal } = createReadinessFixture();
+    await runtime.shutdown();
+    internal.archState.dictation.available = true;
+    internal.dispatchArchEvent({ kind: 'BackendReadyChanged', ready: true });
+    await Promise.resolve();
+    assert.equal(calls, 0);
+  } finally { delete process.env.PIE_DATA_DIR; }
+});
+
+test('HostRuntime traces renderer compaction separately from host projection only when enabled', async (t) => {
+  useTempDataRoot();
+  const wasEnabled = getLivePipelineTraceHealth().enabled;
+  const records: Array<LivePipelineTraceEvent & { recordedAt: number }> = [];
+  t.mock.method(LivePipelineTraceStore.prototype, 'record', (event: LivePipelineTraceEvent) => {
+    records.push({ ...event, recordedAt: performance.now() });
+    return false; // Exercise the real host spans without writing shared diagnostic files.
+  });
+  setLivePipelineTraceEnabled(false);
+  let runtime: HostRuntime | undefined;
+  try {
+    const { platform } = createPlatformFixture();
+    runtime = new HostRuntime(platform, new BackendClient());
+    const internal = runtime as unknown as { archState: { sessions: { sessions: unknown[] } } };
+    internal.archState.sessions.sessions = [{ path: '/trace-kept' }, { path: '/trace-compacted' }];
+
+    const withoutTracing = runtime.buildViewState();
+    assert.equal(withoutTracing.sessions.length, 1);
+    assert.equal(records.length, 0, 'disabled tracing emits no events');
+
+    setLivePipelineTraceEnabled(true);
+    const withTracing = runtime.buildViewState();
+    assert.equal(withTracing.sessions.length, 1, 'real renderer compaction removes the unrelated session');
+    assert.equal(records.length, 2);
+    assert.deepEqual(records.map(({ stage }) => stage), ['host.projection.completed', 'host.renderer.compacted']);
+    assert.ok(records[0]!.durationMs !== undefined && records[1]!.durationMs !== undefined);
+    assert.ok(records[0]!.recordedAt <= records[1]!.recordedAt - records[1]!.durationMs!,
+      'projection completes before the renderer-compaction span begins');
+  } finally {
+    await runtime?.shutdown();
+    setLivePipelineTraceEnabled(wasEnabled);
+    delete process.env.PIE_DATA_DIR;
+  }
+});
+
+test('notification sounds reach each host surface once regardless of focus', async () => {
+  useTempDataRoot();
+  try {
+    for (const independent of [true, false]) {
+      const { platform } = createPlatformFixture({ browserServerEnabled: false });
+      if (!independent) delete (platform as { supportsBrowserServerToggle?: boolean }).supportsBrowserServerToggle;
+      const native: HostToWebviewMessage[] = [];
+      const browser: HostToWebviewMessage[] = [];
+      platform.renderer.postImperative = (message) => {
+        native.push(message);
+        if (!independent) browser.push(message); // standalone facade
+      };
+      const runtime = new HostRuntime(platform, new BackendClient());
+      runtime.browserServer.postImperative = (message) => { browser.push(message); };
+      const internal = runtime as unknown as {
+        archState: { settings: { prefs: { completionSoundVolume: number; suppressCompletionNotifications: boolean } } };
+        handleSessionCompleted(event: unknown): void;
+        handleQuestionRequested(): void;
+      };
+      const prefs = internal.archState.settings.prefs;
+      prefs.completionSoundVolume = 50;
+      prefs.suppressCompletionNotifications = false;
+      for (const focused of [true, false]) {
+        platform.notifications.isWindowFocused = () => focused;
+        internal.handleSessionCompleted({});
+        internal.handleQuestionRequested();
+      }
+      assert.deepEqual(native.map((m) => m.type), ['playCompletionSound', 'playQuestionSound', 'playCompletionSound', 'playQuestionSound']);
+      assert.deepEqual(browser, native);
+      prefs.suppressCompletionNotifications = true;
+      internal.handleSessionCompleted({});
+      internal.handleQuestionRequested();
+      assert.equal(native.length, 5, 'completion suppression must not silence questions');
+      prefs.completionSoundVolume = 0;
+      internal.handleSessionCompleted({});
+      internal.handleQuestionRequested();
+      assert.equal(native.length, 5, 'Off silences both sounds');
+      await runtime.shutdown();
+    }
+  } finally {
+    delete process.env.PIE_DATA_DIR;
+  }
+});
 
 // ─── Stubs ───────────────────────────────────────────────────────────────────
 
@@ -201,6 +332,32 @@ test('HostRuntime preserves the trusted renderer context when routing webview co
     }
   } finally {
     delete process.env.PIE_DATA_DIR;
+  }
+});
+
+test('HostRuntime seeds dictation availability without scheduling an unwired renderer', async () => {
+  const dataRoot = useTempDataRoot();
+  let runtime: HostRuntime | undefined;
+  try {
+    const { platform } = createPlatformFixture();
+    let rendererWired = false;
+    let scheduledAfterWiring = 0;
+    platform.renderer.scheduleState = () => {
+      if (!rendererWired) throw new Error('renderer surface is not wired yet');
+      scheduledAfterWiring++;
+    };
+
+    runtime = new HostRuntime(platform, new BackendClient());
+    rendererWired = true;
+    const expectedAvailability = process.platform === 'win32' && process.arch === 'x64';
+
+    assert.equal(scheduledAfterWiring, 0, 'construction must not schedule a renderer render');
+    assert.equal(runtime.buildViewState().dictation.available, expectedAvailability,
+      'the first snapshot must include host-owned dictation availability');
+  } finally {
+    await runtime?.shutdown();
+    delete process.env.PIE_DATA_DIR;
+    fs.rmSync(dataRoot, { recursive: true, force: true });
   }
 });
 

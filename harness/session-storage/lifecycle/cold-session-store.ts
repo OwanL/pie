@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { appendProviderRuntimeReference, type ProviderRuntimeReference, type RuntimeEntryManager } from '../../model-providers/runtime';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -1018,12 +1019,17 @@ export class ColdSessionStore {
   /** The coordinator patch barrier makes SessionManager.create itself the
    * atomic durable-header boundary. Do not fabricate or reopen the file here:
    * the returned manager is the exact one-use handoff manager. */
-  create(options: { cwd?: string; sessionDir?: string; agentCreated?: boolean } = {}): ColdSessionManagerHandle {
+  create(options: { cwd?: string; sessionDir?: string; agentCreated?: boolean; providerRuntimeReference?: ProviderRuntimeReference } = {}): ColdSessionManagerHandle {
     return this.withWriterAdmission(() => {
       const manager = this.sdk.SessionManager.create(
         options.cwd || this.startupCwd,
         options.sessionDir ?? this.sessionDir,
       );
+      if (options.providerRuntimeReference) {
+        // The cold facade omits this native metadata writer; the SDK manager
+        // retains it behind the existing coordinator write admission.
+        appendProviderRuntimeReference(manager as unknown as RuntimeEntryManager, options.providerRuntimeReference);
+      }
       if (options.agentCreated) appendAgentCreatedSessionProvenance(manager);
       this.refreshCatalog();
       return this.createHandle(manager);

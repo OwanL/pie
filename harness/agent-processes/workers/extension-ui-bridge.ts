@@ -20,6 +20,8 @@ export interface ExtensionUIBridgeEmitter {
   (event: 'extension_ui.request', payload: ExtensionUIRequestPayload): void;
 }
 
+const AUTONOMOUS_DIALOG_TIMEOUT_MS = 3 * 60 * 1000;
+
 /**
  * Implements the SDK's ExtensionUIContext interface by emitting events to the
  * host and awaiting responses. Each confirm/select/input call creates a pending
@@ -31,7 +33,11 @@ export class ExtensionUIBridge {
   private readonly sessionPath: string;
   private closed = false;
 
-  constructor(sessionPath: string, emit: ExtensionUIBridgeEmitter) {
+  constructor(
+    sessionPath: string,
+    emit: ExtensionUIBridgeEmitter,
+    private readonly isAutonomous: () => boolean = () => false,
+  ) {
     this.sessionPath = sessionPath;
     this.emit = emit;
   }
@@ -131,6 +137,15 @@ export class ExtensionUIBridge {
     if (this.closed) {
       return Promise.resolve({ id, cancelled: true });
     }
+    const requestedTimeout = opts?.timeout;
+    // Unattended dialogs must release the agent even without a renderer. Keep
+    // shorter caller deadlines; expiry uses the existing deny/cancel result.
+    const timeout = this.isAutonomous()
+      ? (requestedTimeout && requestedTimeout > 0
+        ? Math.min(requestedTimeout, AUTONOMOUS_DIALOG_TIMEOUT_MS)
+        : AUTONOMOUS_DIALOG_TIMEOUT_MS)
+      : requestedTimeout;
+    payload.timeout = timeout;
     return new Promise<ExtensionUIResponsePayload>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let settled = false;
@@ -151,8 +166,8 @@ export class ExtensionUIBridge {
         return;
       }
       opts?.signal?.addEventListener('abort', onAbort, { once: true });
-      if (opts?.timeout && opts.timeout > 0) {
-        timer = setTimeout(() => settle({ id, cancelled: true }), opts.timeout);
+      if (timeout && timeout > 0) {
+        timer = setTimeout(() => settle({ id, cancelled: true }), timeout);
         timer.unref?.();
       }
       this.emit('extension_ui.request', payload);

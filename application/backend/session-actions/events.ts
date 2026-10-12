@@ -21,6 +21,8 @@ import {
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import type { SessionHostPlatform, HostDisposable } from '../../lib/platform-contracts/session-platform.js';
+import { isProviderManagementSnapshot } from '../../../harness/model-providers/management/validation.js';
+import type { ProviderManagementSnapshot } from '../../../harness/model-providers/management/contracts.js';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
@@ -32,6 +34,7 @@ interface SessionServiceEventsOptions {
   platform: SessionHostPlatform;
   scheduleRender: ScheduleRender;
   onSessionCompleted?: OnSessionCompleted;
+  onQuestionRequested?: () => void;
   runObserver: RunObserver;
   state: SessionServiceState;
   dispatchArch: (event: Event) => void;
@@ -47,12 +50,14 @@ interface SessionServiceEventsOptions {
   onSessionCloseResponseDelivered?: (payload: SessionCloseResponseDeliveredPayload) => void;
   /** Typed coordinator→host execution-settings capture/apply request. */
   onSessionControlSettingsRequested?: (payload: SessionControlSettingsRequest) => void;
+  getBackendGeneration: () => number;
 }
 
 export class SessionServiceEvents {
   private readonly platform: SessionHostPlatform;
   private readonly scheduleRender: ScheduleRender;
   private readonly onSessionCompleted?: OnSessionCompleted;
+  private readonly onQuestionRequested?: () => void;
   private readonly runObserver: RunObserver;
   private readonly state: SessionServiceState;
   private eventDisposable?: HostDisposable;
@@ -64,11 +69,13 @@ export class SessionServiceEvents {
   private readonly onSessionCloseRequested?: (payload: SessionCloseRequestedPayload) => void;
   private readonly onSessionCloseResponseDelivered?: (payload: SessionCloseResponseDeliveredPayload) => void;
   private readonly onSessionControlSettingsRequested?: (payload: SessionControlSettingsRequest) => void;
+  private readonly getBackendGeneration: () => number;
 
   constructor(options: SessionServiceEventsOptions) {
     this.platform = options.platform;
     this.scheduleRender = options.scheduleRender;
     this.onSessionCompleted = options.onSessionCompleted;
+    this.onQuestionRequested = options.onQuestionRequested;
     this.runObserver = options.runObserver;
     this.dispatchArch = options.dispatchArch;
     this.state = options.state;
@@ -78,6 +85,7 @@ export class SessionServiceEvents {
     this.onSessionCloseRequested = options.onSessionCloseRequested;
     this.onSessionCloseResponseDelivered = options.onSessionCloseResponseDelivered;
     this.onSessionControlSettingsRequested = options.onSessionControlSettingsRequested;
+    this.getBackendGeneration = options.getBackendGeneration;
   }
 
   attach(backend: BackendClient): void {
@@ -122,6 +130,21 @@ export class SessionServiceEvents {
   }
 
   handleBackendEvent(event: EventEnvelope): void {
+    if (event.event === 'providers.changed') {
+      const payload = event.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+      const record = payload as { snapshot?: unknown; backendGeneration?: unknown };
+      if (!isProviderManagementSnapshot(record.snapshot)
+        || !Number.isSafeInteger(record.backendGeneration)
+        || record.backendGeneration !== this.getBackendGeneration()) return;
+      this.dispatchArch({
+        kind: 'ProviderManagementSnapshotUpdated',
+        snapshot: record.snapshot as ProviderManagementSnapshot,
+        generation: record.backendGeneration as number,
+      });
+      this.scheduleRender();
+      return;
+    }
     const deps = this.getHandlerDeps();
     dispatchSessionBackendEvent(event, {
       onTurnSemantic: (envelope) => {
@@ -214,6 +237,10 @@ export class SessionServiceEvents {
         this.scheduleRender();
       },
       onSessionOpened: (payload) => this.applySessionOpened(payload),
+      onSessionPromptInventory: (payload) => {
+        this.dispatchArch({ kind: 'SessionPromptInventory', payload, backendGeneration: this.state.getBackendGeneration() });
+        this.scheduleRender();
+      },
       onSessionCloseRequested: (payload) => {
         const sessionPath = this.requireEventSessionPath('session.close.requested', payload.sessionPath);
         if (!sessionPath || !this.onSessionCloseRequested) return;
@@ -363,6 +390,7 @@ export class SessionServiceEvents {
       state: this.state,
       scheduleRender: this.scheduleRender,
       onSessionCompleted: this.onSessionCompleted,
+      onQuestionRequested: this.onQuestionRequested,
       requireEventSessionPath: (eventName: string, sessionPath: string | undefined) => this.requireEventSessionPath(eventName, sessionPath),
     };
   }

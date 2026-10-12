@@ -33,7 +33,8 @@ export function activityToneToStripTone(
     case 'active':
       return 'accent';
     case 'processing':
-      return 'warning';
+      // Thinking, provider waits and other routine work are not warnings.
+      return 'neutral';
     case 'neutral':
     default:
       return 'neutral';

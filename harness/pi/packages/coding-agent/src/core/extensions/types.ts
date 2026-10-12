@@ -683,7 +683,9 @@ export interface AfterProviderResponseEvent {
 
 /** Fired after user submits prompt but before agent loop. */
 export interface BeforeAgentStartEvent {
-	type: "before_agent_start";
+	type: "before_agent_start" | "before_compaction_resume";
+	/** Whether a compaction resume is starting a new user turn rather than continuing automatically. */
+	newUserPrompt?: boolean;
 	/** One-prompt skill-pruning refresh hint; does not change pruning settings. */
 	refreshPruning?: boolean;
 	/** The raw user prompt text (after expansion). */
@@ -1193,7 +1195,7 @@ export interface ExtensionAPI {
 	): void;
 	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
-	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
+	on(event: "before_agent_start" | "before_compaction_resume", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;

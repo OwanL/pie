@@ -42,6 +42,7 @@ Add a `pruning` block to `settings.json`; specify only the fields you want to ov
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
 | `mainAgentEnabled` | `true` | Enable the main agent's independent launch pruning pass |
 | `followUpEnabled` | `false` | Score later idle main-session requests too; otherwise reuse the session selection without prepass feedback or billing |
+| `refreshAfterCompaction` | `true` | Refresh selection once before the next model request after successful history compaction, including automatic continuation; switch off in Settings → Context → Skill pruning |
 | `subagentEnabled` | `true` | Enable one independent launch pruning pass per subagent session; continuations reuse the session decision |
 | `prepass` | _(built-in defaults)_ | Sampling, output, timeout, and manual retry controls for the LLM prepass call; see [Prepass options](#prepass-options) |
 
@@ -113,7 +114,7 @@ active tool/skill selection. This is source-independent: user and agent-originat
 messages use the same rule. A message starting a new idle-session request reuses the main-session selection
 unless follow-up pruning is enabled or an explicit refresh is requested. Merely waiting for transport, startup, or host-side dispatch does
 not make a new request a queued continuation. Tool-result pruning and history
-compaction are separate and unchanged.
+compaction are separate mechanisms. Successful history compaction schedules one uncached selection refresh, without running the scorer while idle. This refresh uses the summary and retained recent conversation, preserves active tools and recovered skills for unfinished work, and still honors pruning disable controls. Failed or cancelled compaction does not schedule it. `refreshAfterCompaction: false` retains ordinary selection behavior.
 
 A `pruning-result` custom message is rendered in the transcript showing what was kept/pruned and estimated tokens saved; the agent turn then proceeds normally (no input handler is needed to continue).
 

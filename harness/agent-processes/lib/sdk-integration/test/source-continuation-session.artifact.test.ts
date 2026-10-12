@@ -94,7 +94,8 @@ type Decision =
 function decideFromPiePolicy(messages: AgentMessage[], tailEntryId: string): Decision {
   const tail = classifyInterruptedContinuationTail(messages, 200_000);
   if (!tail) return { type: 'unsupported', reason: 'The session does not end at a supported continuation point.' };
-  if (tail === 'aborted-assistant' || tail === 'overflow-assistant') {
+  if (tail === 'aborted-assistant' || tail === 'overflow-assistant'
+    || tail === 'failed-assistant' || tail === 'dangling-assistant') {
     return { type: 'continue', omitEntryIds: [tailEntryId] };
   }
   return { type: 'continue' };
@@ -191,6 +192,13 @@ async function fixture(t: test.TestContext, seed: AgentMessage[], options: { can
 }
 
 const supportedCases: Array<{ name: string; tail: AgentMessage; omitted: boolean; retainedText?: string }> = [
+  { name: 'ordinary provider error', tail: assistant([], 'error', 'provider rejected request permanently'), omitted: true },
+  ...(['stop', 'length', 'toolUse'] as const).map((stopReason) => ({
+    name: `dangling tool call (${stopReason})`,
+    tail: assistant([{ type: 'toolCall', id: `dangling-${stopReason}`, name: 'lookup', arguments: {} }], stopReason),
+    omitted: true,
+  })),
+  { name: 'custom message', tail: { role: 'custom', customType: 'fixture', content: 'custom tail', display: true, timestamp: 3 }, omitted: false },
   { name: 'aborted assistant', tail: assistant([{ type: 'text', text: 'partial' }], 'aborted'), omitted: true },
   { name: 'overflow assistant', tail: assistant([], 'error', 'prompt is too long: 201000 tokens > 200000 maximum'), omitted: true },
   { name: 'open provider turn after user', tail: { role: 'user', content: 'current request', timestamp: 2 }, omitted: false },
@@ -216,8 +224,11 @@ for (const continuationCase of supportedCases) {
     assert.equal(JSON.stringify(f.streamCalls[0].messages).includes('current request'), true,
       'the original user request remains available to the zero-message provider continuation');
     if (continuationCase.omitted) {
-      assert.equal(f.agent.state.messages.some((message: any) => message.stopReason === 'aborted'
-        || (message.role === 'assistant' && message.errorMessage?.includes('prompt is too long'))), false);
+      assert.equal(f.streamCalls[0].messages.some((message: any) => message.role === 'assistant'
+        && (message.stopReason === 'aborted' || message.stopReason === 'error'
+          || message.content.some((block: any) => block.type === 'toolCall' && block.id.startsWith('dangling-')))), false);
+      assert.equal(f.events.some((event) => event.type === 'tool_execution_start'), false,
+        'continuation never executes the old dangling tool call');
     }
     const retainedText = continuationCase.retainedText;
     if (retainedText) {
@@ -238,14 +249,7 @@ for (const continuationCase of supportedCases) {
 }
 
 const unsupportedCases: Array<{ name: string; messages: AgentMessage[] }> = [
-  { name: 'ordinary provider error', messages: baseMessages(assistant([], 'error', 'provider rejected request permanently')) },
   { name: 'empty context', messages: [] },
-  ...(['stop', 'length', 'toolUse'] as const).map((stopReason) => ({
-    name: `assistant dangling tool-call (stopReason=${stopReason})`,
-    messages: baseMessages(assistant([
-      { type: 'toolCall', id: `dangling-${stopReason}`, name: 'lookup', arguments: { query: 'offline' } },
-    ], stopReason)),
-  })),
 ];
 
 for (const unsupportedCase of unsupportedCases) {

@@ -8,6 +8,7 @@
     "verbatimModuleSyntax": false,
     "strict": true,
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "noEmit": true,
     "incremental": true,
@@ -18,6 +19,7 @@
     "baseUrl": ".",
     "paths": {
       "yaml": ["../hosts/vscode/node_modules/yaml"],
+      "ajv": ["../hosts/vscode/node_modules/ajv"],
       "immer": ["../hosts/vscode/node_modules/immer"],
       "preact": ["../hosts/vscode/node_modules/preact"],
       "preact-render-to-string": ["../hosts/vscode/node_modules/preact-render-to-string"],

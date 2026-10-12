@@ -76,6 +76,8 @@ export interface RendererHubOptions {
   hostInstanceId?: string;
   /** Shared projected `ViewState`; called at most once per logical render. */
   getViewState(): ViewState;
+  /** Cheap renderer-local capability overlay; the expensive projection stays shared. */
+  overlayViewState?(view: ViewState, rendererId: string): ViewState;
   /** Command routing for validated non-evidence messages. */
   onMessage(msg: WebviewToHostMessage, context: RendererCommandContext): void;
   /** Release resources owned by the renderer generation being invalidated. */
@@ -191,7 +193,10 @@ export class RendererHub implements DisposableLike {
       kind: transport.kind,
       hostInstanceId: this.hostInstanceId,
       clock: this.clock,
-      getViewState: () => this.getSharedViewState(),
+      getViewState: () => {
+        const shared = this.getSharedViewState();
+        return this.options.overlayViewState?.(shared, rendererId) ?? shared;
+      },
       onMessage: (msg, context) => this.options.onMessage(msg, context),
       onRendererInvalidated: this.options.onRendererInvalidated,
       getRunningSessionCount: this.options.getRunningSessionCount,

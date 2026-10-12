@@ -309,6 +309,96 @@ test('fresh isolated inventory supplies full prompts for historical and empty co
   }
 });
 
+test('public cold session.open acknowledges with transcript before deferred prompt inventory publishes', async (t) => {
+  const h = await makeColdServer(t);
+  let markDiscoveryStarted!: () => void;
+  let releaseDiscovery!: () => void;
+  const discoveryStarted = new Promise<void>((resolve) => { markDiscoveryStarted = resolve; });
+  const discoveryBlocked = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+  let discoveryWasStarted = false;
+  let markInventoryPublished!: (payload: any) => void;
+  const inventoryPublished = new Promise<any>((resolve) => { markInventoryPublished = resolve; });
+  const events: Array<{ event: string; payload: any }> = [];
+  h.server.initialContextEstimateClient = {
+    discover: async () => {
+      discoveryWasStarted = true;
+      markDiscoveryStarted();
+      await discoveryBlocked;
+      return inventory('Complete deferred prompt text, including all prompt content.');
+    },
+  };
+  try {
+    await seedLiveMembership(h.server, [h.sessionPath]);
+    h.server.emit = (event: string, payload: any) => {
+      events.push({ event, payload });
+      if (event === 'session.promptInventory') markInventoryPublished(payload);
+    };
+    const opening = h.server.handleRequest({
+      id: 'public-cold-open',
+      method: 'session.open',
+      params: { sessionPath: h.sessionPath, selectionToken: 'cold-open-selection' },
+    });
+    await discoveryStarted;
+    const acknowledgement = await opening;
+
+    assert.deepEqual(acknowledgement, { ok: true, sessionPath: h.sessionPath });
+    const openEvents = events.filter(({ event }) => event === 'session.opened' || event === 'session.promptInventory');
+    assert.deepEqual(openEvents.map(({ event }) => event), ['session.opened']);
+    const opened = events[0]!.payload;
+    assert.equal(opened.selectionToken, 'cold-open-selection');
+    assert.equal(opened.runtimeReady, false);
+    assert.deepEqual(opened.transcript.map((message: { id: string; markdown: string }) => ({
+      id: message.id,
+      markdown: message.markdown,
+    })), [{ id: 'user-1', markdown: 'hello' }]);
+    assert.equal(opened.systemPrompts, undefined, 'the early snapshot does not wait for prompt discovery');
+    assert.equal(typeof opened.promptInventoryToken, 'string');
+
+    releaseDiscovery();
+    const metadata = await inventoryPublished;
+    assert.equal(metadata.sessionPath, h.sessionPath);
+    assert.equal(metadata.token, opened.promptInventoryToken);
+    assert.equal(
+      metadata.systemPrompts.find((prompt: any) => prompt.id === 'harness')?.text,
+      'Complete deferred prompt text, including all prompt content.',
+    );
+    assert.equal(openEvents.filter(({ event }) => event === 'session.opened').length, 1,
+      'publishing prompt metadata does not emit a second open');
+    assert.deepEqual(
+      events.filter(({ event }) => event === 'session.opened' || event === 'session.promptInventory')
+        .map(({ event }) => event),
+      ['session.opened', 'session.promptInventory'],
+    );
+  } finally {
+    releaseDiscovery();
+    if (discoveryWasStarted) await inventoryPublished;
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
+  }
+});
+
+test('public cold session.preload does not discover prompt inventory', async (t) => {
+  const h = await makeColdServer(t);
+  let discoveries = 0;
+  h.server.initialContextEstimateClient = {
+    discover: async () => {
+      discoveries += 1;
+      return inventory();
+    },
+  };
+  try {
+    const preloaded = await h.server.handleRequest({
+      id: 'public-cold-preload',
+      method: 'session.preload',
+      params: { sessionPath: h.sessionPath },
+    });
+    assert.equal(preloaded.runtimeReady, false);
+    assert.deepEqual(preloaded.transcript.map((message: { id: string }) => message.id), ['user-1']);
+    assert.equal(discoveries, 0);
+  } finally {
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
+  }
+});
+
 test('cold discovery failure publishes an authoritative catalog omission with its disabled-entry sidecar', async (t) => {
   const h = await makeColdServer(t);
   const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];

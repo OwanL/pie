@@ -1,23 +1,33 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import * as nodeModule from 'node:module';
 import { isBuiltin, registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { realpath } from 'node:fs/promises';
 import test from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { CompactionHooks } from '@earendil-works/pi-coding-agent';
 
-import { classifyInterruptedContinuationTail } from '../sdk';
+import { classifyInterruptedContinuationTail, loadSdk, resolveContainedPackageImport } from '../sdk';
 import {
   consumedOverflowMessageEntryIds,
   isContextOverflowMessage,
 } from '../../../workers/history-compaction';
-import { sourceFixture } from './source-fixture.js';
+import { sourceFixture, sourceLoadMode } from './source-fixture.js';
 
 // Transform shapes, version markers, and patch idempotence are no longer SDK
 // contracts. Source continuation/history/terminal/loader suites cover those
 // behavioral routes; keep the pure policy edges and uncovered lifecycle edges.
+// The private runtime is Node >=22.19; older ambient @types/node snapshots
+// may not yet declare this native resolver.
+type NativeFindPackageJSON = (specifier: string, parentURL?: string | URL) => string | undefined;
+const nativeFindPackageJSON = (nodeModule as typeof nodeModule & {
+  findPackageJSON?: NativeFindPackageJSON;
+}).findPackageJSON;
+assert.equal(typeof nativeFindPackageJSON, 'function', 'pinned runtime exposes native module.findPackageJSON');
+
 const approvedPackages: Readonly<Record<string, string>> = {
   '@earendil-works/pi-ai': sourceFixture.packageRoots.ai,
   '@earendil-works/pi-agent-core': sourceFixture.packageRoots.agent,
@@ -51,6 +61,59 @@ const sourceModules = Promise.all([
   import(pathToFileURL(path.join(sourceFixture.packageRoots.agent, 'dist/index.js')).href),
   import(pathToFileURL(path.join(sourceFixture.packageRoots.ai, 'dist/compat.js')).href),
 ]);
+
+test('package export containment rejects traversal outside the package before import', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-sdk-export-containment-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const packageDir = path.join(root, 'package');
+  mkdirSync(packageDir);
+  writeFileSync(path.join(root, 'outside.mjs'), 'export const escaped = true;');
+  const escapedTarget = new URL('./../../outside.mjs', pathToFileURL(path.join(packageDir, 'package.json')));
+
+  await assert.rejects(resolveContainedPackageImport(packageDir, escapedTarget), /escapes its package directory/u);
+});
+
+test('package export containment accepts a package directory reached through a symlink', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-sdk-export-symlink-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const actualPackageDir = path.join(root, 'actual-package');
+  const linkedPackageDir = path.join(root, 'linked-package');
+  mkdirSync(actualPackageDir);
+  const exportPath = path.join(actualPackageDir, 'export.mjs');
+  writeFileSync(exportPath, 'export const value = true;');
+  symlinkSync(actualPackageDir, linkedPackageDir, process.platform === 'win32' ? 'junction' : 'dir');
+  const exportUrl = pathToFileURL(path.join(linkedPackageDir, 'export.mjs'));
+
+  assert.equal(await resolveContainedPackageImport(linkedPackageDir, exportUrl), await realpath(exportPath));
+});
+
+test('SDK loader binds the verified graph public import-only compat export', async (t) => {
+  const packageJson = nativeFindPackageJSON!('@earendil-works/pi-ai',
+    pathToFileURL(path.join(sourceFixture.packageRoots.codingAgent, 'package.json')));
+  assert.equal(realpathSync(packageJson!), realpathSync(path.join(sourceFixture.packageRoots.ai, 'package.json')));
+  const metadata = JSON.parse(readFileSync(packageJson!, 'utf8'));
+  assert.equal(typeof metadata.exports['./compat'].import, 'string');
+  assert.equal(metadata.exports['./compat'].require, undefined, 'regression requires an import-only public entry');
+
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-sdk-public-entry-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const originalEnv = { ...process.env };
+  try {
+    // No ambient provider credentials or user-owned SDK state during adapter loading.
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    process.env.HOME = root;
+    process.env.USERPROFILE = root;
+    process.env.PI_CODING_AGENT_DIR = root;
+    for (const surface of ['cold', 'full'] as const) {
+      const sdk = await loadSdk(sourceFixture.packageRoots.codingAgent, { ...sourceLoadMode, surface });
+      assert.equal(typeof sdk.createProviderManagementAuth, 'function');
+      assert.equal(typeof sdk.SessionManager.inMemory, 'function');
+    }
+  } finally {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+  }
+});
 
 function assistant(text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage {
   return {
@@ -228,14 +291,14 @@ test('forced-overflow classification keeps transcript and continuation decisions
   );
   assert.equal(
     classifyInterruptedContinuationTail([{ role: 'assistant', stopReason: 'error', errorMessage: 'provider 500', content: [] }]),
-    undefined,
+    'failed-assistant',
   );
   assert.equal(
     classifyInterruptedContinuationTail([
       { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }] },
     ], 200_000),
-    undefined,
-    'a completed reply with a dangling tool call has no valid provider boundary',
+    'dangling-assistant',
+    'a dangling tool call is omitted for a fresh provider continuation',
   );
 });
 

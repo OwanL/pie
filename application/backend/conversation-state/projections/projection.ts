@@ -39,6 +39,8 @@ import type {
   TranscriptWindow,
   ViewState,
 } from '../../../lib/protocol/index.js';
+import { projectDictationView } from '../../dictation/state.js';
+import { projectProviderManagementView } from '../../provider-management/state.js';
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../../lib/protocol/index.js';
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
 import { pruningTotals } from '../../../lib/transcript/pruning-totals.js';
@@ -330,6 +332,8 @@ function derivePrepassStatus(state: ArchState, activePath: string | null): Prepa
 // keeps the same discipline, which memoization preserves.
 
 interface ProjectionSignature {
+  dictation: ArchState['dictation'];
+  providerManagement: ArchState['providerManagement'];
   activeSessionPath: string | null;
   transcriptLoaded: boolean;
   sessions: SessionsState;
@@ -359,6 +363,7 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
   const activePath = state.sessions.activeSessionPath;
   const windowBySession = state.transcript.windowBySession;
   return {
+    dictation: state.dictation,
     activeSessionPath: activePath,
     transcriptLoaded: activePath
       ? Object.prototype.hasOwnProperty.call(windowBySession, activePath)
@@ -366,6 +371,7 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
     sessions: state.sessions,
     operations: state.operations,
     settings: state.settings,
+    providerManagement: state.providerManagement,
     composer: state.composer,
     fileChanges: state.fileChanges,
     activeTranscript: activePath
@@ -398,11 +404,13 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
 
 function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolean {
   return (
+    a.dictation === b.dictation &&
     a.activeSessionPath === b.activeSessionPath &&
     a.transcriptLoaded === b.transcriptLoaded &&
     a.sessions === b.sessions &&
     a.operations === b.operations &&
     a.settings === b.settings &&
+    a.providerManagement === b.providerManagement &&
     a.composer === b.composer &&
     a.fileChanges === b.fileChanges &&
     a.activeTranscript === b.activeTranscript &&
@@ -782,6 +790,7 @@ function projectViewState(state: ArchState): ViewState {
     // `PieExtension.buildViewState`. The pure projection must not read services
     // (STATE_CONTRACT § Reducer Purity).
     deferredTriggers: EMPTY_DEFERRED_TRIGGERS as DeferredTriggerView[],
+    dictation: projectDictationView(state.dictation),
     draftText: activeDraftText,
     busy,
     retryStatus,
@@ -806,6 +815,7 @@ function projectViewState(state: ArchState): ViewState {
       ? redactRendererErrorText(stripReqIds(settings.noticeRaw))
       : null,
     backendReady: settings.backendReady,
+    providerManagement: projectProviderManagementView(state.providerManagement),
     workspaceCwd: sessions.workspaceCwd,
     systemPrompts: activeSystemPrompts,
     modelSettings: settings.modelSettings,

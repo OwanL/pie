@@ -17,6 +17,9 @@ import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-loggin
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
 import { boundTranscriptSnapshot } from '../../session-storage/transcripts/snapshot-boundary.js';
 import { projectSessionControlTranscript } from './session-control-transcript.js';
+import { selectSessionControlModel, parseBucketConfig, type SessionControlModelSelection } from './session-control-model-selection.js';
+import { parseProviderToggles } from '../../tools/subagent/provider-toggles.js';
+import type { BucketTier } from '../../tools/subagent/bucket-config.js';
 import { WorkerRequestTimeoutError } from '../lib/rpc/worker-client.js';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
@@ -29,7 +32,9 @@ import {
   type DetailResult,
   type LazyDetailRef,
 } from '../lib/rpc/message-contract.js';
-import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
+import type { ModelSettings, ModelInfo } from '../../model-providers/catalog/model-contract.js';
+import { readProviderRuntimeReference, type NativeRuntimeModel, type ProviderRuntimeReference } from '../../model-providers/runtime';
+import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
 import { isThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {
   AgentMessagePayload,
@@ -62,6 +67,7 @@ import {
   type SessionControlSender,
   type SessionControlSenderIdentity,
 } from '../lib/rpc/session-control-attribution.js';
+import { createCoordinatorProviderManagement, hasCoordinatorProviderConfiguration } from './provider-management';
 import { PIE_BUILD_ID } from '../../../lib/build-identity.js';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from '../../model-providers/authentication/auth.js';
 import {
@@ -492,6 +498,29 @@ function installBackendFatalHandlers(): void {
 
 export class BackendServer {
   private sdk!: ColdCoordinatorSdkModule;
+  private providerManagementPromise?: ReturnType<typeof createCoordinatorProviderManagement>;
+
+  private getProviderManagement() {
+    return this.providerManagementPromise ??= createCoordinatorProviderManagement(this.sdk,
+      snapshot => this.emit('providers.changed', { snapshot, backendGeneration: this.backendGeneration }));
+  }
+
+  private async sessionProviderRuntime(sessionPath: string) {
+    const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
+    const manager = retained?.handle.manager ?? this.sdk.SessionManager.open(sessionPath);
+    const reference = readProviderRuntimeReference(manager);
+    if (!reference) return undefined;
+    const management = await this.getProviderManagement();
+    const snapshot = await management.readRuntimeProjection(reference);
+    return { snapshot, location: management.runtimeLocation(reference) };
+  }
+
+  private async sessionModelCatalog(sessionPath: string) {
+    const runtime = await this.sessionProviderRuntime(sessionPath);
+    if (!runtime) return await loadConfiguredModels(this.agentDir, this.modelRegistry);
+    const models = projectProviderRuntimeModels(runtime.snapshot);
+    return { ok: true as const, models };
+  }
   private sdkPath: string;
   private readonly sdkRuntimeSelection: SdkRuntimeSelection;
   private sdkRuntime!: SdkRuntimeSelection;
@@ -604,6 +633,7 @@ export class BackendServer {
   /** Correlation identity for coordinator-originated hot snapshot commands
    * that are not part of a public request. */
   private workerSnapshotRequestSequence = 0;
+  private promptInventorySequence = 0;
   /** Highest coordinator-owned registry revision published to the legacy
    * process env mirror. Broadcast acknowledgements can settle out of order,
    * so completion order must never be allowed to roll this mirror back. */
@@ -1094,6 +1124,7 @@ export class BackendServer {
             startupCwd: this.startupCwd,
             sessionDir: this.getSessionDir() ?? path.join(this.agentDir, 'sessions'),
             openedPayload,
+            providerRuntime: (await this.sessionProviderRuntime(exactSessionPath))?.location,
             modelSettings: await this.readModelSettings(),
             creationReason: retained?.creationReason ?? 'resume',
             exactSessionPath,
@@ -1869,7 +1900,7 @@ export class BackendServer {
           snapshotRequestId,
         );
       }
-      const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
+      const catalog = await this.sessionModelCatalog(sessionPath);
       const availableModels = catalog.models;
       const modelSettings = await this.readModelSettings();
       const store = this.initializeColdSessionStore();
@@ -1987,6 +2018,58 @@ export class BackendServer {
         }
         throw error;
       }
+    });
+  }
+
+  private deferSessionPromptInventory(original: SessionOpenedPayload): void {
+    const sessionPath = original.session.path;
+    const token = `coordinator-prompt-inventory:${++this.promptInventorySequence}`;
+    original.promptInventoryToken = token;
+    const store = this.coldSessionStore;
+    const isCurrent = (payload: SessionOpenedPayload): boolean => (
+      !this.disposed
+      && !this.isSessionForgotten(sessionPath)
+      && !this.workerRuntimeRouter?.hasHotOwner(sessionPath)
+      && payload.runtimeReady === false
+      && !!store?.ownershipStamp(payload)
+      && this.isBrowseResponseCurrent(payload)
+    );
+    const publish = (current?: SessionOpenedPayload): void => {
+      if (!isCurrent(original) || (current && !isCurrent(current))) return;
+      try {
+        store!.publishSync(original, () => {
+          const emitInventory = () => {
+            if (!isCurrent(original) || (current && !isCurrent(current))) return;
+            this.emit('session.promptInventory', {
+              sessionPath,
+              token,
+              systemPrompts: current?.systemPrompts ?? [],
+              ...(current?.systemPrompts !== undefined && current.initialContextEstimate
+                ? { initialContextEstimate: current.initialContextEstimate } : {}),
+            });
+          };
+          if (current) store!.publishSync(current, emitInventory);
+          else emitInventory();
+        });
+      } catch (error) {
+        if (!(error instanceof StaleColdSessionLeaseError)) throw error;
+      }
+    };
+    void Promise.resolve().then(async () => {
+      if (!isCurrent(original)) return;
+      try {
+        const current = await this.buildSessionOpenedPayload(sessionPath);
+        publish(current);
+      } catch {
+        // A failed discovery can settle the token only while the original
+        // cold snapshot still owns this path and durable fingerprint.
+        publish();
+      }
+    }).catch((error) => {
+      backendWarn('backend-session', 'sessionPromptInventory.failed', {
+        sessionPath,
+        error: toErrorMessage(error),
+      });
     });
   }
 
@@ -4193,14 +4276,65 @@ export class BackendServer {
     return patch;
   }
 
-  private async assertSessionControlModelAvailable(model: AgentSessionModelChoice): Promise<void> {
-    const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
+  /** The same private native inputs used by durable creation. */
+  private creationProviderRuntimeInputs(): NativeRuntimeModel[] {
+    const baseline = (this.modelRegistry?.getAll?.() ?? []) as NativeRuntimeModel[];
+    return baseline.map(model => ({ provider: model.provider, id: model.id, name: model.name,
+      api: model.api, baseUrl: model.baseUrl, input: Array.isArray(model.input) ? [...model.input] : [], reasoning: model.reasoning,
+      contextWindow: model.contextWindow, maxTokens: model.maxTokens, cost: { ...model.cost },
+      ...(model.headers ? { headers: { ...model.headers } } : {}),
+      ...(model.compat ? { compat: structuredClone(model.compat) } : {}),
+      ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}) }));
+  }
+
+  private async creationModelCatalog() {
+    if (await hasCoordinatorProviderConfiguration()) {
+      const management = await this.getProviderManagement();
+      const snapshot = await management.previewRuntimeProjection(this.creationProviderRuntimeInputs());
+      if (snapshot) return { ok: true as const, models: projectProviderRuntimeModels(snapshot) };
+    }
+    return await loadConfiguredModels(this.agentDir, this.modelRegistry);
+  }
+
+  private async assertSessionControlModelAvailable(
+    model: AgentSessionModelChoice,
+    sessionPath?: string,
+    creationReasoning?: ThinkingLevel,
+  ): Promise<void> {
+    const catalog = sessionPath ? await this.sessionModelCatalog(sessionPath) : await this.creationModelCatalog();
     if (!catalog.ok) {
       throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to validate session model: ${catalog.error}`);
     }
-    if (!catalog.models.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
+    const candidate = catalog.models.find(candidate => candidate.provider === model.provider && candidate.id === model.id);
+    if (!candidate) {
       throw new BackendError('MODEL_UNAVAILABLE', `Model not available for this session: ${model.provider}/${model.id}`);
     }
+    if (creationReasoning !== undefined && (candidate.subagent?.eligible === false
+      || (candidate.thinkingLevels && !candidate.thinkingLevels.includes(creationReasoning)))) {
+      throw new BackendError('MODEL_UNAVAILABLE', `Selected model/reasoning is not eligible in the creation runtime: ${model.provider}/${model.id}`);
+    }
+  }
+
+  private async selectSessionControlCreationModel(
+    bucket: BucketTier,
+    sourceSessionPath: string,
+    inheritedSettings: AgentSessionSettingsSnapshot,
+  ): Promise<SessionControlModelSelection> {
+    const catalog = await this.sessionModelCatalog(sourceSessionPath);
+    if (!catalog.ok) {
+      throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to select a session model: ${catalog.error}`);
+    }
+    return selectSessionControlModel({
+      bucket,
+      assignments: parseBucketConfig(JSON.stringify(this.runtimePrefs.subagentBuckets)),
+      callerModel: inheritedSettings.model,
+      callerThinkingLevel: inheritedSettings.reasoning,
+      subagentProviderChoices: inheritedSettings.subagentProviderChoices,
+      providerToggles: parseProviderToggles(JSON.stringify(this.runtimePrefs.providerToggles)),
+      availableModels: catalog.models,
+      isEligible: model => catalog.models.find(candidate =>
+        candidate.provider === model.provider && candidate.id === model.id)?.subagent?.eligible !== false,
+    });
   }
 
   private async captureSessionControlSettings(sessionPath: string): Promise<{
@@ -4484,7 +4618,7 @@ export class BackendServer {
     const payload = frame.payload as Record<string, unknown>;
     const allowedPayloadKeys: Readonly<Record<WorkerSessionControlAction, readonly string[]>> = {
       list: [],
-      create: ['cwd', 'title', 'prompt', 'settings'],
+      create: ['cwd', 'title', 'bucket', 'prompt', 'settings'],
       read: ['title', 'self', 'direction', 'cursor', 'limit'],
       message: ['title', 'self', 'replyTo', 'prompt', 'settings'],
       'settings.get': ['title', 'self'],
@@ -4500,6 +4634,9 @@ export class BackendServer {
     if (frame.action === 'list') return { result: this.listLiveSessions() };
 
     if (frame.action === 'create') {
+      if (payload.bucket !== 'small' && payload.bucket !== 'medium' && payload.bucket !== 'frontier') {
+        throw new BackendError('INVALID_PARAMS', 'create requires bucket small, medium, or frontier.');
+      }
       if (typeof payload.title !== 'string' || !boundedAgentString(payload.title, 512)) {
         throw new BackendError('INVALID_PARAMS', 'create requires a bounded title of 1-25 characters after trimming.');
       }
@@ -4516,6 +4653,9 @@ export class BackendServer {
       const explicitSettings = payload.settings === undefined
         ? {}
         : this.validateAgentSessionSettingsPatch(payload.settings);
+      if (explicitSettings.model !== undefined) {
+        throw new BackendError('INVALID_PARAMS', 'create selects its model through bucket; settings.model is not accepted.');
+      }
       if (payload.cwd !== undefined
         && (!boundedAgentString(payload.cwd, 16 * 1024) || !payload.cwd.trim())) {
         throw new BackendError('INVALID_PARAMS', 'create.cwd must be a bounded non-empty path when supplied.');
@@ -4529,8 +4669,14 @@ export class BackendServer {
       // Capture the creator's saved settings once, before the durable create.
       // Explicit settings override those captured values field-by-field.
       let captured: { settings: AgentSessionSettingsSnapshot; cwd: string };
+      let modelSelection: SessionControlModelSelection;
       try {
         captured = await this.captureSessionControlSettings(sourceSessionPath);
+        modelSelection = await this.selectSessionControlCreationModel(payload.bucket, sourceSessionPath, captured.settings);
+        // Validate against the creation-time catalog too: a newly created
+        // independent session may capture a newer provider runtime than its caller.
+        await this.assertSessionControlModelAvailable(modelSelection.model, undefined,
+          explicitSettings.reasoning ?? modelSelection.reasoning ?? captured.settings.reasoning);
       } catch (error) {
         // No durable-create call was admitted. Distinguish this known absence
         // from an unknown create acknowledgement so agents cannot assume a tab
@@ -4548,14 +4694,14 @@ export class BackendServer {
       const settings = this.validateAgentSessionSettingsPatch({
         ...inheritedSettings,
         ...explicitSettings,
-        model: explicitSettings.model ?? inheritedSettings.model,
+        model: modelSelection.model,
+        reasoning: explicitSettings.reasoning ?? modelSelection.reasoning ?? inheritedSettings.reasoning,
         disabledSystemPromptEntries: explicitSettings.disabledSystemPromptEntries
           ?? inheritedSettings.disabledSystemPromptEntries,
       });
       if (!settings.model) {
         throw new BackendError('SESSION_SETTINGS_UNAVAILABLE', 'The complete inherited model settings are unavailable.');
       }
-      await this.assertSessionControlModelAvailable(settings.model);
       BackendServer.assertConfiguredProviderChoices(settings.subagentProviderChoices, inheritedSettings.subagentProviderChoices);
 
       const explicitCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : undefined;
@@ -4632,7 +4778,7 @@ export class BackendServer {
               `${operationId}:send`,
               sendCancellationGeneration,
             );
-        return { result: workerJson({ creation, configuration, message } satisfies WorkerJsonObject) };
+        return { result: workerJson({ creation, configuration, message, modelSelection: workerJson(modelSelection) } satisfies WorkerJsonObject) };
       } finally {
         releaseAdmission?.();
       }
@@ -4658,7 +4804,7 @@ export class BackendServer {
       this.assertSessionNotClosing(resolved.sessionPath);
       const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(resolved.sessionPath);
       try {
-        if (patch.model) await this.assertSessionControlModelAvailable(patch.model);
+        if (patch.model) await this.assertSessionControlModelAvailable(patch.model, resolved.sessionPath);
         if (patch.subagentProviderChoices) {
           const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
           BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
@@ -4686,7 +4832,7 @@ export class BackendServer {
       this.assertSessionNotClosing(resolved.sessionPath);
       const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(resolved.sessionPath);
       try {
-        if (patch?.model) await this.assertSessionControlModelAvailable(patch.model);
+        if (patch?.model) await this.assertSessionControlModelAvailable(patch.model, resolved.sessionPath);
         if (patch?.subagentProviderChoices) {
           const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
           BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
@@ -4956,7 +5102,7 @@ export class BackendServer {
         return this.editOperationLedger.status(params.operationId)!;
       }
     }
-    if (router) {
+    if (router && request.method !== 'providers.manage') {
         const sessionPath = requestSessionPath(request.params);
         const messageOperationId = request.params && typeof request.params === 'object'
           && !Array.isArray(request.params)
@@ -5157,6 +5303,17 @@ export class BackendServer {
       startupCwd: this.startupCwd,
       sessionDir,
       sdk: this.sdk,
+      providerManagement: {
+        request: async request => {
+          if (this.disposed) throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
+          const manager = await (this.providerManagementPromise ??= createCoordinatorProviderManagement(
+            this.sdk,
+            snapshot => this.emit('providers.changed', { snapshot, backendGeneration: this.backendGeneration }),
+          ));
+          if (this.disposed) { manager.dispose(); throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.'); }
+          return manager.request(request);
+        },
+      },
       getSessionContext: () => undefined,
       createSessionContext: () => {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not create in-process session runtimes.');
@@ -5177,7 +5334,14 @@ export class BackendServer {
       createColdSession: async (cwd, pendingCreateOperationId, agentCreated) => {
         const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
         if (replayPath) return { sessionPath: replayPath };
-        const handle = this.initializeColdSessionStore().create({ cwd, agentCreated });
+        let providerRuntimeReference: ProviderRuntimeReference | undefined;
+        if (await hasCoordinatorProviderConfiguration()) {
+          const management = await this.getProviderManagement();
+          // Private capture inputs only. Headers are inspected against compiled native definitions,
+          // never serialized; tiered/partial costs must reach the admission guard unchanged.
+          providerRuntimeReference = await management.captureRuntimeProjection(this.creationProviderRuntimeInputs());
+        }
+        const handle = this.initializeColdSessionStore().create({ cwd, agentCreated, providerRuntimeReference });
         this.retainColdSessionManager(handle, 'new');
         await this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
         return { sessionPath: handle.sessionPath };
@@ -5271,6 +5435,7 @@ export class BackendServer {
           publicRequestId,
         )
       ),
+      deferSessionPromptInventory: (payload) => this.deferSessionPromptInventory(payload),
       createOperationLedger: this.createOperationLedger,
       buildTransitionSessionOpenedPayload: () => {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not build in-process transition snapshots.');
@@ -5317,7 +5482,10 @@ export class BackendServer {
       listAvailableModels: async (context) => {
         const catalog = context
           ? loadAvailableModels(context, this.agentDir)
-          : await loadConfiguredModels(this.agentDir, this.modelRegistry);
+          : request.params && typeof request.params === 'object' && 'sessionPath' in request.params
+            && typeof request.params.sessionPath === 'string'
+            ? await this.sessionModelCatalog(request.params.sessionPath)
+            : await loadConfiguredModels(this.agentDir, this.modelRegistry);
         if (!catalog.ok) {
           throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to load the model catalog: ${catalog.error}`);
         }
@@ -5433,6 +5601,8 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
+    // Dispose provider operations before runtime owners, without exposing errors.
+    try { (await this.providerManagementPromise)?.dispose(); } catch { /* unavailable */ }
     this.clearLiveTitleNamespaceRetry();
     this.liveTitleAdmissionRetries.clear();
     for (const [requestId, entry] of this.hostSessionSettingsRequests) {

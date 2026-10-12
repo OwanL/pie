@@ -389,6 +389,74 @@ test('Windows live capture rejects impossible older children and root closure or
   }
 });
 
+test('Windows watchdog ownership readiness requires a consistent live identity capture', async (t) => {
+  for (const scenario of ['ready', 'root-closed', 'root-reused', 'root-absent', 'census-failed']) {
+    await t.test(scenario, async () => {
+      const child = new ChildProcess();
+      child.pid = 4321;
+      let query = 0;
+      const watchdog = watchChildProcess(child, {
+        timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+        spawnSyncImpl: () => {
+          query += 1;
+          if (scenario === 'census-failed') return { status: 1, stdout: '' };
+          if (query === 2 && scenario === 'root-closed') child.exitCode = 0;
+          if (query === 2 && scenario === 'root-absent') return { status: 0, stdout: '' };
+          const identity = query === 2 && scenario === 'root-reused'
+            ? '20261009170002.000000+780' : '20261009170000.000000+780';
+          return { status: 0, stdout: `4321|1|${identity}\n` };
+        },
+      });
+      assert.equal(watchdog.ownershipReady, scenario === 'ready');
+      watchdog.cleanup();
+    });
+  }
+});
+
+test('Windows live capture brackets ancestry in one shell without trusting an early root row', async (t) => {
+  for (const scenario of ['ready', 'absent', 'reused', 'closed', 'failed']) {
+    await t.test(scenario, () => {
+      const child = new ChildProcess();
+      child.pid = 4321;
+      const root = '20261009170000.000000+780';
+      let queries = 0;
+      const watchdog = watchChildProcess(child, {
+        timeoutMs: 0, platform: 'win32',
+        spawnSyncImpl: (command, args, options) => {
+          queries += 1;
+          assert.equal(command, 'powershell.exe');
+          assert.equal(options.timeout, 5_000);
+          const script = args.at(-1);
+          assert.ok(script.indexOf('PIE_ROOT_CHECK') > script.indexOf('$q.Get()'));
+          assert.ok(script.indexOf(' WHERE ProcessId=4321') > script.indexOf('PIE_ROOT_CHECK'));
+          if (scenario === 'closed') child.exitCode = 0;
+          if (scenario === 'failed') return { status: 1, stdout: '' };
+          const checked = scenario === 'absent' ? '' : `4321|1|${scenario === 'reused' ? '20261009170002.000000+780' : root}\n`;
+          return { status: 0, stdout: `4321|1|${root}\n7654|4321|20261009170001.000000+780\nPIE_ROOT_CHECK\n${checked}` };
+        },
+      });
+      assert.equal(queries, 1, 'no second PowerShell startup exposes short-lived roots to a capture race');
+      assert.equal(watchdog.ownershipReady, scenario === 'ready');
+      watchdog.cleanup();
+    });
+  }
+});
+
+integrationTest('real Windows short-lived child is captured before its natural exit', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  const closed = new Promise((resolve) => child.once('close', resolve));
+  const watchdog = watchChildProcess(child, { timeoutMs: 5_000 });
+  try {
+    assert.equal(watchdog.ownershipReady, true);
+    await closed;
+    const result = await watchdog.settle();
+    assert.equal(result.gone, true, result.diagnostics.join('; '));
+    assert.ok(result.ownedPids.includes(child.pid));
+  } finally {
+    await watchdog.settle();
+  }
+});
+
 test('Windows watchdog cannot recover failed live ownership capture from an empty post-close census', async () => {
   const child = new ChildProcess();
   child.pid = 4321;

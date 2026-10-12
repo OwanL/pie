@@ -38,7 +38,7 @@ export interface LegacyStatsSettlementPorts {
   /** Captured provider/model pricing facts from the provider pricing owner;
    *  settlement accounting consumes the facts and never resolves runtime
    *  catalogs itself. */
-  readonly getCapturedPricingFacts: () => CapturedPricingFacts | undefined;
+  readonly getCapturedPricingFacts: (sessionPath: string) => CapturedPricingFacts | undefined;
   readonly resolveInvocationPricing: InvocationPricingResolver;
   readonly subagentObservationSource: SubagentObservationSource;
   readonly isPrivateSession: (sessionPath: string) => boolean;
