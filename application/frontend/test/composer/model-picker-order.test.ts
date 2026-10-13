@@ -81,6 +81,15 @@ test('orderModelsForPicker avoids repeating provider branding in row and selecte
   assert.equal(entry.title, 'Ollama Cloud: Deepseek V4 pro');
 });
 
+test('orderModelsForPicker preserves tagged model families in row and selected labels', () => {
+  for (const id of ['qwen3.5:9b', 'qwen3.5:cloud']) {
+    const [entry] = orderModelsForPicker([model(id, { provider: 'ollama' })]);
+    assert.equal(entry.label, `ollama · ${id}`);
+    assert.equal(entry.selectedLabel, id);
+    assert.equal(entry.title, id);
+  }
+});
+
 test('orderModelsForPicker uses model id as deterministic tiebreak when names match', () => {
   const ordered = orderModelsForPicker([
     model('b', { name: 'Same', subagent: { eligible: true } }),

@@ -189,7 +189,7 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 		undefined,
 		{ sdk: sdk as any },
 		undefined,
-		{ mode: "latest", content: "[User prompt]\nPlease preserve the public API." },
+		{ mode: "latest", content: "[User prompt]\nPlease preserve the public API.", images: [] },
 	);
 
 	assert.equal(result.exitCode, 0);
@@ -400,7 +400,7 @@ test("runSingleAgent fails closed before session creation when final provider re
 	assert.equal(result.modelRequirementsSatisfied, false);
 	assert.deepEqual(result.requestedModelRequirements, { inputKinds: ["image"] });
 	assert.match(result.requirementDiagnostic ?? "", /No enabled image-capable model/);
-	assert.match(result.requirementDiagnostic ?? "", /remove modelRequirements\.inputKinds=\["image"\]/);
+	assert.match(result.requirementDiagnostic ?? "", /choose another bucket with an enabled image-capable model/);
 	assert.equal(state.createResourceLoaderArgs.length, 0);
 	assert.equal(state.createSessionArgs.length, 0);
 	assert.equal(state.promptCalls, 0);

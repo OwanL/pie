@@ -97,9 +97,9 @@ test.describe('composer toolbar overflow in Chromium', () => {
       }));
       expect(modelText.width, `model text width at ${width}px`).toBeGreaterThan(8);
       if (width === 240) {
-        // The attached session may have a short model name, so temporarily
-        // stress the real label with long text instead of assuming truncation
-        // must occur for every selected model. The UI contract is min-width:0
+        // The fixture model name is short, so temporarily stress the real
+        // label with long text instead of assuming truncation must occur for
+        // every selected model. The UI contract is min-width:0
         // plus ellipsis while Settings and Reasoning stay pinned and separate.
         const originalText = (await modelLabel.textContent()) ?? '';
         try {
@@ -190,7 +190,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
     }
 
     const contextIndicator = popover.locator('[data-toolbar-item="context-window"] [tabindex="0"]');
-    test.skip(await contextIndicator.count() === 0, 'the attached session has no context-window indicator');
+    await expect(contextIndicator).toBeVisible();
     await contextIndicator.scrollIntoViewIfNeeded();
     await contextIndicator.hover();
     const tooltip = page.locator('.pie-tooltip-host--rich:visible');

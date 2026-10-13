@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { parseModelPricing } from '../pricing/pricing-core';
 import type { CapturedPricingFacts, ModelPricingRecord } from '../../../analytics/contracts/model-pricing-facts';
 import type { RuntimeSnapshot } from './contracts';
 import { immutable, validNativeModel } from './projection';
@@ -11,7 +12,7 @@ export function buildProviderRuntimePricingFacts(snapshot: RuntimeSnapshot): Cap
     if (!row.model || row.rejection || !validNativeModel(row.model)) continue;
     const cost = row.model.cost;
     const record = immutable({ id: row.id, provider: row.providerId,
-      pricing: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } });
+      pricing: parseModelPricing(row.pricingFacts) ?? { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } });
     for (const key of new Set([row.id, `${row.providerId}/${row.id}`])) {
       const list = records.get(key) ?? [];
       list.push(record);

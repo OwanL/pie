@@ -1,4 +1,5 @@
-import type { DeepReadonly, ProviderCatalogSnapshot } from '../catalog/provider-model-resolution';
+import type { ModelTokenPricing } from '../../../analytics/contracts/model-pricing-facts';
+import type { DeepReadonly, ProviderCatalogSnapshot, ShippedProviderDefinition } from '../catalog/provider-model-resolution';
 import type { ProviderConfig } from '../catalog/provider-config';
 
 /** SDK-free DTO: pass registry models, never registry/auth objects. */
@@ -17,6 +18,7 @@ export type CredentialSource = { source: 'legacy' | 'none' | 'default' }
 export interface RuntimeModelProjection {
   providerId: string; id: string; enabled: boolean; visible: boolean; subagentEligible: boolean;
   credential: CredentialSource;
+  pricingFacts?: ModelTokenPricing;
   builtinHeaders?: { provider: string; id: string; sha256: string };
   model?: NativeRuntimeModel;
   rejection?: 'unsupported-or-incomplete-runtime-model';
@@ -31,6 +33,8 @@ export interface CaptureProviderRuntimeInput {
   legacyModels: readonly NativeRuntimeModel[];
   /** Verified compiled SDK definitions only; never user registry models. */
   builtinModels?: readonly NativeRuntimeModel[];
+  /** Approved deployed shipped catalog, not arbitrary registry definitions. Exact provider/id only. */
+  shippedCatalog?: Readonly<Record<string, ShippedProviderDefinition>>;
   discovered?: Readonly<Record<string, ProviderCatalogSnapshot>>;
   /** Private opaque UUID epochs, obtained only for credentials actually saved. */
   credentialScopes?: Readonly<Record<string, string | undefined>>;

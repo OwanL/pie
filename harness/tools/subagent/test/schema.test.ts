@@ -55,9 +55,10 @@ test("userContext guidance binds each mode to its condition within its prompt bu
 	assert.equal(modes.length, 3);
 	const [omit, latest, all] = modes;
 
-	assert.match(omit, /\bomit\b.*\bself-contained tasks\b/i);
-	assert.match(latest, /^'latest'\s.*\bcurrent request\b.*\bclarifications\b/);
-	assert.match(all, /^'all'\s.*\brequirements span multiple user turns\b/);
+	assert.match(omit, /Parent user text\/images and ask_user answers: omit for task-only/);
+	assert.match(latest, /^'latest'\s.*\blatest user message\b/);
+	assert.match(all, /^'all'\s.*\bactive-branch history across turns\b/);
+	assert.match(description, /Images automatically require image-capable models/);
 	assert.ok(description.length <= 200, "userContext guidance must remain within its permanent 200-character prompt budget");
 });
 

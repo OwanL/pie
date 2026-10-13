@@ -474,7 +474,7 @@ function closeBoundServer(bound: BoundServer): Promise<void> {
     };
     const timer = setTimeout(() => {
       for (const socket of [...bound.sockets]) socket.destroy();
-      finish();
+      // Destruction initiates teardown; the server close callback confirms it.
     }, RELEASE_GRACE_MS);
     bound.server.close(() => {
       clearTimeout(timer);
@@ -559,13 +559,16 @@ export async function requestPieHostRelease(
 
 function createOwnership(bound: BoundServer, port: number): PieHostOwnership {
   let released = false;
+  let releasePromise: Promise<void> | undefined;
   return {
     kind: bound.kind,
     port,
-    release: async () => {
-      if (released) return;
+    release: () => {
+      if (releasePromise) return releasePromise;
+      if (released) return Promise.resolve();
       released = true;
-      await closeBoundServer(bound);
+      releasePromise = closeBoundServer(bound);
+      return releasePromise;
     },
     abort: () => {
       if (released) return;

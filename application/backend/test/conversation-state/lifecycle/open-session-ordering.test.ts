@@ -235,7 +235,6 @@ async function restoredOpen(t: TestContext, options: {
   let rejectOpen!: (error: Error) => void;
   const backend = { request: (method: string) => method === 'session.open'
     ? new Promise((_, reject) => { rejectOpen = reject; }) : Promise.resolve({}) } as any;
-  let runner: EffectRunner;
   const dispatchArch = (event: Event) => {
     const result = reducer(archState, event);
     archState = result.state;
@@ -254,7 +253,7 @@ async function restoredOpen(t: TestContext, options: {
     },
     dispatch: dispatchArch,
   });
-  runner = new EffectRunner(deps);
+  const runner = new EffectRunner(deps);
   tabs.openSession(missing);
   for (let i = 0; i < 3; i++) await new Promise<void>((resolve) => setImmediate(resolve));
   const open = Object.values(archState.operations).find((operation) => operation.kind === 'session.open')!;

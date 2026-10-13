@@ -212,6 +212,61 @@ test('cold promotion sends only metadata even for large byte-valid transcripts',
   assert.equal(page.transcriptWindow.totalCount, 1);
 });
 
+for (const captured of [true, false]) {
+  test(`cold promotion preserves ${captured ? 'captured provider runtime location' : 'legacy uncaptured services'}`, async () => {
+    const sessionPath = resolve('router-provider-runtime.jsonl');
+    const sdkPath = resolve('/sdk');
+    const providerRuntime = captured ? {
+      artifactDir: resolve('/private/provider-runtime'),
+      credentialFile: resolve('/private/credentials.json'),
+      reference: { version: 1 as const, sha256: 'a'.repeat(64) },
+    } : undefined;
+    let payload: any;
+    const router = new WorkerRuntimeRouter({
+      supervisor: {
+        startWorker: async (root: string, prepare: any) => {
+          await prepare({ workerId: 'worker-provider', workerGeneration: 1, sessionPath: root });
+          return { workerId: 'worker-provider', workerGeneration: 1, sessionPath: root, client: {
+            requestFrame: async (body: any) => {
+              if (body.kind === 'runtime.promote') {
+                // Exercise the actual router construction and JSON serialization,
+                // not a manually populated worker promotion payload.
+                payload = JSON.parse(JSON.stringify(body.payload));
+                return { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+              }
+              return { kind: 'sync.ack', domain: body.domain, revision: body.revision };
+            },
+          } };
+        },
+        stopWorker: async () => undefined,
+      } as any,
+      coldStore: {
+        serializePromotionGrant: (target: string) => ({ grantId: 'provider-grant', coordinatorGeneration: 1,
+          sessionPath: target, sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' }),
+        consumePromotionGrant: (grant: any) => grant,
+        abortPromotionGrant: () => undefined,
+      } as any,
+      ownership: {
+        registerHot: async (target: string, owner: any) => ({ ...owner, canonicalSessionPath: target,
+          ownershipRevision: 1, nonce: 'lease' }),
+        reconcileCrash: async () => undefined,
+      } as any,
+      emit: () => undefined,
+      buildPromotionSnapshot: async () => ({
+        sdkPath, sdkRuntime: createSyntheticSourceTestSdkRuntime(sdkPath),
+        agentDir: resolve('/agent'), startupCwd: resolve('/'), sessionDir: resolve('/sessions'),
+        openedPayload: opened(sessionPath) as any,
+        modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+        providerRuntime,
+      }),
+    });
+    await router.promote(sessionPath);
+    assert.deepEqual(payload.providerRuntime, providerRuntime);
+    assert.equal(Object.hasOwn(payload, 'providerRuntime'), captured,
+      'legacy sessions must not acquire a managed runtime or credential location');
+  });
+}
+
 test('worker router promotion is single-flight and runtime.ready precedes the initiating command', async () => {
   const sessionPath = `${process.cwd()}/router-a.jsonl`;
   const order: string[] = [];

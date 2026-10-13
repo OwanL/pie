@@ -1,6 +1,6 @@
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
-import type { ModelInfo, SessionSummary } from '../../../lib/protocol/index.js';
+import type { SessionSummary } from '../../../lib/protocol/index.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../lib/session-tabs/tab-behavior.js';
@@ -13,53 +13,10 @@ import {
 } from '../operation-registry.js';
 import type { SessionOperation } from '../operation-types.js';
 
-/** Seed a pending picker from the last catalog known to the host. A duplicate
- * prefers its real predecessor; a new session prefers the active real tab and
- * then any configured/session catalog still in memory. The selected model's
- * provider-qualified metadata is merged back in when the chosen catalog is
- * stale or filtered, so reasoning controls do not flash to a non-reasoning
- * fallback while the durable target is unresolved. */
-function provisionalCatalogForSession(
-  state: ArchState,
-  placeholderSummary: SessionSummary,
-  predecessorPath?: string,
-): ModelInfo[] {
-  const catalogs = Object.entries(state.settings.availableModelsBySession)
-    .filter(([path, models]) => !isPendingTabPath(path) && models.length > 0);
-  const activePath = state.sessions.activeSessionPath;
-  const preferredPaths = [predecessorPath, activePath].filter(
-    (path): path is string => !!path && !isPendingTabPath(path),
-  );
-  const preferred = preferredPaths
-    .map((path) => state.settings.availableModelsBySession[path])
-    .find((models): models is ModelInfo[] => !!models && models.length > 0);
-  const base = preferred ?? catalogs[0]?.[1] ?? [];
-  const predecessor = preferredPaths
-    .map((path) => state.sessions.sessions.find((session) => session.path === path))
-    .find((session): session is NonNullable<typeof session> => !!session);
-  const selectedModelId = placeholderSummary.modelId
-    ?? predecessor?.modelId
-    ?? state.settings.modelSettings?.defaultModel;
-  const selectedProvider = placeholderSummary.provider
-    ?? predecessor?.provider
-    ?? state.settings.modelSettings?.defaultProvider;
-  if (!selectedModelId) return [...base];
-
-  const knownModels = catalogs.flatMap(([, models]) => models);
-  const selectedKnown = selectedProvider
-    ? knownModels.find((model) => model.id === selectedModelId && model.provider === selectedProvider)
-    : knownModels.find((model) => model.id === selectedModelId);
-  if (!selectedKnown || base.some((model) => model.id === selectedKnown.id && model.provider === selectedKnown.provider)) {
-    return [...base];
-  }
-  return [...base, selectedKnown];
-}
-
+// Only retain catalogs owned by this session; pending tabs start undiscovered.
 function seedProvisionalModelCatalog(
   state: ArchState,
   sessionPath: string,
-  placeholderSummary: SessionSummary,
-  predecessorPath?: string,
 ): ArchState['settings'] {
   const existingModels = state.settings.availableModelsBySession[sessionPath];
   const existingStatus = state.settings.availableModelsStatusBySession[sessionPath];
@@ -70,11 +27,11 @@ function seedProvisionalModelCatalog(
     ...state.settings,
     availableModelsBySession: {
       ...state.settings.availableModelsBySession,
-      [sessionPath]: provisionalCatalogForSession(state, placeholderSummary, predecessorPath),
+      [sessionPath]: [],
     },
     availableModelsStatusBySession: {
       ...state.settings.availableModelsStatusBySession,
-      [sessionPath]: 'provisional',
+      [sessionPath]: 'loading',
     },
   };
 }
@@ -185,7 +142,7 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
     settings: catalogSummary
-      ? seedProvisionalModelCatalog(state, sessionPath, catalogSummary, state.sessions.activeSessionPath ?? undefined)
+      ? seedProvisionalModelCatalog(state, sessionPath)
       : state.settings,
   };
   return {
@@ -281,7 +238,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
-    settings: seedProvisionalModelCatalog(state, sessionPath, placeholderSummary),
+    settings: seedProvisionalModelCatalog(state, sessionPath),
     operations: operationId
       ? {
           ...state.operations,
@@ -830,7 +787,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
       intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
     },
-    settings: seedProvisionalModelCatalog(state, sessionPath, placeholderSummary, sourceSessionPath),
+    settings: seedProvisionalModelCatalog(state, sessionPath),
     operations: operationId
       ? {
           ...state.operations,

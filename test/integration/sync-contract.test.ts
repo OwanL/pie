@@ -76,6 +76,13 @@ test('provider management is host-global, credential-free and separate from chat
   assert.equal(result.effects[0]?.kind, 'ProviderManagementRpc');
   const snapshot = { revision: 0, configRevision: null, loaded: true, providers: [], definitions: [], protocols: [] };
   assert.equal(isProviderManagementSnapshot(snapshot), true);
+  const authBrowser = { operationId: 'op', url: 'https://login.invalid', instructions: 'Continue' };
+  const auth = { kind: 'input' as const, operationId: 'op', promptId: 'p', message: 'Code' };
+  const updated = reducer(result.state, { kind: 'ProviderManagementSnapshotUpdated', generation: 1, snapshot: { ...snapshot, auth, authBrowser } });
+  const owning = { ...updated.state, providerManagement: { ...updated.state.providerManagement, authOperationId: 'op' } };
+  assert.deepEqual(selectViewState(owning).providerManagement?.authBrowser, authBrowser);
+  assert.deepEqual(selectViewState(owning).providerManagement?.auth, auth);
+  assert.equal(isProviderManagementSnapshot({ ...snapshot, auth, authBrowser }), true);
   assert.equal(isProviderManagementSnapshot({ ...snapshot, apiKey: 'synthetic-private-input' }), false);
   assert.equal(isProviderManagementSnapshot({ ...snapshot, auth: { kind: 'progress', operationId: 'op',
     message: 'Connecting…', access: 'synthetic-private-input' } }), false);

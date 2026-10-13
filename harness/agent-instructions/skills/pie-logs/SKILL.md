@@ -8,17 +8,18 @@ description: Inspect and group Pie persistent, debug, session, and truncated-too
 Pie emits four distinct log kinds. This skill reads and groups them.
 
 **Invocation:** resolve `pi_logs.py` against this skill directory and invoke that
-absolute path. Do not assume the session cwd contains the script.
+absolute path. Do not assume the session cwd contains the script. On Windows, use
+`uv` to select a working Python; it avoids broken `python` command aliases and
+project environment setup:
 
 ```bash
-python "<skill-directory>/pi_logs.py" summary
-# Equivalent when uv is preferred:
-uv run "<skill-directory>/pi_logs.py" summary
+uv run --no-project python "<skill-directory>/pi_logs.py" summary
+uv run --no-project python "<skill-directory>/pi_logs.py" --help
 ```
 
-The script is stdlib-only, so there is no install step. Use `python3` instead of
-`python` where that is the available executable. Run any subcommand with
-`--help` before guessing at options.
+The script is stdlib-only. On other platforms, use the same syntax with `python3`
+(or `python` if that is the available executable) instead of `uv run --no-project python`.
+Run any subcommand with `--help` before guessing at options.
 
 ## The four Pie log kinds
 
@@ -57,19 +58,19 @@ Grouping applies to **any file** via the `group` subcommand — not just Pie log
 Always start with `summary` to see what exists and where:
 
 ```bash
-python "<skill-directory>/pi_logs.py" summary
+uv run --no-project python "<skill-directory>/pi_logs.py" summary
 ```
 
 ### debug — read the /debug snapshot
 
 ```bash
-python "<skill-directory>/pi_logs.py" debug                          # both sections, grouped
-python "<skill-directory>/pi_logs.py" debug --section lines           # rendered TUI lines only
-python "<skill-directory>/pi_logs.py" debug --section messages        # agent messages only
-python "<skill-directory>/pi_logs.py" debug --filter "error" --top 50 # filter by regex
-python "<skill-directory>/pi_logs.py" debug --no-ansi                 # keep ANSI in grouping key
-python "<skill-directory>/pi_logs.py" debug --normalize smart         # collapse timestamps/ids
-python "<skill-directory>/pi_logs.py" debug --grouped                 # group message text too
+uv run --no-project python "<skill-directory>/pi_logs.py" debug                          # both sections, grouped
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --section lines           # rendered TUI lines only
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --section messages        # agent messages only
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --filter "error" --top 50 # filter by regex
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --no-ansi                 # keep ANSI in grouping key
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --normalize smart         # collapse timestamps/ids
+uv run --no-project python "<skill-directory>/pi_logs.py" debug --grouped                 # group message text too
 ```
 
 If absent: tell the user to run `/debug` in pi, then re-run.
@@ -77,17 +78,17 @@ If absent: tell the user to run `/debug` in pi, then re-run.
 ### session — read session JSONL
 
 ```bash
-python "<skill-directory>/pi_logs.py" session                         # most recent (for current cwd)
-python "<skill-directory>/pi_logs.py" session <path>                  # explicit file
-python "<skill-directory>/pi_logs.py" session --summary               # overview: types/roles/tools/tokens/cost
-python "<skill-directory>/pi_logs.py" session --context               # SDK-parity active branch with history compaction applied
-python "<skill-directory>/pi_logs.py" session --role assistant        # filter by message role
-python "<skill-directory>/pi_logs.py" session --type model_change     # filter by entry type
-python "<skill-directory>/pi_logs.py" session --tool bash             # filter by tool name
-python "<skill-directory>/pi_logs.py" session --errors                # only errors / failed tool results
-python "<skill-directory>/pi_logs.py" session --grouped               # group identical message text
-python "<skill-directory>/pi_logs.py" session --last 20               # limit to last N entries
-python "<skill-directory>/pi_logs.py" session --cwd /some/project     # pick session for a different cwd
+uv run --no-project python "<skill-directory>/pi_logs.py" session                         # most recent (for current cwd)
+uv run --no-project python "<skill-directory>/pi_logs.py" session <path>                  # explicit file
+uv run --no-project python "<skill-directory>/pi_logs.py" session --summary               # overview: types/roles/tools/tokens/cost
+uv run --no-project python "<skill-directory>/pi_logs.py" session --context               # SDK-parity active branch with history compaction applied
+uv run --no-project python "<skill-directory>/pi_logs.py" session --role assistant        # filter by message role
+uv run --no-project python "<skill-directory>/pi_logs.py" session --type model_change     # filter by entry type
+uv run --no-project python "<skill-directory>/pi_logs.py" session --tool bash             # filter by tool name
+uv run --no-project python "<skill-directory>/pi_logs.py" session --errors                # only errors / failed tool results
+uv run --no-project python "<skill-directory>/pi_logs.py" session --grouped               # group identical message text
+uv run --no-project python "<skill-directory>/pi_logs.py" session --last 20               # limit to last N entries
+uv run --no-project python "<skill-directory>/pi_logs.py" session --cwd /some/project     # pick session for a different cwd
 ```
 
 **Session directory resolution:** `summary` and `session` read the canonical
@@ -111,12 +112,12 @@ Older summarized entries and entries on other branches are omitted.
 ### group — Unity-group ANY file
 
 ```bash
-python "<skill-directory>/pi_logs.py" group <file>                    # exact grouping
-python "<skill-directory>/pi_logs.py" group <file> --filter "error"   # matching lines only
-python "<skill-directory>/pi_logs.py" group <file> --normalize smart  # collapse volatile tokens
-python "<skill-directory>/pi_logs.py" group <file> --top 100 --min 3  # busy files
-python "<skill-directory>/pi_logs.py" group <file> --no-ansi          # raw escape sequences
-python "<skill-directory>/pi_logs.py" group <file> --context          # show line ranges
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file>                    # exact grouping
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file> --filter "error"   # matching lines only
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file> --normalize smart  # collapse volatile tokens
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file> --top 100 --min 3  # busy files
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file> --no-ansi          # raw escape sequences
+uv run --no-project python "<skill-directory>/pi_logs.py" group <file> --context          # show line ranges
 ```
 
 `group --filter` filters first and then groups. It accepts relative, absolute,
@@ -127,9 +128,9 @@ paths to the native temp directory; `pie.log` resolves from the usual
 ### temp — tool-output temp logs
 
 ```bash
-python "<skill-directory>/pi_logs.py" temp --list                    # all pi-*.log in tmpdir (default)
-python "<skill-directory>/pi_logs.py" temp --read <name-or-path>     # grouped summary + tail
-python "<skill-directory>/pi_logs.py" temp --grouped <name-or-path> # grouped only (full)
+uv run --no-project python "<skill-directory>/pi_logs.py" temp --list                    # all pi-*.log in tmpdir (default)
+uv run --no-project python "<skill-directory>/pi_logs.py" temp --read <name-or-path>     # grouped summary + tail
+uv run --no-project python "<skill-directory>/pi_logs.py" temp --grouped <name-or-path> # grouped only (full)
 ```
 
 `--read` accepts a bare filename (resolved in the tmpdir). Output is grouped first
@@ -168,8 +169,9 @@ goes to stdout. If a section prints `… N more unique group(s)`, raise `--top` 
   silently selecting an unrelated session. A positional session path remains explicit
   and is opened as given, regardless of `--cwd`.
 - **Mixed Windows/Git Bash paths**: prefer the path printed by `summary`, but
-  `/tmp/...` and bare temp-log names are accepted even when the script runs
-  under native Windows Python. Do not manually translate them first.
+  this script accepts `/tmp/...` and bare temp-log names under native Windows
+  Python and translates them itself. That translation is specific to `pi_logs.py`;
+  other native Windows tools may not accept Git Bash `/tmp/...` paths.
 - **Truncated-output temp lifecycle**: Pie applies retention cleanup to orphaned
   temp logs (`pi-bash-*` / `pi-output-*`) at extension activation via a best-effort reaper
   (`lib/temporary-files/temp-log-reaper.ts`). Retention is configurable via

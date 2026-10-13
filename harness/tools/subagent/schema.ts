@@ -20,7 +20,7 @@ const BucketSchema = StringEnum(["small", "medium", "frontier"] as const, {
 });
 
 const UserContextSchema = Type.Optional(StringEnum(["latest", "all"] as const, {
-	description: "Parent prompts and ask_user clarifications only: omit for self-contained tasks; 'latest' for the current request and its clarifications; 'all' only when requirements span multiple user turns.",
+	description: "Parent user text/images and ask_user answers: omit for task-only; 'latest' for latest user message; 'all' for active-branch history across turns. Images automatically require image-capable models.",
 }));
 
 const InputKindSchema = StringEnum(["image"] as const, {
@@ -38,7 +38,7 @@ const ModelRequirementsSchema = Type.Optional(
 		},
 		{
 			additionalProperties: false,
-			description: "Optional hard model requirements for the child. Absent or empty preserves current selection behaviour; { inputKinds: ['image'] } restricts selection to provider-qualified image-capable models.",
+			description: "Optional hard model requirements, e.g. { inputKinds: ['image'] } for images the child will read itself. Inherited user images already imply this requirement; text-only models and fallbacks are excluded.",
 		},
 	),
 );

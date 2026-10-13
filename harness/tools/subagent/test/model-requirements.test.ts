@@ -136,7 +136,9 @@ test("resolveModel: incompatible active-model fallback produces a local selectio
 	assert.deepEqual(resolved.requestedModelRequirements, IMAGE_REQ);
 	assert.match(resolved.requirementDiagnostic!, /No enabled image-capable model is available/);
 	assert.match(resolved.requirementDiagnostic!, /"medium" subagent bucket/);
-	assert.match(resolved.requirementDiagnostic!, /remove modelRequirements\.inputKinds=\["image"\]/);
+	assert.match(resolved.requirementDiagnostic!, /enable its provider/);
+	assert.match(resolved.requirementDiagnostic!, /choose another bucket with an enabled image-capable model/);
+	assert.doesNotMatch(resolved.requirementDiagnostic!, /remove modelRequirements/);
 });
 
 test("resolveModel: qualified active model remains a valid fallback under the requirement", async () => {
@@ -376,6 +378,44 @@ test.after(() => {
 	for (const key of ENV_KEYS) {
 		if (savedEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = savedEnv[key];
+	}
+});
+
+test("implicit parent image requirement rejects text-only dispatch and snapshots once across retries", async () => {
+	for (const withVision of [false, true]) {
+		const text = model("text", "text-only");
+		const vision = model("vision", "vision-model", ["text", "image"]);
+		const ctx = makeCtx(text);
+		ctx.modelRegistry = registry(withVision ? [text, vision] : [text]);
+		let reads = 0;
+		ctx.sessionManager.getBranch = () => {
+			reads++;
+			return [{ type: "message", message: { role: "user", content: [
+				{ type: "image", mimeType: "image/png", data: "aW1hZ2UtcGF5bG9hZA==" },
+			] } }];
+		};
+		let calls = 0;
+		const response = await executeSingleTask({
+			params: { agent: "scout", task: "inspect", bucket: "medium", userContext: "latest" },
+			ctx, agents: [makeAgent()], runtimeCtx: { depth: 0, trail: [], budget: { sessions: 0 } },
+			makeDetails: (results) => noOpDetails("single", results), onUpdate: () => {}, signal: noSignal(),
+			selectionCtx: makeSelectionCtx({
+				registryModels: withVision ? [text, vision] : [text], callerModelInput: ["text"],
+				bucketAssignments: { small: [], medium: assignedModels("text/text-only", "vision/vision-model"), frontier: [] },
+			}),
+			toolCallId: "implicit-image", parentUiBridge: undefined, parentSessionId: undefined, allToolNames: undefined,
+			_internal: { clock: new ImmediateClock(), runAttempt: async (resolved) => {
+				calls++;
+				assert.equal(resolved.modelOverride, "vision/vision-model");
+				// A failed provider must not retry with the remaining text model.
+				return syntheticResult({ provider: "vision", model: "vision-model", stderr: "429 rate limit exceeded" });
+			} },
+		});
+		assert.equal(reads, 1);
+		assert.equal(calls, withVision ? 1 : 0);
+		assert.equal(response.isError, true);
+		assert.equal(JSON.stringify(response).includes("aW1hZ2UtcGF5bG9hZA=="), false);
+		assert.match(response.details.results[0].parentUserContext!, /\[Parent image 1\]/);
 	}
 });
 

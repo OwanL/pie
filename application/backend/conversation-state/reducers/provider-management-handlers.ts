@@ -93,12 +93,12 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
     case 'reload': p.status = 'loading'; rpc(p.selectedId ? { type: 'read-provider', operationId: op, id: p.selectedId } : { type: 'read', operationId: op }); break;
     case 'close': case 'cancel': cancelAuth(op); p.refreshFence++; p.operationId = null; p.draft = null; p.selectedId = null; p.status = 'idle'; p.flow = { open: c.type !== 'close', screen: 'manage' }; break;
     case 'back': {
-      const screen = p.flow.screen === 'connect' ? 'choose' : 'manage';
+      const screen = p.flow.screen === 'connect' && p.flow.navigationOrigin === 'chooser' ? 'choose' : 'manage';
       cancelAuth(op); p.refreshFence++; p.operationId = null; p.status = 'idle';
       if (screen === 'manage') { p.draft = null; p.selectedId = null; }
-      p.flow = { open: true, screen }; break;
+      p.flow = { open: true, screen, navigationOrigin: screen === 'choose' ? 'chooser' : 'home' }; break;
     }
-    case 'add': cancelAuth(op); p.refreshFence++; p.operationId = null; p.selectedId = null; p.draft = null; p.status = 'idle'; p.flow = { open: true, screen: 'choose' }; break;
+    case 'add': cancelAuth(op); p.refreshFence++; p.operationId = null; p.selectedId = null; p.draft = null; p.status = 'idle'; p.flow = { open: true, screen: 'choose', navigationOrigin: 'chooser' }; break;
     case 'choose': {
       if (!p.snapshot.loaded) break;
       const definition = p.snapshot.definitions.find(d => c.definitionId ? d.id === c.definitionId : d.kind === c.kind);
@@ -110,17 +110,17 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
       if (isOther) while (p.snapshot.providers.some(provider => provider.id === id && provider.configured)) id = `${base}-${n++}`;
       else if (p.snapshot.providers.some(provider => provider.id === id && provider.configured)) {
         p.selectedId = id; p.draft = null; p.status = 'loading';
-        p.flow = { open: true, screen: 'connect', kind: definition.kind, definitionId: definition.id, connectionMethod: definition.authMethods[0] };
+        p.flow = { open: true, screen: 'connect', navigationOrigin: 'chooser', kind: definition.kind, definitionId: definition.id, connectionMethod: definition.authMethods[0] };
         rpc({ type: 'read-provider', operationId: op, id }); break;
       }
       p.draftConfigRevision = p.snapshot.configRevision;
       p.draft = { originalId: null, id, enabled: true, api: definition?.api ?? '', baseUrl: definition?.baseUrl ?? '', credentialSource: 'default', environmentName: '', models: [] };
-      p.status = 'idle'; p.flow = { open: true, screen: 'connect', kind: definition.kind, definitionId: definition.id, connectionMethod: definition.authMethods[0] }; break;
+      p.status = 'idle'; p.flow = { open: true, screen: 'connect', navigationOrigin: 'chooser', kind: definition.kind, definitionId: definition.id, connectionMethod: definition.authMethods[0] }; break;
     }
     case 'models': case 'edit': {
       cancelAuth(op); p.selectedId = c.id; p.draft = null;
       const definition = p.snapshot.definitions.find(d => d.id === c.id) ?? p.snapshot.definitions.find(d => d.id === 'other');
-      p.flow = c.type === 'models' ? { open: true, screen: 'models' } : { open: true, screen: 'connect', kind: definition?.kind, definitionId: definition?.id, connectionMethod: definition?.authMethods[0] };
+      p.flow = c.type === 'models' ? { open: true, screen: 'models', navigationOrigin: 'home' } : { open: true, screen: 'connect', navigationOrigin: 'home', kind: definition?.kind, definitionId: definition?.id, connectionMethod: definition?.authMethods[0] };
       p.status = 'loading'; rpc({ type: 'read-provider', operationId: op, id: c.id }); break;
     }
     case 'auth-method': p.flow = { ...p.flow, connectionMethod: c.method }; break;

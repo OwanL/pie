@@ -328,7 +328,13 @@ test('reducer: a second toggle merges into the session override set', () => {
     cmd: { kind: 'McpSetServerEnabledForSession', corrId: 'm13', sessionPath: SESSION, name: 'echo', enabled: true },
   });
   const effect = result.effects[0] as Extract<Effect, { kind: 'McpSetSessionServerRpc' }>;
-  assert.deepEqual(effect.overrides, { jira: true, echo: false });
+  assert.deepEqual(effect.overrides, { jira: true });
+  const enabled = reducer(result.state, {
+    kind: 'Command',
+    cmd: { kind: 'McpSetServerEnabledForSession', corrId: 'm13-enable', sessionPath: SESSION, name: 'jira', enabled: true },
+  });
+  assert.deepEqual(enabled.state.settings.mcpSessionOverridesBySession[SESSION], {});
+  assert.deepEqual((enabled.effects[0] as Extract<Effect, { kind: 'McpSetSessionServerRpc' }>).overrides, {});
 });
 
 test('reducer: McpSessionServersUpdated applies the authoritative set and pending flag', () => {

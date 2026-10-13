@@ -56,6 +56,7 @@ test('registered bash metadata documents the effective timeout without changing 
   assert.match(registeredTool.description, /60 seconds.*PIE_BASH_DEFAULT_TIMEOUT/u);
   assert.match(registeredTool.description, /capped at 600 seconds/u);
   assert.match(registeredTool.description, /nonpositive values use the default/u);
+  assert.match(registeredTool.description, /Omit to use the configured default/u);
 
   const inheritedTimeout = baseTool.parameters.properties.timeout;
   const registeredTimeout = registeredTool.parameters.properties.timeout;
@@ -63,6 +64,7 @@ test('registered bash metadata documents the effective timeout without changing 
   assert.match(String(registeredTimeout.description), /PIE_BASH_DEFAULT_TIMEOUT/u);
   assert.match(String(registeredTimeout.description), /capped at 600 seconds/u);
   assert.match(String(registeredTimeout.description), /nonpositive values use the default/u);
+  assert.match(String(registeredTimeout.description), /Omit to use the configured default/u);
 
   const { description: _inheritedDescription, ...inheritedTimeoutSchema } = inheritedTimeout;
   const { description: _registeredDescription, ...registeredTimeoutSchema } = registeredTimeout;

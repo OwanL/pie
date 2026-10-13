@@ -49,6 +49,41 @@ interface NativeRuntimeSdk {
 const unavailable = () => new Error('Captured provider authentication is unavailable');
 const modelUnavailable = () => new Error('Captured provider model is disabled, unsupported or unpriced');
 const identity = (provider: string, id: string) => JSON.stringify([provider, id]);
+function cloneRuntimeModel(model: NonNullable<RuntimeSnapshot['models'][number]['model']>): NativeRuntimeModel {
+  return structuredClone({ ...model, input: [...model.input], cost: { ...model.cost },
+    ...(model.headers ? { headers: { ...model.headers } } : {}),
+    ...(model.compat ? { compat: { ...model.compat } } : {}),
+    ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}) });
+}
+
+/** Offline availability admission shared by cold catalogs and native runtime services.
+ * Saved credentials are read only within the captured epoch; no key resolution or refresh occurs.
+ */
+export function availableProviderRuntimeModels(snapshot: RuntimeSnapshot, options: {
+  credentialFile: string;
+  savedCredential: (provider: string) => unknown;
+  legacyHasAuth: (provider: string) => boolean;
+  defaultHasAuth: (provider: string) => boolean;
+}): NativeRuntimeModel[] {
+  const hasAuth = (row: RuntimeSnapshot['models'][number]) => {
+    const source = row.credential;
+    if (source.source === 'legacy') return options.legacyHasAuth(row.providerId);
+    if (source.source === 'environment') return !!process.env[source.name];
+    if (source.source === 'default') return options.defaultHasAuth(row.providerId);
+    if (source.source === 'none') {
+      const models = snapshot.models.filter(candidate => candidate.providerId === row.providerId && candidate.model);
+      return models.length > 0 && models.every(candidate => runtimeProtocols.includes(candidate.model!.api as typeof runtimeProtocols[number]));
+    }
+    if (source.source !== 'saved') return false;
+    try {
+      return isRuntimeCredentialScopeCurrent(options.credentialFile, row.providerId, source.scope)
+        && !!options.savedCredential(row.providerId)
+        && isRuntimeCredentialScopeCurrent(options.credentialFile, row.providerId, source.scope);
+    } catch { return false; }
+  };
+  return snapshot.models.filter(row => row.enabled && row.visible && row.model && !row.rejection
+    && validNativeModel(row.model) && hasAuth(row)).map(row => cloneRuntimeModel(row.model!));
+}
 
 /** Parent default/subagent capture admission. Visibility is a selector mask, not dispatch permission. */
 export function assertProviderRuntimeModel(snapshot: RuntimeSnapshot, provider: string, id: string,
@@ -56,7 +91,7 @@ export function assertProviderRuntimeModel(snapshot: RuntimeSnapshot, provider: 
   const row = snapshot.models.find(row => row.providerId === provider && row.id === id);
   if (!row?.enabled || !row.model || row.rejection || !validNativeModel(row.model)
     || (options.subagent && !row.subagentEligible) || (options.visible && !row.visible)) throw modelUnavailable();
-  return structuredClone(row.model) as NativeRuntimeModel;
+  return cloneRuntimeModel(row.model);
 }
 
 /** Session-local facade around the verified native SDK engine. Never registers APIs globally,
@@ -203,8 +238,12 @@ export function createProviderRuntimeServices(
   modelRegistry.isModelEligibleForSubagent = (provider, id) => !!admitted(provider, id)?.subagentEligible;
   modelRegistry.find = model;
   modelRegistry.getAll = () => captured.models.filter(row => admitted(row.providerId, row.id)).map(row => model(row.providerId, row.id)!);
-  modelRegistry.getAvailable = () => captured.models.filter(row => row.visible && admitted(row.providerId, row.id)
-    && authStorage.hasAuth(row.providerId)).map(row => model(row.providerId, row.id)!);
+  modelRegistry.getAvailable = () => availableProviderRuntimeModels(captured, {
+    credentialFile: options.credentialFile,
+    savedCredential: id => currentSaved(id, policy(id) as Extract<CredentialSource, { source: 'saved' }>)?.credential,
+    legacyHasAuth: id => legacy?.hasAuth?.(id) ?? false,
+    defaultHasAuth: id => environment.hasAuth(id),
+  }).map(value => model(value.provider, value.id)!);
   modelRegistry.refresh = () => { /* Frozen identities/policies; auth is resolved afresh per request. */ };
   modelRegistry.getError = () => undefined;
   modelRegistry.hasConfiguredAuth = value => !!model(value.provider, value.id) && authStorage.hasAuth(value.provider);

@@ -4,7 +4,7 @@ import { validateWebviewToHostMessage } from '../protocol-validation.js';
 import { validateBrowserToHostMessage } from '../browser-ingress.js';
 const clientCommandId = '11111111-1111-4111-8111-111111111111';
 test('provider commands accept only exact bounded nested fields in both ingress validators', () => {
-  for (const command of [{ type: 'open' }, { type: 'choose', kind: 'custom' }, { type: 'change', field: 'baseUrl', value: 'https://example.test/v1' }, { type: 'model-preference', id: 'model', field: 'visible', value: 'no' }]) {
+  for (const command of [{ type: 'open' }, { type: 'choose', kind: 'custom' }, { type: 'choose', kind: 'ollama', definitionId: 'ollama' }, { type: 'change', field: 'baseUrl', value: 'https://example.test/v1' }, { type: 'model-preference', id: 'model', field: 'visible', value: 'no' }]) {
     const message = { type: 'providerManagementCommand', command, clientCommandId, viewGeneration: 1 };
     assert.equal(validateWebviewToHostMessage(message).ok, true);
     assert.equal(validateBrowserToHostMessage(message, 512).ok, true);

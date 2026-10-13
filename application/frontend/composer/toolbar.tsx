@@ -161,6 +161,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   onSetSessionTitlesSettings,
   availableExtensions,
   availableModels,
+  availableModelsStatus,
   systemPrompts,
   selectedModel,
   selectedProvider,
@@ -249,9 +250,15 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             onModelChange(id, provider, nextLevel);
           }}
         />
-      ) : selectedModel ? (
-        <ToolbarChip label={selectedModel} tooltip={selectedModel} />
-      ) : null}
+      ) : (
+        <ToolbarChip
+          label={availableModelsStatus === 'authoritative'
+            ? selectedModel || 'No models available'
+            : selectedModel ? `${selectedModel} — Loading models…` : 'Loading models…'}
+          tooltip={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
+          ariaLabel={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
+        />
+      )}
       {supportsReasoning && selectedThinkingOptions.length > 0 && (
         <ChoicePicker
           value={selectedLevel}

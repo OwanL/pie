@@ -22,6 +22,35 @@ test('native baseline, qualified identity, overlays, masks and independent prefe
   assert.equal(captureProviderRuntimeProjection({ legacyModels: [native] }), undefined);
   assert.throws(() => captureProviderRuntimeProjection({ config, configRevision: canonicalRevision('projection-one'), legacyModels: [native, native] }));
 });
+test('managed Ollama complete inventory excludes absent models only in new captures', () => {
+  const installed = { ...native, provider: 'ollama', id: 'qwen3.5:9b' };
+  const absent = { ...native, provider: 'ollama', id: 'llama3:latest' };
+  const other = { ...native, provider: 'other', id: absent.id };
+  const input = { config: { version: 1 as const, providers: { ollama: { enabled: true }, other: { enabled: true } } },
+    configRevision: canonicalRevision('ollama-inventory'), legacyModels: [installed, absent, other],
+    builtinModels: [installed, absent, other] };
+  const pinned = captureProviderRuntimeProjection(input)!;
+  assert.equal(pinned.models.length, 3); // No listing: offline known fallback.
+  for (const freshness of ['fresh', 'stale'] as const) {
+    const snapshot = captureProviderRuntimeProjection({ ...input, discovered: {
+      ollama: { kind: 'account', complete: true, freshness, models: { [installed.id]: {} } },
+      other: { kind: 'account', complete: true, freshness, models: {} },
+    } })!;
+    assert.deepEqual(snapshot.models.map(row => `${row.providerId}/${row.id}`),
+      ['ollama/qwen3.5:9b', 'other/llama3:latest']);
+    assert.ok(snapshot.models.every(row => row.model));
+  }
+  assert.ok(pinned.models.find(row => row.providerId === 'ollama' && row.id === absent.id)?.model);
+  const partial = captureProviderRuntimeProjection({ ...input, discovered: {
+    ollama: { kind: 'account', complete: false, freshness: 'fresh', models: { [installed.id]: {} } },
+  } })!;
+  assert.equal(partial.models.length, 3);
+  const empty = captureProviderRuntimeProjection({ ...input, discovered: {
+    ollama: { kind: 'account', complete: true, freshness: 'stale', models: {} },
+  } })!;
+  assert.deepEqual(empty.models.map(row => row.providerId), ['other']);
+});
+
 test('no invented capabilities or rates; unknown and tiered prices rejected', () => {
   for (const pricing of ['unknown', { input: 1, output: 2 }, { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: [] }] as const) {
     const snapshot = captureProviderRuntimeProjection({ config: { version: 1, providers: { custom: { enabled: true, manualModels: ['new'], modelOverrides: { new: { pricing: pricing as never } } } } }, configRevision: canonicalRevision('projection-one'), legacyModels: [] })!;
@@ -30,6 +59,16 @@ test('no invented capabilities or rates; unknown and tiered prices rejected', ()
   }
   const snapshot = captureProviderRuntimeProjection({ config: { version: 1, providers: { known: { enabled: true, modelOverrides: { same: { pricing: 'unknown' } } } } }, configRevision: canonicalRevision('projection-one'), legacyModels: [native] })!;
   assert.equal(snapshot.models[0].model, undefined);
+});
+test('SDK optional undefined tiers are flat prices, but actual tiers remain rejected', () => {
+  const baseline = { ...native, cost: { ...native.cost, tiers: undefined } };
+  const capture = (cost: typeof baseline.cost) => captureProviderRuntimeProjection({
+    config: { version: 1, providers: { known: { enabled: true } } },
+    configRevision: canonicalRevision('optional-tiers'),
+    legacyModels: [{ ...baseline, cost }], builtinModels: [{ ...baseline, cost }],
+  })!;
+  assert.deepEqual(capture(baseline.cost).models[0].model?.cost, native.cost);
+  assert.equal(capture({ ...baseline.cost, tiers: [] } as never).models[0].model, undefined);
 });
 test('managed pricing requires compiled proof or declared complete rates', () => {
   const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -56,7 +95,21 @@ test('managed pricing requires compiled proof or declared complete rates', () =>
   assert.equal(capture(native, [native], 'unknown', 'unknown').models.find(row => row.id === 'same')?.model, undefined);
   assert.deepEqual(capture(native, [native], { input: 9, output: 8 }, 'unknown').models.find(row => row.id === 'same')?.model?.cost,
     { ...native.cost, input: 9, output: 8 });
-  assert.equal(capture(native, [native], { ...native.cost, tiers: [] }).models[0].model, undefined);
+  // Complete declared pricing is authoritative, including full financial facts.
+  const emptyTiers = capture(native, [native], { ...native.cost, tiers: [] }).models[0];
+  assert.deepEqual(emptyTiers.model?.cost, native.cost);
+  assert.deepEqual(emptyTiers.pricingFacts, native.cost);
+  const tiers = [{ inputTokensAbove: 1000, input: 4, output: 5, cacheRead: 1, cacheWrite: 2 }];
+  const tiered = capture(native, [native], { ...native.cost, tiers }).models[0];
+  assert.deepEqual(tiered.model?.cost, native.cost);
+  assert.deepEqual(tiered.pricingFacts, { ...native.cost, tiers });
+  for (const pricing of ['unknown', { ...native.cost, tiers: [{ inputTokensAbove: 1000, input: 4 }] },
+    { ...native.cost, output: -1 }]) {
+    const rejected = capture(native, [native], pricing).models[0];
+    assert.equal(rejected.model, undefined);
+    assert.equal(rejected.pricingFacts, undefined);
+    assert.equal(rejected.rejection, 'unsupported-or-incomplete-runtime-model');
+  }
 });
 test('artifact reads do not create directories and saves reject linked Git checkouts before mkdir', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pie-runtime-path-test-'));

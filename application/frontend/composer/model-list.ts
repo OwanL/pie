@@ -103,7 +103,9 @@ export interface ModelPickerEntry {
  * The dropdown itself keeps the full provider-qualified label for disambiguation.
  */
 function stripProviderPrefix(name: string): string {
-  return name.replace(/^[^:]+:\s*/, '');
+  // Provider display prefixes use a colon plus whitespace. A bare colon
+  // belongs to a model tag (for example qwen3.5:cloud or qwen3.5:9b).
+  return name.replace(/^[^:]+:\s+/, '');
 }
 
 /**

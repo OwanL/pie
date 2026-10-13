@@ -81,6 +81,49 @@ test('patch compaction only combines adjacent operations with the same path', ()
   assert.deepEqual(applyJsonPatch({}, compactJsonPatchOperations(createThenDelete)), { ok: true, value: {} });
 });
 
+test('root string and array growth produce applicable patches', () => {
+  for (const [before, after] of [
+    ['hel', 'hello'],
+    [[1], [1, 2]],
+    [[{ text: 'old' }], [{ text: 'new' }, { text: 'added' }]],
+  ] as [JsonSafeValue, JsonSafeValue][]) {
+    const operations = diffJsonValues(before, after);
+    assert.deepEqual(applyJsonPatch(before, operations), { ok: true, value: after });
+    assert.ok(operations.every((operation) => operation.path.length > 0 || operation.op === 'set'));
+  }
+});
+
+test('sparse append arrays fail closed instead of introducing undefined entries', () => {
+  const value = new Array<JsonSafeValue>(1);
+  const base: JsonSafeValue = { items: [] };
+  assert.equal(applyJsonPatch(base, [{ op: 'appendArray', path: ['items'], value }]).ok, false);
+  assert.deepEqual(base, { items: [] });
+});
+
+test('inserted containers respect their depth in the resulting document', () => {
+  const limits = { maxDepth: 2, maxPathSegments: 128, maxOperations: 4_096 };
+  const base: JsonSafeValue = { nested: { items: [] } };
+  const unchanged = structuredClone(base);
+  for (const operation of [
+    { op: 'set', path: ['nested', 'value'], value: { child: {} } },
+    { op: 'appendArray', path: ['nested', 'items'], value: [{}] },
+  ] as JsonStructuralPatchOperation[]) {
+    assert.equal(isJsonSafeValue(operation.value, limits), true);
+    assert.equal(applyJsonPatch(base, [operation], limits).ok, false);
+    assert.deepEqual(base, unchanged);
+  }
+
+  for (const operation of [
+    { op: 'set', path: ['nested', 'value'], value: { child: 'leaf' } },
+    { op: 'appendArray', path: ['nested', 'items'], value: ['leaf'] },
+    { op: 'set', path: [], value: base },
+  ] as JsonStructuralPatchOperation[]) {
+    const applied = applyJsonPatch(base, [operation], limits);
+    assert.equal(applied.ok, true);
+    if (applied.ok) assert.equal(isJsonSafeValue(applied.value, limits), true);
+  }
+});
+
 test('malformed paths and operation capacity fail closed', () => {
   assert.equal(applyJsonPatch({ value: 'x' }, [{ op: 'appendString', path: ['missing'], value: 'y' }]).ok, false);
   assert.equal(applyJsonPatch({ value: 'x' }, Array.from({ length: 4_097 }, () => ({

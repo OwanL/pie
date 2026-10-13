@@ -107,6 +107,8 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
           known.push(definition(provider.id, provider.name, 'custom', '', '', false, 'unsupported'));
         }
       }
+      known.push({ id: 'ollama', name: 'Ollama (local and cloud)', kind: 'ollama', api: 'openai-completions',
+        baseUrl: 'http://localhost:11434/v1', authMethods: ['local'], discovery: 'ollama' });
       known.push({ id: customId, name: 'Other provider', kind: 'custom', api: 'openai-completions',
         baseUrl: '', authMethods: ['api-key', 'local'], discovery: 'openai' });
       return known;

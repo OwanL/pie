@@ -3,6 +3,7 @@
  * Creates an agent session runtime from the SDK services.
  */
 
+import { selectAdmittedInitialModel } from '../lib/sdk-integration/sdk';
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files';
 import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt';
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
@@ -43,6 +44,7 @@ export interface RuntimeFactoryOptions {
 
 interface RuntimeModelRegistry {
   find: (provider: string, modelId: string) => unknown;
+  getAvailable?: () => Array<{ provider: string; id: string }>;
 }
 
 interface RuntimeSettingsManager {
@@ -58,11 +60,20 @@ interface RuntimeSettingsManager {
 function resolveExplicitModel(
   services: Record<string, unknown>,
   sessionManager: SdkSessionManager,
+  managed = false,
+  sdk: Pick<SdkModule, 'defaultModelPerProvider'> = {},
 ): unknown | undefined {
   const sessionModel = sessionManager.buildSessionContext?.().model;
   const settingsManager = services.settingsManager as RuntimeSettingsManager | undefined;
   const configuredModel = settingsManager?.getDefaultModel?.();
   const configuredProvider = settingsManager?.getDefaultProvider?.();
+  if (managed && !sessionModel) {
+    const registry = services.modelRegistry as RuntimeModelRegistry | undefined;
+    const admitted = registry?.getAvailable?.() ?? [];
+    const selected = selectAdmittedInitialModel(sdk, admitted, configuredProvider, configuredModel);
+    if (!selected) throw new Error('Captured provider authentication is unavailable: no admitted models.');
+    return selected;
+  }
   const identity = sessionModel ?? (
     configuredProvider && configuredModel
       ? { provider: configuredProvider, modelId: configuredModel }
@@ -217,8 +228,14 @@ export function createRuntimeFactory(
     // concurrent session opens cannot saturate the process during an active
     // generation. Every admitted call still creates unique fresh services.
     let services: Record<string, unknown>;
+    let managed = false;
     try {
       const providerServices = await options.providerServices?.({ sessionManager: guardedSessionManager, agentDir });
+      managed = providerServices !== undefined;
+      if (managed && !guardedSessionManager.buildSessionContext?.().model) {
+        const registry = providerServices!.modelRegistry as RuntimeModelRegistry;
+        if (!registry.getAvailable?.().length) throw new Error('Captured provider authentication is unavailable: no admitted models.');
+      }
       services = (await gate.run(() => runtimeSdk.createAgentSessionServices({
       cwd,
       agentDir,
@@ -318,7 +335,7 @@ export function createRuntimeFactory(
     });
     let created: Record<string, unknown>;
     try {
-      const model = resolveExplicitModel(services, guardedSessionManager);
+      const model = resolveExplicitModel(services, guardedSessionManager, managed, runtimeSdk);
       const thinkingLevel = resolveExplicitThinkingLevel(guardedSessionManager);
       const customTools = options.customTools?.(guardedSessionManager.getSessionFile?.());
       created = (await runtimeSdk.createAgentSessionFromServices({

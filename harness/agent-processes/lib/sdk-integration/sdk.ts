@@ -27,6 +27,19 @@ import type { MessageLike } from '../../../session-storage/transcripts/types';
 // We type only the surface the backend actually consumes. SDK breaking changes
 // surface as TypeScript errors here instead of late runtime failures.
 
+/** Offline equivalent of the SDK initial-model fallback over an already admitted catalog. */
+export function selectAdmittedInitialModel<T extends { provider: string; id: string }>(
+  sdk: Pick<SdkModule, 'defaultModelPerProvider'>, models: readonly T[], provider?: string, id?: string,
+): T | undefined {
+  const configured = models.find(model => model.provider === provider && model.id === id);
+  if (configured) return configured;
+  for (const [preferredProvider, preferredId] of Object.entries(sdk.defaultModelPerProvider ?? {})) {
+    const preferred = models.find(model => model.provider === preferredProvider && model.id === preferredId);
+    if (preferred) return preferred;
+  }
+  return models[0];
+}
+
 export interface SdkSessionEvent {
   type:
     | 'session_start'
@@ -469,11 +482,13 @@ export interface SdkSessionInfo {
 
 export interface SdkModule {
   VERSION: string;
+  defaultModelPerProvider?: Readonly<Record<string, string>>;
   /** Pure SDK compaction functions used by Pie's supported before-compact customization. */
   prepareCompaction?: typeof SourceSdk.prepareCompaction;
   compact?: typeof SourceSdk.compact;
   getAgentDir: () => string;
   formatSkillsForPrompt?: (skills: SdkSkill[]) => string;
+  getProviderManagementModels?: (provider: string) => readonly import('../../../model-providers/runtime/contracts').NativeRuntimeModel[];
   getProviderRuntimeBuiltinModel?: (provider: string, id: string) => import('../../../model-providers/runtime/contracts').NativeRuntimeModel | undefined;
   createProviderManagementAuth?: (credentialFile: string) => ProviderManagementAuthPort;
   AuthStorage: {
@@ -538,7 +553,7 @@ export interface SdkModule {
  * AgentSession implementation. */
 export type ColdCoordinatorSdkModule = Pick<
   SdkModule,
-  'VERSION' | 'getAgentDir' | 'AuthStorage' | 'SessionManager' | 'createProviderManagementAuth' | 'getProviderRuntimeBuiltinModel'
+  'VERSION' | 'defaultModelPerProvider' | 'getAgentDir' | 'AuthStorage' | 'SessionManager' | 'createProviderManagementAuth' | 'getProviderRuntimeBuiltinModel' | 'getProviderManagementModels'
 > & { ModelRegistry: NonNullable<SdkModule['ModelRegistry']> };
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
@@ -791,6 +806,7 @@ async function createCustomizedCompaction(
 export type SourceArtifactSdkModule = Omit<typeof SourceSdk,
   'createAgentSession' | 'createAgentSessionFromServices' | 'createAgentSessionRuntime'> & {
   getProviderRuntimeBuiltinModel?: (provider: string, id: string) => import('../../../model-providers/runtime/contracts').NativeRuntimeModel | undefined;
+  getProviderManagementModels?: (provider: string) => readonly import('../../../model-providers/runtime/contracts').NativeRuntimeModel[];
   /** Loader-owned facade, preserving the verified artifact's native AuthStorage. */
   createProviderManagementAuth?: (credentialFile: string) => ProviderManagementAuthPort;
   createAgentSession: (options?: SourceSdk.CreateAgentSessionOptions) => Promise<SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>>;
@@ -900,11 +916,12 @@ async function loadSelectedSdk(sdkPath: string, mode: SdkLoadMode): Promise<Sour
   const compaction: Pick<SdkModule, 'prepareCompaction' | 'compact'> = {};
   let exports: Partial<SdkModule>;
   if (mode.surface === 'cold') {
-    const [config, auth, models, sessions] = await Promise.all([
-      'config.js', 'core/auth-storage.js', 'core/model-registry.js', 'core/session-manager.js',
+    const [config, auth, models, sessions, resolver] = await Promise.all([
+      'config.js', 'core/auth-storage.js', 'core/model-registry.js', 'core/session-manager.js', 'core/model-resolver.js',
     ].map(async (entry) => dynamicImport(pathToFileURL(await sourceInternalPath(verifiedPath, entry)).href))) as Partial<SdkModule>[];
     exports = { VERSION: config.VERSION, getAgentDir: config.getAgentDir, AuthStorage: auth.AuthStorage,
-      ModelRegistry: models.ModelRegistry, SessionManager: sessions.SessionManager };
+      ModelRegistry: models.ModelRegistry, SessionManager: sessions.SessionManager,
+      defaultModelPerProvider: resolver.defaultModelPerProvider };
   } else {
     exports = await dynamicImport(pathToFileURL(await sourceInternalPath(verifiedPath, 'index.js')).href) as Partial<SdkModule>;
   }
@@ -956,6 +973,8 @@ async function loadSelectedSdk(sdkPath: string, mode: SdkLoadMode): Promise<Sour
   const publicAi = await dynamicImport(pathToFileURL(canonicalCompatPath).href) as { getModels: typeof PublicGetModels };
   const NativeAuthStorage = exports.AuthStorage as typeof SourceSdk.AuthStorage;
   const adapted = { ...exports, SessionManager: managerFacade,
+    getProviderManagementModels: (provider: string) =>
+      structuredClone(publicAi.getModels(provider as Parameters<typeof PublicGetModels>[0])),
     getProviderRuntimeBuiltinModel: (provider: string, id: string) => {
       const model = publicAi.getModels(provider as Parameters<typeof PublicGetModels>[0]).find(model => model.provider === provider && model.id === id);
       return model ? structuredClone(model) : undefined;

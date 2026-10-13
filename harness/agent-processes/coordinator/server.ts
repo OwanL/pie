@@ -2,7 +2,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { sessionMcpOverridePath } from '../../session-storage/settings/mcp-session-config';
+import { sessionMcpConfigPathFor } from '../../session-storage/settings/mcp-session-config';
 import * as path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
@@ -34,7 +34,6 @@ import {
 } from '../lib/rpc/message-contract.js';
 import type { ModelSettings, ModelInfo } from '../../model-providers/catalog/model-contract.js';
 import { readProviderRuntimeReference, type NativeRuntimeModel, type ProviderRuntimeReference } from '../../model-providers/runtime';
-import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
 import { isThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {
   AgentMessagePayload,
@@ -121,6 +120,7 @@ import {
   type SdkAuthStorage,
   type SdkModelRegistry,
 } from '../lib/sdk-integration/sdk';
+import { selectAdmittedInitialModel } from '../lib/sdk-integration/sdk';
 import {
   assertWorkspaceDevelopmentSdkOptIn,
   parseSdkRuntimeSelection,
@@ -518,8 +518,9 @@ export class BackendServer {
   private async sessionModelCatalog(sessionPath: string) {
     const runtime = await this.sessionProviderRuntime(sessionPath);
     if (!runtime) return await loadConfiguredModels(this.agentDir, this.modelRegistry);
-    const models = projectProviderRuntimeModels(runtime.snapshot);
-    return { ok: true as const, models };
+    const management = await this.getProviderManagement();
+    const models = management.admittedRuntimeModels(runtime.snapshot, this.authStorage);
+    return { ok: true as const, models, managed: true as const };
   }
   private sdkPath: string;
   private readonly sdkRuntimeSelection: SdkRuntimeSelection;
@@ -907,14 +908,7 @@ export class BackendServer {
       workerEntryPath: this.workerEntryPath!,
       coordinatorGeneration: this.backendGeneration,
       sdkRuntime,
-      mcpConfigPathFor: (sessionPath) => {
-        const overridePath = sessionMcpOverridePath(sessionPath);
-        try {
-          return fsSync.existsSync(overridePath) ? overridePath : undefined;
-        } catch {
-          return undefined;
-        }
-      },
+      mcpConfigPathFor: sessionMcpConfigPathFor,
       onWorkerStateChange: (rootSessionPath, snapshot, identity) => {
         void this.workerRuntimeRouter?.handleWorkerStateChange(rootSessionPath, snapshot, identity).catch((error) => {
           backendError('backend-worker', 'runtime state reconciliation failed', {
@@ -1902,7 +1896,12 @@ export class BackendServer {
       }
       const catalog = await this.sessionModelCatalog(sessionPath);
       const availableModels = catalog.models;
-      const modelSettings = await this.readModelSettings();
+      const defaults = await this.readModelSettings();
+      // A captured runtime is authoritative even when admission is empty.
+      // Do not advertise a global model which this session cannot execute.
+      const modelSettings = 'managed' in catalog
+        ? { ...defaults, defaultModel: '', defaultProvider: undefined }
+        : defaults;
       const store = this.initializeColdSessionStore();
       const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
       try {
@@ -1922,11 +1921,15 @@ export class BackendServer {
         const openColdSnapshot = async (openOptions: typeof options & {
           systemPrompts?: SessionOpenedPayload['systemPrompts'];
           initialContextEstimate?: SessionOpenedPayload['initialContextEstimate'];
-        }): Promise<SessionOpenedPayload> => (
-          retained
+        }): Promise<SessionOpenedPayload> => {
+          const snapshot = retained
             ? await store.openHandleSnapshot(retained.handle, openOptions)
-            : await store.openSnapshot(sessionPath, openOptions)
-        );
+            : await store.openSnapshot(sessionPath, openOptions);
+          if ('managed' in catalog && snapshot.session.modelId) {
+            snapshot.modelSettings = { ...modelSettings, defaultModel: snapshot.session.modelId, defaultProvider: snapshot.session.provider };
+          }
+          return snapshot;
+        };
         const resolveInventoryTarget = (snapshot: SessionOpenedPayload) => {
           const modelId = snapshot.session.modelId ?? modelSettings.defaultModel;
           const provider = snapshot.session.provider ?? modelSettings.defaultProvider
@@ -4291,7 +4294,7 @@ export class BackendServer {
     if (await hasCoordinatorProviderConfiguration()) {
       const management = await this.getProviderManagement();
       const snapshot = await management.previewRuntimeProjection(this.creationProviderRuntimeInputs());
-      if (snapshot) return { ok: true as const, models: projectProviderRuntimeModels(snapshot) };
+      if (snapshot) return { ok: true as const, models: management.admittedRuntimeModels(snapshot, this.authStorage) };
     }
     return await loadConfiguredModels(this.agentDir, this.modelRegistry);
   }
@@ -5341,7 +5344,16 @@ export class BackendServer {
           // never serialized; tiered/partial costs must reach the admission guard unchanged.
           providerRuntimeReference = await management.captureRuntimeProjection(this.creationProviderRuntimeInputs());
         }
-        const handle = this.initializeColdSessionStore().create({ cwd, agentCreated, providerRuntimeReference });
+        const store = this.initializeColdSessionStore();
+        const handle = store.create({ cwd, agentCreated, providerRuntimeReference });
+        if (providerRuntimeReference) {
+          const management = await this.getProviderManagement();
+          const snapshot = await management.readRuntimeProjection(providerRuntimeReference);
+          const admitted = management.admittedRuntimeModels(snapshot, this.authStorage);
+          const defaults = await this.readModelSettings();
+          const selected = selectAdmittedInitialModel(this.sdk, admitted, defaults.defaultProvider, defaults.defaultModel);
+          if (selected) await store.setHandleModelSettings(handle, { model: { provider: selected.provider, modelId: selected.id } });
+        }
         this.retainColdSessionManager(handle, 'new');
         await this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
         return { sessionPath: handle.sessionPath };

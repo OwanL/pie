@@ -88,7 +88,7 @@ test('mcp.list hydrates a session override set when sessionPath is given', async
   const after = await handleBackendRequest(makeDeps(cwd), {
     id: 'list-2', method: 'mcp.list', params: { sessionPath: path.join(cwd, 'session.jsonl') },
   }) as McpListResult & { sessionOverrides?: Record<string, boolean> };
-  assert.deepEqual(after.sessionOverrides, { echo: true, jira: false });
+  assert.deepEqual(after.sessionOverrides, { echo: true });
 
   // A plain mcp.list carries no session payload.
   const plain = await mcpList(cwd) as McpListResult & { sessionOverrides?: Record<string, boolean> };

@@ -106,9 +106,16 @@ test('edit connects, models manages models, and native choices reuse their regis
   const edit = command(s, { type: 'edit', id: 'native' });
   assert.equal(edit.state.providerManagement.flow.screen, 'connect');
   assert.equal(edit.state.providerManagement.flow.connectionMethod, 'oauth');
-  assert.equal(command(s, { type: 'models', id: 'native' }).state.providerManagement.flow.screen, 'models');
+  assert.equal(edit.state.providerManagement.flow.navigationOrigin, 'home');
+  assert.equal(command(edit.state, { type: 'back' }).state.providerManagement.flow.screen, 'manage');
+  const models = command(s, { type: 'models', id: 'native' }).state;
+  assert.equal(models.providerManagement.flow.screen, 'models');
+  assert.equal(models.providerManagement.flow.navigationOrigin, 'home');
+  assert.equal(command(models, { type: 'back' }).state.providerManagement.flow.screen, 'manage');
   const chosen = command(s, { type: 'choose', kind: 'custom', definitionId: 'native' });
   assert.equal(chosen.state.providerManagement.selectedId, 'native');
+  assert.equal(projectProviderManagementView(chosen.state.providerManagement).flow?.navigationOrigin, 'chooser');
+  assert.equal(command(chosen.state, { type: 'back' }).state.providerManagement.flow.screen, 'choose');
   assert.ok(chosen.effects.some(e => e.kind === 'ProviderManagementRpc' && e.request.type === 'read-provider' && e.request.id === 'native'));
 });
 test('unknown capabilities cannot choose and partial commit errors remain visible without losing drafts', () => {

@@ -29,8 +29,15 @@ export function resolveComposerModelState({
   availableModels,
 }: ResolveComposerModelStateOptions): ComposerModelState {
   const hasActiveModel = Boolean(activeModelId?.trim());
-  const selectedModel = activeModelId?.trim() || modelSettings?.defaultModel || '';
-  const selectedProvider = hasActiveModel ? activeProvider : modelSettings?.defaultProvider;
+  // An empty session catalog is authoritative for sessions with no provider
+  // admission. Do not present the global default as though it were selectable.
+  // Keep an explicit session pin visible even when it is absent from the catalog.
+  const selectedModel = activeModelId?.trim()
+    || (availableModels.length > 0 ? modelSettings?.defaultModel : undefined)
+    || '';
+  const selectedProvider = hasActiveModel
+    ? activeProvider
+    : selectedModel ? modelSettings?.defaultProvider : undefined;
   const selectedLevel = activeThinkingLevel ?? modelSettings?.defaultThinkingLevel ?? 'high';
   const matchingModels = availableModels.filter((model) => model.id === selectedModel);
   // Never guess from registry order when multiple providers expose the same id.

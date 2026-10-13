@@ -4,6 +4,8 @@ export type { ProviderSetupPreference, ProviderSetupCredentialSource, ProviderSe
 export type ProviderSetupScreen = 'manage' | 'choose' | 'connect' | 'done' | 'models';
 export interface ProviderSetupFlow {
   open: boolean; screen: ProviderSetupScreen; kind?: ProviderSetupKind;
+  /** Host-owned return destination, retained across renderer remounts. */
+  navigationOrigin?: 'home' | 'chooser';
   definitionId?: string; connectionMethod?: ProviderConnectionMethod;
 }
 export interface ProviderSetupPreviewView {
@@ -16,6 +18,7 @@ export interface ProviderSetupPreviewView {
   status: 'idle' | 'loading' | 'connecting' | 'saving' | 'saved' | 'conflict' | 'error';
   loaded?: boolean;
   auth?: ProviderAuthPrompt;
+  authBrowser?: import('../../../harness/model-providers/management/contracts').ProviderManagementSnapshot['authBrowser'];
   message?: string;
   issues?: { path: string; message: string }[];
 }

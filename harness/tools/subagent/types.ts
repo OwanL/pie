@@ -233,8 +233,9 @@ export interface SingleResult {
 	/** Diagnostic when a nested subagent's requested bucket was not allowed and
 	 *  was downgraded (or fell back to the active model) under the nested-bucket cap. */
 	bucketDowngradeReason?: string;
-	/** Requested hard model requirements for this delegation (e.g. image input).
-	 *  Absent when the call made no requirement. Retained on running, terminal,
+	/** Effective hard model requirements for this delegation, including image
+	 *  input automatically inferred from parent user context. Absent when neither
+	 *  the caller nor the context imposed a requirement. Retained on running, terminal,
 	 *  retried, and compacted results as provenance. */
 	requestedModelRequirements?: ModelRequirements;
 	/** Whether the resolved effective model satisfies

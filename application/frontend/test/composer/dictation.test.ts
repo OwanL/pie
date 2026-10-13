@@ -50,7 +50,7 @@ test('recording mic reacts to samples; busy and terminal phases reset its active
   const mic = root.querySelector('[data-action="dictation"]')!;
   const quiet = mic.getAttribute('style');
   assert.equal(mic.getAttribute('aria-pressed'), 'true');
-  assert.match(mic.getAttribute('title')!, /10 seconds/);
+  assert.match(mic.getAttribute('title')!, /10\x20seconds/);
   paint({ ...recording, audioLevel: 0.01 });
   assert.notEqual(mic.getAttribute('style'), quiet);
   const quietSpeech = mic.getAttribute('style');
@@ -88,10 +88,10 @@ test('transcript root never renders the dictation edge', () => {
   assert.doesNotMatch(panelSource, /dictation/);
   assert.doesNotMatch(readFileSync('application/frontend/styles/transcript.css', 'utf8'), /dictation-edge/);
   const css = readFileSync('application/frontend/styles/composer.css', 'utf8');
-  assert.match(css, /position: absolute;\n  inset: 0;/);
+  assert.match(css, /position: absolute;\n {2}inset: 0;/);
   assert.match(css, /pointer-events: none/);
-  assert.match(css, /position: relative;\n  isolation: isolate/);
-  assert.match(css, /z-index: -1;\n  border-radius: inherit/);
+  assert.match(css, /position: relative;\n {2}isolation: isolate/);
+  assert.match(css, /z-index: -1;\n {2}border-radius: inherit/);
   assert.match(css, /transparent 12px/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   const edgeCss = css.match(/\.dictation-edge \{[^}]+\}/)![0];

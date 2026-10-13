@@ -22,12 +22,12 @@ import type {
 import type { AgentConfig } from "../../agent-instructions/agent-discovery/agents.js";
 import { attachRootSessionId } from "../../../lib/session-attribution.js";
 import { textContent } from "./text-content.js";
-import { formatSubagentPrompt, type UserContextMode } from "./user-context.js";
+import { formatSubagentPrompt, type ParentUserContext } from "./user-context.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
 import { createSubagentModelRegistryView } from "./model-registry-eligibility.js";
-import { formatRequirementDiagnostic, requirementIsActive } from "./selection.js";
+import { effectiveRequirementsForContext, formatRequirementDiagnostic, requirementIsActive } from "./selection.js";
 import { reportedUsageCost } from "./usage-evidence.js";
 import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample, TokenChannelPresence } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
@@ -136,7 +136,7 @@ interface SessionLike {
 	_rebuildSystemPrompt?: (toolNames: string[]) => string;
 	extensionRunner: { setUIContext: (ctx: unknown) => void };
 	subscribe: (cb: (event: SubagentSessionEvent) => void) => () => void;
-	prompt: (prompt: string) => Promise<void>;
+	prompt: (prompt: string, options?: Parameters<AgentSession["prompt"]>[1]) => Promise<void>;
 	abort: () => Promise<void>;
 	dispose: () => void;
 }
@@ -1224,13 +1224,14 @@ export async function runSingleAgent(
 	/** Optional lean user-role context handoff extracted from the parent session.
 	 * The mode and exact inserted packet are retained as result metadata so the
 	 * parent UI can explain precisely what the child received. */
-	parentUserContext?: { mode: UserContextMode; content?: string },
+	parentUserContext?: ParentUserContext,
 	/** Per-call hard model requirements (e.g. image input) to enforce at
 	 *  execution-model resolution. Threaded from `params.modelRequirements` so
 	 *  duplicate ids are resolved by provider-qualified capability on every
 	 *  attempt and the resolution layer never escapes to an incompatible model. */
 	modelRequirements?: ModelRequirements,
 ): Promise<SingleResult> {
+	modelRequirements = effectiveRequirementsForContext(modelRequirements, parentUserContext);
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
 	if (!agent) {
@@ -1702,7 +1703,7 @@ export async function runSingleAgent(
 	};
 	const runPrompt = (): Promise<void> =>
 		runWithChildToolRuntimeOwner(childToolRuntimeOwner, () =>
-			subagentContext.run(childSignal, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content))));
+			subagentContext.run(childSignal, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content), { images: parentUserContext?.images.map((image) => ({ ...image })) })));
 	try {
 		// Capture the model the session actually selected (in case our hint was overridden).
 		if (session.agent?.state?.model) {

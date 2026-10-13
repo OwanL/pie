@@ -65,6 +65,7 @@ describe('askUserSchema', () => {
     // non-empty question, so no minLength behavioral change is introduced here.
     assert.equal(props.question.minLength, undefined);
     assert.match(props.question.description, /never empty/);
+    assert.match(props.allowCustom.description, /Omit to use the default \(true\)/);
   });
 });
 

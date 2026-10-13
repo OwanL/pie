@@ -52,7 +52,7 @@ export const inputSchema = Type.Union([
 ]);
 
 export const observationSchema = Type.Object({
-  mode: Type.Optional(StringEnum(['auto', 'full', 'none'] as const, { description: 'auto (default) returns a fresh bounded snapshot after state-changing actions; full forces a full-depth snapshot; none skips the snapshot and leaves old refs invalidated.' })),
+  mode: Type.Optional(StringEnum(['auto', 'full', 'none'] as const, { description: 'auto (default) returns a fresh bounded snapshot after state-changing actions; full forces a full-depth snapshot; none skips a post-action/observe snapshot and leaves old refs invalidated. none is invalid for open, which must return its initial accessibility observation.' })),
   depth: Type.Optional(Type.Integer({ description: 'Maximum accessibility-tree depth (1-50) for the fresh snapshot.', maximum: MAX_OBSERVATION_DEPTH, minimum: MIN_OBSERVATION_DEPTH })),
   target: Type.Optional(targetSchema),
   screenshot: Type.Optional(Type.Boolean({ description: 'Capture an opt-in screenshot, also saved as a session artifact; text-only models receive the artifact path.' })),
@@ -61,10 +61,10 @@ export const observationSchema = Type.Object({
   requestLimit: Type.Optional(Type.Integer({ description: 'Maximum failed requests returned (0-200).', maximum: MAX_EVENT_LIMIT, minimum: 0 })),
   downloadLimit: Type.Optional(Type.Integer({ description: 'Maximum download records returned (0-200).', maximum: MAX_EVENT_LIMIT, minimum: 0 })),
   includeTabs: Type.Optional(Type.Boolean({ description: 'Set false to omit the open-tab list from the observation.' })),
-}, strict);
+}, { ...strict, description: 'Observation settings apply to open, observe, act, and run_code. target is available for observe but not run_code (its post-code observation covers the page). open always returns the initial accessibility observation, so mode none is invalid for open.' });
 
 export const playwrightSchema = Type.Object({
-  action: StringEnum(['open', 'observe', 'act', 'run_code', 'close'] as const, { description: 'Required. open starts a session (and page when url is given), observe returns the accessibility snapshot, act (requires input) performs one input action, run_code (requires code) evaluates Playwright code, close (requires scope) ends a session or the runtime. observe, act, and run_code require sessionId.' }),
+  action: StringEnum(['open', 'observe', 'act', 'run_code', 'close'] as const, { description: 'Required. open starts a session (and page when url is given) and returns the initial observation; observe returns the accessibility snapshot; act (requires input) performs one input action; run_code (requires code) evaluates Playwright code and its post-code observation covers the page (observation.target unsupported); close (requires scope) ends a session or the runtime. observe, act, and run_code require sessionId.' }),
   sessionId: Type.Optional(Type.String({ description: 'playwright session id from open; required for observe, act, and run_code (open generates one when omitted).', maxLength: MAX_ID_CHARS, minLength: 1 })),
   pageId: Type.Optional(Type.String({ description: 'Addressed page; defaults to the session\'s active page. Required for ref-targeted act actions so the ref is checked against its owning page.', maxLength: MAX_ID_CHARS, minLength: 1 })),
 

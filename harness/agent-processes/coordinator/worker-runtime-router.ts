@@ -162,6 +162,12 @@ export interface WorkerRuntimePromotionSnapshot {
   sessionDir: string;
   sdkPath: string;
   sdkRuntime: import('../lib/sdk-integration/sdk-runtime-selection').SdkRuntimeSelection;
+  /** Private captured service location; preserve it across the promotion handoff. */
+  providerRuntime?: {
+    artifactDir: string;
+    credentialFile: string;
+    reference: import('../../model-providers/runtime/contracts').ProviderRuntimeReference;
+  };
   creationReason?: 'new' | 'resume';
   /** Exact durable handle path. Never substitute the caller's alias. */
   exactSessionPath?: string;
@@ -2051,6 +2057,7 @@ export class WorkerRuntimeRouter {
             // available to the existing cold view and to the promoted worker.
             openedPayload: sessionOpenedMetadataForWorkerIpc(snapshot.openedPayload),
             modelSettings: snapshot.modelSettings,
+            ...(snapshot.providerRuntime ? { providerRuntime: snapshot.providerRuntime } : {}),
             ...(this.options.analyticsActivation && route.analyticsCaptureSubject
               ? {
                 analytics: {

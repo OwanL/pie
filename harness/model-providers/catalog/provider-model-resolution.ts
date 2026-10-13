@@ -7,7 +7,9 @@ export type DeepReadonly<T> = T extends readonly (infer U)[] ? readonly DeepRead
 export type ProviderModelMetadata = DeepReadonly<Omit<ProviderModelOverride, 'pricing'> & {
   api?: ProviderApi;
   baseUrl?: string;
-  pricing?: 'unknown' | Partial<Exclude<ProviderPricing, 'unknown'>>;
+  /** Explicit daemon evidence that this identity delegates to a remote model. */
+  execution?: 'remote';
+  pricing?: 'unknown' | Partial<Exclude<ProviderPricing, 'unknown'> & import('../../../analytics/contracts/model-pricing-facts').ModelTokenPricing>;
 }>;
 export interface ShippedProviderDefinition {
   readonly api?: ProviderApi;
@@ -47,7 +49,7 @@ export interface ProviderModelListInput {
 }
 
 const metadataFields = ['name', 'input', 'reasoning', 'contextWindow', 'maxTokens', 'api', 'baseUrl'] as const;
-const pricingFields = ['input', 'output', 'cacheRead', 'cacheWrite', 'tiers'] as const;
+const pricingFields = ['input', 'output', 'cacheRead', 'cacheWrite', 'tiers', 'peak', 'cacheReadUnsupported'] as const;
 const protocols: readonly ProviderApi[] = ['openai-completions', 'mistral-conversations', 'openai-responses',
   'azure-openai-responses', 'openai-codex-responses', 'anthropic-messages', 'bedrock-converse-stream',
   'google-generative-ai', 'google-vertex'];
@@ -133,7 +135,15 @@ export function resolveProviderModelList({ config, shipped = {}, discovered = {}
       // Provider defaults supply only transport fields, never arbitrary vendor fields.
       mergeMetadata(metadata, definition ? { api: definition.api, baseUrl: definition.baseUrl } : undefined);
       mergeMetadata(metadata, own(definition?.models, id));
-      mergeMetadata(metadata, own(snapshot?.models, id));
+      const observation = own(snapshot?.models, id);
+      if (observation?.execution === 'remote') {
+        metadata.execution = 'remote';
+        const rates = metadata.pricing as Dictionary | undefined;
+        // Local free rates are not evidence of the price of a remote alias.
+        if (rates && typeof rates === 'object'
+          && pricingFields.every(field => rates[field] === undefined || rates[field] === 0)) delete metadata.pricing;
+      }
+      mergeMetadata(metadata, observation);
       mergeMetadata(metadata, own(entry?.modelOverrides, id));
       mergeMetadata(metadata, entry ? { api: entry.api, baseUrl: entry.baseUrl } : undefined);
       const resolvedMetadata = metadata as ProviderModelMetadata;

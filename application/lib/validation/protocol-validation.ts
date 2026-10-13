@@ -102,7 +102,7 @@ function isProviderSetupCommand(value: unknown): boolean {
   };
   if (!Object.hasOwn(keys, value.type) || !hasOnlyKeys(value, ['type', ...keys[value.type]])) return false;
   switch (value.type) {
-    case 'choose': return ['chatgpt', 'openai', 'anthropic', 'copilot', 'custom'].includes(value.kind as string) && (value.definitionId === undefined || boundedProviderString(value.definitionId, 128));
+    case 'choose': return ['chatgpt', 'openai', 'anthropic', 'copilot', 'ollama', 'custom'].includes(value.kind as string) && (value.definitionId === undefined || boundedProviderString(value.definitionId, 128));
     case 'auth-method': return ['oauth', 'api-key', 'local'].includes(value.method as string);
     case 'models': case 'edit': case 'refresh': case 'manual-model-add': return boundedProviderString(value.id, 256) && value.id.length > 0;
     case 'change': return ['id', 'api', 'baseUrl', 'environmentName'].includes(value.field as string) && boundedProviderString(value.value);

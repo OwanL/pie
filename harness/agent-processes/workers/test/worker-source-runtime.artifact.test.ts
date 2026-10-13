@@ -19,6 +19,7 @@ import { WorkerRuntimeHost, type WorkerRuntimePromotionPayload } from '../worker
 import { createSourceArtifactTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 
+
 const SOURCE_RUNTIME_CHILD = path.resolve('harness/agent-processes/workers/test/fixtures/source-runtime-child.ts');
 const WORKER_ENTRY = path.resolve('harness/agent-processes/workers/worker-entry.ts');
 const TSX_LOADER = path.resolve('application/hosts/vscode/node_modules/tsx/dist/loader.mjs');
@@ -126,9 +127,11 @@ async function runChild(
     const child = childProcess.spawn(executable, args, options);
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGKILL');
-      reject(new Error(`Source SDK child exceeded ${timeoutMs}ms. stdout=${stdout.slice(-4_000)} stderr=${stderr.slice(-4_000)}`));
+      // Settle only after close confirms the child can no longer touch the fixture.
     }, timeoutMs);
     child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
@@ -138,7 +141,8 @@ async function runChild(
     });
     child.once('close', (code) => {
       clearTimeout(timer);
-      resolve({ code, stdout, stderr });
+      if (timedOut) reject(new Error(`Source SDK child exceeded ${timeoutMs}ms. stdout=${stdout.slice(-4_000)} stderr=${stderr.slice(-4_000)}`));
+      else resolve({ code, stdout, stderr });
     });
   });
 }
@@ -338,10 +342,33 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
       cwd,
       agentDir,
       sessionDir,
-      prepareOnly: true,
+      capturePrepare: true,
     }), 'utf8');
 
-    const env = buildSanitizedWorkerEnv(root, preload);
+    const configDir = path.join(root, 'private-providers');
+    await fs.mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, 'providers.yaml');
+    const privateConfig = `version: 1
+providers:
+  local:
+    enabled: true
+    api: openai-completions
+    baseUrl: https://invalid.example
+    credentialRef: { source: none }
+    manualModels: [captured]
+    modelOverrides:
+      captured:
+        name: Offline captured model
+        reasoning: true
+        input: [text]
+        contextWindow: 8192
+        maxTokens: 1024
+        pricing: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }
+    modelPreferences:
+      captured: { visible: true, subagentEligible: true }
+`;
+    await fs.writeFile(configFile, privateConfig);
+    const env = { ...buildSanitizedWorkerEnv(root, preload), PIE_PROVIDER_CONFIG_DIR: configDir };
     const prepared = await runChild(process.execPath, [SOURCE_RUNTIME_CHILD, inputPath], {
       cwd,
       env,
@@ -397,6 +424,27 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
       t.diagnostic(`source worker bootstrap startup stderr:\n${client.getSnapshot().stderrTail}`);
     }
     const promotion = makePromotionPayload(selected.sdkPath, selected.sdkRuntime, root, workerId, sessionPath);
+    const resolvePersistedRuntime = async (resolveRuntimePath: string) => {
+      await fs.writeFile(inputPath, JSON.stringify({ sdkRuntime: selected.sdkRuntime, cwd, agentDir, sessionDir, resolveRuntimePath }));
+      const reopened = await runChild(process.execPath, [SOURCE_RUNTIME_CHILD, inputPath], {
+        cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      }, 120_000);
+      assert.equal(reopened.code, 0, reopened.stderr);
+      const result = reopened.stdout.split(/\r?\n/).map(text => {
+        try { return JSON.parse(text); } catch { return undefined; }
+      }).find(value => value?.kind === 'source-runtime-location');
+      assert.ok(result, reopened.stdout);
+      assert.equal(result.state.messages.length, 0, 'capture is durable before any assistant message');
+      return result;
+    };
+    const reopened = await resolvePersistedRuntime(sessionPath);
+    assert.ok(reopened.providerRuntime, 'fresh SDK reopen recovers the coordinator capture marker');
+    assert.equal(reopened.entries.filter((entry: any) => entry.customType === 'pie-provider-runtime-v1').length, 1);
+    assert.equal((await resolvePersistedRuntime(sessionResult.legacySessionPath as string)).providerRuntime, null,
+      'unmarked cold creation remains legacy, despite private configuration');
+    promotion.providerRuntime = reopened.providerRuntime;
+    const { artifactDir: captureDir, reference } = reopened.providerRuntime;
+    promotion.modelSettings = { defaultProvider: 'local', defaultModel: 'captured', defaultThinkingLevel: 'high' };
     const promoted = await client.requestFrame({
       kind: 'runtime.promote',
       operationId: 'source-runtime-promotion',
@@ -412,16 +460,80 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
     }, 'response');
     assert.equal(command.kind, 'response');
     assert.equal(command.ok, true, `production worker models.list failed: ${command.ok ? '' : command.error.message}`);
-    if (command.ok) assert.equal(command.result.kind, 'runtime.command');
+    const expectedModels = [{ id: 'captured', provider: 'local', name: 'Offline captured model', reasoning: true,
+      thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'], inputKinds: ['text'], contextWindow: 8192, maxTokens: 1024,
+      subagent: { eligible: true, pricing: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }];
+    if (command.ok) {
+      assert.equal(command.result.kind, 'runtime.command');
+      assert.deepEqual(command.result.payload, expectedModels);
+    }
     assert.deepEqual(await client.shutdown('source runtime fixture complete'), { kind: 'shutting-down' });
     await client.waitForConfirmedExit(10_000);
     assert.equal(client.getSnapshot().status, 'exited', 'promoted worker disposal confirms process exit');
     assert.equal(await fs.stat(sessionPath).then((stat) => stat.isFile()), true);
+
+    const inspectSession = async () => {
+      await fs.writeFile(inputPath, JSON.stringify({ sdkRuntime: selected.sdkRuntime, cwd, agentDir, sessionDir, inspectSessionPath: sessionPath }));
+      const inspected = await runChild(process.execPath, [SOURCE_RUNTIME_CHILD, inputPath], {
+        cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      }, 120_000);
+      assert.equal(inspected.code, 0, inspected.stderr);
+      const line = inspected.stdout.split(/\r?\n/).map(text => {
+        try { return JSON.parse(text); } catch { return undefined; }
+      }).find(value => value?.kind === 'source-runtime-session-state');
+      assert.ok(line, inspected.stdout);
+      assert.deepEqual(line.state.model, { provider: 'local', modelId: 'captured' });
+      assert.equal(line.state.thinkingLevel, 'high');
+    };
+    await inspectSession();
+
+    // Saved configuration changes cannot refresh this session's immutable capture.
+    await fs.writeFile(configFile, privateConfig.replace('Offline captured model', 'Changed private model')
+      .replace('input: 1, output: 2', 'input: 99, output: 99'));
+    const replacementRuntime = await resolvePersistedRuntime(sessionPath);
+    assert.deepEqual(replacementRuntime.providerRuntime, reopened.providerRuntime);
+    promotion.providerRuntime = replacementRuntime.providerRuntime;
+    await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { local: {
+      baseUrl: 'https://changed.invalid', api: 'openai-completions', models: [{ id: 'captured', name: 'Changed saved model',
+        reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 512,
+        cost: { input: 99, output: 99, cacheRead: 99, cacheWrite: 99 } }],
+    } } }));
+    await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultProvider: 'local', defaultModel: 'changed', defaultThinkingLevel: 'low' }));
+    const startReplacement = async () => {
+      client = new WorkerClient({ workerEntryPath: WORKER_ENTRY, coordinatorGeneration: 41, workerId,
+        workerGeneration: 1, sessionPath, rootSessionPath: sessionPath, leasePath: sessionPath, leaseRevision: 1,
+        sdkRuntime: selected.sdkRuntime, heartbeatIntervalMs: 500, missedHeartbeatMs: 15_000,
+        requestTimeoutMs: 60_000, env, spawn: sanitizedSpawn(root, env) });
+      await client.start();
+      return client;
+    };
+    // Resume must restore the explicit branch choice, not this changed default.
+    promotion.modelSettings.defaultThinkingLevel = 'low';
+    const replacement = await startReplacement();
+    const ready = await replacement.requestFrame({ kind: 'runtime.promote', operationId: 'replacement-promotion',
+      payload: promotion as unknown as WorkerJsonObject }, 'runtime.ready');
+    assert.equal(ready.kind, 'runtime.ready');
+    const replacementModels = await replacement.requestFrame({ kind: 'runtime.command', operation: 'models.list',
+      payload: { params: { sessionPath }, publicRequestId: 'replacement-model-list' } }, 'response');
+    assert.equal(replacementModels.kind, 'response');
+    assert.equal(replacementModels.ok, true);
+    if (replacementModels.ok) assert.deepEqual(replacementModels.result.payload, expectedModels);
+    await replacement.shutdown('replacement fixture complete');
+    await replacement.waitForConfirmedExit(10_000);
+    await inspectSession();
+
+    await fs.writeFile(path.join(captureDir, `${reference.sha256}.json`), '{}');
+    const corrupt = await startReplacement();
+    await assert.rejects(corrupt.requestFrame({ kind: 'runtime.promote', operationId: 'corrupt-promotion',
+      payload: promotion as unknown as WorkerJsonObject }, 'runtime.ready'), /Invalid provider runtime artifact or reference/);
+    await corrupt.forceKill();
+    await corrupt.waitForConfirmedExit(10_000);
   } finally {
     if (client && client.getSnapshot().status !== 'exited' && client.getSnapshot().pid) {
       await client.forceKill().catch(() => undefined);
-      await client.waitForConfirmedExit(5_000).catch(() => undefined);
+      await client.waitForConfirmedExit(5_000);
     }
+    assert.ok(!client || client.getSnapshot().status === 'exited', 'confirm worker exit before fixture cleanup');
     await fs.rm(root, { recursive: true, force: true });
   }
 });

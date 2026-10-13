@@ -390,6 +390,37 @@ function successfulOwner(config) {
   return { config, passed: true, teardownConfirmed: true, summary: null };
 }
 
+test('final summaries aggregate TODO and cancelled counts while retaining zero counts', async (t) => {
+  const previousExitCode = process.exitCode;
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
+  try {
+    for (const scenario of [
+      {
+        passed: true,
+        counts: { passed: 2, failed: 0, skipped: 0, todo: 3, cancelled: 4 },
+        expected: 'Summary: 1/1 package passed — 2 passed, 0 failed, 0 skipped, 3 todo, 4 cancelled.',
+      },
+      {
+        passed: false,
+        counts: { passed: 0, failed: 1, skipped: 0, todo: 0, cancelled: 0 },
+        expected: 'Summary: 0/1 package passed — 0 passed, 1 failed, 0 skipped.',
+      },
+    ]) {
+      lines.length = 0;
+      await runSelectedPackages({ fast: false, testArgs: [] }, [lifetimeConfig], {}, undefined, {
+        runPackageImpl: async () => ({ ...successfulOwner(lifetimeConfig), passed: scenario.passed,
+          summary: { counts: scenario.counts } }),
+        printResult: () => {},
+      });
+      assert.equal(lines.find((line) => line.startsWith('Summary:')), scenario.expected);
+      process.exitCode = undefined;
+    }
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
 test('release owners use four rolling slots, preserve selection and print in owner order', async (t) => {
   t.mock.method(console, 'log', () => {});
   const configs = Array.from({ length: 9 }, (_, index) => ({ ...lifetimeConfig, id: String(index) }));

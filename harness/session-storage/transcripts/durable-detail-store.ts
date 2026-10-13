@@ -421,6 +421,10 @@ export class DurableDetailStore {
       this.canonicalBytes -= existing.bytes;
       this.sources.delete(sourceKey);
     }
+    // Oversized sources remain streamable/refetchable through the resolver,
+    // but must not exceed the retained canonical cache budget or leave a
+    // stale same-key source available to refetch.
+    if (source.bytes > this.budgets.maxCanonicalBytes) return;
     while (this.sources.size > 0 && (this.sources.size >= this.budgets.maxSources
       || this.canonicalBytes + source.bytes > this.budgets.maxCanonicalBytes)) {
       const victimKey = this.sources.keys().next().value as string | undefined;

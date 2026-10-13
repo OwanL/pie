@@ -1166,6 +1166,7 @@ export async function runSelectedPackages(parsedArgs, selectedPackages, runtime,
   const failedResults = results.filter((result) => !result.passed);
   const passedCount = results.length - failedResults.length;
   const packageWord = results.length === 1 ? 'package' : 'packages';
+  const countSummary = formatCounts(totals);
 
   console.log('');
   if (signal?.aborted) {
@@ -1173,12 +1174,12 @@ export async function runSelectedPackages(parsedArgs, selectedPackages, runtime,
     process.exitCode = 1;
   }
   if (failedResults.length === 0) {
-    console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
+    console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${countSummary}.`);
     return;
   }
 
   const failedPackageIds = failedResults.map((result) => result.config.id).join(', ');
-  console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
+  console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${countSummary}.`);
   console.log(`Failed packages: ${failedPackageIds}`);
   if (uncertain) throw Object.assign(new Error('Package child teardown is unconfirmed; retaining verification runtime'), { teardownUnconfirmed: true });
   process.exitCode = 1;

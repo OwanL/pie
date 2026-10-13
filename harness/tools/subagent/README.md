@@ -36,13 +36,25 @@ branch:
 - `"all"` — every user-role prompt and successful `ask_user` question/answer
   pair on the active branch.
 
-Assistant prose, reasoning, and other tool output are never copied. The packet
-is capped at 12,000 characters with its beginning and end preserved. The chosen
-mode and exact bounded packet are retained on the subagent result so pie can
-show the handoff in the subagent header and its context tooltip; task-only
-calls are identified explicitly. There is intentionally no full-history mode:
-delegated work should retain an isolated, lean context, and the explicit `task`
-remains its scope.
+Selected user images travel with their text through the SDK's native image
+input, in occurrence order, including duplicates. `latest` never searches older
+messages for an image; `all` includes images from every selected user prompt.
+Images automatically impose the hard image-capability requirement on selection
+and every retry. The packet is snapshotted once; retries cannot pick up later
+parent messages or modified image objects. No extra attachment argument is needed.
+
+Assistant prose, reasoning, and other tool output are never copied. Text-only
+context is capped at 12,000 characters with its beginning and end preserved.
+Image-bearing context that exceeds this text bound is rejected rather than
+losing text/image associations. Images reuse the shared input limits (10 MiB
+per image, 20 MiB total). Unavailable context, malformed images, and exceeded
+bounds fail before child dispatch; choose `latest` or narrow the request.
+
+The mode and bounded text, including numbered `[Parent image N]` markers, are
+retained on the result for the context tooltip; image bytes are passed separately,
+not duplicated into task text or handoff metadata. Task-only calls remain explicit.
+There is no full-transcript mode, temporary-file export, or implicit tool-image
+inheritance. The explicit `task` remains the delegated scope.
 
 ## Agent Discovery
 
@@ -138,9 +150,13 @@ image-producing flow never lands on a text-only model:
   "agent": "scout",
   "task": "Inspect the latest screenshot and report whether the button is positioned correctly.",
   "bucket": "small",
-  "modelRequirements": { "inputKinds": ["image"] }
+  "userContext": "latest"
 }
 ```
+
+For a screenshot attached to that user message, the image requirement is
+inferred automatically. Keep explicit `modelRequirements: { "inputKinds": ["image"] }`
+for tasks where the child will obtain images itself, such as reading an image file.
 
 `modelRequirements.inputKinds: ["image"]` is a **hard requirement**. Only a
 provider-qualified model whose runtime `input` includes `image` may serve the
@@ -158,8 +174,9 @@ produces a local selection error rather than a silent text-only dispatch.
   provider-qualified capability: capability on one provider must not make an
   incompatible duplicate eligible. A disabled provider is never reintroduced to
   satisfy a requirement.
-- The object and `inputKinds` field are optional. An absent or empty requirement
-  preserves current selection behaviour.
+- The object and `inputKinds` field are optional. Without inherited images, an
+  absent or empty requirement preserves unconstrained selection. Inherited
+  images always impose image capability, even if the explicit object is empty.
 
 If no enabled model satisfies all constraints, the subagent fails **before**
 creating or prompting a child session, with a bounded diagnostic and recovery
@@ -167,8 +184,7 @@ actions, for example:
 
 ```text
 No enabled image-capable model is available for the requested "small" subagent bucket.
-Add an image-capable model to an eligible bucket, enable its provider, choose another bucket,
-or remove modelRequirements.inputKinds=["image"].
+Add an image-capable model to an eligible bucket, enable its provider, or choose another bucket.
 ```
 
 The selector never silently falls back to a text-only model.
@@ -187,8 +203,8 @@ Every dispatched child result exposes audit metadata directly on its
   then a provider-qualified runtime registry declaration; its deterministic
   fallback is the effective model id, or `unknown` if no model was observable.
 - `parentToolCallId` is the immediate parent session's subagent tool-call id.
-- `requestedModelRequirements` records the requested hard model requirements
-  (e.g. `{ inputKinds: ["image"] }`) when one was made. `modelRequirementsSatisfied`
+- `requestedModelRequirements` records effective hard requirements requested of
+  selection, including image capability inferred from inherited attachments. `modelRequirementsSatisfied`
   is `true` when the resolved effective model satisfied it, or `false` (with a
   bounded `requirementDiagnostic`) when selection failed before dispatching a
   child. These fields are retained on running, terminal, retried, and compacted

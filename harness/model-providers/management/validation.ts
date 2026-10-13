@@ -43,9 +43,9 @@ export function isProviderManagementRequest(value: unknown): value is ProviderMa
   }
 }
 const definition = (value: unknown) => record(value) && keys(value, ['id', 'name', 'kind', 'api', 'baseUrl', 'authMethods', 'discovery'])
-  && identity(value.id) && text(value.name) && choice(value.kind, ['chatgpt', 'openai', 'anthropic', 'copilot', 'custom'])
+  && identity(value.id) && text(value.name) && choice(value.kind, ['chatgpt', 'openai', 'anthropic', 'copilot', 'ollama', 'custom'])
   && text(value.api, 256) && text(value.baseUrl, 8192) && array(value.authMethods, method, 3)
-  && choice(value.discovery, ['openai', 'copilot', 'unsupported']);
+  && choice(value.discovery, ['openai', 'copilot', 'ollama', 'unsupported']);
 const summary = (value: unknown) => record(value) && keys(value, ['id', 'name', 'configured', 'enabled', 'modelCount', 'credentials', 'discovery'])
   && identity(value.id) && text(value.name) && boolean(value.configured) && boolean(value.enabled) && integer(value.modelCount)
   && choice(value.credentials, ['saved', 'missing', 'environment', 'default', 'none'])
@@ -65,10 +65,12 @@ const auth = (value: unknown) => {
 };
 /** Global host event data is a closed, credential-free projection, not configuration authority. */
 export function isProviderManagementSnapshot(value: unknown): value is ProviderManagementSnapshot {
-  return record(value) && keys(value, ['revision', 'configRevision', 'loaded', 'providers', 'definitions', 'protocols', 'auth', 'mutation', 'error'])
+  return record(value) && keys(value, ['revision', 'configRevision', 'loaded', 'providers', 'definitions', 'protocols', 'auth', 'authBrowser', 'mutation', 'error'])
     && integer(value.revision) && revision(value.configRevision) && boolean(value.loaded)
     && array(value.providers, summary) && array(value.definitions, definition, 1000) && array(value.protocols, entry => text(entry, 256), 1000)
     && optional(value, 'auth', auth)
+    && optional(value, 'authBrowser', browser => record(browser) && keys(browser, ['operationId', 'url', 'instructions', 'code'])
+      && identity(browser.operationId) && text(browser.url, 32_768) && optional(browser, 'instructions', text) && optional(browser, 'code', text))
     && optional(value, 'mutation', mutation => record(mutation) && keys(mutation, ['operationId', 'phase']) && identity(mutation.operationId) && mutation.phase === 'saving')
     && optional(value, 'error', text);
 }

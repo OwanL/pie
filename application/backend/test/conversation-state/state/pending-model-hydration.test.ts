@@ -83,20 +83,17 @@ function createCommand(kind: 'CreateSession' | 'DuplicateSession'): Event {
   } as Event;
 }
 
-test('pending create and duplicate seed the picker from a predecessor catalog and preserve reasoning levels', () => {
+test('pending create and duplicate isolate catalogs and preserve selected identity', () => {
   for (const kind of ['CreateSession', 'DuplicateSession'] as const) {
     const state = createState();
     const next = reducer(state, createCommand(kind)).state;
-    assert.deepEqual(next.settings.availableModelsBySession[PENDING], [SOURCE_MODEL, OTHER_MODEL]);
-    assert.equal(next.settings.availableModelsStatusBySession[PENDING], 'provisional');
-    assert.deepEqual(
-      next.settings.availableModelsBySession[PENDING]?.find((model) => model.id === SOURCE_MODEL.id)?.thinkingLevels,
-      ['off', 'low', 'high'],
-    );
+    assert.deepEqual(next.settings.availableModelsBySession[PENDING], []);
+    assert.equal(next.settings.availableModelsStatusBySession[PENDING], 'loading');
+    assert.equal(next.sessions.sessions.find((session) => session.path === PENDING)?.modelId, SOURCE_MODEL.id);
   }
 });
 
-test('PendingPathReplaced transfers provisional catalog and status to the durable path', () => {
+test('PendingPathReplaced transfers isolated loading catalog to the durable path', () => {
   const state = reducer(createState(), createCommand('CreateSession')).state;
   const next = reducer(state, {
     kind: 'PendingPathReplaced',
@@ -104,8 +101,8 @@ test('PendingPathReplaced transfers provisional catalog and status to the durabl
     newSessionPath: TARGET,
   });
 
-  assert.deepEqual(next.state.settings.availableModelsBySession[TARGET], [SOURCE_MODEL, OTHER_MODEL]);
-  assert.equal(next.state.settings.availableModelsStatusBySession[TARGET], 'provisional');
+  assert.deepEqual(next.state.settings.availableModelsBySession[TARGET], []);
+  assert.equal(next.state.settings.availableModelsStatusBySession[TARGET], 'loading');
   assert.equal(PENDING in next.state.settings.availableModelsBySession, false);
   assert.equal(PENDING in next.state.settings.availableModelsStatusBySession, false);
 });
@@ -304,7 +301,7 @@ test('a provider-qualified pending selection never borrows same-id capabilities 
       selectionToken: 'selection-provider',
     },
   }).state;
-  assert.deepEqual(pending.settings.availableModelsBySession[PENDING], [activeModel]);
+  assert.deepEqual(pending.settings.availableModelsBySession[PENDING], []);
 });
 
 test('a stale hydration result cannot overwrite a SetModel fence, while a newer refresh may replace the catalog', () => {

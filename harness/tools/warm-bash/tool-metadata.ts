@@ -4,10 +4,10 @@ export const BASH_DEFAULT_TIMEOUT = 60;
 export const BASH_MAX_TIMEOUT = 600;
 
 const BASH_TIMEOUT_DESCRIPTION =
-  `Timeout in seconds. Defaults to ${BASH_DEFAULT_TIMEOUT} seconds (configurable via PIE_BASH_DEFAULT_TIMEOUT); nonpositive values use the default, and timeouts are capped at ${BASH_MAX_TIMEOUT} seconds.`;
+  `Timeout in seconds. Defaults to ${BASH_DEFAULT_TIMEOUT} seconds (configurable via PIE_BASH_DEFAULT_TIMEOUT); nonpositive values use the default, and timeouts are capped at ${BASH_MAX_TIMEOUT} seconds. Omit to use the configured default.`;
 
 const BASH_TIMEOUT_TOOL_GUIDANCE =
-  ` Timeout defaults to ${BASH_DEFAULT_TIMEOUT} seconds (configurable via PIE_BASH_DEFAULT_TIMEOUT); explicit timeouts are capped at ${BASH_MAX_TIMEOUT} seconds, and nonpositive values use the default.`;
+  ` Timeout defaults to ${BASH_DEFAULT_TIMEOUT} seconds (configurable via PIE_BASH_DEFAULT_TIMEOUT); explicit timeouts are capped at ${BASH_MAX_TIMEOUT} seconds, and nonpositive values use the default. Omit to use the configured default.`;
 
 type SchemaProperty = Record<string, unknown>;
 

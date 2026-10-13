@@ -141,10 +141,13 @@ export class StateAppliedWatchdog {
     };
     appendPieLog('warn', 'sidebar-provider', 'force-reloading webview after classified recovery', context);
     bootLog('sidebar-provider', 'recovery.reload', context);
-    void this.deps.onForceReload(recovery).finally(() => {
+    const onReloadSettled = (): void => {
       this.reloadInFlight = false;
       if (recovery.reason === 'commit-timeout') this.commitTimeouts = 0;
-    });
+    };
+    // Handle both outcomes: discarding a finally() promise would propagate a
+    // rejected reload as an unhandled rejection despite running the cleanup.
+    void this.deps.onForceReload(recovery).then(onReloadSettled, onReloadSettled);
     return true;
   }
 }

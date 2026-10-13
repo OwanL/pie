@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { parseModelPricing } from '../pricing/pricing-core';
 import { resolveProviderModelList, type ShippedProviderDefinition } from '../catalog/provider-model-resolution';
 import type { CaptureProviderRuntimeInput, NativeRuntimeModel, RuntimeSnapshot, RuntimeModelProjection } from './contracts';
 
@@ -18,7 +19,10 @@ const rateChannels = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
 function flatCost(value: unknown): value is NativeRuntimeModel['cost'] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const rates = value as Record<string, unknown>;
-  return Object.keys(rates).every(key => rateChannels.includes(key as typeof rateChannels[number]))
+  // Native SDK merges can materialize the optional tiers field as undefined.
+  // That is not tiered pricing; actual tiers (including []) still fail closed.
+  return Object.keys(rates).every(key => rateChannels.includes(key as typeof rateChannels[number])
+      || (key === 'tiers' && rates[key] === undefined))
     && rateChannels.every(key => typeof rates[key] === 'number' && Number.isFinite(rates[key]) && Number(rates[key]) >= 0);
 }
 const positive = (n: unknown) => Number.isSafeInteger(n) && Number(n) > 0;
@@ -54,7 +58,16 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
     const models = definition.models as Record<string, unknown>;
     if (Object.hasOwn(models, model.id)) throw new Error('Duplicate runtime model identity');
     models[model.id] = { name: model.name, api: model.api, baseUrl: model.baseUrl, input: [...model.input], reasoning: model.reasoning, contextWindow: model.contextWindow, maxTokens: model.maxTokens,
-      ...(!Object.hasOwn(input.config.providers, model.provider) || provedBaseline(model) ? { pricing: { ...model.cost } } : {}) };
+      ...(!Object.hasOwn(input.config.providers, model.provider) || provedBaseline(model) ? { pricing: Object.fromEntries(Object.entries(model.cost).filter(([key, value]) => key !== 'tiers' || value !== undefined)) } : {}) };
+  }
+  // Approved shipped facts replace registry-derived metadata for exact identities.
+  for (const [provider, definition] of Object.entries(input.shippedCatalog ?? {})) {
+    const baseline = shipped[provider];
+    const models = { ...baseline?.models };
+    for (const [id, metadata] of Object.entries(definition.models ?? {})) {
+      models[id] = { ...models[id], ...metadata };
+    }
+    shipped[provider] = { ...baseline, ...definition, models };
   }
   // Only runtime capture suppresses unknown listing prices backed by compiled rates.
   // Management's canonical merger deliberately keeps the listing's unknown price.
@@ -71,15 +84,23 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
   for (const provider of Object.values(resolved.providers)) {
     const entry = input.config.providers[provider.id];
     for (const item of Object.values(provider.models)) {
+      // Managed Ollama tags are the installed/remote-alias inventory, not a
+      // vendor catalog. A last-known complete listing remains authoritative
+      // offline; without one, retain the known-model fallback. This only affects
+      // new captures, never an already persisted session pin.
+      const inventory = input.discovered?.[provider.id];
+      if (provider.id === 'ollama' && entry && inventory?.kind === 'account' && inventory.complete
+        && !Object.hasOwn(inventory.models, item.id)) continue;
       const metadata = item.metadata;
       const pricing = metadata.pricing;
       const native = input.legacyModels.find(model => model.provider === provider.id && model.id === item.id);
       const nativeProtocol = input.legacyModels.some(model => model.provider === provider.id && model.api === metadata.api);
+      const completePricing = pricing === 'unknown' ? undefined : parseModelPricing(pricing);
       const candidate = { ...(native?.compat ? { compat: native.compat } : {}),
         ...(native?.thinkingLevelMap ? { thinkingLevelMap: native.thinkingLevelMap } : {}),
         provider: provider.id, id: item.id, name: item.label, api: metadata.api, baseUrl: metadata.baseUrl,
         input: metadata.input, reasoning: metadata.reasoning, contextWindow: metadata.contextWindow, maxTokens: metadata.maxTokens,
-        cost: pricing === 'unknown' ? undefined : pricing };
+        cost: completePricing ? Object.fromEntries(rateChannels.map(key => [key, completePricing[key]])) : undefined };
       // Header-bearing baselines may contain credential material. This DTO does not
       // serialize it, and must not silently dispatch a headerless approximation.
       const nativeHeaders = native && (native as NativeRuntimeModel & { headers?: Record<string, string> }).headers;
@@ -88,12 +109,16 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
       const trustedHeaders = !!digest && !!nativeHeaders && !!builtin?.headers
         && Object.keys(nativeHeaders).length === Object.keys(builtin.headers).length
         && Object.keys(nativeHeaders).every(key => Object.hasOwn(builtin.headers!, key) && nativeHeaders[key] === builtin.headers![key]);
-      const pricingProved = !entry || (!!native && provedBaseline(native))
+      const explicitPricing = [entry?.modelOverrides?.[item.id]?.pricing, input.discovered?.[provider.id]?.models[item.id]?.pricing]
+        .some(value => !!parseModelPricing(value) && typeof value === 'object'
+          && rateChannels.every(key => typeof value[key] === 'number'));
+      const pricingProved = explicitPricing || !entry || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || (!!native && provedBaseline(native))
         || flatCost(entry.modelOverrides?.[item.id]?.pricing)
         || flatCost(input.discovered?.[provider.id]?.models[item.id]?.pricing);
       const supported = pricingProved && validNativeModel(candidate) && (!(nativeHeaders && Object.keys(nativeHeaders).length) || trustedHeaders)
         && (runtimeProtocols.includes(candidate.api as typeof runtimeProtocols[number]) || nativeProtocol)
-        && !(pricing && pricing !== 'unknown' && pricing.tiers !== undefined);
+        && !!completePricing
+        && ((!pricing || pricing === 'unknown' || pricing.tiers === undefined) || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || explicitPricing);
       const row: RuntimeModelProjection = { providerId: provider.id, id: item.id,
         enabled: !provider.configured || provider.enabled, visible: item.preferences.visible !== false,
         subagentEligible: item.preferences.subagentEligible !== false,
@@ -103,6 +128,7 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
             : entry.credentialRef ? { ...entry.credentialRef } : { source: 'default' } };
       if (supported) {
         row.model = JSON.parse(JSON.stringify(candidate)) as NativeRuntimeModel;
+        row.pricingFacts = completePricing;
         if (trustedHeaders) row.builtinHeaders = { provider: provider.id, id: item.id, sha256: digest! };
       }
       else row.rejection = 'unsupported-or-incomplete-runtime-model';

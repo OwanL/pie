@@ -1,7 +1,14 @@
+import type { ImageContent } from "@mariozechner/pi-ai";
+import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_IMAGE_INPUT_BYTES, MAX_AGGREGATE_IMAGE_INPUT_BYTES } from "../../model-providers/request-validation/image-constraints.js";
 import type { ToolContext } from "./tool-context.js";
 import { TRAVERSAL_POLICY_PROMPT } from "../execution-safety/traversal-policy.js";
 
 export type UserContextMode = "latest" | "all";
+export interface ParentUserContext {
+	mode: UserContextMode;
+	content?: string;
+	images: ImageContent[];
+}
 export type ParentSessionManager = ToolContext["sessionManager"];
 type SessionEntry = ReturnType<ParentSessionManager["getBranch"]>[number];
 
@@ -21,15 +28,15 @@ interface ContextBlock {
 export function buildParentUserContext(
 	mode: UserContextMode | undefined,
 	sessionManager: ParentSessionManager | undefined,
-): string | undefined {
-	if (!mode || !sessionManager) return undefined;
+): ParentUserContext | undefined {
+	if (!mode) return undefined;
+	if (!sessionManager) throw new Error("Parent user context unavailable: session manager is missing. Retry with an available parent session or omit userContext and include requirements in task.");
 
 	let branch: SessionEntry[];
 	try {
 		branch = sessionManager.getBranch();
 	} catch {
-		// Optional context must never make an otherwise-valid delegation fail.
-		return undefined;
+		throw new Error("Parent user context unavailable: active branch could not be read. Retry with an available parent session or omit userContext and include requirements in task.");
 	}
 
 	const questions = collectAskUserQuestions(branch);
@@ -37,13 +44,33 @@ export function buildParentUserContext(
 	if (mode === "latest" && latestUserIndex < 0) return undefined;
 	const startIndex = mode === "latest" ? latestUserIndex : 0;
 	const blocks: ContextBlock[] = [];
+	const images: ImageContent[] = [];
+	let aggregateBytes = 0;
 
 	for (let index = startIndex; index < branch.length; index++) {
 		const message = getMessage(branch[index]);
 		if (!message) continue;
 
 		if (message.role === "user") {
-			const text = extractText(message.content);
+			const text = extractText(message.content, (record) => {
+				const number = images.length + 1;
+				const { data, mimeType } = record;
+				if (typeof data !== "string" || !data || typeof mimeType !== "string" || !ALLOWED_IMAGE_MIME_TYPES.has(mimeType)) {
+					throw new Error(`Parent image ${number} has missing or invalid data/MIME type. Supply a valid image attachment or narrow userContext.`);
+				}
+				const bytes = decodedBase64ByteLength(data);
+				if (bytes > MAX_IMAGE_INPUT_BYTES) throw new Error(`Parent image ${number} exceeds the shared 10 MiB image limit. Narrow the request.`);
+				aggregateBytes += bytes;
+				if (aggregateBytes > MAX_AGGREGATE_IMAGE_INPUT_BYTES) throw new Error("Parent images exceed the shared 20 MiB aggregate limit. Choose latest or narrow the request.");
+				// Validate flat, unwrapped base64 without decoding or copying large buffers.
+				const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+				const body = data.slice(0, data.length - padding);
+				if (!body || /[^A-Za-z0-9+/]/.test(body) || body.length % 4 === 1 || (padding > 0 && (data.length % 4 !== 0 || padding !== (4 - body.length % 4) % 4))) {
+					throw new Error(`Parent image ${number} has malformed base64 data. Supply a valid image attachment.`);
+				}
+				images.push({ type: "image", data, mimeType });
+				return `[Parent image ${number}]`;
+			});
 			if (text) blocks.push({ kind: "prompt", text });
 			continue;
 		}
@@ -72,7 +99,10 @@ export function buildParentUserContext(
 			? `[User prompt]\n${block.text}`
 			: `[Recorded clarification]\n${block.text}`
 	)).join("\n\n");
-	return truncateMiddle(rendered, MAX_USER_CONTEXT_CHARS);
+	if (images.length > 0 && rendered.length > MAX_USER_CONTEXT_CHARS) {
+		throw new Error("Image-bearing parent user context exceeds the text limit; choose latest or narrow the request to preserve text/image associations.");
+	}
+	return { mode, content: truncateMiddle(rendered, MAX_USER_CONTEXT_CHARS), images };
 }
 
 /** Build the sole user turn sent to the isolated child session.
@@ -118,14 +148,14 @@ function getMessage(entry: SessionEntry): Record<string, unknown> | undefined {
 	return asRecord(entry.message);
 }
 
-function extractText(content: unknown): string {
+function extractText(content: unknown, imageMarker?: (image: Record<string, unknown>) => string): string {
 	if (typeof content === "string") return content.trim();
 	if (!Array.isArray(content)) return "";
 	return content
 		.map((part) => {
 			const record = asRecord(part);
 			if (record?.type === "text" && typeof record.text === "string") return record.text;
-			if (record?.type === "image") return "[image attachment omitted]";
+			if (record?.type === "image") return imageMarker?.(record) ?? "";
 			return "";
 		})
 		.filter(Boolean)

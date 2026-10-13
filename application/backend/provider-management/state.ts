@@ -31,5 +31,6 @@ export function projectProviderManagementView(state: ProviderManagementState): P
   return { mode: 'management', providers: state.snapshot.providers, definitions: state.snapshot.definitions, protocols: state.snapshot.protocols,
     loaded: state.snapshot.loaded, draft: state.draft, flow: state.flow, status: !state.snapshot.loaded && state.flow.screen === 'choose' ? 'loading' : state.status,
     ...(state.snapshot.auth && state.snapshot.auth.operationId === state.authOperationId ? { auth: state.snapshot.auth } : {}),
+    ...(state.snapshot.authBrowser && state.snapshot.authBrowser.operationId === state.authOperationId ? { authBrowser: state.snapshot.authBrowser } : {}),
     ...(state.snapshot.error || state.message ? { message: state.snapshot.error || state.message } : {}) };
 }

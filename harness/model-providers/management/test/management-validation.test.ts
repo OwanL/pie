@@ -41,6 +41,9 @@ test('credentials are accepted only in bounded private request fields', () => {
 });
 test('snapshot mutation and optional callback metadata match core contracts', () => {
   assert.equal(snapshot(state), true);
+  const authBrowser = { operationId: 'op', url: 'https://login.invalid', instructions: 'Continue', code: 'PUBLIC' };
+  assert.equal(snapshot({ ...state, authBrowser }), true);
+  for (const extra of [{ token: 'secret' }, { access: 'secret' }, { refresh: 'secret' }, { code: 123 }, { url: 'x'.repeat(32769) }]) assert.equal(snapshot({ ...state, authBrowser: { ...authBrowser, ...extra } }), false);
   assert.equal(snapshot({ ...state, mutation: { operationId: 'op', phase: 'saving' } }), true);
   for (const auth of [{ kind: 'browser', operationId: 'op', url: 'https://example.invalid' }, { kind: 'input', operationId: 'op', promptId: 'p', message: 'Code' }, { kind: 'input', operationId: 'op', promptId: 'p', message: 'Code', placeholder: '', allowEmpty: false }]) assert.equal(snapshot({ ...state, auth }), true);
   for (const change of [{ apiKey: 'secret' }, { credentials: { token: 'secret' } }, { mutation: { operationId: 'op', phase: 'done' } }, { auth: { kind: 'browser', operationId: 'op', url: '', token: 'secret' } }, { auth: { kind: 'input', operationId: 'op', promptId: 'p', message: '', allowEmpty: 'yes' } }]) assert.equal(snapshot({ ...state, ...change }), false);

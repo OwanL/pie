@@ -32,8 +32,8 @@ function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
-function makeModelRegistry() {
-	const model = { id: "model-a", provider: "test", contextWindow: 128_000 } as any;
+function makeModelRegistry(input: string[] = ["text"]) {
+	const model = { id: "model-a", provider: "test", input, contextWindow: 128_000 } as any;
 	return {
 		getAvailable: () => [model],
 		getAll: () => [model],
@@ -52,7 +52,7 @@ function createFakeSdk(options?: {
 	const sessionId = `fake-child-${++fakeSessionSequence}`;
 	const listeners: Array<(event: any) => void> = [];
 	let releasePrompt: (() => void) | undefined;
-	const state: { resourceReloadCalls: number; createdModel?: { provider?: string; id?: string }; createdSessionManager?: object } = {
+	const state: { resourceReloadCalls: number; createdModel?: { provider?: string; id?: string }; createdSessionManager?: object; promptText?: string; promptOptions?: any } = {
 		resourceReloadCalls: 0,
 	};
 
@@ -64,7 +64,9 @@ function createFakeSdk(options?: {
 			listeners.push(cb);
 			return () => undefined;
 		},
-		prompt: async (_prompt: string) => {
+		prompt: async (_prompt: string, promptOptions?: any) => {
+			state.promptText = _prompt;
+			state.promptOptions = promptOptions;
 			if (options?.onPrompt) {
 				await options.onPrompt((event) => {
 					for (const listener of listeners) listener(event);
@@ -147,6 +149,46 @@ function successfulFakeSdk(options?: {
 		},
 	});
 }
+
+test("runner forwards parent images only through SDK prompt options", async () => {
+	const { sdk, state } = successfulFakeSdk();
+	const image = { type: "image" as const, data: "aW1hZ2UtcGF5bG9hZA==", mimeType: "image/png" };
+	const result = await runSingleAgent(
+		process.cwd(), [makeAgent()], "worker", "inspect", undefined, undefined,
+		undefined, undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(["text", "image"]), { id: "model-a", provider: "test", input: ["text", "image"] } as any, undefined, undefined, undefined, undefined,
+		undefined, undefined, { sdk: sdk as any }, undefined,
+		{ mode: "latest", content: "[Parent image 1]", images: [image] },
+	);
+	assert.deepEqual(state.promptOptions.images, [image]);
+	assert.notEqual(state.promptOptions.images[0], image);
+	state.promptOptions.images[0].data = "provider-mutated";
+	assert.equal(image.data, "aW1hZ2UtcGF5bG9hZA==");
+	assert.match(state.promptText!, /\[Parent image 1\]/);
+	assert.equal(state.promptText!.includes(image.data), false);
+	assert.equal(JSON.stringify(result).includes(image.data), false);
+	assert.equal(result.parentUserContext, "[Parent image 1]");
+});
+
+test("direct image packet fails closed on a text-only registry before session creation", async () => {
+	const { sdk, state } = successfulFakeSdk();
+	let created = false;
+	sdk.createSession = async () => { created = true; throw new Error("must not create"); };
+	const result = await runSingleAgent(
+		process.cwd(), [makeAgent()], "worker", "inspect", undefined, undefined,
+		undefined, undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(), undefined, undefined, undefined, undefined, undefined,
+		undefined, undefined, { sdk: sdk as any }, undefined,
+		{ mode: "latest", content: "[Parent image 1]", images: [{ type: "image", data: "payload", mimeType: "image/png" }] },
+	);
+	assert.equal(created, false);
+	assert.equal(state.promptText, undefined);
+	assert.equal(result.modelRequirementsSatisfied, false);
+	assert.deepEqual(result.requestedModelRequirements, { inputKinds: ["image"] });
+	assert.match(result.requirementDiagnostic!, /image-capable/);
+});
 
 test("child disposal removes its exact SDK output and recall stash files", async () => {
 	const rootSessionId = "private-root";

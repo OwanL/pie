@@ -4,6 +4,7 @@ import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { ProviderRuntimeReference, RuntimeEntryManager, RuntimeSnapshot } from './contracts';
 import { immutable, validNativeModel } from './projection';
+import { parseModelPricing } from '../pricing/pricing-core';
 
 const marker = 'pie-provider-runtime-v1';
 const maxBytes = 4 * 1024 * 1024;
@@ -21,7 +22,7 @@ function snapshot(value: unknown): RuntimeSnapshot {
   if (!exact(value, ['version', 'configRevision', 'models']) || value.version !== 1 || typeof value.configRevision !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.configRevision) || !Array.isArray(value.models) || value.models.length > 10000) throw failure();
   const identities = new Set<string>();
   for (const row of value.models) {
-    if (!exact(row, ['providerId', 'id', 'enabled', 'visible', 'subagentEligible', 'credential'], ['model', 'rejection', 'builtinHeaders'])
+    if (!exact(row, ['providerId', 'id', 'enabled', 'visible', 'subagentEligible', 'credential'], ['model', 'rejection', 'builtinHeaders', 'pricingFacts'])
       || typeof row.providerId !== 'string' || !row.providerId || typeof row.id !== 'string' || !row.id
       || !['enabled', 'visible', 'subagentEligible'].every(k => typeof row[k] === 'boolean')) throw failure();
     const identity = JSON.stringify([row.providerId, row.id]);
@@ -31,6 +32,12 @@ function snapshot(value: unknown): RuntimeSnapshot {
       || (c.source === 'environment' ? typeof c.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(c.name) : Object.hasOwn(c, 'name'))
       || (Object.hasOwn(c, 'scope') && (c.source !== 'saved' || typeof c.scope !== 'string'
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(c.scope)))) throw failure();
+    if (row.pricingFacts !== undefined) {
+      const parsed = parseModelPricing(row.pricingFacts);
+      if (!row.model || !parsed || JSON.stringify(parsed) !== JSON.stringify(row.pricingFacts)
+        || ['input', 'output', 'cacheRead', 'cacheWrite'].some(key =>
+          (row.model as any).cost?.[key] !== (parsed as any)[key])) throw failure();
+    }
     if (row.builtinHeaders !== undefined) {
       const proof = row.builtinHeaders;
       if (!row.model || !exact(proof, ['provider', 'id', 'sha256']) || proof.provider !== row.providerId

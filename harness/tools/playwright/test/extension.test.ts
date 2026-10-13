@@ -50,6 +50,8 @@ test('extension registers one sequential playwright tool and session-owned shutd
   assert.deepEqual(tool.parameters.properties.action.enum, ['open', 'observe', 'act', 'run_code', 'close']);
   assert.ok(typeof tool.promptSnippet === 'string' && tool.promptSnippet.length > 0);
   assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length >= 5, 'metadata must be sufficient for basic operation without the skill');
+  assert.ok(tool.promptGuidelines.some((guideline: string) => /invalid on open because open must return the initial observation/.test(guideline)));
+  assert.ok(tool.promptGuidelines.some((guideline: string) => /observation\.target.*not pass it with run_code/.test(guideline)));
   assert.equal(handlers.has('context'), false, 'playwright registers no image-filtering or replacement context handler');
   assert.ok(handlers.has('session_shutdown'));
 });

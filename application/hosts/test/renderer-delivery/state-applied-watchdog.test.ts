@@ -14,13 +14,16 @@ function recovery(reason: StateDeliveryRecovery['reason'], revision = 1): StateD
   return { reason, revision, viewGeneration: 2, desiredGeneration: 3 };
 }
 
-function harness() {
+function harness(onForceReload?: StateAppliedWatchdogDeps['onForceReload']) {
   const reloads: StateDeliveryRecovery[] = [];
   let now = 1_000;
   const deps: StateAppliedWatchdogDeps = {
     getHostInstanceId: () => 'host-test',
     getRunningSessionCount: () => 1,
-    onForceReload: async (value) => { reloads.push(value); },
+    onForceReload: async (value) => {
+      reloads.push(value);
+      await onForceReload?.(value);
+    },
     now: () => now,
   };
   return {
@@ -125,6 +128,39 @@ test('meaningful activity explicitly resets terminal reload suppression', async 
   assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 4)), true);
   await settle();
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT + 1);
+});
+
+test('rejected reloads release the in-flight gate without unhandled rejections or resetting the storm limit', async () => {
+  const h = harness(async () => { throw new Error('reload rejected'); });
+  for (let i = 0; i < STATE_APPLIED_RELOAD_LIMIT; i++) {
+    assert.equal(h.watchdog.handleRecovery(recovery('render-failure', i + 1)), true);
+    assert.equal(h.watchdog.handleRecovery(recovery('render-failure', i + 1)), false);
+    // Cross an event-loop turn so node:test observes any discarded rejected promise.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT);
+  assert.equal(h.watchdog.handleRecovery(recovery('render-failure')), false);
+  assert.equal(h.watchdog.getLastDecision(), 'throttled');
+  h.setNow(1_000 + STATE_APPLIED_RELOAD_WINDOW_MS + 1);
+  assert.equal(h.watchdog.handleRecovery(recovery('render-failure')), false);
+  assert.equal(h.watchdog.getLastDecision(), 'circuit-open');
+});
+
+test('rejected commit-timeout reload resets the provisional resnapshot episode', async () => {
+  const h = harness(async () => { throw new Error('reload rejected'); });
+  for (let i = 0; i < PROVISIONAL_COMMIT_RESNAPSHOT_MAX_RETRIES; i++) {
+    assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout')), false);
+  }
+  assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout')), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let i = 0; i < PROVISIONAL_COMMIT_RESNAPSHOT_MAX_RETRIES; i++) {
+    assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout')), false);
+    assert.equal(h.watchdog.getLastDecision(), 'resnapshot');
+  }
+  assert.equal(h.reloads.length, 1);
+  assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout')), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.reloads.length, 2);
 });
 
 test('direct throttle helper retains the rolling-window semantics', () => {

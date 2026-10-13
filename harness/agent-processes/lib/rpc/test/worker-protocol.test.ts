@@ -425,6 +425,52 @@ test('worker IPC carries the durable analytics branch shape through draft and de
   }
 });
 
+test('runtime promotion accepts optional provider captures and rejects malformed references', () => {
+  const frame = {
+    ...base, kind: 'runtime.promote', requestId: 'promote', operationId: 'operation-1',
+    payload: {
+      sdkPath: 'C:/sdk', sdkRuntime, agentDir: 'C:/agent', startupCwd: 'C:/work',
+      sessionDir: 'C:/sessions', sessionPath: base.leasePath, creationReason: 'resume',
+      writeLease: {
+        coordinatorGeneration: base.coordinatorGeneration, workerId: base.workerId,
+        workerGeneration: base.workerGeneration, canonicalSessionPath: base.leasePath,
+        ownershipRevision: base.leaseRevision, nonce: 'source-nonce',
+      },
+      openedPayload: {}, modelSettings: {},
+    },
+  };
+  const runtime = {
+    artifactDir: path.resolve('captures'), credentialFile: path.resolve('credentials.json'),
+    reference: { version: 1, sha256: 'a'.repeat(64) },
+  };
+  const check = (candidate: typeof frame) => {
+    const { seq: _seq, ...draft } = candidate;
+    return [validateWorkerIpcFrameDraft(draft), parseCoordinatorToWorkerFrame(candidate, expected)];
+  };
+  assert.equal(check(frame)[0], undefined, 'legacy promotion drafts remain valid');
+  assert.equal(parseCoordinatorToWorkerFrame(frame, expected).status, 'accepted');
+  const captured = { ...frame, payload: { ...frame.payload, providerRuntime: runtime } };
+  assert.equal(check(captured)[0], undefined);
+  assert.equal(parseCoordinatorToWorkerFrame(captured, expected).status, 'accepted');
+  const malformed = [
+    null, [], {}, { ...runtime, extra: true },
+    ...['artifactDir', 'credentialFile'].flatMap(key =>
+      ['', 'relative/path', '/bad\u0000path', `/${'a'.repeat(4096)}`, 7].map(value => ({ ...runtime, [key]: value }))),
+    ...[null, [], {}, { version: 2, sha256: 'a'.repeat(64) },
+      { version: 1, sha256: 'A'.repeat(64) }, { version: 1, sha256: 'a'.repeat(63) },
+      { version: 1, sha256: 7 }, { ...runtime.reference, extra: true },
+    ].map(reference => ({ ...runtime, reference })),
+  ];
+  for (const providerRuntime of malformed) {
+    const candidate = { ...frame, payload: { ...frame.payload, providerRuntime } };
+    const { seq: _seq, ...draft } = candidate;
+    assert.match(validateWorkerIpcFrameDraft(draft) ?? '', /providerRuntime/);
+    const result = parseCoordinatorToWorkerFrame(candidate, expected);
+    assert.equal(result.status, 'invalid');
+    if (result.status === 'invalid') assert.match(result.detail, /providerRuntime/);
+  }
+});
+
 test('SDK runtime selection is source-only and required on bootstrap and promotion', () => {
   const bootstrap = { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkRuntime };
   assert.equal(parseCoordinatorToWorkerFrame(bootstrap, expected).status, 'accepted');

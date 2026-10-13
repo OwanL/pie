@@ -1,0 +1,77 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
+import { installDom } from '../helpers/dom';
+import { ComposerSettingsMenu } from '../../settings/settings-menu';
+import { createInitialArchState, reducer } from '../../../backend/conversation-state/reducer';
+import { projectProviderManagementView } from '../../../backend/provider-management/state';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index';
+import type { ProviderSetupCommand } from '../../../lib/protocol/provider-setup-preview';
+installDom();
+
+test('Settings suspension preserves host OAuth/save ownership but clears detached secret inputs', () => {
+  const container = document.createElement('div'); document.body.append(container);
+  let state = createInitialArchState();
+  state = { ...state, settings: { ...state.settings, backendReady: true }, providerManagement: { ...state.providerManagement, generation: 1, snapshot: { revision: 0, configRevision: null, loaded: true, protocols: [], providers: [], definitions: [{ id: 'openai', name: 'OpenAI', kind: 'openai', api: 'openai-completions', baseUrl: '', authMethods: ['api-key', 'oauth'], discovery: 'unsupported' }] } } };
+  let serial = 0;
+  const command = (value: ProviderSetupCommand) => { state = reducer(state, { kind: 'Command', cmd: { kind: 'ProviderManagement', generation: 1, operationId: `op-${++serial}`, corrId: 'test', command: value } }).state; update(); };
+  const update = () => act(() => render(h(ComposerSettingsMenu, { prefs: DEFAULT_CHAT_PREFS, pruningSettings: DEFAULT_PRUNING_SETTINGS, pruningCatalog: { skills: [], tools: [] }, pruningResult: null, toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, availableExtensions: [], availableModels: [], providerGateStats: EMPTY_PROVIDER_GATE_STATS, mcpServers: [], mcpPendingApply: false, onSetPrefs() {}, onMcpListRequested() {}, onMcpSetServerEnabled() {}, onSetPruningSettings() {}, onSetToolResultPruningSettings() {}, providerManagement: { view: projectProviderManagementView(state.providerManagement), onCommand: command } }), container));
+  const click = (selector: string) => act(() => (document.querySelector(selector) as HTMLButtonElement).click());
+  const push = (revision: number, operationId: string) => { state = reducer(state, { kind: 'ProviderManagementSnapshotUpdated', generation: 1, snapshot: { ...state.providerManagement.snapshot, revision, auth: { kind: 'input', operationId, promptId: 'prompt', message: 'Code', allowEmpty: false } } }).state; update(); };
+  try {
+    update(); click('.toolbar-settings-trigger'); click('[data-tab=providers]');
+    command({ type: 'add' }); command({ type: 'choose', kind: 'openai' });
+    assert.equal(state.providerManagement.flow.navigationOrigin, 'chooser');
+    click('[data-tab=chat]'); click('[data-tab=providers]');
+    const back = () => act(() => (Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview button')).find(button => button.textContent === 'Back')!).click());
+    back(); assert.equal(state.providerManagement.flow.screen, 'choose');
+    for (const type of ['edit', 'models'] as const) {
+      command({ type, id: 'openai' });
+      assert.equal(state.providerManagement.flow.navigationOrigin, 'home');
+      click('[data-tab=chat]'); click('[data-tab=providers]');
+      back(); assert.equal(state.providerManagement.flow.screen, 'manage');
+      assert.equal(state.providerManagement.draft, null);
+    }
+    command({ type: 'add' }); command({ type: 'choose', kind: 'openai' });
+    const key = document.querySelector<HTMLInputElement>('input[type=password]')!; key.value = 'private-key';
+    click('[data-tab=chat]'); assert.equal(key.value, '');
+    click('[data-tab=providers]');
+    state = reducer(state, { kind: 'Command', cmd: { kind: 'ProviderManagementConnect', generation: 1, operationId: 'login', corrId: 'login', method: 'oauth' } }).state;
+    push(1, 'login');
+    const input = document.querySelector<HTMLInputElement>('.provider-setup-preview-auth input')!; input.value = 'private-code';
+    click('.toolbar-settings-close'); assert.equal(input.value, '');
+    assert.equal(state.providerManagement.authOperationId, 'login');
+    push(2, 'login');
+    assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
+    click('.toolbar-settings-trigger');
+    assert.ok(document.querySelector('.provider-setup-preview-auth input'));
+    assert.equal(document.activeElement, document.querySelector('.toolbar-settings-search-input'));
+    click('[data-tab=chat]'); click('[data-tab=providers]');
+    assert.equal(state.providerManagement.authOperationId, 'login');
+    const cancel = Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview button')).find(button => button.textContent === 'Cancel')!;
+    act(() => cancel.click());
+    assert.equal(state.providerManagement.authOperationId, null);
+    assert.equal(state.providerManagement.flow.screen, 'manage');
+    command({ type: 'choose', kind: 'openai' });
+    push(3, 'login'); assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
+    command({ type: 'manual-model-add', id: 'manual' });
+    command({ type: 'model-preference', id: 'manual', field: 'visible', value: 'no' });
+    command({ type: 'refresh', id: 'openai' });
+    const refreshOwner = state.providerManagement.operationId!;
+    const refreshFence = state.providerManagement.refreshFence;
+    click('[data-tab=chat]');
+    state = reducer(state, { kind: 'ProviderManagementResult', generation: 1, fence: refreshFence, selectedId: null, requestType: 'refresh', response: { operationId: refreshOwner, status: 'ok', snapshot: { ...state.providerManagement.snapshot, revision: 4 }, draft: { ...state.providerManagement.draft!, models: [] } } }).state;
+    update(); click('[data-tab=providers]');
+    assert.equal(state.providerManagement.draft?.models[0]?.id, 'manual');
+    assert.equal(state.providerManagement.draft?.models[0]?.visible, 'no');
+    command({ type: 'save' });
+    const owner = state.providerManagement.operationId!;
+    const fence = state.providerManagement.refreshFence;
+    click('[data-tab=chat]'); click('.toolbar-settings-close');
+    state = reducer(state, { kind: 'ProviderManagementResult', generation: 1, fence, selectedId: null, requestType: 'save', response: { operationId: owner, status: 'ok', snapshot: { ...state.providerManagement.snapshot, revision: 4 } } }).state;
+    update(); assert.equal(state.providerManagement.status, 'saved');
+    click('.toolbar-settings-trigger'); click('[data-tab=providers]');
+    assert.equal(state.providerManagement.status, 'saved');
+  } finally { act(() => render(null, container)); container.remove(); }
+});

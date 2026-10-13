@@ -8,7 +8,7 @@ import { ComposerSettingsMenu } from '../../settings/settings-menu';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
 import type { ProviderSetupPreviewView, ProviderSetupCommand } from '../../../lib/protocol/provider-setup-preview';
 
-test('management tab is always available with props; actions and native cancellation keep parent settings open', () => {
+test('management tab integrates inline navigation, Escape, tab switching and Settings closing', () => {
   const container = document.createElement('div'); document.body.append(container);
   const commands: ProviderSetupCommand[] = [];
   const view: ProviderSetupPreviewView = { mode: 'management', providers: [{ id: 'opaque', name: 'Friendly provider', configured: true, enabled: true, modelCount: 2 }], protocols: [], definitions: [{ id: 'opaque', name: 'Friendly provider', kind: 'custom', api: 'test', baseUrl: '', authMethods: ['local'], discovery: 'unsupported' }], loaded: true, draft: null, status: 'idle' };
@@ -21,15 +21,46 @@ test('management tab is always available with props; actions and native cancella
     for (const label of ['Edit', 'Models', 'Refresh', 'Add provider']) act(() => Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview-home button')).find(button => button.textContent === label)!.click());
     assert.deepEqual(commands.map(command => command.type), ['edit', 'models', 'refresh', 'add']);
     view.flow = { open: true, screen: 'choose' }; update();
-    const modal = document.querySelector('dialog')!;
-    act(() => { modal.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
-    act(() => { modal.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true })); });
-    assert.equal(commands.at(-1)?.type, 'close');
+    const page = document.querySelector('.provider-setup-preview-inline')!;
+    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.querySelector('[role=tabpanel]')!.contains(page));
+    act(() => { page.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
     assert.ok(document.querySelector('.toolbar-settings-menu'));
-    assert.doesNotMatch(modal.textContent!, /Demo/);
+    assert.doesNotMatch(page.textContent!, /Demo/);
+    const escape = () => act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    escape();
+    assert.equal(commands.at(-1)?.type, 'back');
+    assert.ok(document.querySelector('.toolbar-settings-menu'));
     view.status = 'connecting'; update();
-    act(() => { modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    escape();
     assert.equal(commands.at(-1)?.type, 'cancel');
     assert.ok(document.querySelector('.toolbar-settings-menu'));
+
+    // Switching tabs unmounts the subpage without dismissing Settings or
+    // leaving its capture-phase Escape listener behind.
+    const count = commands.length;
+    click('[data-tab=chat]');
+    assert.equal(document.querySelector('.provider-setup-preview-inline'), null);
+    assert.ok(document.querySelector('.toolbar-settings-menu'));
+    assert.equal(commands.length, count);
+    click('[data-tab=providers]');
+    assert.ok(document.querySelector('.provider-setup-preview-inline'));
+    click('.toolbar-settings-close');
+    assert.equal(document.querySelector('.toolbar-settings-menu'), null);
+    escape();
+    assert.equal(commands.length, count);
+
+    view.status = 'idle'; view.flow = { open: false, screen: 'manage' }; update();
+    click('.toolbar-settings-trigger'); click('[data-tab=providers]');
+    const edit = Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview-home button')).find(button => button.textContent === 'Edit')!;
+    act(() => { edit.focus(); edit.click(); });
+    view.flow = { open: true, screen: 'connect' }; update();
+    escape();
+    assert.equal(commands.at(-1)?.type, 'close');
+    assert.ok(document.querySelector('.toolbar-settings-menu'));
+    view.flow = { open: false, screen: 'manage' }; update();
+    assert.equal(document.activeElement?.textContent, 'Edit');
+    escape();
+    assert.equal(document.querySelector('.toolbar-settings-menu'), null);
   } finally { act(() => render(null, container)); container.remove(); }
 });

@@ -6,14 +6,16 @@ const fingerprint = (value: unknown): string => {
 };
 import { readProviderConfig, providerProtocolOptions, type ProviderConfig } from '../catalog/provider-config';
 import { editProviderConfig } from '../catalog/provider-config-writer';
-import { resolveProviderModelList, type ProviderCatalogSnapshot } from '../catalog/provider-model-resolution';
+import { resolveProviderModelList, type ProviderCatalogSnapshot, type ShippedProviderDefinition } from '../catalog/provider-model-resolution';
 import { createProviderSetupDraft, prepareProviderSetupSave } from './drafts';
-import { discoverModels, invalidateDiscoveryCache, loadDiscoveryCache, saveDiscoveryCache } from './discovery';
+import { discoverModels, normalizeOllamaBaseUrl, invalidateDiscoveryCache, loadDiscoveryCache, saveDiscoveryCache } from './discovery';
 import type { ProviderManagementAuthPort, StagedProviderCredential } from './auth-port';
 import type { ProviderManagementRequest, ProviderManagementResponse, ProviderManagementSnapshot, ProviderAuthPrompt } from './contracts';
 
 export function createProviderManagementService(options: { configFile: string; modelCacheDir: string; auth: ProviderManagementAuthPort;
   fetch?: typeof globalThis.fetch; readEnvironment?: (name: string) => string | undefined; now?: () => number;
+  shipped?: (provider: string) => ShippedProviderDefinition | undefined;
+  captureShippedCatalog?: () => Readonly<Record<string, ShippedProviderDefinition>>;
   invalidateCache?: typeof invalidateDiscoveryCache;
   onSnapshot?: (snapshot: ProviderManagementSnapshot) => void }) {
   const definitions = options.auth.definitions();
@@ -21,6 +23,7 @@ export function createProviderManagementService(options: { configFile: string; m
   let config: ProviderConfig = { version: 1, providers: {} }, configRevision: string | null = null;
   let loaded = false, revision = 0, error: string | undefined, auth: ProviderAuthPrompt | undefined, disposed = false;
   let mutation: ProviderManagementSnapshot['mutation'];
+  let authBrowser: ProviderManagementSnapshot['authBrowser'];
   const discovered: Record<string, ProviderCatalogSnapshot> = Object.create(null);
   const discoveryProvenance: Record<string, string> = Object.create(null);
   const discoveryEpoch: Record<string, number> = Object.create(null);
@@ -28,7 +31,14 @@ export function createProviderManagementService(options: { configFile: string; m
   const operations = new Map<string, { intent: string; promise: Promise<ProviderManagementResponse>; controller: AbortController }>();
   const prompts = new Map<string, { operationId: string; resolve: (value: string) => void; reject: () => void }>();
   let promptCounter = 0, activeLogin: string | undefined;
-  const list = () => resolveProviderModelList({ config, discovered });
+  const list = () => {
+    const shipped: Record<string, ShippedProviderDefinition> = Object.create(null);
+    for (const id of Object.keys(config.providers)) {
+      const definition = options.shipped?.(id);
+      if (definition) shipped[id] = definition;
+    }
+    return resolveProviderModelList({ config, discovered, shipped });
+  };
   const own = <T>(record: Record<string, T>, id: string): T | undefined => Object.hasOwn(record, id) ? record[id] : undefined;
   let daoTail: Promise<unknown> = Promise.resolve();
   const dao = <T>(work: () => Promise<T>): Promise<T> => {
@@ -43,7 +53,7 @@ export function createProviderManagementService(options: { configFile: string; m
       return { id, name, configured: !!entry, enabled: entry?.enabled === true, modelCount: Object.keys(own(catalog.providers, id)?.models ?? {}).length,
         credentials: entry?.credentialRef?.source === 'none' ? 'none' : entry?.credentialRef?.source === 'environment' ? 'environment' : options.auth.hasSavedCredential(id) ? 'saved' : entry?.credentialRef?.source === 'saved' ? 'missing' : 'default',
         discovery: own(states, id) ?? (supported(id) === 'unsupported' ? 'unsupported' : 'idle') };
-    }), ...(auth ? { auth: structuredClone(auth) } : {}), ...(mutation ? { mutation: { ...mutation } } : {}), ...(error ? { error } : {}) }); };
+    }), ...(auth ? { auth: structuredClone(auth) } : {}), ...(authBrowser ? { authBrowser: { ...authBrowser } } : {}), ...(mutation ? { mutation: { ...mutation } } : {}), ...(error ? { error } : {}) }); };
   const publish = () => { revision++; try { options.onSnapshot?.(snapshot()); } catch { /* observer cannot fail an operation */ } };
   const result = (operationId: string, status: ProviderManagementResponse['status'], draft?: ProviderManagementResponse['draft']): ProviderManagementResponse => ({ operationId, status, snapshot: snapshot(), ...(draft ? { draft } : {}) });
   const supported = (id: string) => {
@@ -55,7 +65,7 @@ export function createProviderManagementService(options: { configFile: string; m
   const provenance = (id: string) => {
     const entry = own(config.providers, id);
     const definition = definitions.find(d => d.id === id);
-    return JSON.stringify({ api: entry?.api, baseUrl: entry?.baseUrl, credentialRef: entry?.credentialRef,
+    return JSON.stringify({ api: entry?.api, baseUrl: definition?.discovery === 'ollama' && entry?.baseUrl ? normalizeOllamaBaseUrl(entry.baseUrl) : entry?.baseUrl, credentialRef: entry?.credentialRef,
       integration: definition ? { id: definition.id, discovery: definition.discovery } : supported(id) });
   };
   let running = 0;
@@ -77,12 +87,12 @@ export function createProviderManagementService(options: { configFile: string; m
       timer = setTimeout(() => controller.abort(), 10_000);
       const effect = async () => {
         const entry = config.providers[id], definition = definitions.find(d => d.id === id);
-        const key = entry.credentialRef?.source === 'environment' ? options.readEnvironment?.(entry.credentialRef.name)
+        const key = definition?.discovery === 'ollama' ? undefined : entry.credentialRef?.source === 'environment' ? options.readEnvironment?.(entry.credentialRef.name)
           : entry.credentialRef?.source === 'saved' ? await options.auth.getApiKey(id) : undefined;
         const configuredBaseUrl = entry.baseUrl ?? definition?.baseUrl ?? '';
-        const baseUrl = entry.credentialRef?.source === 'saved'
+        const baseUrl = definition?.discovery !== 'ollama' && entry.credentialRef?.source === 'saved'
           ? await options.auth.discoveryBaseUrl(id, configuredBaseUrl) : configuredBaseUrl;
-        return discoverModels({ kind: supported(id) as 'openai' | 'copilot', baseUrl, key, fetch: options.fetch ?? globalThis.fetch, signal: controller.signal });
+        return discoverModels({ kind: supported(id) as 'openai' | 'copilot' | 'ollama', baseUrl, key, fetch: options.fetch ?? globalThis.fetch, signal: controller.signal });
       };
       const observed = await Promise.race([effect(), new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true }))]);
       if (disposed || controller.signal.aborted || epoch !== (own(discoveryEpoch, id) ?? 0) || stamp !== provenance(id)) return;
@@ -109,10 +119,13 @@ export function createProviderManagementService(options: { configFile: string; m
     }
     publish(); return true;
   });
+  const clearPrompts = (id: string) => {
+    for (const [key, prompt] of prompts) if (prompt.operationId === id) { prompts.delete(key); prompt.reject(); }
+  };
   const cancel = (id: string) => {
     operations.get(id)?.controller.abort();
-    for (const [key, prompt] of prompts) if (prompt.operationId === id) { prompts.delete(key); prompt.reject(); }
-    if (activeLogin === id) { activeLogin = undefined; auth = undefined; publish(); }
+    clearPrompts(id);
+    if (activeLogin === id) { activeLogin = undefined; auth = undefined; authBrowser = undefined; publish(); }
   };
   const execute = async (request: ProviderManagementRequest, controller: AbortController): Promise<ProviderManagementResponse> => {
     const id = request.operationId;
@@ -150,15 +163,25 @@ export function createProviderManagementService(options: { configFile: string; m
         if (!request.apiKey?.trim()) { error = 'Enter an API key.'; publish(); return result(id, 'error'); }
         credential = { type: 'api_key', key: request.apiKey };
       } else if (request.method === 'oauth') {
-        activeLogin = id;
+        activeLogin = id; auth = undefined; authBrowser = undefined;
         const current = () => !disposed && !controller.signal.aborted && activeLogin === id;
-        const emit = (value: ProviderAuthPrompt) => { if (current()) { auth = value; publish(); } };
-        const prompt = (value: { kind: 'input'; message: string; placeholder?: string; allowEmpty?: boolean } | { kind: 'select'; message: string; options: { id: string; label: string }[] }) => new Promise<string>((resolve, reject) => {
-          if (!current()) { reject(new Error('Cancelled')); return; }
-          const promptId = `${id}:${++promptCounter}`;
-          prompts.set(promptId, { operationId: id, resolve, reject: () => reject(new Error('Cancelled')) });
-          emit({ ...value, operationId: id, promptId });
-        });
+        const emit = (value: ProviderAuthPrompt) => { if (current()) {
+          auth = value;
+          if (value.kind === 'browser') authBrowser = { operationId: id, url: value.url, ...(value.instructions !== undefined ? { instructions: value.instructions } : {}) };
+          if (value.kind === 'device') authBrowser = { operationId: id, url: value.url, code: value.code };
+          publish();
+        } };
+        const prompt = (value: { kind: 'input'; message: string; placeholder?: string; allowEmpty?: boolean } | { kind: 'select'; message: string; options: { id: string; label: string }[] }) => {
+          const pending = new Promise<string>((resolve, reject) => {
+            if (!current()) { reject(new Error('Cancelled')); return; }
+            const promptId = `${id}:${++promptCounter}`;
+            prompts.set(promptId, { operationId: id, resolve, reject: () => reject(new Error('Cancelled')) });
+            emit({ ...value, operationId: id, promptId });
+          });
+          // The SDK may complete a login without awaiting every optional prompt callback.
+          void pending.catch(() => {});
+          return pending;
+        };
         try {
           const staged = options.auth.stageOAuthLogin(request.draft.id, { signal: controller.signal,
             onAuth: value => emit({ kind: 'browser', operationId: id, url: value.url, ...(value.instructions !== undefined ? { instructions: value.instructions } : {}) }),
@@ -170,8 +193,11 @@ export function createProviderManagementService(options: { configFile: string; m
             onProgress: () => emit({ kind: 'progress', operationId: id, message: 'Connecting to provider…' }) });
           credential = await Promise.race([staged, new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true }))]);
           if (!current()) return result(id, 'cancelled');
-        } catch { if (controller.signal.aborted) return result(id, 'cancelled'); error = 'Provider sign-in failed. Try again.'; publish(); return result(id, 'error'); }
-        finally { if (activeLogin === id) { activeLogin = undefined; auth = undefined; publish(); } }
+        } catch { if (activeLogin === id) { activeLogin = undefined; auth = undefined; authBrowser = undefined; publish(); } if (controller.signal.aborted) return result(id, 'cancelled'); error = 'Provider sign-in failed. Try again.'; publish(); return result(id, 'error'); }
+        finally {
+          clearPrompts(id);
+          if (activeLogin === id) { activeLogin = undefined; auth = undefined; authBrowser = undefined; publish(); }
+        }
       }
     }
     if (controller.signal.aborted || disposed) return result(id, 'cancelled');
@@ -181,6 +207,13 @@ export function createProviderManagementService(options: { configFile: string; m
     const draft = request.type === 'connect' && request.method === 'local'
       ? { ...request.draft, credentialSource: 'none' as const, environmentName: '' }
       : credential ? { ...request.draft, credentialSource: 'saved' as const, environmentName: '' } : request.draft;
+    if (draft.id === 'ollama') {
+      if (draft.api !== 'openai-completions' || !['none', 'default'].includes(draft.credentialSource)) {
+        error = 'Ollama uses the daemon connection and its existing sign-in, not API credentials.'; publish(); return result(id, 'error');
+      }
+      draft.baseUrl = normalizeOllamaBaseUrl(draft.baseUrl);
+      draft.credentialSource = 'none';
+    }
     const prepared = prepareProviderSetupSave(config, draft);
     if (prepared.status !== 'valid') { error = 'Provider settings are invalid. Check identity, endpoint and model settings.'; publish(); return result(id, 'error'); }
     mutation = { operationId: id, phase: 'saving' }; publish();
@@ -224,11 +257,14 @@ export function createProviderManagementService(options: { configFile: string; m
           const definition = definitions.find(d => d.id === id);
           const integration = definition ? { id: definition.id, discovery: definition.discovery }
             : entry.api === 'openai-completions' || entry.api === 'openai-responses' ? 'openai' : 'unsupported';
-          const stamp = JSON.stringify({ api: entry.api, baseUrl: entry.baseUrl, credentialRef: entry.credentialRef, integration });
+          const stamp = JSON.stringify({ api: entry.api, baseUrl: definition?.discovery === 'ollama' && entry.baseUrl ? normalizeOllamaBaseUrl(entry.baseUrl) : entry.baseUrl, credentialRef: entry.credentialRef, integration });
           const observed = await loadDiscoveryCache(options.modelCacheDir, id, stamp);
           if (observed) cached[id] = observed;
+          if (definition?.discovery === 'ollama' && entry.baseUrl) {
+            runtimeConfig.providers[id].baseUrl = normalizeOllamaBaseUrl(entry.baseUrl);
+          }
           const nativeModels = runtimeModels.filter(model => model.provider === id);
-          if (nativeModels.length && definition && definition.kind !== 'custom') {
+          if (nativeModels.length && definition && definition.kind !== 'custom' && definition.kind !== 'ollama') {
             // Saved native template defaults are not per-model overrides. Native models
             // can use different protocols, and OAuth can select an account-specific endpoint.
             if (entry.api === definition.api) delete runtimeConfig.providers[id].api;
@@ -249,7 +285,7 @@ export function createProviderManagementService(options: { configFile: string; m
         }
         return captureProviderRuntimeProjection({ config: runtimeConfig, configRevision: read.revision!, legacyModels: runtimeModels,
           builtinModels: typeof builtinModels === 'function' ? builtinModels() : builtinModels,
-          discovered: cached, credentialScopes });
+          shippedCatalog: options.captureShippedCatalog?.(), discovered: cached, credentialScopes });
       });
     },
     request(request: ProviderManagementRequest): Promise<ProviderManagementResponse> {

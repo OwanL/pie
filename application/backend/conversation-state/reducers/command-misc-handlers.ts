@@ -995,7 +995,9 @@ export function handleMcpSetServerEnabled(state: ArchState, cmd: Extract<Command
  *  transition. */
 export function handleMcpSetServerEnabledForSession(state: ArchState, cmd: Extract<Command, { kind: 'McpSetServerEnabledForSession' }>): ReducerResult {
   const previous = state.settings.mcpSessionOverridesBySession[cmd.sessionPath] ?? {};
-  const overrides: Record<string, boolean> = { ...previous, [cmd.name]: !cmd.enabled };
+  const overrides: Record<string, boolean> = Object.fromEntries(Object.entries(previous).filter(([, disabled]) => disabled === true));
+  if (cmd.enabled) delete overrides[cmd.name];
+  else overrides[cmd.name] = true;
   const recycle = !state.sessions.runningSessionPaths.includes(cmd.sessionPath);
   return {
     state: {

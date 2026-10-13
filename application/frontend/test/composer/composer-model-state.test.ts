@@ -12,6 +12,30 @@ test('resolveComposerModelState uses high as the defensive new-session reasoning
   assert.equal(state.selectedLevel, 'high');
 });
 
+test('resolveComposerModelState does not display the global default for an empty session catalog', () => {
+  const state = resolveComposerModelState({
+    modelSettings: { defaultModel: 'glm-5.2', defaultProvider: 'z.ai', defaultThinkingLevel: 'high' },
+    availableModels: [],
+  });
+
+  assert.equal(state.selectedModel, '');
+  assert.equal(state.selectedProvider, undefined);
+  assert.equal(state.selectedModelInfo, undefined);
+});
+
+test('resolveComposerModelState retains an explicit session model with an empty catalog', () => {
+  const state = resolveComposerModelState({
+    activeModelId: 'glm-5.2',
+    activeProvider: 'z.ai',
+    modelSettings: { defaultModel: 'other-model', defaultProvider: 'other-provider', defaultThinkingLevel: 'high' },
+    availableModels: [],
+  });
+
+  assert.equal(state.selectedModel, 'glm-5.2');
+  assert.equal(state.selectedProvider, 'z.ai');
+  assert.equal(state.selectedModelInfo, undefined);
+});
+
 test('resolveComposerModelState prefers the active session model over the global default', () => {
   const state = resolveComposerModelState({
     activeModelId: 'gemini-2.5-pro',

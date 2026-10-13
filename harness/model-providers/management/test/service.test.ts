@@ -9,7 +9,8 @@ import { discoverModels, parseOpenAIModels, loadDiscoveryCache, saveDiscoveryCac
 import { createPiProviderAuth } from '../pi-auth';
 const draft = { originalId: null, id: 'local', enabled: false, api: 'openai-completions', baseUrl: 'http://localhost:1234/v1', credentialSource: 'default' as const, environmentName: '', models: [], manualModelIds: ['manual'] };
 async function fixture(authChanges: Partial<ProviderManagementAuthPort> = {}, fetcher?: typeof fetch, onSnapshot?: Parameters<typeof createProviderManagementService>[0]['onSnapshot'],
-  invalidateCache?: Parameters<typeof createProviderManagementService>[0]['invalidateCache']) {
+  invalidateCache?: Parameters<typeof createProviderManagementService>[0]['invalidateCache'],
+  shipped?: Parameters<typeof createProviderManagementService>[0]['shipped']) {
   const dir = await mkdtemp(join(tmpdir(), 'pie-provider-core-'));
   const auth: ProviderManagementAuthPort = { definitions: () => [], hasSavedCredential: () => false,
     stageOAuthLogin: async () => ({ type: 'oauth', access: 'private', refresh: 'private', expires: 1 }), saveCredential: async () => {},
@@ -17,9 +18,44 @@ async function fixture(authChanges: Partial<ProviderManagementAuthPort> = {}, fe
   const configFile = join(dir, 'providers.yaml');
   const modelCacheDir = join(dir, 'cache');
   const service = createProviderManagementService({ configFile, modelCacheDir, auth,
-    onSnapshot, invalidateCache, fetch: fetcher ?? (async () => { throw new Error('No network expected'); }) });
+    onSnapshot, invalidateCache, shipped, fetch: fetcher ?? (async () => { throw new Error('No network expected'); }) });
   return { service, configFile, modelCacheDir, close: async () => { service.dispose(); await rm(dir, { recursive: true, force: true }); } };
 }
+test('configured Codex lists offline shipped models with unknown account listing and preserves overrides', async () => {
+  let credentials = 0, network = 0;
+  const requested: string[] = [];
+  const f = await fixture({ definitions: () => [{ id: 'openai-codex', name: 'Codex', kind: 'chatgpt',
+    api: 'openai-codex-responses', baseUrl: 'https://example.com', authMethods: ['oauth'], discovery: 'unsupported' }],
+    hasSavedCredential: () => true,
+    getApiKey: async () => { credentials++; throw new Error('unexpected'); },
+    discoveryBaseUrl: async () => { credentials++; throw new Error('unexpected'); }
+  }, async () => { network++; throw new Error('unexpected'); }, undefined, undefined, id => {
+    requested.push(id);
+    return { models: { shipped: { name: 'Public', contextWindow: 1000 }, extra: { name: 'Extra' } } };
+  });
+  try {
+    await writeFile(f.configFile, JSON.stringify({ version: 1, providers: { 'openai-codex': {
+      enabled: true, credentialRef: { source: 'saved' }, manualModels: ['manual'],
+      modelOverrides: { shipped: { name: 'Override' } }, modelPreferences: { shipped: { visible: false } }
+    } } }));
+    const read = await f.service.request({ type: 'read', operationId: 'offline' });
+    assert.deepEqual(read.snapshot.providers.map(p => [p.id, p.modelCount, p.discovery]), [['openai-codex', 3, 'unsupported']]);
+    const detail = await f.service.request({ type: 'read-provider', operationId: 'detail', id: 'openai-codex' });
+    const model = detail.draft!.models.find(m => m.id === 'shipped')!;
+    assert.equal(model.name, 'Override'); assert.equal(model.visible, 'no');
+    assert.equal(credentials, 0); assert.equal(network, 0);
+    assert.ok(requested.every(id => id === 'openai-codex'));
+    const stamp = JSON.stringify({ api: undefined, baseUrl: undefined, credentialRef: { source: 'saved' },
+      integration: { id: 'openai-codex', discovery: 'unsupported' } });
+    await saveDiscoveryCache(f.modelCacheDir, 'openai-codex', stamp, { kind: 'public', complete: false,
+      freshness: 'fresh', models: { shipped: { name: 'Discovered', contextWindow: 2000 }, extra: { name: 'Discovered Extra' } } }, Date.now());
+    const cached = await f.service.request({ type: 'read-provider', operationId: 'cached', id: 'openai-codex' });
+    assert.equal(cached.draft!.models.find(m => m.id === 'extra')!.name, 'Discovered Extra');
+    assert.equal(cached.draft!.models.find(m => m.id === 'shipped')!.name, 'Override');
+    assert.equal(credentials, 0); assert.equal(network, 0);
+  } finally { await f.close(); }
+});
+
 test('environment discovery does not inherit stored OAuth account routing', async () => {
   let savedLookups = 0, endpointLookups = 0, requestedUrl = '';
   const f = await fixture({ definitions: () => [{ id: 'github-copilot', name: 'Copilot', kind: 'copilot',
@@ -92,6 +128,55 @@ test('OAuth callback snapshots whitelist SDK fields before publishing', async ()
     await f.service.request({ type: 'cancel', operationId: 'cancel-oauth', targetOperationId: 'oauth' });
     await Promise.all([assert.rejects(input), assert.rejects(select)]);
     assert.equal((await pending).status, 'cancelled');
+  } finally { await f.close(); }
+});
+test('synchronous browser then manual code retains public context and clears terminal state', async () => {
+  for (const outcome of ['success', 'failure', 'cancel'] as const) {
+    let ready!: () => void;
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    const snapshots: import('../contracts').ProviderManagementSnapshot[] = [];
+    const f = await fixture({ definitions: () => [{ id: 'local', name: 'Test', kind: 'custom', api: draft.api, baseUrl: draft.baseUrl, authMethods: ['oauth'], discovery: 'unsupported' }],
+      stageOAuthLogin: async (_, cb) => {
+        (cb.onAuth as any)({ url: 'https://login.invalid', instructions: 'Continue', token: 'SECRET' });
+        const input = cb.onManualCodeInput!(); ready();
+        await input;
+        cb.onProgress!('SECRET');
+        if (outcome === 'failure') throw new Error('SECRET');
+        return { type: 'oauth', access: 'SECRET', refresh: 'SECRET', expires: 1 };
+      } }, undefined, value => snapshots.push(value));
+    try {
+      const pending = f.service.request({ type: 'connect', operationId: outcome, expectedRevision: null, draft, method: 'oauth' });
+      await started;
+      const current = snapshots.at(-1)!;
+      assert.equal(current.auth?.kind, 'input');
+      assert.deepEqual(current.authBrowser, { operationId: outcome, url: 'https://login.invalid', instructions: 'Continue' });
+      assert.equal(JSON.stringify(current).includes('SECRET'), false);
+      if (outcome === 'cancel') await f.service.request({ type: 'cancel', operationId: 'cancel-request', targetOperationId: outcome });
+      else await f.service.request({ type: 'auth-response', operationId: 'answer', targetOperationId: outcome, promptId: `${outcome}:1`, value: 'private-code' });
+      const terminal = await pending;
+      assert.equal(terminal.status, outcome === 'success' ? 'ok' : outcome === 'failure' ? 'error' : 'cancelled');
+      assert.equal(terminal.snapshot.authBrowser, undefined);
+      assert.equal(terminal.snapshot.auth, undefined);
+      assert.equal(snapshots.at(-1)?.authBrowser, undefined);
+    } finally { await f.close(); }
+  }
+});
+test('completed OAuth login removes an unanswered manual-code prompt', async () => {
+  let prompted!: () => void;
+  const promptShown = new Promise<void>(resolve => { prompted = resolve; });
+  const f = await fixture({ definitions: () => [{ id: 'local', name: 'Test', kind: 'custom', api: draft.api, baseUrl: draft.baseUrl, authMethods: ['oauth'], discovery: 'unsupported' }],
+    stageOAuthLogin: async (_, cb) => {
+      cb.onManualCodeInput!();
+      prompted();
+      return { type: 'oauth', access: 'private', refresh: 'private', expires: 1 };
+    } });
+  try {
+    const pending = f.service.request({ type: 'connect', operationId: 'browser-first', expectedRevision: null, draft, method: 'oauth' });
+    await promptShown;
+    assert.equal((await pending).status, 'ok');
+    const stale = await f.service.request({ type: 'auth-response', operationId: 'late-answer', targetOperationId: 'browser-first',
+      promptId: 'browser-first:1', value: 'stale-code' });
+    assert.equal(stale.status, 'error');
   } finally { await f.close(); }
 });
 test('credential storage failure explicitly reports partial write and never exposes key', async () => {

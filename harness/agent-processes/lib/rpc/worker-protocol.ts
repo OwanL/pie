@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { JSONL_MAX_LINE_BYTES } from './jsonl.js';
 import {
   isDetailCursor,
@@ -1001,7 +1002,7 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   const payloadKeys = exactKeys(value.payload, [
     'sdkPath', 'sdkRuntime', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath', 'creationReason',
     'writeLease', 'openedPayload', 'modelSettings',
-  ], ['analytics']);
+  ], ['analytics', 'providerRuntime']);
   if (payloadKeys) return `runtime.promote.payload ${payloadKeys}`;
   for (const key of ['sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath'] as const) {
     if (!boundedString(value.payload[key], MAX_SESSION_PATH_BYTES)) return `runtime.promote.payload.${key} must be a bounded non-empty string.`;
@@ -1012,6 +1013,24 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   const leaseError = validateLease(value.payload.writeLease, value, true);
   if (leaseError) return `runtime.promote.payload.writeLease ${leaseError}`;
   if (!isRecord(value.payload.openedPayload) || !isRecord(value.payload.modelSettings)) return 'runtime.promote openedPayload and modelSettings must be objects.';
+  if (value.payload.providerRuntime !== undefined) {
+    const runtime = value.payload.providerRuntime;
+    if (!isRecord(runtime)) return 'runtime.promote.payload.providerRuntime must be an object.';
+    const runtimeKeys = exactKeys(runtime, ['artifactDir', 'reference', 'credentialFile']);
+    if (runtimeKeys) return `runtime.promote.payload.providerRuntime ${runtimeKeys}`;
+    for (const key of ['artifactDir', 'credentialFile'] as const) {
+      if (!boundedString(runtime[key], 4_096) || runtime[key].includes('\u0000') || !isAbsolute(runtime[key])) {
+        return `runtime.promote.payload.providerRuntime.${key} must be a bounded absolute path.`;
+      }
+    }
+    if (!isRecord(runtime.reference)) return 'runtime.promote.payload.providerRuntime.reference must be an object.';
+    const referenceKeys = exactKeys(runtime.reference, ['version', 'sha256']);
+    if (referenceKeys) return `runtime.promote.payload.providerRuntime.reference ${referenceKeys}`;
+    if (runtime.reference.version !== 1 || typeof runtime.reference.sha256 !== 'string'
+        || !/^[a-f0-9]{64}$/.test(runtime.reference.sha256)) {
+      return 'runtime.promote.payload.providerRuntime.reference is invalid.';
+    }
+  }
   if (value.payload.analytics !== undefined) {
     const analytics = value.payload.analytics;
     if (!isRecord(analytics)) return 'runtime.promote.payload.analytics must be an object.';

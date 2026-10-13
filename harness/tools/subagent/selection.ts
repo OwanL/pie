@@ -32,6 +32,16 @@ import type { RuntimeModelRef } from "./runtime-provenance.js";
  *  (which would pull a cross-tree dependency into selection). */
 export type ModelInputKind = "text" | "image";
 
+/** Infer packet constraints at both selection and direct execution boundaries. */
+export function effectiveRequirementsForContext(
+	requirements: ModelRequirements | undefined,
+	context: { images: readonly unknown[] } | undefined,
+): ModelRequirements | undefined {
+	return context?.images.length
+		? { inputKinds: [...new Set([...(requirements?.inputKinds ?? []), "image" as const])] }
+		: requirements;
+}
+
 /** True when `input` satisfies every requested kind in `requirement`. An absent
  *  or empty requirement is always satisfied (current selection behaviour). A
  *  missing/unknown `input` array never satisfies a non-empty requirement. */
@@ -72,7 +82,7 @@ export function formatRequirementDiagnostic(
 ): string {
 	const kinds = describeActiveRequirementKinds(requirement);
 	const kindLabel = kinds || "image";
-	return `No enabled ${kindLabel}-capable model is available for the requested "${bucket}" subagent bucket. Add a ${kindLabel}-capable model to an eligible bucket, enable its provider, choose another bucket, or remove modelRequirements.inputKinds=["${kindLabel}"].`;
+	return `No enabled ${kindLabel}-capable model is available for the requested "${bucket}" subagent bucket. Add a ${kindLabel}-capable model to an eligible bucket, enable its provider, or choose another bucket with an enabled ${kindLabel}-capable model.`;
 }
 
 /** Context for model selection settings and restrictions. */

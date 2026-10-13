@@ -146,6 +146,15 @@ function diffAt(
   limits: JsonPatchLimits,
 ): void {
   if (deepEqual(previous, next)) return;
+  // Application only permits set at the root; append optimizations must
+  // remain nested even when both inputs are strings or growing arrays.
+  if (path.length === 0 && (
+    (typeof previous === 'string' && typeof next === 'string' && next.startsWith(previous))
+    || (Array.isArray(previous) && Array.isArray(next) && next.length > previous.length)
+  )) {
+    operations.push({ op: 'set', path: [], value: cloneJson(next) });
+    return;
+  }
   if (typeof previous === 'string' && typeof next === 'string' && next.startsWith(previous)) {
     operations.push({ op: 'appendString', path: [...path], value: next.slice(previous.length) });
     return;
@@ -188,12 +197,20 @@ function validateOperation(operation: unknown, limits: JsonPatchLimits): string 
       if (FORBIDDEN_KEYS.has(segment)) return 'forbidden patch path';
     } else if (!Number.isSafeInteger(segment) || segment < 0) return 'invalid array index';
   }
-  if (candidate.op === 'set') return isJsonSafeValue(candidate.value, limits) ? undefined : 'set value is not JSON-safe';
+  // Values are checked at their destination depth, not as standalone roots.
+  const valueLimits = { ...limits, maxDepth: limits.maxDepth - candidate.path.length };
+  if (candidate.op === 'set') return isJsonSafeValue(candidate.value, valueLimits) ? undefined : 'set value is not JSON-safe';
   if (candidate.op === 'delete') return undefined;
   if (candidate.op === 'appendString') return typeof candidate.value === 'string' ? undefined : 'invalid string append';
   if (candidate.op === 'appendArray') {
-    return Array.isArray(candidate.value) && candidate.value.every((entry) => isJsonSafeValue(entry, limits))
-      ? undefined : 'invalid array append';
+    if (!Array.isArray(candidate.value)) return 'invalid array append';
+    const entryLimits = { ...valueLimits, maxDepth: valueLimits.maxDepth - 1 };
+    for (let index = 0; index < candidate.value.length; index += 1) {
+      if (!hasOwn(candidate.value, index) || !isJsonSafeValue(candidate.value[index], entryLimits)) {
+        return 'invalid array append';
+      }
+    }
+    return undefined;
   }
   return 'unknown patch operation';
 }

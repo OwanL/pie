@@ -984,7 +984,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       // first, so we skip here rather than rely on the child stopping
       // propagation (stopImmediatePropagation would have no effect).
       const active = document.activeElement as HTMLElement | null;
-      if (active && active.closest('.model-picker-dropdown, .provider-setup-preview')) {
+      if (active && active.closest('.model-picker-dropdown, [data-provider-subflow="active"]')) {
         return;
       }
       // If the user is typing in the search box, Escape clears the query before

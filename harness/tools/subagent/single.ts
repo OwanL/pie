@@ -31,6 +31,8 @@ import {
 	attachSelectionMetadata,
 	isModelFailure,
 	checkTrailLoop,
+	modelInputSatisfiesRequirement,
+	effectiveRequirementsForContext,
 	type SelectionContext,
 } from "./selection.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
@@ -461,7 +463,24 @@ export async function executeSingleTask(args: {
 		) => Promise<SingleResult>;
 	};
 }): Promise<SingleResultEnvelope> {
-	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, selectionCtx, _internal } = args;
+	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, _internal } = args;
+	// This boundary owns both the immutable packet and its effective constraint,
+	// including callers using the direct/modes compatibility route.
+	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
+	const requestedRequirements = params.modelRequirements ?? args.selectionCtx.modelRequirements;
+	const effectiveRequirements = effectiveRequirementsForContext(requestedRequirements, parentUserContext);
+	const selectionCtx: SelectionContext = {
+		...args.selectionCtx,
+		modelRequirements: effectiveRequirements,
+		callerModelInput: args.selectionCtx.callerModelInput ?? ctx.model?.input,
+		...(parentUserContext?.images.length ? {
+			requirementQualifiedModelIds: new Set(ctx.modelRegistry.getAvailable()
+				.filter((model) => !args.selectionCtx.disabledProviders?.has(model.provider)
+					&& args.selectionCtx.isModelEligibleForSubagent?.(model.provider, model.id) !== false
+					&& modelInputSatisfiesRequirement(model.input, effectiveRequirements))
+				.flatMap((model) => [model.id, `${model.provider}/${model.id}`])),
+		} : {}),
+	};
 	if (checkTrailLoop(params.agent, runtimeCtx.trail)) {
 		throw new Error(`Trail loop detected: agent "${params.agent}" already appeared twice in ancestor chain.`);
 	}
@@ -477,12 +496,12 @@ export async function executeSingleTask(args: {
 		registryModels: selectionCtx.registryModels,
 	};
 	const makeDetailsWithProvenance: MakeDetails = (results) => makeDetails(
-		results.map((current) => withRuntimeProvenance(current, provenanceSeed)),
+		results.map((current) => withRuntimeProvenance(
+			current,
+			provenanceSeed,
+		)),
 	);
 	const injectedRunAttempt = _internal?.runAttempt;
-	// Snapshot optional parent context once so provider retries receive the same
-	// lean handoff even if the parent transcript advances while an attempt runs.
-	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
 	const captureSubject = runtimeCtx.analyticsCapture?.captureSubject;
 	const rootOrigin = captureSubject
 		? JSON.stringify(captureSubject)
@@ -550,8 +569,8 @@ export async function executeSingleTask(args: {
 					args.allToolNames,
 					{ clock: _internal?.clock ?? realRetryClock },
 					attemptId,
-					params.userContext ? { mode: params.userContext, content: parentUserContext } : undefined,
-					params.modelRequirements,
+					parentUserContext,
+					effectiveRequirements,
 				);
 			},
 	});
@@ -560,7 +579,7 @@ export async function executeSingleTask(args: {
 	// replace the attempt accumulator. Stamp the immutable handoff again here so
 	// every terminal result tells the same truth as live progress snapshots.
 	if (params.userContext) result.parentUserContextMode = params.userContext;
-	if (parentUserContext) result.parentUserContext = parentUserContext;
+	if (parentUserContext?.content) result.parentUserContext = parentUserContext.content;
 
 	// Test seams and provider-retry paths can return a result without passing
 	// through runSingleAgent's terminal cleanup. Stamp the producer summary here

@@ -65,7 +65,7 @@ The TypeBox schema is strict. [`harness/tools/playwright/schema.ts`](../../harne
 
 Creates one isolated session and first page, optionally navigates, and returns the initial bounded observation.
 
-Main inputs are the `open` fields of the schema: an optional `sessionId` (generated as `pw-<uuid>` when omitted), an optional URL, a viewport, an optional Playwright storage-state JSON path, session-level action/navigation timeout defaults, and observation settings. Per-field viewport ranges and millisecond bounds live in the schema, not here.
+Main inputs are the `open` fields of the schema: an optional `sessionId` (generated as `pw-<uuid>` when omitted), an optional URL, a viewport, an optional Playwright storage-state JSON path, session-level action/navigation timeout defaults, and observation settings. `open` always returns the initial accessibility observation, so `observation.mode: "none"` is invalid here. Per-field viewport ranges and millisecond bounds live in the schema, not here.
 
 The result states `headless: true` and `isolated: true` and returns the session ID, page ID, URL, title, revision, snapshot, event/tabs evidence, and optional screenshot paths.
 
@@ -75,7 +75,7 @@ Calls require either a durable Pie session path or a runner-provided child runti
 
 Returns current page evidence without changing the page.
 
-Observation settings are the closed `observationSchema` object: a snapshot `mode`, bounded depth, an optional target, an explicit opt-in screenshot flag, per-category event limits, and optional tab summaries.
+Observation settings are the closed `observationSchema` object: a snapshot `mode`, bounded depth, an optional target, an explicit opt-in screenshot flag, per-category event limits, and optional tab summaries. `observation.target` can narrow an `observe` snapshot; it is unsupported with `run_code`, whose post-code observation always covers the page.
 
 Screenshots are never implicit. V1 captures the viewport only and writes both a bounded full PNG and a display PNG whose long edge is at most 1,600 pixels. Image-capable models receive the display PNG; text-only models receive an explicit unavailable notice and artifact path.
 
@@ -107,7 +107,7 @@ A body receives `page`, `context`, and `helpers` in scope. A full function recei
 
 Code-size, deadline, and result-size bounds follow the schema and limits owners rather than restated numbers. Cyclic, bigint, and function values get safe representations. Results above the inline budget spill to a complete session artifact; a result beyond the artifact cap fails with `ARTIFACT_TOO_LARGE`, and no capped prefix is presented as a complete artifact.
 
-Every dispatch invalidates all refs before execution. Afterwards the backend reconciles contexts/pages reachable through the dedicated browser and returns a fresh bounded observation by default.
+Every dispatch invalidates all refs before execution. Afterwards the backend reconciles contexts/pages reachable through the dedicated browser and returns a fresh bounded observation by default. That post-code observation covers the page; `observation.target` is unsupported for `run_code`.
 
 Synchronous infinite loops or unresponsive cancellation cannot be safely interrupted in-process. The parent deadline force-terminates the sidecar process tree, invalidates all IDs, and returns reopen-required guidance. Ambiguous code is never replayed automatically.
 

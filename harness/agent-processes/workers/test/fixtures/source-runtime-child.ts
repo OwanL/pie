@@ -12,6 +12,11 @@ import {
   type SdkRuntimeSelection,
 } from '../../../lib/sdk-integration/sdk-runtime-selection.js';
 import { WorkerRuntimeHost, type WorkerRuntimePromotionPayload } from '../../worker-runtime-host.js';
+import { createCoordinatorProviderManagement } from '../../../coordinator/provider-management.js';
+import { ColdSessionStore } from '../../../../session-storage/lifecycle/cold-session-store.js';
+import { readProviderRuntimeReference } from '../../../../model-providers/runtime/index.js';
+import type { ColdCoordinatorSdkModule } from '../../../lib/sdk-integration/sdk.js';
+import { BackendAnalyticsActivation } from '../../../../../analytics/authority/backend-analytics-activation.js';
 
 interface SourceRuntimeChildInput {
   sdkRuntime: SdkRuntimeSelection;
@@ -19,6 +24,9 @@ interface SourceRuntimeChildInput {
   agentDir: string;
   sessionDir: string;
   prepareOnly?: boolean;
+  inspectSessionPath?: string;
+  capturePrepare?: boolean;
+  resolveRuntimePath?: string;
 }
 
 async function main(): Promise<void> {
@@ -29,17 +37,59 @@ async function main(): Promise<void> {
   const verified = await verifySdkRuntimeSelection(sdkRuntimeSdkPath(selection), selection);
   if (verified.kind !== 'source-artifact') throw new Error('Source runtime child requires a source-artifact selection.');
   const sdkPath = verified.descriptor.sdkPath;
-  const mode = sdkRuntimeLoadMode(verified, 'full');
+  const surface = input.capturePrepare ? 'cold' : 'full';
+  const mode = sdkRuntimeLoadMode(verified, surface);
   if (mode.mode !== 'source-artifact') throw new Error('Source runtime child requires a source-artifact selection.');
   const sdk = await loadSdk(sdkPath, {
     ...(mode as SourceSdkLoadMode),
-    surface: 'full',
+    surface,
   }) as SourceArtifactSdkModule;
+
+  if (input.resolveRuntimePath) {
+    // Fresh process and fresh manager: no capture object or creation handle is retained.
+    const manager = sdk.SessionManager.open(input.resolveRuntimePath, input.sessionDir);
+    const reference = readProviderRuntimeReference(manager as never);
+    const management = await createCoordinatorProviderManagement(sdk as unknown as ColdCoordinatorSdkModule, () => undefined);
+    process.stdout.write(`${JSON.stringify({ kind: 'source-runtime-location',
+      providerRuntime: reference ? management.runtimeLocation(reference) : null,
+      state: manager.buildSessionContext(), entries: manager.getEntries() })}\n`);
+    return;
+  }
+
+  if (input.capturePrepare) {
+    const management = await createCoordinatorProviderManagement(sdk as unknown as ColdCoordinatorSdkModule, () => undefined);
+    const reference = await management.captureRuntimeProjection([]);
+    if (!reference) throw new Error('Private provider configuration did not produce a capture.');
+    // Match coordinator startup's production admission setup for this private,
+    // legacy-authority data root; canonical analytics activation is not in scope.
+    const authority = new BackendAnalyticsActivation({ agentDir: () => input.agentDir,
+      buildId: 'offline-source-fixture', hostPid: () => process.pid,
+      openWriterStore: () => { throw new Error('Legacy fixture must not activate canonical analytics.'); } }, {});
+    authority.validate();
+    authority.openWriterAdmission();
+    const store = new ColdSessionStore({ sdk: sdk as unknown as ColdCoordinatorSdkModule,
+      coordinatorGeneration: 41, startupCwd: input.cwd, agentDir: input.agentDir, sessionDir: input.sessionDir,
+      writerAdmission: authority.admission });
+    const handle = store.create({ providerRuntimeReference: reference });
+    await store.setHandleModelSettings(handle, { thinkingLevel: 'high' });
+    const legacy = store.create();
+    process.stdout.write(`${JSON.stringify({ kind: 'source-runtime-session-ready', sdkVersion: sdk.VERSION,
+      sessionPath: handle.sessionPath, legacySessionPath: legacy.sessionPath })}\n`);
+    return;
+  }
+
+  if (input.inspectSessionPath) {
+    const manager = sdk.SessionManager.open(input.inspectSessionPath, input.sessionDir);
+    process.stdout.write(`${JSON.stringify({ kind: 'source-runtime-session-state', state: manager.buildSessionContext() })}\n`);
+    return;
+  }
 
   await fs.mkdir(input.agentDir, { recursive: true });
   await fs.mkdir(input.sessionDir, { recursive: true });
   await fs.writeFile(path.join(input.agentDir, 'settings.json'), '{}\n', 'utf8');
   const sessionManager = sdk.SessionManager.create(input.cwd, input.sessionDir);
+  // A default is not a durable branch choice; seed the choice restored on resume.
+  sessionManager.appendThinkingLevelChange('high');
   const sessionPath = sessionManager.getSessionFile();
   if (!sessionPath) throw new Error('Source SDK did not create a durable session path.');
   const canonicalSessionPath = await fs.realpath(sessionPath);

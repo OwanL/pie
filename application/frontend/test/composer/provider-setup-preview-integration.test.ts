@@ -61,7 +61,7 @@ for (const injected of [false, true]) test(`Provider management tab is ${injecte
     assert.equal(document.querySelector('dialog.provider-setup-preview[open]'), null);
     assert.equal(!!document.querySelector('.provider-setup-preview-home'), injected);
     assert.equal(!!Array.from(document.querySelectorAll('button')).find(node => node.textContent === 'Add provider'), injected);
-    assert.deepEqual(commands, []);
+    assert.equal(commands.length, 0);
     assert.equal(liveWrites, 0);
     assert.equal(!!document.querySelector('[data-settings-section="provider management"]'), injected);
     if (injected) {
@@ -70,6 +70,17 @@ for (const injected of [false, true]) test(`Provider management tab is ${injecte
       act(() => addProvider.click());
       assert.deepEqual(commands, [{ type: 'add' }]);
       assert.ok(document.querySelector('[role=dialog][aria-label=Settings]'), 'provider tab leaves parent settings mounted');
+      view.flow = { open: true, screen: 'choose' }; act(redraw);
+      const back = Array.from(document.querySelectorAll('button')).find(node => node.textContent === 'Back')!;
+      back.focus();
+      act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+      assert.equal(commands.at(-1)?.type, 'back');
+      assert.ok(document.querySelector('[role=dialog][aria-label=Settings]'), 'active subflow consumes Escape');
+      view.flow = { open: false, screen: 'manage' }; act(redraw);
+      const homeAdd = Array.from(document.querySelectorAll('button')).find(node => node.textContent === 'Add provider')!;
+      homeAdd.focus();
+      act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+      assert.equal(document.querySelector('[role=dialog][aria-label=Settings]'), null, 'home Escape closes real Settings parent');
     }
   } finally { act(() => render(null, container)); container.remove(); }
 });
@@ -134,12 +145,12 @@ async function createController(file: string, container: HTMLElement) {
     switch (command.type) {
       case 'open': flow = { open: true, screen: 'manage' }; break;
       case 'close': flow = { ...flow, open: false }; break;
-      case 'add': flow = { open: true, screen: 'choose' }; break;
+      case 'add': flow = { open: true, screen: 'choose', navigationOrigin: 'chooser' }; break;
       case 'choose':
         draft = { ...createProviderSetupDraft(config, list), id: 'synthetic-openai', enabled: true, api: 'openai-completions', baseUrl: 'https://example.test/v1' };
-        flow = { open: true, screen: 'connect', kind: command.kind }; break;
-      case 'back': flow = { ...flow, screen: flow.screen === 'connect' ? 'choose' : 'manage' }; break;
-      case 'models': draft = createProviderSetupDraft(config, list, command.id); flow = { open: true, screen: 'models' }; break;
+        flow = { open: true, screen: 'connect', navigationOrigin: 'chooser', kind: command.kind }; break;
+      case 'back': flow = { ...flow, screen: flow.screen === 'connect' && flow.navigationOrigin === 'chooser' ? 'choose' : 'manage' }; break;
+      case 'models': draft = createProviderSetupDraft(config, list, command.id); flow = { open: true, screen: 'models', navigationOrigin: 'home' }; break;
       case 'change': draft = { ...draft, [command.field]: command.value }; break;
       case 'model-preference': draft = { ...draft, models: draft.models.map(model => model.id === command.id ? { ...model, [command.field]: command.value } : model) }; break;
       case 'save': save(); return;

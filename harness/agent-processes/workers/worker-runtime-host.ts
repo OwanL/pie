@@ -948,7 +948,10 @@ export class WorkerRuntimeHost {
     const context: SessionContext = {
       runtime,
       session,
-      sessionPath,
+      // Keep the host's public address distinct from the SDK's canonical
+      // write-lease path (notably Windows 8.3 aliases and symlinked roots).
+      // Host state is keyed by the original address, not filesystem identity.
+      sessionPath: payload.sessionPath,
       sessionOwnershipEpoch: 0,
       unsubscribe: () => undefined,
       busySeq: 0,
@@ -996,8 +999,13 @@ export class WorkerRuntimeHost {
     }
     session.sessionManager = nextManager;
     context.sessionManagerFence = nextFence;
-    const sessionPath = session.sessionFile ?? nextManager.getSessionFile();
-    if (!sessionPath) throw new Error('Replacement session did not expose a path.');
+    const sdkSessionPath = session.sessionFile ?? nextManager.getSessionFile();
+    if (!sdkSessionPath) throw new Error('Replacement session did not expose a path.');
+    // Rebinding the same durable session must not silently rename its public
+    // address. A genuine replacement still adopts the destination SDK path.
+    const sessionPath = sameSessionPath(previousSessionPath, sdkSessionPath)
+      ? previousSessionPath
+      : sdkSessionPath;
     // A replacement can be initiated by an extension command before the SDK
     // emits agent_end/message_start. Close the source's busy window while its
     // path still identifies the source; otherwise the replacement's later

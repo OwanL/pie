@@ -119,7 +119,7 @@ export function rewritePieBuiltSystemPrompt(
     PIE_INTRO,
     PIE_ROLE,
     PIE_CAPABILITIES,
-    `Available tools:\n${sections.toolSummaries}\n\nTool guidance:\n${sections.toolGuidelines}`,
+    `Available tools:\n${sections.toolSummaries}\n\nTool guidance:\n${sections.toolGuidelines}\n- Omit optional arguments when documented defaults are intended (e.g. read.offset=1, ask_user.allowCustom=true); omit timeout only when the configured default is intended, and keep required identity/decision fields explicit.`,
     harnessDocumentation,
   ].join('\n\n');
   return ownedPrompt + sections.suffix;

@@ -1,7 +1,7 @@
 /** Browser-safe provider management contracts. Credentials are never snapshot data. */
 export type ProviderSetupPreference = 'unset' | 'yes' | 'no';
 export type ProviderSetupCredentialSource = 'default' | 'saved' | 'environment' | 'none';
-export type ProviderSetupKind = 'chatgpt' | 'openai' | 'anthropic' | 'copilot' | 'custom';
+export type ProviderSetupKind = 'chatgpt' | 'openai' | 'anthropic' | 'copilot' | 'ollama' | 'custom';
 export interface ProviderSetupModel {
   id: string; name: string; visible: ProviderSetupPreference; subagentEligible: ProviderSetupPreference;
   pricing: { kind: 'unknown' | 'partial' | 'known'; input?: number; output?: number; cacheRead?: number; cacheWrite?: number; tiered: boolean };
@@ -15,7 +15,7 @@ export type ProviderConnectionMethod = 'oauth' | 'api-key' | 'local';
 export interface ProviderDefinition {
   id: string; name: string; kind: ProviderSetupKind; api: string; baseUrl: string;
   authMethods: ProviderConnectionMethod[];
-  discovery: 'openai' | 'copilot' | 'unsupported';
+  discovery: 'openai' | 'copilot' | 'ollama' | 'unsupported';
 }
 export interface ManagedProviderSummary {
   id: string; name: string; configured: boolean; enabled: boolean; modelCount: number;
@@ -36,6 +36,8 @@ export interface ProviderManagementSnapshot {
   definitions: ProviderDefinition[];
   protocols: readonly string[];
   auth?: ProviderAuthPrompt;
+  /** Public browser/device context retained independently of the current prompt. */
+  authBrowser?: { operationId: string; url: string; instructions?: string; code?: string };
   /** Noncancelable configuration/credential commit; never credential data. */
   mutation?: { operationId: string; phase: 'saving' };
   /** Safe fixed summary, never raw provider exceptions or request bodies. */

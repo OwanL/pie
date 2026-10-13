@@ -123,6 +123,9 @@ export function parseArgs(argv) {
       else sdkPath = value;
       continue;
     }
+    if (arg.startsWith('-')) {
+      throw new Error(`Unknown option ${arg}. Runner options must precede selectors; forward native Node flags with test:file <selector> -- <flags>. Prefix a selector beginning with - with ./ instead.`);
+    }
     sawSelector = true;
     selectors.push(arg);
   }

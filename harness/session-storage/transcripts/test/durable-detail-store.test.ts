@@ -202,6 +202,50 @@ test('fetch re-emits the exact evicted page with stable identity and checksum', 
   }
 });
 
+test('sources larger than the cache budget still stream and refetch without being retained', async () => {
+  const value = addressableResult({ text: 'x'.repeat(20_000) });
+  const { store, emitted } = createStore({
+    transcript: transcriptWithResult(value), budgets: { maxCanonicalBytes: 1024 },
+  });
+  await store.subscribe('req-1', 'subscription-1', ADDRESS, 4096, fence());
+  assert.ok(terminalOf(emitted, 'subscription-1'));
+  assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 1, canonicalBytes: 0 });
+  const originalPages = pagesOf(emitted, 'subscription-1');
+  const original = asPage(originalPages[1]!);
+  assert.ok(original);
+  await store.fetch('req-2', 'subscription-1', ADDRESS, original.ref, 4096, fence());
+  assert.deepEqual(asPage(pagesOf(emitted, 'subscription-1').at(-1)!), original);
+  assert.equal(pagesOf(emitted, 'subscription-1').length, originalPages.length + 1);
+  assert.equal(store.debugState().canonicalBytes, 0);
+  assert.equal(errorsOf(emitted, 'subscription-1').length, 0);
+});
+
+test('oversized siblings invalidate a cached source with the same durable identity before refetch', async () => {
+  const siblingAddress: LiveSubagentDetailAddress = {
+    ...ADDRESS,
+    lineage: [{ childId: 'child-2', spawningToolCallId: 'tool-1', attemptId: 'attempt-2' }],
+  };
+  const small = addressableResult({ text: 'small' });
+  const oversized = { ...addressableResult({ text: 'x'.repeat(20_000) }), lineage: siblingAddress.lineage };
+  const { store, emitted } = createStore({
+    transcript: transcriptWithResult({ results: [small, oversized] }),
+    budgets: { maxCanonicalBytes: 1024 },
+  });
+  await store.subscribe('small', 'small', ADDRESS, 4096, fence());
+  assert.equal(store.debugState().sources, 1);
+  assert.equal(store.debugState().canonicalBytes, Buffer.byteLength(JSON.stringify(small), 'utf8'));
+  await store.subscribe('oversized', 'oversized', siblingAddress, 4096, fence());
+  const originalPages = pagesOf(emitted, 'oversized');
+  assert.deepEqual(reassembleDetailPages(originalPages.map(asPage) as NarrowPage[]), oversized);
+  const original = asPage(originalPages[1]!);
+  assert.ok(original);
+  await store.fetch('fetch', 'oversized', siblingAddress, original.ref, 4096, fence());
+  assert.equal(pagesOf(emitted, 'oversized').length, originalPages.length + 1);
+  assert.deepEqual(asPage(pagesOf(emitted, 'oversized').at(-1)!), original);
+  assert.equal(errorsOf(emitted, 'oversized').length, 0);
+  assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 2, canonicalBytes: 0 });
+});
+
 test('fetch validates the subscription owner and the manifest before emitting', async () => {
   const value = addressableResult({ text: 'y'.repeat(20_000) });
   const { store, emitted } = createStore({ transcript: transcriptWithResult(value) });

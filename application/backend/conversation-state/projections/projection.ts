@@ -175,24 +175,6 @@ function sortUniqueNames(names: readonly string[]): string[] {
   )].sort((a, b) => a.localeCompare(b));
 }
 
-/** Deterministically borrow a non-empty model catalog from another host-known
- *  real session. Mirrors the reducer's `provisionalCatalogForSession` source
- *  rule — pending pseudo-paths are never catalog sources — so projection-only
- *  borrowing and reducer-time seeding agree on what "the last usable catalog"
- *  means. Preference: open real tabs in tab order, then any other known
- *  catalog in map insertion order. Pure and side-effect-free. */
-function borrowAvailableModels(state: ArchState, activePath: string): ModelInfo[] {
-  const availableModelsBySession = state.settings.availableModelsBySession;
-  const isUsableSource = (path: string): boolean =>
-    path !== activePath
-    && !isPendingTabPath(path)
-    && (availableModelsBySession[path]?.length ?? 0) > 0;
-  const fromOpenTab = state.sessions.openTabPaths.find(isUsableSource);
-  if (fromOpenTab !== undefined) return availableModelsBySession[fromOpenTab]!;
-  const fallbackPath = Object.keys(availableModelsBySession).find(isUsableSource);
-  return fallbackPath !== undefined ? availableModelsBySession[fallbackPath]! : EMPTY_AVAILABLE_MODELS;
-}
-
 function selectActivePruningCatalog(
   activePath: string | null,
   analyticsFactorsBySession: Record<string, import('../../../lib/protocol/index.js').SessionAnalyticsFactors | null>,
@@ -684,15 +666,8 @@ function projectViewState(state: ArchState): ViewState {
     ? settings.availableModelsStatusBySession[activePath]
       ?? (activeOwnAvailableModels.length > 0 ? 'authoritative' : 'loading')
     : 'authoritative';
-  // While the active session's own catalog is still loading/provisional and
-  // empty, borrow a non-empty catalog the host already knows from another
-  // real session so the picker stays interactive until this session's own
-  // hydration lands. A successful (authoritative) empty catalog is never
-  // overridden — the backend proved no models are usable this way.
-  const activeAvailableModels: ModelInfo[] =
-    activePath && activeOwnAvailableModels.length === 0 && activeAvailableModelsStatus !== 'authoritative'
-      ? borrowAvailableModels(state, activePath)
-      : activeOwnAvailableModels;
+  // Never project another session's catalog while this session hydrates.
+  const activeAvailableModels = activeOwnAvailableModels;
 
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;

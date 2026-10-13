@@ -20,7 +20,7 @@ export const askUserSchema = {
     allowCustom: {
       type: 'boolean',
       default: true,
-      description: 'Whether the user may type a free-form answer instead of picking an option.',
+      description: 'Whether the user may type a free-form answer instead of picking an option. Omit to use the default (true).',
     },
     context: {
       type: 'string',

@@ -27,7 +27,7 @@ async function fixture(t: { after: (callback: () => unknown) => void }, code: st
 async function received(path: string): Promise<string> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    try { return await readFile(path, 'utf8'); } catch {}
+    try { return await readFile(path, 'utf8'); } catch { /* Wait for the helper to create the acknowledgement file. */ }
     await new Promise<void>(resolve => setImmediate(resolve));
   }
   throw new Error(`Helper did not acknowledge ${path}`);

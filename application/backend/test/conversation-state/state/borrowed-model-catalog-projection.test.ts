@@ -52,7 +52,7 @@ function stateWith(
   };
 }
 
-test('borrowed-catalog projection keeps the picker supplied while the active catalog is provisional and empty', () => {
+test('catalog projection isolates an empty provisional session', () => {
   // The host opened the active tab before any catalog for it existed; another
   // real open tab already has the only usable catalog the host knows.
   const borrowed = selectViewState(stateWith(
@@ -61,24 +61,21 @@ test('borrowed-catalog projection keeps the picker supplied while the active cat
     { [KNOWN]: 'authoritative', [ACTIVE]: 'provisional' },
   ));
 
-  assert.equal(borrowed.availableModels.length, 1);
-  assert.equal(borrowed.availableModels[0]!.id, KNOWN_MODEL.id);
-  assert.equal(borrowed.availableModels[0]!.provider, KNOWN_MODEL.provider);
+  assert.deepEqual(borrowed.availableModels, []);
   // The status still describes the active session's own catalog freshness.
   assert.equal(borrowed.availableModelsStatus, 'provisional');
 });
 
-test('borrowed-catalog projection prefers an open real tab and serves a loading session', () => {
+test('catalog projection isolates a loading session from open tabs', () => {
   const view = selectViewState(stateWith(
     ACTIVE,
     { [KNOWN]: [KNOWN_MODEL] },
     { [KNOWN]: 'authoritative' },
   ));
 
-  // No own entry at all → 'loading'; borrowing keeps the picker interactive
-  // instead of collapsing to a non-interactive chip while hydration runs.
+  // No own entry stays empty until this session's hydration arrives.
   assert.equal(view.availableModelsStatus, 'loading');
-  assert.deepEqual(view.availableModels, [KNOWN_MODEL]);
+  assert.deepEqual(view.availableModels, []);
 });
 
 test('borrowed-catalog projection never overrides an authoritative empty catalog', () => {

@@ -66,6 +66,9 @@ test('key fields carry accurate field descriptions for model guidance', () => {
   assert.match(action, /open starts a session/);
   assert.match(action, /act \(requires input\)/);
   assert.match(action, /run_code \(requires code\)/);
+  assert.match(action, /post-code observation covers the page/);
+  assert.match(action, /observation\.target unsupported/);
+  assert.match(action, /returns the initial observation/);
   assert.match(action, /close \(requires scope\)/);
   assert.match(action, /observe, act, and run_code require sessionId/);
   assert.match(properties.sessionId!.description!, /open generates one when omitted/);
@@ -83,6 +86,10 @@ test('key fields carry accurate field descriptions for model guidance', () => {
   assert.match(code, /helpers\.writeArtifact/);
   assert.match(code, /function expression/);
   assert.match(code, /async body/);
+  const observation = (playwrightSchema as { properties: Record<string, { description?: string; properties?: Record<string, { description?: string }> }> }).properties.observation!;
+  assert.match(observation.description!, /target is available for observe but not run_code/);
+  assert.match(observation.description!, /mode none is invalid for open/);
+  assert.match(observation.properties!.mode!.description!, /invalid for open/);
 });
 
 test('schema caps unbounded string sizes', () => {

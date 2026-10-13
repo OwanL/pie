@@ -7,13 +7,14 @@ export function normalizeDanglingTranscript(
   transcript: SessionOpenedPayload['transcript'],
 ): SessionOpenedPayload['transcript'] {
   return transcript.map((message) => {
-    const hasDanglingTool = message.toolCalls?.some((tool) => tool.status === 'running') ?? false;
+    const hasDanglingTool = (message.toolCalls?.some((tool) => tool.status === 'running') ?? false)
+      || (message.parts?.some((part) => part.kind === 'toolCall' && part.toolCall.status === 'running') ?? false);
     if (!hasDanglingTool && message.status !== 'streaming') return message;
     const toolCalls = message.toolCalls?.map((tool) => tool.status === 'running'
       ? { ...tool, status: 'failed' as const }
       : tool);
-    const parts = message.parts?.map((part) => part.kind === 'toolCall'
-      ? { kind: 'toolCall' as const, toolCall: toolCalls?.find((tool) => tool.id === part.toolCall.id) ?? part.toolCall }
+    const parts = message.parts?.map((part) => part.kind === 'toolCall' && part.toolCall.status === 'running'
+      ? { ...part, toolCall: { ...part.toolCall, status: 'failed' as const } }
       : part);
     return {
       ...message,

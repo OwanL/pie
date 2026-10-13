@@ -35,7 +35,7 @@ test("real pinned MCP entry registers eagerly and fences deferred execution thro
     const stub = path.join(fixture, "stubs.ts");
     const names = new Set<string>();
     const modules = new Set<string>();
-    for (const match of source.matchAll(/^import \{([^}]+)\} from "(\.\/[^\"]+)";/gm)) {
+    for (const match of source.matchAll(/^import \{([^}]+)\} from "(\.\/[^"]+)";/gm)) {
       if (match[2] === "./runtime-owner.ts" || match[2] === "./mcp-code.ts") continue;
       modules.add(match[2]);
       for (const item of match[1].split(",")) {

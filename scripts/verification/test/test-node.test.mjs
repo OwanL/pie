@@ -183,6 +183,20 @@ test('explicit files accept focused e2e tests and reject unrelated files', (t) =
   assert.throws(() => resolveTestFiles(root, ['../outside.test.mjs']), /stay within the repository/);
 });
 
+test('CLI rejects unknown options before -- with native forwarding guidance', () => {
+  for (const argv of [
+    ['--test-name-pattern', 'worker', 'suite'],
+    ['suite', '--test-name-pattern=worker'],
+    ['suite', '--typo'],
+    ['-x', 'suite'],
+  ]) {
+    assert.throws(() => parseArgs(argv), /Unknown option .*test:file <selector> -- <flags>/u);
+  }
+  assert.deepEqual(parseArgs(['./-suite', '--', '--test-name-pattern', 'worker']).selectors, ['./-suite']);
+  assert.deepEqual(parseArgs(['suite', '--', '--test-name-pattern', 'worker']).nodeFlags,
+    ['--test-name-pattern', 'worker']);
+});
+
 test('CLI separates selectors and forwards Node test flags after --', () => {
   assert.deepEqual(parseArgs(['--tsconfig', 'application/hosts/vscode/tsconfig.json', '--sdk-path=harness/pi/packages/coding-agent', '--include', '**/*.artifact.test.*', '--include=**/*.generated.test.*', '--exclude', '**/*.artifact.test.*', '--exclude=**/*.generated.test.*', 'scripts', 'test/foo.test.mjs', '--', '--test-name-pattern=worker', '--test-reporter=spec']), {
     selectors: ['scripts', 'test/foo.test.mjs'],

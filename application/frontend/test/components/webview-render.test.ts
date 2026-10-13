@@ -92,6 +92,33 @@ function loadWebviewModules() {
   return webviewModules;
 }
 
+test('empty durable provider failure renders its terminal error detail', () => {
+  const { mapAssistantMessage, mapTranscript } = require('../../../../harness/session-storage/transcripts/transcript.ts');
+  const raw = {
+    role: 'assistant', content: [], stopReason: 'error',
+    errorMessage: 'Failed to extract accountId from token', timestamp: 1767268800000,
+  };
+  const liveTerminal = mapAssistantMessage('assistant-error', raw);
+  const reopened = mapTranscript([
+    { id: 'user-entry', type: 'message', timestamp: '2026-01-01T12:00:00Z', message: { role: 'user', content: 'hello' } },
+    { id: 'assistant-error', type: 'message', timestamp: '2026-01-01T12:00:01Z', message: raw },
+  ]).at(-1);
+  for (const message of [liveTerminal, reopened]) {
+    assert.equal(message.status, 'error');
+    assert.equal(message.markdown, '');
+    const html = renderToString(h(webviewModules.MessageItem, {
+      message, isStreaming: false, prefs: DEFAULT_CHAT_PREFS, readonly: true,
+      workingDirectory: '/repo', editingId: null, onEditRequest: noop,
+      onEditConfirm: noop, onEditCancel: noop, onOpenFile: noop,
+      onContextMenu: noopContextMenu, renderToolCall: () => null,
+      isLastAssistantMessage: true,
+    }));
+    assert.match(html, /message-error-detail/);
+    assert.match(html, /Failed to extract accountId from token/);
+    assert.doesNotMatch(html, /Agent is responding/);
+  }
+});
+
 // Body-specific SSR checks exercise the visual inspector directly. Ordinary
 // cards no longer auto-open; manual disclosure is covered by DOM lifecycle tests.
 function ExpandedToolBody(props: Parameters<typeof toolCallCardModule.ToolCallCard>[0]) {

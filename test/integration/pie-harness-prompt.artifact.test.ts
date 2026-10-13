@@ -56,6 +56,7 @@ test('Pie base uses the approved static wording and preserves live SDK tool sect
   assert.ok(result.startsWith(`${pieIntro}\n\n${pieRole}\n\n${pieCapabilities}`));
   assert.ok(result.includes(`Available tools:\n- read: ${dynamicSnippet}`));
   assert.ok(result.includes(`Tool guidance:\n- ${dynamicGuideline}`));
+  assert.ok(result.includes('- Omit optional arguments when documented defaults are intended (e.g. read.offset=1, ask_user.allowCustom=true); omit timeout only when the configured default is intended, and keep required identity/decision fields explicit.'));
   assert.ok(result.includes('Harness documentation\nConsult harness documentation only when the task concerns Pie or its underlying Pi runtime.'));
   assert.ok(result.includes('- For Pie development or configuration, load: C:/pie/harness/agent-instructions/skills/develop-pie/SKILL.md'));
   assert.ok(result.includes('Read the full normative contract when changing its invariants.'));

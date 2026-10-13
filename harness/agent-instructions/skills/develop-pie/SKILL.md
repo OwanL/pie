@@ -51,6 +51,7 @@ proto run pnpm -- run setup                 # gated frozen-lockfile dependency s
 proto run pnpm -- run install:dependencies  # alias for setup
 proto run pnpm -- run test                  # primary affected Moon project tasks
 proto run pnpm -- run test:file path/to/owner/test.ts
+proto run pnpm -- run test:file path/to/owner/test.ts -- --test-name-pattern=pattern # native flags follow --
 proto run pnpm -- run test:artifact         # artifact fixtures; prepares one private SDK artifact
 proto run pnpm -- run test:artifact -- --pi-runtime "<absolute verified runtime root>" # reuse artifact
 proto run pnpm -- run test:all              # all configured Moon :test project tasks

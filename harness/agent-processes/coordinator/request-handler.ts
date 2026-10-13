@@ -16,7 +16,7 @@ import {
 } from '../lib/rpc/backend-rpc.js';
 import { ProviderGate } from '../../model-providers/concurrency/provider-gate.js';
 import { listMcpServers, setMcpServerEnabled } from '../../tools/package-integrations/mcp/mcp-config.js';
-import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverrides } from '../../session-storage/settings/mcp-session-config';
+import { normalizeSessionMcpOverrides, readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverrides } from '../../session-storage/settings/mcp-session-config';
 import { hasBillableSessionActivity } from '../workers/session-activity';
 import { BackendLiveTurnAccumulator } from '../workers/live-turn-accumulator';
 import { BackendError } from './server-io.js';
@@ -108,10 +108,11 @@ async function handleMcpSetSessionServerEnabled(
 ): Promise<unknown> {
   const params = validateMcpSetSessionServerEnabled(request.params);
   markRequestValidated(deps);
+  const overrides = normalizeSessionMcpOverrides(params.overrides);
   const writeOverrides = () => writeSessionMcpOverrides({
     sessionPath: params.sessionPath,
     agentDir: deps.agentDir,
-    overrides: params.overrides,
+    overrides,
   });
   if (deps.runSessionFilesystemMutation) {
     await deps.runSessionFilesystemMutation(params.sessionPath, 'mcp-session-override', writeOverrides);
@@ -128,7 +129,7 @@ async function handleMcpSetSessionServerEnabled(
       recycled = false;
     }
   }
-  return { recycled, overrides: params.overrides };
+  return { recycled, overrides };
 }
 
 async function handleRuntimePrefsSet(
