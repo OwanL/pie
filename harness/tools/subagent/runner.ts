@@ -1069,11 +1069,12 @@ function applyThrownError(
 	setActivity(result, interrupted ? "cancelled" : "failed", result.errorMessage);
 }
 
-/** Tear down a session, swallowing disposal errors. */
+/** Fence publication and tear down a session, retaining failed disposal ownership. */
 function teardownSession(
 	unsubscribe: () => void,
 	session: { dispose: () => void },
 	beforeDispose?: () => void,
+	onDisposeFailure?: (error: unknown) => void,
 ): void {
 	try {
 		unsubscribe();
@@ -1087,8 +1088,8 @@ function teardownSession(
 	}
 	try {
 		session.dispose();
-	} catch {
-		/* ignore */
+	} catch (error) {
+		onDisposeFailure?.(error);
 	}
 }
 
@@ -1218,6 +1219,7 @@ export async function runSingleAgent(
 		sdk?: SubagentSdk;
 		orphanRegistry?: OrphanCleanupRegistry;
 		clock?: RetryClock;
+		toolCleanupGraceMs?: number;
 	},
 	/** Stable identity for this attempt; used by orphan registry and analytics. */
 	attemptId?: string,
@@ -1403,16 +1405,22 @@ export async function runSingleAgent(
 	const resolvedAttemptId = attemptId ?? nextAttemptIdentity(agentName, _toolCallId);
 	currentResult.attemptId = resolvedAttemptId;
 	const childToolRuntimeOwner = createChildToolRuntimeOwner(`${agentName}: ${task.slice(0, 100)}`);
+	const orphanRegistry = _internal?.orphanRegistry ?? globalOrphanRegistry;
+	const boundedOwnerCleanup = () => raceTimeout("child tool-runtime cleanup", _internal?.toolCleanupGraceMs ?? 5_000, cleanupChildToolRuntimeOwner(childToolRuntimeOwner));
 	const cleanupChildToolRuntimes = async (): Promise<void> => {
 		try {
-			await cleanupChildToolRuntimeOwner(childToolRuntimeOwner);
+			await boundedOwnerCleanup();
 		} catch (firstError) {
-			// The first owner cleanup fully settles every callback before rejecting.
+			// A timeout leaves the same in-flight owner cleanup fenced and memoized.
+			// A normal rejection fully settles every callback before rejecting.
 			// Retry only the retained failed callbacks; never recreate the runtime or
 			// replay the model task. The owner remains fenced throughout both passes.
 			try {
-				await cleanupChildToolRuntimeOwner(childToolRuntimeOwner);
+				await boundedOwnerCleanup();
 			} catch (retryError) {
+				if ((retryError as Error)?.name === "AbortError") {
+					orphanRegistry.register(`${resolvedAttemptId}:tool-runtime`, () => cleanupChildToolRuntimeOwner(childToolRuntimeOwner));
+				}
 				const cleanupMessage = `Child tool-runtime cleanup failed after one cleanup-only retry; an exclusive desktop claim may remain blocked. First attempt: ${toErrorMessage(firstError)}; retry: ${toErrorMessage(retryError)}`;
 				currentResult.exitCode = 1;
 				currentResult.stopReason = "error";
@@ -1435,7 +1443,6 @@ export async function runSingleAgent(
 			}
 		}
 	};
-	const orphanRegistry = _internal?.orphanRegistry ?? globalOrphanRegistry;
 	let session: SessionLike;
 	let childSessionId: string | undefined;
 	let childSessionRootId: string | undefined;
@@ -1477,10 +1484,7 @@ export async function runSingleAgent(
 			? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
 			: await raceAbort(signal, createSessionPromise, "creating subagent session");
 		session = created.session as unknown as SessionLike;
-		// Apply Pie's base prompt before any child setup, subscription, or prompt
-		// call. The wrapper preserves the agent-role append supplied above and
-		// keeps later SDK tool/resource rebuilds on the same shared path.
-		installPieSystemPromptRebuildGuard(session, sdk.getAgentDir());
+
 	} catch (err) {
 		// Pre-spawn abort or failure: never reach the prompt phase. Return a
 		// loud failure result so `execute()` always settles and the parent
@@ -1490,14 +1494,17 @@ export async function runSingleAgent(
 		// If session creation lost the abort/timeout race, retain
 		// ownership of the underlying promise. A late resolution may still
 		// produce a session; fence it from setup/prompt, dispose it exactly
-		// once, reclaim attempt-owned loader listeners, and never retain a
+		// once, without globally reclaiming unowned listeners, and never retain a
 		// process permit. The orphan registry handles retry/backoff and
 		// best-effort drain.
 		const interrupted = parentAlreadyAborted || !!signal?.aborted || (err as { name?: string } | null)?.name === "AbortError";
 		await cleanupChildToolRuntimes();
+		// Do not reclaim listeners when a cancelled reload eventually settles:
+		// the SDK exposes no owned listener handles, and this old global snapshot
+		// could remove another live attempt's listeners. Late reload leaks remain
+		// unresolved until the runtime provides reliable listener ownership.
 		if (createSessionPromise && interrupted) {
 			const capturedCreatePromise = createSessionPromise;
-			const capturedListenersBefore = signalListenersBefore;
 			// Every registry retry observes the same in-flight cleanup task. This
 			// matters when a registry timeout wins while createSession is still
 			// pending: a later retry must keep awaiting that task rather than report
@@ -1518,7 +1525,9 @@ export async function runSingleAgent(
 					if (!lateSession) return;
 					// The race was lost before this session reached setup/prompt.
 					// Dispose it immediately; never set UI context, subscribe, or run
-					// a prompt. Reclaim the loader-leaked listeners afterwards.
+					// a prompt. Do not reclaim listeners using the old global snapshot:
+					// late settlement/retries may overlap another live attempt, and the
+					// SDK supplies no per-attempt listener identities.
 					logLoud("subagent orphan create resolved", {
 						toolCallId: _toolCallId,
 						agent: agentName,
@@ -1539,14 +1548,12 @@ export async function runSingleAgent(
 							await cleanupSessionTempOutputs(childSessionId, childSessionManager, childSessionRootId);
 							await reapSessionStashes(childSessionId);
 						}
-						reclaimOrphanedSignalListeners(capturedListenersBefore);
 						throw error;
 					}
 					if (childSessionId) {
 						await cleanupSessionTempOutputs(childSessionId, childSessionManager, childSessionRootId);
 						await reapSessionStashes(childSessionId);
 					}
-					reclaimOrphanedSignalListeners(capturedListenersBefore);
 				})().catch((error) => {
 					cleanupTask = undefined;
 					throw error;
@@ -1652,7 +1659,15 @@ export async function runSingleAgent(
 			emitUpdate.close();
 			// Fence the SDK callback before cancelling UI or disposing the session;
 			// either operation may synchronously flush provider/extension callbacks.
-			teardownSession(unsubscribe, session, cancelProxy);
+			teardownSession(unsubscribe, session, cancelProxy, (error) => {
+				logLoud("subagent session dispose failed", {
+					attemptId: resolvedAttemptId,
+					error: toErrorMessage(error),
+				});
+				orphanRegistry.register(`${resolvedAttemptId}:session-dispose`, async () => {
+					session.dispose();
+				});
+			});
 			// Direct AgentSession disposal does not emit session_shutdown. Await the
 			// attempt-owned runtime cleanup explicitly; the owner was fenced above.
 			await cleanupChildToolRuntimes();
@@ -1705,6 +1720,7 @@ export async function runSingleAgent(
 		runWithChildToolRuntimeOwner(childToolRuntimeOwner, () =>
 			subagentContext.run(childSignal, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content), { images: parentUserContext?.images.map((image) => ({ ...image })) })));
 	try {
+		installPieSystemPromptRebuildGuard(session, sdk.getAgentDir());
 		// Capture the model the session actually selected (in case our hint was overridden).
 		if (session.agent?.state?.model) {
 			currentResult.model = session.agent.state.model.id;

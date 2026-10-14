@@ -46,6 +46,7 @@ sessionTitles:
   thinkingLevel: off
   timeoutSec: 15
 profileOrder:
+  - gemini-4-argon
   - claude-haiku-5.5
   - provider: github-copilot
     id: gpt-6.1-sol
@@ -1168,6 +1169,42 @@ providers:
               input: 0.75
               output: 3.75
               cacheRead: 0.07
+              cacheWrite: 0
+        eligible: false
+        thinking:
+          - minimal
+          - low
+          - medium
+          - high
+        disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+      - id: gemini-4-argon
+        name: "Copilot: Gemini 4 Argon"
+        api: openai-completions
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsReasoningEffort: true
+        reasoning: true
+        input:
+          - text
+          - image
+        contextWindow: 200000
+        maxTokens: 65536
+        thinkingLevelMap:
+          low: low
+          medium: medium
+          high: high
+          minimal: low
+        pricing:
+          input: 2
+          output: 10
+          cacheRead: 0.1
+          cacheWrite: 0
+          tiers:
+            - inputTokensAbove: 200000
+              input: 2
+              output: 10
+              cacheRead: 0.1
               cacheWrite: 0
         eligible: false
         thinking:

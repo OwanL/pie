@@ -89,9 +89,24 @@ export function useComposerInput({
   postMessage: (msg: WebviewToHostMessage) => void;
   draftRestore?: { text: string; nonce: number } | null;
   focusTrigger?: string;
-  onAddInput: (input: ComposerInputDraft) => void;
+  onAddInput: (input: ComposerInputDraft, sessionPath?: string) => void;
   supportsImageInputs: boolean;
 }) {
+  // Async reads belong to the selection/admission lifetime that started them.
+  // Track transitions during render so A→B→A cannot resurrect an old read.
+  const transferOwnerRef = useRef({ sessionPath, commandsAvailable, generation: 0, mounted: true });
+  const owner = transferOwnerRef.current;
+  if (owner.sessionPath !== sessionPath || owner.commandsAvailable !== commandsAvailable) {
+    owner.generation++;
+    owner.sessionPath = sessionPath;
+    owner.commandsAvailable = commandsAvailable;
+  }
+  const transferStateRef = useRef({ supportsImageInputs, onAddInput });
+  transferStateRef.current = { supportsImageInputs, onAddInput };
+  useEffect(() => () => {
+    transferOwnerRef.current.mounted = false;
+    transferOwnerRef.current.generation++;
+  }, []);
   const [text, setTextState] = useState('');
   const editGenerationRef = useRef(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -519,7 +534,13 @@ export function useComposerInput({
   }, [scheduleCheckpoint, cancelDictation]);
 
   const applyComposerTransfer = useCallback(async (dataTransfer: DataTransfer | null, source: 'drop' | 'paste') => {
+    const owner = transferOwnerRef.current;
+    const ownerPath = owner.sessionPath;
+    const generation = owner.generation;
+    if (!ownerPath || !owner.mounted || owner.commandsAvailable === false) return;
     const { inputs, unsupportedInputs, rejectedFiles } = await extractComposerInputs(dataTransfer, source);
+    if (!owner.mounted || owner.generation !== generation) return;
+    const { supportsImageInputs, onAddInput } = transferStateRef.current;
     const acceptedInputs = supportsImageInputs
       ? inputs
       : inputs.filter((input) => input.kind !== 'imageBlob');
@@ -528,10 +549,10 @@ export function useComposerInput({
       : inputs.filter((input) => input.kind === 'imageBlob').length;
 
     for (const input of acceptedInputs) {
-      onAddInput(input);
+      onAddInput(input, ownerPath);
     }
     for (const unsupportedInput of unsupportedInputs) {
-      onAddInput(unsupportedInput);
+      onAddInput(unsupportedInput, ownerPath);
     }
 
     const unsupportedFileMessage = formatComposerTransferError(rejectedFiles);
@@ -539,7 +560,7 @@ export function useComposerInput({
       ? 'The selected model does not support image inputs. Switch to an image-capable model to paste or drop images.'
       : null;
     setAttachmentError([blockedImageMessage, unsupportedFileMessage].filter(Boolean).join(' ') || null);
-  }, [onAddInput, supportsImageInputs]);
+  }, []);
 
   const handlePaste = useCallback((event: ClipboardEvent) => {
     const dataTransfer = event.clipboardData;

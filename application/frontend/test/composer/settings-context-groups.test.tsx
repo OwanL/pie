@@ -115,6 +115,7 @@ test('history compaction units track threshold mode and describe their visible u
 });
 
 test('skill pruning groups keep scope, limits, and always-keep controls', () => {
+  const patches: Array<Partial<typeof DEFAULT_PRUNING_SETTINGS>> = [];
   const container = document.createElement('div');
   document.body.appendChild(container);
   try {
@@ -124,12 +125,18 @@ test('skill pruning groups keep scope, limits, and always-keep controls', () => 
       skillCatalog: ['skill-a'],
       toolCatalog: ['tool-a'],
       onSetPrefs: () => undefined,
-      onSetPruningSettings: () => undefined,
+      onSetPruningSettings: (patch) => { patches.push(patch); },
     }), container));
 
     const groups = contentGroups(container);
     assert.deepEqual(groups.map((group) => group.getAttribute('aria-label')), ['Scope & limits', 'Always keep']);
-    assert.deepEqual([...groups[0].querySelectorAll('[role="checkbox"]')].map((control) => control.textContent?.trim()), ['Main agents', 'Subagents', 'Re-prune on follow-up messages']);
+    assert.deepEqual([...groups[0].querySelectorAll('[role="checkbox"]')].map((control) => control.textContent?.trim()), ['Main agents', 'Subagents', 'Re-prune on follow-up messages', 'Refresh tool/skill pruning after history compaction']);
+    const refresh = [...groups[0].querySelectorAll<HTMLButtonElement>('[role="checkbox"]')]
+      .find((control) => control.textContent?.trim() === 'Refresh tool/skill pruning after history compaction');
+    assert.ok(refresh);
+    assert.equal(refresh.getAttribute('aria-checked'), 'true');
+    act(() => refresh.click());
+    assert.deepEqual(patches, [{ refreshAfterCompaction: false }]);
     assert.ok(groups[0].querySelector('[aria-label="Pruning mode"]'));
     assert.ok(groups[0].querySelector('[aria-label="About Scope & limits"]'));
     assert.ok(groups[0].textContent?.includes('Skill limit'));

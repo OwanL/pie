@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { resolveBinary } from "./resolve.js";
 import { killTree } from "./kill.js";
@@ -25,9 +26,20 @@ export interface FastPathOpts {
  * cancel/timeout (caller propagates, matching the built-in bash tool).
  */
 export async function execFastPath(opts: FastPathOpts): Promise<{ exitCode: number | null }> {
+  if (opts.signal?.aborted) throw new Error("aborted");
+  const cwd = opts.cwd ? resolve(opts.baseCwd, opts.cwd) : opts.baseCwd;
+
   // In-process `echo` with no flags — extremely common in agent output
   // (section headers etc.) and trivially correct without any spawn.
   if (opts.program === "echo" && opts.args.every((a) => !a.startsWith("-"))) {
+    // A peeled `cd … && echo` must not succeed when cd would fail. Degrade
+    // to the shell so it owns the diagnostic and exit code (also for bad
+    // session cwd, just as spawning a binary would fail).
+    try {
+      if (!statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
+    } catch (error) {
+      throw new FastPathError((error as Error).message);
+    }
     onDataEcho(opts.args, opts.onData);
     return { exitCode: 0 };
   }
@@ -38,7 +50,6 @@ export async function execFastPath(opts: FastPathOpts): Promise<{ exitCode: numb
   const binary = resolveBinary(opts.program, opts.env);
   if (!binary) throw new FastPathError(`ENOENT: ${opts.program}`);
 
-  const cwd = opts.cwd ? resolve(opts.baseCwd, opts.cwd) : opts.baseCwd;
   return execBinary(binary, opts.args, cwd, opts.env, opts.onData, opts.signal, opts.timeout);
 }
 

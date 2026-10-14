@@ -363,7 +363,7 @@ test('local connect persists explicit no-credential intent through reload and pr
     baseUrl: 'http://localhost:1234/v1', authMethods: ['api-key', 'local'], discovery: 'openai' }],
     hasSavedCredential: () => true,
     getApiKey: async () => { apiKeyLookups++; return savedKey; },
-    discoveryBaseUrl: async (_, url) => { endpointLookups++; return 'https://credential-routed.invalid'; },
+    discoveryBaseUrl: async () => { endpointLookups++; return 'https://credential-routed.invalid'; },
     saveCredential: async (_, value) => { credentialWrites++; if (value.type === 'api_key') savedKey = value.key; },
   }, async url => {
     assert.equal(String(url), 'http://localhost:1234/v1/models');
@@ -491,5 +491,28 @@ test('credential replacement clears account cache before failed refresh, preserv
     assert.deepEqual(after.draft?.manualModelIds, ['manual', 'preference-only']);
     const savedConfig = await readFile(f.configFile, 'utf8');
     assert.match(savedConfig, /old-account-model:\s*\{\s*visible: false/);
+  } finally { await f.close(); }
+});
+
+test('queued discovery does not fetch after provider is disabled', async () => {
+  let fetches = 0;
+  const f = await fixture({}, async (_, init) => {
+    fetches++;
+    return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+  });
+  try {
+    await f.service.request({ type: 'save', operationId: 'seed', expectedRevision: null, draft: { ...draft, enabled: true } });
+    const running = Array.from({ length: 3 }, (_, i) => f.service.request({ type: 'refresh', operationId: 'running-' + i, id: 'local' }));
+    while (fetches < 3) await new Promise(r => setTimeout(r, 1));
+    const queued = f.service.request({ type: 'refresh', operationId: 'queued', id: 'local' });
+    const detail = await f.service.request({ type: 'read-provider', operationId: 'detail', id: 'local' });
+    const disabled = await f.service.request({ type: 'save', operationId: 'disable', expectedRevision: detail.snapshot.configRevision,
+      draft: { ...detail.draft!, enabled: false } });
+    assert.equal(disabled.status, 'ok');
+    await f.service.request({ type: 'cancel', operationId: 'release', targetOperationId: 'running-0' });
+    await queued;
+    assert.equal(fetches, 3);
+    await Promise.all([1, 2].map(i => f.service.request({ type: 'cancel', operationId: 'cancel-' + i, targetOperationId: 'running-' + i })));
+    await Promise.all(running);
   } finally { await f.close(); }
 });

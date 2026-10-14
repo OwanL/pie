@@ -58,7 +58,7 @@ export interface AppHandlers {
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
   handleSetSessionTitlesSettings: (partial: Partial<SessionTitlesSettings>) => void;
   handleEditRequest: (messageId: string) => void;
-  handleAddComposerInput: (input: ComposerInputDraft) => void;
+  handleAddComposerInput: (input: ComposerInputDraft, ownerSessionPath?: string) => void;
   handleRemoveComposerInput: (inputId: string) => void;
   handleSelectTab: (path: string) => void;
   handleMoveTab: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
@@ -228,9 +228,11 @@ export function useAppHandlers(
     postMessage({ type: 'startEdit', sessionPath, messageId });
   }, [postMessage, activeSessionPathRef]);
 
-  const handleAddComposerInput = useCallback((input: ComposerInputDraft) => {
-    const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
+  const handleAddComposerInput = useCallback((input: ComposerInputDraft, ownerSessionPath?: string) => {
+    const sessionPath = ownerSessionPath ?? activeSessionPathRef.current;
+    // Selection handlers update the ref before the next composer render.
+    // Never retarget an async attachment during that gap.
+    if (!sessionPath || sessionPath !== activeSessionPathRef.current) return;
     postMessage({ type: 'addComposerInput', sessionPath, input });
   }, [postMessage, activeSessionPathRef]);
 

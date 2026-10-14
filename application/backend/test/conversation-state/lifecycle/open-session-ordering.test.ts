@@ -17,7 +17,7 @@ import test, { type TestContext } from 'node:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BackendRpcError } from '../../../agent-connection/client';
+import { BackendClient, BackendRpcError } from '../../../agent-connection/client';
 import { RequestTimeoutError } from '../../../agent-connection/request-tracker';
 import assert from 'node:assert/strict';
 
@@ -28,7 +28,7 @@ import { reducer } from '../../../conversation-state/reducer';
 import { SessionServiceState } from '../../../session-actions/state';
 import { SessionTabActions } from '../../../session-actions/tab-actions';
 import type { SessionSummary } from '../../../../lib/protocol/index.js';
-import { EffectRunner, type EffectRunnerDeps } from '../../../conversation-state/effects/effect-runner';
+import { EffectRunner, type BackendLike, type CommitAwareRequestOptions } from '../../../conversation-state/effects/effect-runner';
 import type { Event, EffectResultEvent } from '../../../conversation-state/events';
 import { makeEffectRunnerDeps } from '../../helpers/effect-runner-deps';
 
@@ -151,13 +151,18 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
   const getArchState = () => archState;
   const context = createExtensionContext();
 
-  // Backend rejects session.open; everything else resolves.
-  const backend = {
-    request: async (method: string): Promise<unknown> => {
-      if (method === 'session.open') throw new Error('boom');
-      return {};
+  // A correlated backend rejection is definitive, unlike transport failure.
+  const backend: BackendLike = {
+    async request<T = unknown>(method: string, _params?: unknown, options?: CommitAwareRequestOptions<T>): Promise<T> {
+      if (method === 'session.open') {
+        const error = new BackendRpcError('open', method, 'INTERNAL_ERROR', 'boom');
+        options?.onCorrelatedResponse?.({ ok: false, error });
+        throw error;
+      }
+      throw new Error(`Unexpected backend request: ${method}`);
     },
-  } as any;
+  };
+  let openCompletion!: Promise<void>;
 
   // The dispatch loop mirrors extension-host: run the reducer, then execute the
   // emitted effects via the runner. The runner's result dispatch +
@@ -168,7 +173,9 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
+  // SessionServiceState requires the concrete backend type; this test exercises
+  // its backend-independent selection path. The runner below uses the mock.
+  const state = new SessionServiceState(new BackendClient(), () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
     scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
@@ -176,6 +183,14 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
 
   const { deps } = makeEffectRunnerDeps({
     backend,
+    queues: {
+      enqueueLifecycle: (task) => {
+        const completion = task();
+        openCompletion = completion.then(() => undefined);
+        return completion;
+      },
+      enqueueSessionOperation: (_path, task) => task(),
+    },
     serviceOverrides: {
       handleSelectionFailure: (token: string, notice: string) => state.handleSelectionFailure(token, notice),
     },
@@ -189,8 +204,8 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
   assert.equal(archState.sessions.activeSessionPath, NEW);
   assert.ok(archState.sessions.openTabPaths.includes(NEW));
 
-  // Drain microtasks: backend rejection -> handleSelectionFailure -> recovery dispatches.
-  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
+  // Includes the fresh asynchronous host stat and all recovery dispatches.
+  await openCompletion;
 
   // Final state equals the pre-open state: active restored to OLD, opened
   // tab + placeholder gone, no pending run-summary, a notice surfaced.
@@ -209,6 +224,7 @@ async function restoredOpen(t: TestContext, options: {
   error?: Error;
   present?: boolean;
   notDirectory?: boolean;
+  correlatedTransportFailure?: boolean;
   fence?: 'running' | 'hidden-running' | 'closing' | 'duplicate' | 'create' | 'message' | 'settled' | 'superseded' | 'epoch' | 'generation';
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'pie-restored-open-'));
@@ -233,18 +249,44 @@ async function restoredOpen(t: TestContext, options: {
     },
   };
   let rejectOpen!: (error: Error) => void;
-  const backend = { request: (method: string) => method === 'session.open'
-    ? new Promise((_, reject) => { rejectOpen = reject; }) : Promise.resolve({}) } as any;
+  let openCompletion!: Promise<void>;
+  let started!: () => void;
+  const openStarted = new Promise<void>((resolve) => { started = resolve; });
+  const backend: BackendLike = {
+    request<T = unknown>(method: string, _params?: unknown, requestOptions?: CommitAwareRequestOptions<T>): Promise<T> {
+      if (method !== 'session.open') return Promise.reject(new Error(`Unexpected backend request: ${method}`));
+      return new Promise<T>((_, reject) => {
+        rejectOpen = (error) => {
+          // Transport deadlines have no correlated response; backend errors do.
+          if (error instanceof BackendRpcError || options.correlatedTransportFailure) {
+            requestOptions?.onCorrelatedResponse?.({ ok: false, error });
+          }
+          reject(error);
+        };
+        started();
+      });
+    },
+  };
   const dispatchArch = (event: Event) => {
     const result = reducer(archState, event);
     archState = result.state;
     for (const effect of result.effects) runner.run(effect);
   };
-  const state = new SessionServiceState(backend, () => undefined, () => archState, dispatchArch, 0);
+  // The state path under test is backend-independent; the runner below uses
+  // the request mock while satisfying SessionServiceState's concrete type.
+  const state = new SessionServiceState(new BackendClient(), () => undefined, () => archState, dispatchArch, 0);
   const tabs = new SessionTabActions({ state, getArchState: () => archState, dispatchArch,
     scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER });
   const { deps, calls } = makeEffectRunnerDeps({
     backend,
+    queues: {
+      enqueueLifecycle: (task) => {
+        const completion = task();
+        openCompletion = completion.then(() => undefined);
+        return completion;
+      },
+      enqueueSessionOperation: (_path, task) => task(),
+    },
     timer: { schedule: () => 0, cancel: () => undefined },
     serviceOverrides: {
       handleSelectionFailure: (token, notice, attempt, reason, confirmedMissing) =>
@@ -255,7 +297,7 @@ async function restoredOpen(t: TestContext, options: {
   });
   const runner = new EffectRunner(deps);
   tabs.openSession(missing);
-  for (let i = 0; i < 3; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+  await openStarted;
   const open = Object.values(archState.operations).find((operation) => operation.kind === 'session.open')!;
   if (options.fence === 'running') archState.sessions.runningSessionPaths = [missing];
   if (options.fence === 'hidden-running') archState.sessions.intentionallyHiddenRunningPaths = [missing];
@@ -282,7 +324,7 @@ async function restoredOpen(t: TestContext, options: {
     dispatchArch({ kind: 'NoticeShown', notice: 'Current notice' });
   }
   rejectOpen(options.error ?? new BackendRpcError('open', 'session.open', 'SESSION_NOT_FOUND', 'missing'));
-  for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+  await openCompletion;
   return { archState, calls, missing, healthy };
 }
 
@@ -320,6 +362,7 @@ for (const [label, options] of [
   ['EACCES', { error: new BackendRpcError('open', 'session.open', 'EACCES', 'denied') }],
   ['forgetting an existing file', { present: true }],
   ['transport failure', { error: new Error('transport failed') }],
+  ['correlated transport failure', { error: new Error('transport failed'), correlatedTransportFailure: true }],
   ['timeout', { error: new RequestTimeoutError('open') }],
   ...(['running', 'hidden-running', 'closing', 'duplicate', 'create', 'message', 'settled', 'epoch', 'generation'] as const)
     .map((fence) => [fence, { fence }] as const),
@@ -328,6 +371,13 @@ for (const [label, options] of [
     const { archState, missing } = await restoredOpen(t, options);
     assert.ok(archState.sessions.openTabPaths.includes(missing));
     assert.ok(archState.sessions.sessions.some((session) => session.path === missing));
+    if (label === 'transport failure' || label === 'correlated transport failure' || label === 'timeout') {
+      const operation = Object.values(archState.operations).find((candidate) => candidate.kind === 'session.open')!;
+      assert.equal(operation.phase, 'ambiguous');
+      assert.equal(operation.terminal, undefined);
+      assert.equal(archState.sessions.activeSessionPath, missing);
+      assert.equal(archState.settings.notice, null);
+    }
     if (label === 'settled') {
       assert.equal(archState.sessions.activeSessionPath, missing);
       assert.equal(archState.settings.notice, null);

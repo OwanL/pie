@@ -61,7 +61,7 @@ inheritance. The explicit `task` remains the delegated scope.
 Agents are discovered automatically from both locations:
 
 - **User/global agents** (`<agent-dir>/harness/agent-instructions/agents/` in the Pie checkout/installed config)
-- **Project agents** (`agents/`, project root)
+- **Project agents** (`agents/`, project root). When `cwd` is supplied, its project root is checked before the session cwd and config root, so a same-named task-project agent takes precedence. Without `cwd`, discovery checks the session cwd before the config root.
 
 Starting an agent does not require confirmation. Agent invocation is routine orchestration; any tool calls the child makes remain subject to the same action-level safeguards as the parent, so dangerous operations can still be blocked or confirmed at the point of risk.
 
@@ -343,11 +343,13 @@ See [Subagent and provider resilience](../../../docs/contracts/SUBAGENT_PROVIDER
 for retry/failover, orphan cleanup, provider/transport bounds, and containment
 details.
 
-On an abort race during session creation, the retained creation promise ensures
-any late session is disposed exactly once before setup or prompt. The upstream
-`DefaultResourceLoader` has no reliable `dispose()` API, so cleanup is limited to
-session disposal and reclaiming leaked exit-signal listeners; the loader itself
-is not torn down.
+On abort races during session creation, the retained creation promise lets a
+late-created session be cleaned up without continuing setup or prompting. Cleanup
+uses bounded retries and is best effort, not an exactly-once guarantee. The
+upstream `DefaultResourceLoader` has no reliable `dispose()` API, so the loader
+itself is not torn down. Exit-signal listener reclamation is immediate best effort
+only: delayed `reload()` or session-creation closures are not globally reclaimed
+because they cannot be attributed safely to one attempt, and may accumulate.
 
 ## Persisted result size
 

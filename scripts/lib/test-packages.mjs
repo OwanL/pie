@@ -453,6 +453,8 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'model-provider-catalog',
     dir: 'harness/model-providers/catalog',
+    sourceRoots: ['harness/model-providers/management', 'harness/model-providers/runtime', 'application/backend/provider-management'],
+    testRoots: ['harness/model-providers/management/test', 'harness/model-providers/runtime/test', 'application/backend/test/provider-management'],
     testFiles: ['test/integration/backend-model-profiles.test.ts'],
     tsxConfig: 'application/hosts/vscode/tsconfig.json',
     typecheck: { config: 'harness/model-providers/catalog/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
@@ -476,6 +478,7 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'session-storage-ownership',
     dir: 'harness/session-storage/ownership',
+    testRoots: ['harness/session-storage/test'],
     testFiles: ['test/integration/session-runtime-crash-matrix.test.ts'],
     tsxConfig: 'application/hosts/vscode/tsconfig.json',
     typecheck: { config: 'harness/session-storage/ownership/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
@@ -533,9 +536,9 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'conversation-state',
     dir: 'application/backend/conversation-state',
-    sourceRoots: ['application/backend/test/helpers'],
-    testRoots: ['application/backend/test/conversation-state', 'application/backend/conversation-state/test'],
-    testFiles: ['test/integration/sync-contract.test.ts'],
+    sourceRoots: ['application/backend/test/helpers', 'application/backend/dictation'],
+    testRoots: ['application/backend/test/conversation-state', 'application/backend/conversation-state/test', 'application/backend/test/dictation'],
+    testFiles: ['test/integration/sync-contract.test.ts', 'application/backend/conversation-state/reducers/dictation-handlers.test.ts'],
     tsxConfig: 'application/hosts/vscode/tsconfig.json',
     includeOwnerDependencies: true,
     typecheck: { config: 'application/backend/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },

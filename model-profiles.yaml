@@ -2,6 +2,15 @@
 # Source of truth: models.yaml (repo root). Edit there and re-run sync.
 profiles:
   - provider: github-copilot
+    id: gemini-4-argon
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
     id: claude-haiku-5.5
     eligible: false
     thinking:

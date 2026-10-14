@@ -6,15 +6,20 @@ import type { SdkModule, SdkSessionManager } from '../../../agent-processes/lib/
 test('providerServices callback is per-session/guarded; undefined retains legacy factory options', async () => {
   const originalAuth = {};
   const capturedAuth = {};
-  const capturedRegistry = { find: () => undefined };
+  const admittedModel = { provider: 'github-copilot', id: 'fixture-model' };
+  const capturedRegistry = { find: () => admittedModel, getAvailable: () => [admittedModel] };
   const calls: { authStorage?: unknown; modelRegistry?: unknown }[] = [];
+  const selectedModels: unknown[] = [];
   const callbackManagers: SdkSessionManager[] = [];
   const sdk = {
     createAgentSessionServices: async (options: unknown) => {
       calls.push(options as typeof calls[number]);
       return { modelRegistry: capturedRegistry };
     },
-    createAgentSessionFromServices: async () => ({ session: {} }),
+    createAgentSessionFromServices: async ({ model }: { model?: unknown }) => {
+      selectedModels.push(model);
+      return { session: {} };
+    },
   } as unknown as SdkModule;
   const manager = (name: string) => ({ getSessionFile: () => undefined, getBranch: () => [], getSessionName: () => name }) as unknown as SdkSessionManager;
   const first = manager('captured');
@@ -34,4 +39,21 @@ test('providerServices callback is per-session/guarded; undefined retains legacy
   assert.equal(calls[0].modelRegistry, capturedRegistry);
   assert.equal(calls[1].authStorage, originalAuth);
   assert.equal(Object.hasOwn(calls[1], 'modelRegistry'), false);
+  assert.deepEqual(selectedModels, [admittedModel, undefined]);
+});
+
+test('managed new sessions reject an empty admitted registry before loading SDK services', async () => {
+  let serviceCalls = 0;
+  const sdk = {
+    createAgentSessionServices: async () => { serviceCalls += 1; return {}; },
+  } as unknown as SdkModule;
+  const manager = { getSessionFile: () => undefined } as unknown as SdkSessionManager;
+  const factory = createRuntimeFactory(sdk, {}, '/workspace', new ServiceLoadingGate(), {
+    providerServices: async () => ({ authStorage: {}, modelRegistry: { getAvailable: () => [] } }),
+  });
+  await assert.rejects(
+    factory({ cwd: '/workspace', agentDir: '/agent', sessionManager: manager }),
+    /Captured provider authentication is unavailable: no admitted models/,
+  );
+  assert.equal(serviceCalls, 0);
 });

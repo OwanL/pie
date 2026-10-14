@@ -1,7 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { execFastPath } from '../fast-path.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFastPath, FastPathError } from '../fast-path.js';
+
+test('in-process echo honours cancellation before emitting output', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const output: Buffer[] = [];
+  await assert.rejects(execFastPath({
+    program: 'echo', args: ['hello'], cwd: null, baseCwd: process.cwd(),
+    signal: controller.signal, onData: (data) => output.push(data),
+  }), /^Error: aborted$/);
+  assert.equal(output.length, 0);
+});
+
+test('in-process echo falls back for missing or non-directory cwd, preserving valid output', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pie-echo-'));
+  try {
+    writeFileSync(join(root, 'file'), 'not a directory');
+    for (const cwd of ['missing', 'file']) {
+      const output: Buffer[] = [];
+      await assert.rejects(execFastPath({
+        program: 'echo', args: ['hello'], cwd, baseCwd: root,
+        onData: (data) => output.push(data),
+      }), FastPathError);
+      assert.equal(output.length, 0);
+    }
+    const output: Buffer[] = [];
+    assert.deepEqual(await execFastPath({
+      program: 'echo', args: ['hello', 'two words', ''], cwd: '.', baseCwd: root,
+      onData: (data) => output.push(data),
+    }), { exitCode: 0 });
+    assert.equal(Buffer.concat(output).toString(), 'hello two words \n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const INHERITED_PIPE_HOLD_MS = 2_500;
 

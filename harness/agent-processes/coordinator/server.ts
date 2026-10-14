@@ -2,7 +2,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { sessionMcpConfigPathFor } from '../../session-storage/settings/mcp-session-config';
+import { sessionMcpConfigPathFor, sessionMcpOverridePath } from '../../session-storage/settings/mcp-session-config';
 import * as path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
@@ -32,7 +32,7 @@ import {
   type DetailResult,
   type LazyDetailRef,
 } from '../lib/rpc/message-contract.js';
-import type { ModelSettings, ModelInfo } from '../../model-providers/catalog/model-contract.js';
+import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
 import { readProviderRuntimeReference, type NativeRuntimeModel, type ProviderRuntimeReference } from '../../model-providers/runtime';
 import { isThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {

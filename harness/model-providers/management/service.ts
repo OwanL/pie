@@ -82,7 +82,7 @@ export function createProviderManagementService(options: { configFile: string; m
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stamp = provenance(id);
     try {
-      if (disposed || controller.signal.aborted) return;
+      if (disposed || controller.signal.aborted || !own(config.providers, id)?.enabled || supported(id) === 'unsupported') return;
       states[id] = 'refreshing'; publish();
       timer = setTimeout(() => controller.abort(), 10_000);
       const effect = async () => {

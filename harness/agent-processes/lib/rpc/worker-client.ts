@@ -289,6 +289,8 @@ export class WorkerClient {
       throw this.failure;
     }
     this.child = child;
+    child.once('error', (error) => this.fail(error, true));
+    child.once('exit', (code, signal) => { void this.handleExit(code, signal); });
     const outbound = asWritable(child.stdio[WORKER_IPC_COORDINATOR_TO_WORKER_FD]);
     const inbound = asReadable(child.stdio[WORKER_IPC_WORKER_TO_COORDINATOR_FD]);
     if (!child.pid || !outbound || !inbound) {
@@ -308,8 +310,6 @@ export class WorkerClient {
     };
     this.attachDiagnostics(child.stdout, 'stdout');
     this.attachDiagnostics(child.stderr, 'stderr');
-    child.once('error', (error) => this.fail(error, true));
-    child.once('exit', (code, signal) => { void this.handleExit(code, signal); });
 
     try {
       // Assignment happens before bootstrap, so the worker cannot execute user
@@ -633,8 +633,15 @@ export class WorkerClient {
   private handleIpcEnd(): void {
     if (this.exitSeen || this.ipcClosed || this.exitGraceTimer) return;
     this.ipcClosed = true;
-    if (this.status === 'stopping' || this.status === 'failed') return;
-    this.fail(new Error('Worker IPC read descriptor closed before process exit.'), false);
+    const error = this.failure ?? new Error('Worker IPC read descriptor closed before process exit.');
+    for (const requestId of [...this.pending.keys()]) this.takePending(requestId)?.reject(error);
+    this.expiredRequestIds.clear();
+    if (this.status === 'stopping') {
+      if (!this.readySeen) this.rejectReadySeamlessly();
+      return;
+    }
+    if (this.status === 'failed') return;
+    this.fail(error, false);
     if (this.exitSeen) return;
     this.exitGraceTimer = this.scheduler.setTimeout(() => {
       this.exitGraceTimer = undefined;

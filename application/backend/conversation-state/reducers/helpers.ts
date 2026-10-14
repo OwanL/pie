@@ -454,7 +454,9 @@ export function evictSession(
         ...state.transcript,
         bySession: remainingTranscripts,
         systemPromptsBySession: remainingSystemPrompts,
-        pendingPromptInventoryBySession: remainingPromptInventory,
+        ...(state.transcript.pendingPromptInventoryBySession !== undefined
+          ? { pendingPromptInventoryBySession: remainingPromptInventory }
+          : {}),
         windowBySession: remainingWindows,
         sessionUsageBySession: remainingSessionUsage,
         editingMessageIdBySession: remainingEditing,

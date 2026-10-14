@@ -1792,7 +1792,10 @@ export class EffectRunner {
               kind: 'OpenSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath,
               ...resultFields,
               ok: response.ok,
-              ...(!response.ok ? { error: toErrorMessage(response.error) } : {}),
+              ...(!response.ok ? {
+                error: toErrorMessage(response.error),
+                ...(!(response.error instanceof BackendRpcError) ? { ambiguous: true } : {}),
+              } : {}),
             }),
           } : undefined);
           appendPieLog('info', 'session-timing', 'session.open.response.received', {
@@ -1818,7 +1821,9 @@ export class EffectRunner {
             durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
             error: toErrorMessage(err),
           });
-          const ambiguous = err instanceof RequestTimeoutError;
+          // Only a correlated backend rejection establishes failure. A local
+          // timeout or transport error cannot establish whether open committed.
+          const ambiguous = !(err instanceof BackendRpcError);
           if (!ambiguous) {
             // RPC codes alone are not filesystem evidence: SESSION_NOT_FOUND
             // also means "being forgotten". Transport failures and permission

@@ -36,6 +36,37 @@ test('query client reports one immutable identity through authoritative worker e
   assert.match(events[0]?.identity.instanceId ?? '', /^[0-9a-f-]{36}$/iu);
 });
 
+test('validated readiness resets the inactivity deadline with a fake scheduler', async (t) => {
+  let now = 0;
+  const timers = new Set<{ deadline: number; callback: () => void; refresh: () => unknown; unref: () => void }>();
+  t.mock.method(globalThis, 'setTimeout', (callback: () => void, delay: number) => {
+    const timer = {
+      deadline: now + delay, callback,
+      refresh: () => { timer.deadline = now + delay; return timer; },
+      unref: () => undefined,
+    };
+    timers.add(timer);
+    if (delay === 1_000 && now === 0) now = 900;
+    return timer;
+  });
+  t.mock.method(globalThis, 'clearTimeout', (timer: Parameters<typeof timers.delete>[0]) => timers.delete(timer));
+  const advance = (duration: number) => {
+    now += duration;
+    for (const timer of timers) {
+      if (timer.deadline <= now) { timers.delete(timer); timer.callback(); }
+    }
+  };
+  const client = new AnalyticsQueryClient({
+    databasePath: 'unused.sqlite', workerScript, timeoutMs: 1_000,
+    onWorkerLifecycle: (event) => {
+      if (event.state === 'ready') advance(900);
+    },
+  });
+  assert.deepEqual(await client.query({ type: 'schema' }), { ok: true });
+  assert.equal(now, 1_800, 'total duration may exceed the inactivity budget');
+  assert.equal(timers.size, 0);
+});
+
 test('query lifecycle observer failure cannot change query completion', async () => {
   const client = new AnalyticsQueryClient({
     databasePath: path.join(path.dirname(fileURLToPath(import.meta.url)), 'observer-failure.sqlite'),

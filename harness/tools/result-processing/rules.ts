@@ -127,8 +127,9 @@ function lastNonBlankIndex(lines: string[]): number {
 // 4. JSON minify (validate-then-minify).
 //
 // Only fires when the trimmed text is a single JSON document (starts with `{`
-// or `[` and parses cleanly). Emits canonical JSON.stringify output. Falls
-// back to raw on any parse failure ("uncertain → keep", §7.4).
+// or `[` and parses cleanly). Removes only whitespace outside strings, keeping
+// numeric lexemes, duplicate keys, and escapes intact. Falls back to raw on
+// any parse failure ("uncertain → keep", §7.4).
 //
 // Semantically identical JSON, typically 40–60% smaller on pretty-printed
 // configs. Note: the agent recovers human formatting via the un-pruned `read`
@@ -139,13 +140,28 @@ function minifyJson(text: string, _ctx: RuleContext): RuleResult | null {
   if (trimmed.length === 0) return null;
   const first = trimmed[0];
   if (first !== "{" && first !== "[") return null;
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed);
+    JSON.parse(trimmed); // validation only: serializing the value can lose data
   } catch {
     return null; // not JSON, or surrounded by other text — keep raw
   }
-  const minified = JSON.stringify(parsed);
+  const tokens: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of trimmed) {
+    if (inString) {
+      tokens.push(char);
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+      tokens.push(char);
+    } else if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
+      tokens.push(char);
+    }
+  }
+  const minified = tokens.join("");
   // Only claim a change if minification actually shrank anything. Preserves a
   // trailing newline the tool may have emitted, since that's not JSON-owned.
   const hadTrailingNewline = text.endsWith("\n");

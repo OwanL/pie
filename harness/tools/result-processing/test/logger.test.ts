@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import test, { describe, beforeEach, afterEach } from 'node:test';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadModuleFixture } from './module-fixture.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 
 type Event = {
   event: 'tool_result_pruned';
@@ -31,7 +29,7 @@ describe('logger', () => {
   let logPath: string;
 
   test.before(async () => {
-    mod = (await import(loggerUrl)) as LoggerModule;
+    mod = (await loadModuleFixture()).logger as LoggerModule;
   });
 
   beforeEach(() => {
@@ -40,7 +38,8 @@ describe('logger', () => {
     mod.setLogPathOverrideForTesting(logPath);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await mod.flushLog();
     mod.setLogPathOverrideForTesting(null);
     rmSync(dir, { recursive: true, force: true });
   });

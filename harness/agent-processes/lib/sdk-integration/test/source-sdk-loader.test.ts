@@ -120,6 +120,7 @@ export async function createAgentSessionRuntime(factory, options) {
 export { VERSION, getAgentDir } from './config.js';
 export { AuthStorage } from './core/auth-storage.js';
 export { ModelRegistry } from './core/model-registry.js';
+export { defaultModelPerProvider } from './core/model-resolver.js';
 export { SessionManager } from './core/session-manager.js';
 export { AgentSession } from './core/agent-session.js';
 export { prepareCompaction, compact } from './core/compaction/index.js';
@@ -130,6 +131,7 @@ export { createAgentSession, createAgentSessionServices, createAgentSessionFromS
     'dist/config.js': config,
     'dist/core/auth-storage.js': authStorage,
     'dist/core/model-registry.js': modelRegistry,
+    'dist/core/model-resolver.js': `${recordImports('model-resolver')}export const defaultModelPerProvider = {};\n`,
     'dist/core/session-manager.js': sessionManager,
     'dist/core/agent-session.js': agentSession,
     'dist/core/compaction/index.js': compaction,
@@ -149,11 +151,18 @@ async function fixture(t: TestContext, artifactTarget: PiRuntimeTarget = target)
   const artifactDir = path.join(parent, 'pi-runtime');
   for (const packageName of PI_RUNTIME_PACKAGES) {
     const prefix = `node_modules/${packageName}/`;
-    const packageJson = { name: packageName, version: '0.80.6', type: 'module' };
+    const packageJson = {
+      name: packageName, version: '0.80.6', type: 'module',
+      ...(packageName === '@earendil-works/pi-ai'
+        ? { exports: { './compat': { import: './dist/compat.js' } } }
+        : {}),
+    };
     await put(artifactDir, `${prefix}package.json`, JSON.stringify(packageJson));
     await put(artifactDir, `${prefix}dist/index.js`, 'export {}\n');
     await put(artifactDir, `${prefix}LICENSE`, 'fixture license\n');
   }
+  await put(artifactDir, 'node_modules/@earendil-works/pi-ai/dist/compat.js',
+    `${markerCode(marker, 'ai-compat')}export function getModels() { return []; }\n`);
   const sdkRoot = `${PI_RUNTIME_SDK_RELATIVE_PATH}/`;
   await put(artifactDir, `${sdkRoot}package.json`, JSON.stringify({
     name: '@earendil-works/pi-coding-agent', version: '0.80.6', type: 'module',
@@ -240,6 +249,8 @@ test('source-artifact loader validates and loads cold and full surfaces without 
   const coldSdk = await loadSdk(cold.sdkPath, sourceMode(coldDescriptor, target, 'cold'));
   assert.equal(coldSdk.VERSION, '0.80.6');
   assert.equal(typeof coldSdk.getAgentDir, 'function');
+  assert.deepEqual(coldSdk.defaultModelPerProvider, {});
+  assert.deepEqual(coldSdk.getProviderManagementModels!('synthetic-provider'), []);
   assert.deepEqual(await snapshot(cold.artifactDir), coldBefore);
   const coldImports = importRecord(cold.marker);
   assert.ok(coldImports && coldImports.imports.length > 0);
@@ -253,6 +264,7 @@ test('source-artifact loader validates and loads cold and full surfaces without 
   assert.equal(typeof fullSdk.AgentSession?.prototype.getCompactionRequestAuth, 'function');
   assert.equal(typeof fullSdk.AgentSession?.prototype.continueAfterInterruption, 'function');
   assert.equal(typeof fullSdk.createAgentSessionRuntime, 'function');
+  assert.deepEqual(fullSdk.getProviderManagementModels!('synthetic-provider'), []);
   assert.deepEqual(await snapshot(full.artifactDir), fullBefore);
   const fullImports = importRecord(full.marker);
   assert.ok(fullImports && fullImports.imports.includes('index'));

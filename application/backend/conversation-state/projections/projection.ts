@@ -44,7 +44,6 @@ import { projectProviderManagementView } from '../../provider-management/state.j
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../../lib/protocol/index.js';
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
 import { pruningTotals } from '../../../lib/transcript/pruning-totals.js';
-import { isPendingTabPath } from '../../../../lib/session-path.js';
 import { stripReqIds } from '../error-mapping.js';
 import { redactRendererErrorText } from '../../../../lib/sensitive-data/renderer-error-redaction.js';
 import { incidentRecoveryActions } from '../operational-incidents.js';
@@ -407,6 +406,21 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
   );
 }
 
+// Snooze filtering must not allocate a new session list on transcript-only
+// recomputes. Key by both inputs so visibility changes still invalidate it.
+const visibleSessionsCache = new WeakMap<SessionsState['sessions'], {
+  snoozed: SessionsState['snoozedBySession'];
+  visible: SessionsState['sessions'];
+}>();
+
+function selectVisibleSessions(sessions: SessionsState): SessionsState['sessions'] {
+  const cached = visibleSessionsCache.get(sessions.sessions);
+  if (cached?.snoozed === sessions.snoozedBySession) return cached.visible;
+  const visible = sessions.sessions.filter((s) => !sessions.snoozedBySession[s.path]);
+  visibleSessionsCache.set(sessions.sessions, { snoozed: sessions.snoozedBySession, visible });
+  return visible;
+}
+
 let cachedSignature: ProjectionSignature | null = null;
 let cachedViewState: ViewState | null = null;
 
@@ -720,7 +734,7 @@ function projectViewState(state: ArchState): ViewState {
   const noticeVisible = settings.noticeSessionPath === null || settings.noticeSessionPath === activePath;
 
   return {
-    sessions: sessions.sessions.filter((s) => !sessions.snoozedBySession[s.path]),
+    sessions: selectVisibleSessions(sessions),
     snoozedSessions: Object.values(sessions.snoozedBySession).map(({ path, name, wakeAt }) => ({ path, name, wakeAt })),
     sessionCatalogProgress: sessions.sessionCatalogProgress,
     openTabPaths: sessions.openTabPaths,

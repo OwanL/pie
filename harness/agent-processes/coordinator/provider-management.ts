@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { parseModelPricing } from '../../model-providers/pricing/pricing-core';
 import { approvedShippedRuntimeCatalog } from '../../model-providers/runtime/shipped-catalog';
 import { availableProviderRuntimeModels } from '../../model-providers/runtime/services';
 import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
@@ -40,7 +41,7 @@ export async function createCoordinatorProviderManagement(
       .filter(model => model.provider === provider)
       .map(model => [model.id, { name: model.name, ...(isProviderApi(model.api) ? { api: model.api } : {}), baseUrl: model.baseUrl,
         input: model.input, reasoning: model.reasoning, contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens, pricing: model.cost }])) }),
+        maxTokens: model.maxTokens, pricing: parseModelPricing(model.cost) }])) }),
   });
   // Session captures are durable configuration, not disposable discovery cache.
   const artifactDir = path.join(paths.configDir, 'provider-runtime');

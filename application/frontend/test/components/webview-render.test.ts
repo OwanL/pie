@@ -1454,7 +1454,9 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
   }));
   assert.match(typingRowHtml, /activity-status-row/);
   assert.match(typingRowHtml, /aria-label="Agent is pruning skills and tools"/);
-  assert.match(typingRowHtml, /turn-activity-strip warning standalone/);
+  // Routine pruning is processing, not a warning; retain the standalone status strip.
+  assert.match(typingRowHtml, /class="turn-activity-strip standalone"/);
+  assert.doesNotMatch(typingRowHtml, /class="turn-activity-strip[^"\n]*\bwarning\b/);
   assert.match(typingRowHtml, /turn-activity-strip-label">pruning skills\/tools</);
   assert.doesNotMatch(typingRowHtml, /turn-activity-strip-dot running/);
 
@@ -1486,7 +1488,8 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
     renderToolCall: () => null,
   }));
   assert.match(messageRowHtml, /Rendered row/);
-  assert.match(messageRowHtml, /turn-activity-strip warning/);
+  assert.match(messageRowHtml, /class="turn-activity-strip running"/);
+  assert.doesNotMatch(messageRowHtml, /class="turn-activity-strip[^"\n]*\bwarning\b/);
   assert.match(messageRowHtml, /turn-activity-strip-label">thinking</);
   assert.match(messageRowHtml, /turn-activity-strip-dot running/);
 

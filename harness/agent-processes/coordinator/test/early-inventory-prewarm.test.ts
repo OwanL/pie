@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { BackendServer } from '../server.js';
+import { sessionMcpConfigPathFor } from '../../../session-storage/settings/mcp-session-config.js';
 import { InitialContextEstimateClient } from '../../context-inventory/initial-context-estimate-client.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 
@@ -42,6 +43,7 @@ for (const rejects of [false, true]) {
       installBackendFatalHandlers() {},
       verifySdkRuntimeSelection: async () => { order.push('validated'); return runtime; },
       sdkRuntimeSdkPath: () => runtime.descriptor.sdkPath,
+      sessionMcpConfigPathFor,
       InitialContextEstimateClient: class {
         constructor(options: any) {
           assert.equal(options.sdkRuntime, runtime);
@@ -56,6 +58,9 @@ for (const rejects of [false, true]) {
         }
       },
       WorkerSupervisor: class {
+        constructor(options: any) {
+          assert.equal(options.mcpConfigPathFor, sessionMcpConfigPathFor);
+        }
         async initialize() { order.push('later-startup'); entered.resolve(); await gate.promise; }
       },
       backendWarn: () => { order.push('warning'); },

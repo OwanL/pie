@@ -58,7 +58,6 @@ for (const stopReason of ['stop', 'error'] as const) {
       triggers: { onSessionFinished: () => undefined } as any, getBackendGeneration: () => 1,
     });
     const forwarded: Array<{ event: string; payload: any }> = [];
-    let router: WorkerRuntimeRouter;
     let seq = 0;
     const routing: Promise<void>[] = [];
     const server = {
@@ -87,7 +86,7 @@ for (const stopReason of ['stop', 'error'] as const) {
         throw new Error('Unexpected command');
       },
     };
-    router = new WorkerRuntimeRouter({
+    const router = new WorkerRuntimeRouter({
       supervisor: { startWorker: async (_root: string, prepare: any) => {
         await prepare(owner); return { ...owner, sessionPath: publicPath, client };
       }, stopWorker: async () => undefined } as any,

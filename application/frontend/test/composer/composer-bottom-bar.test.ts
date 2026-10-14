@@ -140,7 +140,10 @@ test('composer controls render in the agreed bottom-bar order', () => {
   ]);
   assert.match(html, /aria-pressed="false"/);
   assert.match(html, /autonomous-mode-trigger/);
-  assertOrdered(html, ['12 tok/s', '1m 23s', 'LIVE']);
+  // Throughput is not a bottom-bar control; the toolbar exposes working
+  // time and run status even when host token-rate telemetry is populated.
+  assert.doesNotMatch(html, /12 tok\/s|panel-chip-indicator-speed/);
+  assertOrdered(html, ['$0.01', '1m 23s', 'LIVE']);
 });
 
 test('working-time indicator formats session totals compactly', () => {
@@ -329,7 +332,7 @@ test('composer uses the configured initial textarea rows and defaults to one', (
   assert.doesNotMatch(emptySessionHtml, /panel-chip-indicator-time/);
 });
 
-test('composer actions use compact icons in clear, stop, and queue order', () => {
+test('composer actions use compact icons in clear, stop, dictation, and queue order', () => {
   const html = renderToString(h(ComposerActions, {
     busy: true,
     hasQueuedMessages: true,
@@ -342,9 +345,14 @@ test('composer actions use compact icons in clear, stop, and queue order', () =>
   assertOrdered(html, [
     'data-action="clear-queue"',
     'data-action="stop"',
+    'data-action="dictation"',
     'data-action="queue"',
   ]);
-  assert.equal((html.match(/<svg/g) ?? []).length, 3);
+  assert.deepEqual([...html.matchAll(/data-action="([^"]+)"/g)].map((match) => match[1]), [
+    'clear-queue', 'stop', 'dictation', 'queue',
+  ]);
+  assert.match(html, /aria-label="Start dictation"[^>]*disabled[^>]*data-action="dictation"/);
+  assert.equal((html.match(/<svg/g) ?? []).length, 4);
   assert.doesNotMatch(html, />\s*(?:Clear queued|Stop|Queue|Send)\s*</);
   assert.doesNotMatch(html, /Attach file|paperclip/i);
 });
@@ -400,7 +408,9 @@ test('disconnected browser state disables queued, stop, and submit mutations', (
     canSend: true,
   }));
 
-  assert.equal((html.match(/disabled/g) ?? []).length, 3);
+  for (const action of ['clear-queue', 'stop', 'dictation', 'queue']) {
+    assert.match(html, new RegExp(`<button[^>]*disabled[^>]*data-action="${action}"`));
+  }
   assert.match(html, /data-action="clear-queue"/);
   assert.match(html, /data-action="stop"/);
   assert.match(html, /data-action="queue"/);

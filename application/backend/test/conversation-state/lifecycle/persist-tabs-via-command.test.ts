@@ -51,7 +51,7 @@ test('PersistTabs Command handler emits a PersistTabs Effect with the command ar
 
   // No state change (pass-through).
   assert.equal(result.state, archState);
-  // Exactly one effect, carrying the command's args verbatim.
+  // Exactly one effect, carrying tab args plus host-owned snooze intent.
   assert.equal(result.effects.length, 1);
   assert.equal(result.effects[0].kind, 'PersistTabs');
   assert.deepEqual(
@@ -63,6 +63,7 @@ test('PersistTabs Command handler emits a PersistTabs Effect with the command ar
       activeSessionPath,
       pinnedTabPaths,
       pinnedTabGroups,
+      snoozedBySession: {},
     },
   );
 });

@@ -92,6 +92,7 @@ export class WorkerSupervisor {
   private readonly generations = new Map<string, number>();
   private readonly clock: WorkerClientScheduler;
   private disposed = false;
+  private disposal?: Promise<void>;
   private initialized = false;
 
   constructor(private readonly options: WorkerSupervisorOptions) {
@@ -124,6 +125,10 @@ export class WorkerSupervisor {
     this.generations.set(requestedKey, workerGeneration);
     const workerId = randomUUID();
     const assignment = await prepareOwnership?.({ workerId, workerGeneration, sessionPath });
+    // Disposal may finish while ownership preparation is pending. Reject before
+    // constructing a client so the caller's failed-promotion cleanup can release
+    // prepared ownership (there is no child whose death needs confirmation).
+    if (this.disposed) throw new Error('Worker supervisor is disposed.');
     const clientOptions: WorkerClientOptions = {
       workerEntryPath: this.options.workerEntryPath,
       coordinatorGeneration: this.options.coordinatorGeneration,
@@ -248,13 +253,16 @@ export class WorkerSupervisor {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposal) return await this.disposal;
     this.disposed = true;
-    const paths = [...this.workers.keys()];
-    await Promise.allSettled(paths.map((sessionPath) => this.stopWorker(sessionPath, 'coordinator shutdown')));
-    if (this.workers.size > 0) {
-      throw new Error(`Worker supervisor could not confirm exit for ${this.workers.size} worker(s).`);
-    }
+    this.disposal = (async () => {
+      const paths = [...this.workers.keys()];
+      await Promise.allSettled(paths.map((sessionPath) => this.stopWorker(sessionPath, 'coordinator shutdown')));
+      if (this.workers.size > 0) {
+        throw new Error(`Worker supervisor could not confirm exit for ${this.workers.size} worker(s).`);
+      }
+    })();
+    return await this.disposal;
   }
 
   private requireWorker(sessionPath: string): SupervisedWorker {

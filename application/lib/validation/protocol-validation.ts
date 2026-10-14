@@ -1,21 +1,17 @@
 /**
  * Runtime validators for the host ↔ webview protocol.
  *
- * These guards are intentionally **hand-rolled and dependency-free** so they
- * can live in `shared/` (consumed by both backend and host) without pulling a
- * schema library into the webview bundle. They mirror the static types in
- * `./protocol.ts` and exist to catch protocol drift at the trust boundaries:
+ * These guards are hand-written and use the protocol types from
+ * `../protocol/index.js` without a schema-library dependency. They catch
+ * protocol drift at trust boundaries:
  *
  *   - Webview → host messages arrive as untyped JSON over `postMessage`.
- *     Bugs in the webview or a future fuzz/attacker could send malformed
- *     envelopes; the host should detect and log this rather than implicitly
- *     trusting `as WebviewToHostMessage`.
+ *     Browser ingress enforces this validator before routing commands; the
+ *     VS Code `SidebarViewProvider` also uses it for audit-only logging and
+ *     does not drop messages.
  *   - Backend ↔ host messages arrive as JSON-line envelopes; the existing
  *     `isEventEnvelope` / `isResponseEnvelope` checks only validate the outer
  *     shape, not the payload kind.
- *
- * Today the only consumer is `SidebarViewProvider` (audit-only logging — does
- * **not** drop messages). Tighten to rejection once the audit log is clean.
  */
 
 import type {
@@ -546,12 +542,12 @@ function validateToolResultPruningSettingsPatch(value: unknown): value is Partia
     } else if (key === 'profile') {
       if (v !== undefined && (typeof v !== 'string' || !VALID_TOOL_RESULT_PRUNING_PROFILES.has(v as ToolResultPruningSettings['profile']))) return false;
     } else if (key === 'rules') {
-      if (v !== undefined && !isObject(v)) return false;
-      const rules = v as Record<string, unknown>;
-      for (const ruleKey of Object.keys(rules)) {
-        if (!['ansi', 'whitespace', 'blankRun', 'jsonMinify', 'lsLong', 'gitLog', 'grepGroup'].includes(ruleKey)) return false;
-        const ruleValue = rules[ruleKey];
-        if (ruleValue !== undefined && typeof ruleValue !== 'boolean') return false;
+      if (v !== undefined) {
+        if (!isObject(v)) return false;
+        for (const [ruleKey, ruleValue] of Object.entries(v)) {
+          if (!['ansi', 'whitespace', 'blankRun', 'jsonMinify', 'lsLong', 'gitLog', 'grepGroup'].includes(ruleKey)) return false;
+          if (ruleValue !== undefined && typeof ruleValue !== 'boolean') return false;
+        }
       }
     } else if (key === 'tools') {
       if (v !== undefined && v !== null && !Array.isArray(v)) return false;

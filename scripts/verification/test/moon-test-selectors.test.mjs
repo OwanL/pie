@@ -24,6 +24,29 @@ function fixtureChildEnv(source = process.env) {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const NATIVE_NODE_RUNNER = 'scripts/verification/test-node.mjs';
 const SELECTOR_REGRESSION_TEST = 'scripts/verification/test/moon-test-selectors.test.mjs';
+const CHECKPOINT_ARTIFACT_FILES = [
+  'harness/agent-processes/cold-browse-helper/test/cold-browse-helper-client.artifact.test.ts',
+  'harness/agent-processes/cold-browse-helper/test/cold-browse-helper-runtime.artifact.test.ts',
+  'harness/agent-processes/context-inventory/test/initial-context-estimate-client.artifact.test.ts',
+  'harness/agent-processes/coordinator/test/provider-runtime-creation.artifact.test.ts',
+  'harness/agent-processes/workers/test/worker-public-address.artifact.test.ts',
+];
+const ARTIFACT_FAMILY_COUNTS = new Map([
+  ['harness/agent-processes/', 18],
+  ['harness/session-storage/', 3],
+  ['harness/tool-and-skill-selection/', 4],
+  ['harness/tools/playwright/', 1],
+  ['harness/model-providers/model-discovery/', 2],
+  ['harness/model-providers/runtime/', 5],
+  ['harness/tools/package-integrations/web-access/', 1],
+  ['harness/tools/subagent/', 2],
+  ['harness/tools/warm-bash/', 1],
+  ['application/backend/', 1],
+  ['scripts/install/test/', 1],
+  ['scripts/lib/test/', 2],
+  ['scripts/development/test/', 1],
+  ['test/integration/', 5],
+]);
 const ARTIFACT_FILES = [
   'harness/tools/playwright/test/host-runtime-integration.artifact.test.ts',
   'scripts/install/test/source-pi-cli.artifact.test.mjs',
@@ -169,8 +192,16 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   const artifactFiles = relativeFiles(resolveTestFiles(repoRoot, DEFAULT_ARTIFACT_SELECTORS, {
     includeGlobs: [ARTIFACT_TEST_GLOB],
   }));
-  assert.equal(artifactFiles.size, 30, 'the artifact selector resolves all 29 retained artifact tests and private refresh acceptance');
+  assert.equal(artifactFiles.size, 47, 'the artifact selector resolves the retained artifact suites, five checkpoint suites and private refresh acceptance');
   assert.ok([...artifactFiles].every((file) => path.matchesGlob(file, ARTIFACT_TEST_GLOB)));
+  for (const [family, count] of ARTIFACT_FAMILY_COUNTS) {
+    assert.equal([...artifactFiles].filter((file) => file.startsWith(family)).length, count,
+      `${family} contributes its intended artifact suite inventory`);
+  }
+  for (const file of CHECKPOINT_ARTIFACT_FILES) {
+    assert.ok(artifactFiles.has(file), `${file} is an intended checkpoint artifact suite`);
+    assert.equal(fastFiles.has(file), false, `${file} remains outside ordinary native selectors`);
+  }
   for (const file of ARTIFACT_FILES) {
     assert.ok(artifactFiles.has(file), `${file} is selected by the default artifact selectors`);
     assert.equal(fastFiles.has(file), false, `${file} is excluded from all fast native Node selectors`);
@@ -197,6 +228,9 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   for (const file of INTENTIONAL_UNREGISTERED_FAST_FILES) {
     assert.ok(fastFiles.has(file), `${file} is an intentional Moon-only fast suite`);
   }
+  assert.deepEqual([...registryFiles].filter((file) => path.matchesGlob(file, ARTIFACT_TEST_GLOB)).sort(),
+    [...artifactFiles].filter((file) => file !== 'scripts/development/test/refresh.artifact.test.mjs').sort(),
+    'every registered artifact suite is selected only by the artifact lane');
   const expectedFiles = new Set([...registryFiles, ...INTENTIONAL_UNREGISTERED_FAST_FILES,
     'scripts/development/test/refresh.artifact.test.mjs']);
   const actualFiles = new Set([...fastFiles, ...artifactFiles]);

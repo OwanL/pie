@@ -1,6 +1,6 @@
 // Bounded offline adapter. Callers own paths, revisions and persistence.
 import { isDeepStrictEqual } from 'node:util';
-import { providerProtocolOptions, validateProviderConfig, type ProviderConfig, type ProviderConfigDiagnostic } from '../catalog/provider-config';
+import { validateProviderConfig, type ProviderConfig, type ProviderConfigDiagnostic } from '../catalog/provider-config';
 import type { ProviderConfigEdit } from '../catalog/provider-config-writer';
 import type { ProviderModelList } from '../catalog/provider-model-resolution';
 import type { ProviderSetupDraft, ProviderSetupModel, ProviderSetupPreference } from './contracts';

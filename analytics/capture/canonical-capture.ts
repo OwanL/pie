@@ -552,10 +552,14 @@ export class CanonicalAnalyticsCapture {
       });
       return factStatus === 'rejected' ? 'rejected' : 'submitted';
     } catch (error) {
-      this.options.onDetailCaptureError?.(
-        error instanceof Error ? error : new Error(String(error)),
-        payloadId,
-      );
+      try {
+        this.options.onDetailCaptureError?.(
+          error instanceof Error ? error : new Error(String(error)),
+          payloadId,
+        );
+      } catch {
+        // Diagnostics cannot escape into producer execution.
+      }
       return 'rejected';
     }
   }
@@ -884,9 +888,13 @@ export class CanonicalAnalyticsCapture {
   }
 
   private report(error: unknown, observation: AnalyticsObservation<object>): void {
-    this.options.onCaptureError?.(
-      error instanceof Error ? error : new Error(String(error)),
-      observation,
-    );
+    try {
+      this.options.onCaptureError?.(
+        error instanceof Error ? error : new Error(String(error)),
+        observation,
+      );
+    } catch {
+      // Diagnostics cannot alter disposition or sequence settlement.
+    }
   }
 }

@@ -188,8 +188,9 @@ test('BackendReadyChanged{ready:true} with queued sends: emits DrainBackendReady
   // backendReady set to true.
   assert.equal(out.state.settings.backendReady, true);
 
-  // Two effects: DrainBackendReadyQueue + CancelBackendReadyWatchdog.
-  assert.equal(out.effects.length, 2);
+  // Queue drain, watchdog cancellation, and generation-fenced provider discovery.
+  assert.equal(out.effects.length, 3);
+  assert.deepEqual(out.effects.at(-1), providerStartupEffect);
   const drainEffect = out.effects.find((e) => e.kind === 'DrainBackendReadyQueue') as Extract<Effect, { kind: 'DrainBackendReadyQueue' }>;
   assert.ok(drainEffect);
   assert.equal(drainEffect.entries.length, 2);
@@ -200,12 +201,19 @@ test('BackendReadyChanged{ready:true} with queued sends: emits DrainBackendReady
   assert.ok(cancelEffect);
 });
 
-test('BackendReadyChanged{ready:true} with empty queue: no effects', () => {
+const providerStartupEffect: Effect = {
+  kind: 'ProviderManagementRpc', request: { type: 'read', operationId: 'provider-startup:1' },
+  generation: 1, fence: 1, selectedId: null,
+};
+
+test('BackendReadyChanged{ready:true} with empty queue: loads provider management', () => {
   const state = notReadyState();
   const out = reducer(state, backendReadyChanged(true));
 
   assert.equal(out.state.settings.backendReady, true);
-  assert.deepEqual(out.effects, []);
+  assert.deepEqual(out.effects, [providerStartupEffect]);
+  assert.equal(out.state.providerManagement.status, 'loading');
+  assert.equal(out.state.providerManagement.operationId, 'provider-startup:1');
 });
 
 test('BackendReadyChanged replays deferred model configuration through the durable SetModel path', () => {
@@ -244,7 +252,7 @@ test('BackendReadyChanged replays deferred model configuration through the durab
     kind: 'DrainDeferredSetModelQueue',
     corrId: 'drain-model:model-1',
     entries: [state.pending.deferredSetModelBySession[SESSION]],
-  }]);
+  }, providerStartupEffect]);
 });
 
 test('backend-ready sends wait for the deferred model write for their session', () => {
@@ -270,6 +278,7 @@ test('backend-ready sends wait for the deferred model write for their session', 
   assert.deepEqual(ready.effects, [
     { kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:model-before-send', entries: [modelEntry] },
     { kind: 'CancelBackendReadyWatchdog', corrId: 'watchdog' },
+    providerStartupEffect,
   ]);
   assert.deepEqual(ready.state.pending.backendReadyQueueBySession[SESSION], [sendEntry]);
 
@@ -323,7 +332,7 @@ test('deferred model writes replay one at a time in click order across sessions'
   assert.equal(ready.state.pending.deferredSetModelBySession[SESSION_B]?.corrId, 'model-2');
   assert.deepEqual(ready.effects, [{
     kind: 'DrainDeferredSetModelQueue', corrId: 'drain-model:model-1', entries: [first],
-  }]);
+  }, providerStartupEffect]);
 
   const replayedFirst = reducer(ready.state, {
     kind: 'Command',

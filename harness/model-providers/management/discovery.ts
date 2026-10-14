@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { renameWithTransientRetry } from '../../../lib/temporary-files/atomic-write';
 import { COPILOT_HEADERS, parseCopilotModelsResponse } from '../model-discovery/copilot-models';
 import type { ProviderCatalogSnapshot, ProviderModelMetadata } from '../catalog/provider-model-resolution';
 
@@ -156,5 +157,10 @@ export async function invalidateDiscoveryCache(directory: string, id: string): P
 }
 export async function saveDiscoveryCache(directory: string, id: string, provenance: string, snapshot: ProviderCatalogSnapshot, observedAt: number): Promise<void> {
   await mkdir(directory, { recursive: true });
-  await writeFile(filename(directory, id), JSON.stringify({ version: 2, id, provenance, observedAt, models: snapshot.models }), 'utf8');
+  const staging = await mkdtemp(join(directory, '.discovery-'));
+  try {
+    const stagedFile = join(staging, 'cache.json');
+    await writeFile(stagedFile, JSON.stringify({ version: 2, id, provenance, observedAt, models: snapshot.models }), 'utf8');
+    await renameWithTransientRetry(stagedFile, filename(directory, id));
+  } finally { await rm(staging, { recursive: true, force: true }); }
 }

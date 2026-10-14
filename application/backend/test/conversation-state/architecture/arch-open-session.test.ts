@@ -89,12 +89,12 @@ test('OpenSession inserts the placeholder summary, opens + selects the tab, leav
   assert.deepEqual(out.state.composer.activeRunSummaryBySession, { [OLD]: STALE_RUN_SUMMARY });
   // Effects: PersistTabs (post-open tabs + new active) then the thin RPC effect.
   assert.deepEqual(out.effects, [
-    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, NEW], activeSessionPath: NEW, pinnedTabPaths: [], pinnedTabGroups: [] },
+    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, NEW], activeSessionPath: NEW, pinnedTabPaths: [], pinnedTabGroups: [], snoozedBySession: {} },
     { kind: 'OpenSession', corrId: 'c1', sessionPath: NEW, selectionToken: 'tok' },
   ]);
 });
 
-test('OpenSession immediately seeds a cold target with the last usable model catalog', () => {
+test('OpenSession leaves a cold target undiscovered rather than borrowing another session catalog', () => {
   const model: ModelInfo = {
     id: 'reasoning-model', name: 'Reasoning model', provider: 'p', reasoning: true,
     thinkingLevels: ['off', 'high'], inputKinds: ['text'],
@@ -112,8 +112,10 @@ test('OpenSession immediately seeds a cold target with the last usable model cat
   };
   const out = reducer(state, openCmd('catalog', NEW, target));
 
-  assert.deepEqual(out.state.settings.availableModelsBySession[NEW], [model]);
-  assert.equal(out.state.settings.availableModelsStatusBySession[NEW], 'provisional');
+  assert.deepEqual(out.state.settings.availableModelsBySession[NEW], []);
+  assert.equal(out.state.settings.availableModelsStatusBySession[NEW], 'loading');
+  assert.deepEqual(out.state.settings.availableModelsBySession[OLD], [model]);
+  assert.equal(out.state.settings.availableModelsStatusBySession[OLD], 'authoritative');
 });
 
 test('OpenSession does not duplicate the summary or tab if the path is already summarized + already open', () => {

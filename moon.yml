@@ -20,5 +20,5 @@ tasks:
   artifactTest:
     command: 'proto run node -- scripts/verification/test-artifact.mjs'
     deps: ['pi:build']
-    inputs: ['harness/pi/packages/**/*', 'harness/agent-processes/**/*', 'harness/session-storage/**/*', 'harness/tool-and-skill-selection/**/*', 'harness/tools/playwright/**/*', 'scripts/install/test/**/*', 'scripts/lib/test/**/*', 'scripts/development/**/*', 'scripts/development/test/**/*', 'test/integration/**/*', 'scripts/build/pi-runtime.mjs', 'lib/development-runtime/**/*', '@globs(lifecycle)', '@globs(protected)']
+    inputs: ['harness/pi/packages/**/*', 'harness/agent-processes/**/*', 'harness/session-storage/**/*', 'harness/tool-and-skill-selection/**/*', 'harness/tools/playwright/**/*', 'harness/model-providers/model-discovery/**/*', 'harness/model-providers/runtime/**/*', 'harness/tools/package-integrations/web-access/**/*', 'harness/tools/subagent/**/*', 'harness/tools/warm-bash/**/*', 'application/backend/**/*', 'scripts/install/test/**/*', 'scripts/lib/test/**/*', 'scripts/development/**/*', 'scripts/development/test/**/*', 'test/integration/**/*', 'scripts/build/pi-runtime.mjs', 'lib/development-runtime/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}

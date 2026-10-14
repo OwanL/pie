@@ -172,6 +172,7 @@ function makeBuildFixture(t) {
   const viteInputs = [
     'application/hosts/vscode/activation/extension.ts',
     'application/hosts/standalone/index.ts',
+    'application/backend/dictation/helper-entry.ts',
     'harness/agent-processes/coordinator/index.ts',
     'harness/agent-processes/workers/worker-entry.ts',
     'analytics/recording/recorder-worker-entry.ts',
@@ -255,6 +256,7 @@ test('explicit delivery source-bound isolated build selects candidate graph and 
     'TypeScript resolves the explicit candidate SDK graph, not the installed owner copy',
   );
   assert.ok(existsSync(path.join(output, 'standalone.js')), 'the actual Vite config emits the standalone host entry');
+  assert.ok(existsSync(path.join(output, 'dictation-helper.js')), 'the actual Vite config emits the separately spawned dictation helper');
   const bundledHost = readFileSync(path.join(output, 'extension.js'), 'utf8');
   assert.match(bundledHost, /verified-candidate-sdk-graph/, 'the actual Vite config bundles the selected candidate SDK alias');
   const rendererRoot = path.join(output, 'webview', 'panel');

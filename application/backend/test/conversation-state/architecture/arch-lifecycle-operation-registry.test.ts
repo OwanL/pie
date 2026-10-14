@@ -348,7 +348,7 @@ test('session.close private final marker-removal command preserves operation cor
   assert.deepEqual(final.effects, [{
     kind: 'PersistTabs', corrId: 'private-final', operationId, backendGeneration: 7,
     acknowledgementKey: 'privacy-marker-removal', openTabPaths: [OTHER],
-    activeSessionPath: OTHER, pinnedTabPaths: [], pinnedTabGroups: [], privateSessionPaths: [],
+    activeSessionPath: OTHER, pinnedTabPaths: [], pinnedTabGroups: [], privateSessionPaths: [], snoozedBySession: {},
   }]);
 });
 

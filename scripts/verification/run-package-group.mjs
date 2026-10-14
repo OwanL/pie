@@ -61,39 +61,39 @@ function printHelp() {
   console.log(`Available groups: ${Object.keys(PACKAGE_GROUPS).join(', ')}`);
 }
 
-function runRunner(script, args, signal) {
+export function runRunner(script, args, signal, dependencies = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'verification', script), ...args], withProcessTreeIsolation({
+    const child = (dependencies.spawn ?? spawn)(process.execPath, [path.join(repoRoot, 'scripts', 'verification', script), ...args], withProcessTreeIsolation({
       cwd: repoRoot,
       env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))),
       stdio: 'inherit',
       windowsHide: true,
     }));
-    const watchdog = watchChildProcess(child, {
+    const watchdog = (dependencies.watchChildProcess ?? watchChildProcess)(child, {
       timeoutMs: resolveChildProcessTimeoutMs(),
       signal,
       label: `${script} (${args.join(' ')})`,
     });
     child.on('error', async (error) => {
-      await watchdog.settle().catch(() => {});
-      reject(error);
-    });
-    child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (!cleanup.gone) { reject(new Error('Package-group tree teardown is unconfirmed')); return; }
-      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
+      reject(cleanup.gone ? error : Object.assign(new Error('Package-group tree teardown is unconfirmed', { cause: error }), { teardownUnconfirmed: true }));
+    });
+    child.on('close', async (code, signal) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      if (!cleanup.gone || code === 125) { reject(Object.assign(new Error('Package-group tree teardown is unconfirmed'), { teardownUnconfirmed: true })); return; }
+      resolve(watchdog.timedOut || watchdog.aborted || signal || code === null ? 1 : code);
     });
   });
 }
 
 export async function runPackageGroup(selection, invocation, signal, dependencies = {}) {
-  const run = dependencies.runRunner ?? runRunner;
+  const run = dependencies.runRunner ?? ((script, args, signal) => runRunner(script, args, signal, dependencies));
   return withVerificationRuntime(selection, signal, (runtime) =>
     run(invocation.script, [...runtimeArgs(runtime), ...invocation.args], signal), dependencies);
 }
 
-async function main() {
-  const selection = extractRuntimeArgs(process.argv.slice(2));
+async function main(argv, dependencies) {
+  const selection = extractRuntimeArgs(argv);
   const [runner, group, ...forwarded] = selection.args;
   if (!runner || !group || runner === '--help' || runner === '-h') {
     printHelp();
@@ -116,14 +116,18 @@ async function main() {
   try {
     const informational = forwarded.some((arg) => ['--help', '-h', '--list'].includes(arg));
     const exitCode = informational
-      ? await runRunner(invocation.script, invocation.args, abort.signal)
-      : await runPackageGroup(selection, invocation, abort.signal);
+      ? await runRunner(invocation.script, invocation.args, abort.signal, dependencies)
+      : await runPackageGroup(selection, invocation, abort.signal, dependencies);
     if (exitCode !== 0) process.exitCode = exitCode;
   } finally {
     abort.dispose();
   }
 }
 
+export async function runPackageGroupCli(argv = process.argv.slice(2), dependencies = {}) {
+  await main(argv, dependencies).catch((error) => { console.error(error.message); process.exitCode = error.teardownUnconfirmed === true ? 125 : 1; });
+}
+
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) await main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (invokedDirectly) await runPackageGroupCli();

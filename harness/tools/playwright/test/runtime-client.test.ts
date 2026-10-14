@@ -65,10 +65,88 @@ function fakeFactory(options: { neverCancel?: boolean } = {}) {
   };
 }
 
+class DeferredShutdownChild extends FakeChild {
+  receive(record: any) {
+    if (record.kind === 'shutdown') {
+      this.records.push(record);
+      this.allRecords.push(record);
+      return;
+    }
+    super.receive(record);
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeout = 2000): Promise<void> {
   const end = Date.now() + timeout;
   while (!predicate()) { if (Date.now() > end) throw new Error('condition timed out'); await new Promise((resolve) => setTimeout(resolve, 5)); }
 }
+
+test('shutdown fences requests and concurrent callers until deferred child exit, then permits restart', async () => {
+  const children: DeferredShutdownChild[] = [];
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-deferred.jsonl'), () => {
+    const child = new DeferredShutdownChild(undefined, []);
+    children.push(child);
+    return child;
+  });
+  await client.request('open', {});
+  let firstDone = false;
+  let secondDone = false;
+  const first = client.shutdown().then(() => { firstDone = true; });
+  const second = client.shutdown().then(() => { secondDone = true; });
+  try {
+    await assert.rejects(client.request('open', {}), (error: unknown) =>
+      error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_REOPEN_REQUIRED');
+    assert.equal(children.length, 1);
+    assert.equal(firstDone, false);
+    assert.equal(secondDone, false);
+    assert.equal(children[0].records.filter((record: any) => record.kind === 'shutdown').length, 1);
+  } finally {
+    children[0].exitCleanly();
+    await Promise.all([first, second]);
+  }
+  await client.request('open', {});
+  assert.equal(children.length, 2);
+  const cleanup = client.shutdown();
+  children[1].exitCleanly();
+  await cleanup;
+});
+
+test('registry retains shutdown ownership until cleanup and creates a fresh client afterwards', async () => {
+  const children: DeferredShutdownChild[] = [];
+  const registry = new RuntimeRegistry(() => {
+    const child = new DeferredShutdownChild(undefined, []);
+    children.push(child);
+    return child;
+  });
+  const sessionPath = path.join(tmpdir(), 'pw-registry-deferred.jsonl');
+  const client = await registry.get(sessionPath);
+  await client.request('open', {});
+  let sessionDone = false;
+  let allDone = false;
+  const sessionShutdown = registry.shutdownSession(sessionPath).then(() => { sessionDone = true; });
+  await waitFor(() => children[0].records.some((record: any) => record.kind === 'shutdown'));
+  const allShutdown = registry.shutdownAll().then(() => { allDone = true; });
+  try {
+    assert.equal(await registry.get(sessionPath), client);
+    await assert.rejects(client.request('open', {}), (error: unknown) =>
+      error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_REOPEN_REQUIRED');
+    assert.equal(registry.size, 1);
+    assert.equal(children.length, 1);
+    assert.equal(sessionDone, false);
+    assert.equal(allDone, false);
+  } finally {
+    children[0].exitCleanly();
+    await Promise.all([sessionShutdown, allShutdown]);
+  }
+  assert.equal(registry.size, 0);
+  const fresh = await registry.get(sessionPath);
+  assert.notEqual(fresh, client);
+  await fresh.request('open', {});
+  assert.equal(children.length, 2);
+  const cleanup = registry.shutdownAll();
+  children[1].exitCleanly();
+  await cleanup;
+});
 
 test('runtime starts lazily and round-trips typed results and typed errors', async () => {
   const fake = fakeFactory();

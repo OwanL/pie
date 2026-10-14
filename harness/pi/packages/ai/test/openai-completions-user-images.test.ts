@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import { convertMessages } from "../src/api/openai-completions.ts";
 import type { Model, OpenAICompletionsCompat, UserMessage } from "../src/types.ts";
 

@@ -2,14 +2,10 @@ import assert from 'node:assert/strict';
 import test, { describe, beforeEach, afterEach } from 'node:test';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadModuleFixture } from './module-fixture.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const indexUrl = pathToFileURL(path.resolve(__dirname, '../../../../extensions/tool-result-pruner/index.ts')).href;
-const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
-const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 
 type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean; duplicateCollapse: boolean; progressNoise: boolean };
 type Config = { enabled: boolean; profile: string; rules: RuleToggles };
@@ -76,9 +72,10 @@ describe('index handler (visibility badge + analytics)', () => {
   const sessionContexts = new Map<string, unknown>();
 
   test.before(async () => {
-    configMod = (await import(configUrl)) as ConfigModule;
-    loggerMod = (await import(loggerUrl)) as LoggerModule;
-    const indexMod = (await import(indexUrl)) as IndexModule;
+    const fixture = await loadModuleFixture();
+    configMod = fixture.config as ConfigModule;
+    loggerMod = fixture.logger as LoggerModule;
+    const indexMod = fixture.adapter as IndexModule;
     setStashDir = indexMod.setStashDirForTesting;
     const handlers = new Map<string, AnyHandler>();
     const mockPi = {

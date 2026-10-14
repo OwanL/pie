@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import path from 'node:path';
-import { writeFileSync, rmSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { loadModuleFixture } from './module-fixture.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
+let __dirname: string;
 
 type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean; duplicateCollapse: boolean; progressNoise: boolean };
 type Config = { enabled: boolean; profile: string; rules: RuleToggles; tools: string[] | null };
@@ -19,7 +19,11 @@ type ConfigModule = {
 describe('config loader', () => {
   let mod: ConfigModule;
   test.before(async () => {
-    mod = (await import(configUrl)) as ConfigModule;
+    mod = (await loadModuleFixture()).config as ConfigModule;
+    __dirname = mkdtempSync(path.join(tmpdir(), 'trp-config-'));
+  });
+  test.after(() => {
+    if (__dirname) rmSync(__dirname, { recursive: true, force: true });
   });
   test.afterEach(() => {
     mod.setConfigOverrideForTesting(null);

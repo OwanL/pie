@@ -220,7 +220,7 @@ test('sources larger than the cache budget still stream and refetch without bein
   assert.equal(errorsOf(emitted, 'subscription-1').length, 0);
 });
 
-test('oversized siblings invalidate a cached source with the same durable identity before refetch', async () => {
+test('oversized siblings do not replace a retained sibling baseline before refetch', async () => {
   const siblingAddress: LiveSubagentDetailAddress = {
     ...ADDRESS,
     lineage: [{ childId: 'child-2', spawningToolCallId: 'tool-1', attemptId: 'attempt-2' }],
@@ -243,7 +243,7 @@ test('oversized siblings invalidate a cached source with the same durable identi
   assert.equal(pagesOf(emitted, 'oversized').length, originalPages.length + 1);
   assert.deepEqual(asPage(pagesOf(emitted, 'oversized').at(-1)!), original);
   assert.equal(errorsOf(emitted, 'oversized').length, 0);
-  assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 2, canonicalBytes: 0 });
+  assert.deepEqual(store.debugState(), { sources: 1, subscriptions: 2, canonicalBytes: Buffer.byteLength(JSON.stringify(small), 'utf8') });
 });
 
 test('fetch validates the subscription owner and the manifest before emitting', async () => {
@@ -331,7 +331,7 @@ test('source and subscription caches are bounded', async () => {
 });
 
 test('evicted durable sources are re-read by exact identity and reject changed payloads', async () => {
-  for (const failure of ['identity', 'bytes', 'canonical', 'missing'] as const) {
+  for (const failure of ['identity', 'bytes', 'content', 'canonical', 'missing'] as const) {
     let rereading = false;
     const value = addressableResult({ text: 'x'.repeat(5000) });
     const emitted: CoordinatorToHostDetailMessage[] = [];
@@ -345,7 +345,7 @@ test('evicted durable sources are re-read by exact identity and reject changed p
         }
         return {
           value: rereading && address.rootToolCallId === 'tool-1'
-            ? failure === 'canonical' ? BigInt(1) : failure === 'bytes' ? { changed: true } : value
+            ? failure === 'canonical' ? BigInt(1) : failure === 'bytes' ? { changed: true } : failure === 'content' ? addressableResult({ text: 'y'.repeat(5000) }) : value
             : value,
           sizeBytes: 5000,
           messageId: rereading && failure === 'identity' ? 'different' : `msg-${address.rootToolCallId}`,
@@ -468,4 +468,98 @@ test('durable resolution addresses the root tool call and the lineage child', ()
     ...ADDRESS, rootToolCallId: 'tool-missing',
   });
   assert.equal(missingRoot.status, 'not-found');
+});
+
+
+test('equal-length retained siblings refetch their own exact baseline', async () => {
+  const sibling = { ...ADDRESS, lineage: [{ childId: 'child-2', spawningToolCallId: 'tool-1', attemptId: 'attempt-2' }] };
+  const first = addressableResult({ text: 'aaaa' });
+  const second = { ...addressableResult({ text: 'bbbb' }), lineage: sibling.lineage };
+  const { store, emitted } = createStore({ transcript: transcriptWithResult({ results: [first, second] }) });
+  await store.subscribe('a', 'a', ADDRESS, 4096, fence());
+  const original = asPage(pagesOf(emitted, 'a')[0]!);
+  assert.ok(original);
+  await store.subscribe('b', 'b', sibling, 4096, fence());
+  await store.fetch('f', 'a', ADDRESS, original.ref, 4096, fence());
+  assert.deepEqual(asPage(pagesOf(emitted, 'a').at(-1)!), original);
+  assert.equal(store.debugState().sources, 2);
+});
+
+test('pending subscription reservations enforce capacity and fence retired completions', async () => {
+  for (const retirement of ['unsubscribe', 'dispose', 'supersede', 'reject'] as const) {
+    let finish!: (value: unknown) => void;
+    let fail!: (error: Error) => void;
+    let calls = 0;
+    const { store, emitted } = createStore({ budgets: { maxSubscriptions: 1 }, resolveOverride: async () => {
+      calls += 1;
+      if (calls === 1) return new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+      return { text: 'fresh' };
+    } });
+    const pending = store.subscribe('a', 'a', ADDRESS, 4096, fence());
+    assert.equal(store.owns('a'), true);
+    assert.equal(store.debugState().subscriptions, 1);
+    await store.subscribe('duplicate', 'a', ADDRESS, 4096, fence());
+    assert.equal(calls, 1);
+    await store.subscribe('b', 'b', { ...ADDRESS, rootToolCallId: 'other' }, 4096, fence());
+    assert.equal(calls, 1);
+    if (retirement === 'dispose') store.dispose();
+    else if (retirement === 'supersede') await store.subscribe('new', 'new', ADDRESS, 4096, fence());
+    else store.unsubscribe('u', 'a');
+    const before = emitted.length;
+    if (retirement === 'reject') fail(new Error('late failure'));
+    else finish({ text: 'late' });
+    await pending;
+    assert.equal(emitted.length, before);
+    assert.equal(store.owns('a'), false);
+    assert.equal(store.debugState().subscriptions, retirement === 'supersede' ? 1 : 0);
+    assert.equal(store.debugState().sources, retirement === 'supersede' ? 1 : 0);
+  }
+});
+
+test('source resolution cannot retain after ownership retires between nested promise continuations', async () => {
+  for (const retirement of ['unsubscribe', 'dispose'] as const) {
+    let finish!: (value: unknown) => void;
+    let calls = 0;
+    const { store, emitted } = createStore({ budgets: { maxCanonicalBytes: 1 }, resolveOverride: async () => {
+      calls += 1;
+      if (calls === 1) return { text: 'baseline' };
+      return new Promise((resolve) => { finish = resolve; });
+    } });
+    await store.subscribe('a', 'a', ADDRESS, 4096, fence());
+    const page = asPage(pagesOf(emitted, 'a')[0]!);
+    assert.ok(page);
+    const pending = store.fetch('f', 'a', ADDRESS, page.ref, 4096, fence());
+
+    // Resolve the underlying operation first. Its continuation validates
+    // ownership, then this microtask retires it before sourceFor resumes.
+    finish({ text: 'baseline' });
+    queueMicrotask(() => {
+      if (retirement === 'dispose') store.dispose();
+      else store.unsubscribe('u', 'a');
+    });
+    const before = emitted.length;
+    await pending;
+    assert.equal(emitted.length, before);
+    assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+  }
+});
+
+test('late evicted-source fetch cannot publish or retain after owner disposal', async () => {
+  let finish!: (value: unknown) => void;
+  let calls = 0;
+  const { store, emitted } = createStore({ budgets: { maxCanonicalBytes: 1 }, resolveOverride: async () => {
+    calls += 1;
+    if (calls === 1) return { text: 'baseline' };
+    return new Promise((resolve) => { finish = resolve; });
+  } });
+  await store.subscribe('a', 'a', ADDRESS, 4096, fence());
+  const page = asPage(pagesOf(emitted, 'a')[0]!);
+  assert.ok(page);
+  const pending = store.fetch('f', 'a', ADDRESS, page.ref, 4096, fence());
+  store.dispose();
+  const before = emitted.length;
+  finish({ text: 'baseline' });
+  await pending;
+  assert.equal(emitted.length, before);
+  assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
 });

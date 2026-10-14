@@ -26,6 +26,14 @@ export async function withCatalogLock<T>(
     try {
       handle = await open(lockPath, 'wx');
     } catch (error) {
+      // Windows can report EPERM while a previous holder's unlink is still
+      // pending. Retry exclusive creation within the same budget, but never
+      // interpret a permission error as evidence that a lock is stale.
+      if (process.platform === 'win32' && error instanceof Error && 'code' in error && error.code === 'EPERM') {
+        if (Date.now() - startedAt >= timeoutMs) throw error;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        continue;
+      }
       if (!isAlreadyExists(error)) throw error;
 
       const ageMs = await stat(lockPath)

@@ -30,14 +30,21 @@ test('coordinator injects public native models without resolving OAuth credentia
         providers.push(provider);
         return [{ provider, id: 'public', name: 'Public Native', api: 'openai-codex-responses',
           baseUrl: 'https://example.com', input: ['text'], reasoning: true, contextWindow: 1000, maxTokens: 100,
-          cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }];
+          cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+            tiers: [{ inputTokensAbove: 200000, input: 3, output: 4, cacheRead: 0, cacheWrite: 0 }] } },
+          { provider, id: 'invalid', name: 'Invalid pricing', api: 'openai-codex-responses',
+            baseUrl: 'https://example.com', input: ['text'], reasoning: false, contextWindow: 1000, maxTokens: 100,
+            cost: { input: 1, output: 2, tiers: [{ inputTokensAbove: 200000 }] } }];
       }
     } as unknown as import('../../lib/sdk-integration/sdk').ColdCoordinatorSdkModule, () => {});
     const read = await service.request({ type: 'read', operationId: 'read' });
     assert.equal(read.status, 'ok');
-    assert.deepEqual(read.snapshot.providers.map(p => [p.id, p.modelCount]), [['openai-codex', 1]]);
+    assert.deepEqual(read.snapshot.providers.map(p => [p.id, p.modelCount]), [['openai-codex', 2]]);
     const detail = await service.request({ type: 'read-provider', operationId: 'detail', id: 'openai-codex' });
-    assert.equal(detail.draft!.models[0].name, 'Public Native');
+    const publicModel = detail.draft!.models.find(model => model.id === 'public')!;
+    assert.equal(publicModel.name, 'Public Native');
+    assert.deepEqual(publicModel.pricing, { kind: 'known', input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiered: true });
+    assert.deepEqual(detail.draft!.models.find(model => model.id === 'invalid')!.pricing, { kind: 'unknown', tiered: false });
     assert.ok(providers.every(id => id === 'openai-codex'));
   } finally {
     service?.dispose();

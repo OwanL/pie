@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -67,10 +67,9 @@ export async function installRuntimeBootstrap({ extensionDir, pkg }) {
   const generation = hash.digest('hex');
   const relativeDir = `pie-bootstrap/${generation}`;
   const destination = path.join(extensionDir, relativeDir);
-  const staging = `${destination}.staging-${process.pid}`;
   await mkdir(path.dirname(destination), { recursive: true });
+  const staging = await mkdtemp(`${destination}.staging-`);
   try {
-    await mkdir(staging, { recursive: true });
     await Promise.all(bootstrapFiles.map((name, index) => writeFile(path.join(staging, name), contents[index])));
     try {
       await rename(staging, destination);
@@ -85,12 +84,32 @@ export async function installRuntimeBootstrap({ extensionDir, pkg }) {
       throw new Error('Installed extension identity changed during bootstrap installation.');
     }
     const manifest = JSON.stringify({ ...pkg, main: `./${relativeDir}/bootstrap.cjs`, pieRuntimeBootstrap: 1 }, null, 2) + '\n';
-    const manifestStaging = path.join(extensionDir, `.package-${process.pid}-${generation}.json`);
+    const manifestStaging = path.join(extensionDir, `.package-${randomUUID()}.json`);
+    let ownsManifestStaging = false;
     try {
-      await writeFile(manifestStaging, manifest, { flag: 'wx' });
-      await rename(manifestStaging, path.join(extensionDir, 'package.json'));
+      const manifestHandle = await open(manifestStaging, 'wx');
+      ownsManifestStaging = true;
+      try {
+        await manifestHandle.writeFile(manifest);
+      } finally {
+        await manifestHandle.close();
+      }
+      const manifestPath = path.join(extensionDir, 'package.json');
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await rename(manifestStaging, manifestPath);
+          break;
+        } catch (error) {
+          if (!['EACCES', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
+          // Windows can refuse replacement while another invocation reads or
+          // selects the same manifest. An identical selection is already done.
+          if (await readFile(manifestPath, 'utf8') === manifest) break;
+          if (attempt === 9) throw error;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
     } finally {
-      await rm(manifestStaging, { force: true });
+      if (ownsManifestStaging) await rm(manifestStaging, { force: true });
     }
     return generation;
   } finally {

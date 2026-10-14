@@ -116,7 +116,7 @@ exports.runPruningPrepass = () => { throw new Error('must not call a provider');
       configure({}); await run(first, {...event, prompt: 'hi'}, 'short');
       await run(first, event, 'empty');
       first.hooks.get('input')({text: event.prompt, streamingBehavior: 'steer'});
-      await run(first, event, 'queued');
+      // Queued delivery does not invoke before_agent_start in the SDK.
       assert.equal(globalThis.executionLoads, 0);
       assert.ok(Object.keys(Module._cache).every(filename => !isExecution(filename)));
       const candidate = {...event, refreshPruning: true, systemPromptOptions: {skills: [{name: 'fixture', description: 'fixture', filePath: '/fixture/SKILL.md'}]}};

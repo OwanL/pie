@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { assertRuntimeBootstrapSupportsSchema } from '../runtime-publication.mjs';
+import { assertRuntimeBootstrapSupportsSchema, installRuntimeBootstrap } from '../runtime-publication.mjs';
 import runtime from '../../../application/hosts/vscode/runtime/runtime-generations.cjs';
 
 const sourcePkg = JSON.parse(await readFile(new URL('../../../application/hosts/vscode/package.json', import.meta.url), 'utf8'));
@@ -25,6 +25,49 @@ async function fixture(t, helper, { legacy = false } = {}) {
   return { root, directory };
 }
 const check = (root, schema) => assertRuntimeBootstrapSupportsSchema({ extensionDir: root, schema });
+
+test('concurrent same-process loader installs own their staging paths', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-loader-concurrent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'package.json'), JSON.stringify(sourcePkg));
+  const generations = await Promise.all(Array.from({ length: 16 }, () =>
+    installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg })));
+  assert.equal(new Set(generations).size, 1);
+  await check(root, 2);
+  assert.deepEqual(await readdir(path.join(root, 'pie-bootstrap')), [generations[0]]);
+  assert.deepEqual((await readdir(root)).sort(), ['package.json', 'pie-bootstrap']);
+});
+
+test('partial manifest staging writes remove only the exclusively owned file', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pie-loader-partial-write-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'package.json'), JSON.stringify(sourcePkg));
+  const untouchedPath = path.join(root, '.untouched');
+  await writeFile(untouchedPath, 'keep me');
+
+  const probePath = path.join(root, '.handle-probe');
+  const probe = await open(probePath, 'w');
+  const handlePrototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  await rm(probePath);
+  const originalWriteFile = handlePrototype.writeFile;
+  handlePrototype.writeFile = async function (data, ...args) {
+    await originalWriteFile.call(this, String(data).slice(0, 8), ...args);
+    throw new Error('injected partial manifest write failure');
+  };
+  try {
+    await assert.rejects(
+      installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg }),
+      /injected partial manifest write failure/u,
+    );
+  } finally {
+    handlePrototype.writeFile = originalWriteFile;
+  }
+
+  assert.equal(await readFile(untouchedPath, 'utf8'), 'keep me');
+  assert.equal(await readFile(path.join(root, 'package.json'), 'utf8'), JSON.stringify(sourcePkg));
+  assert.deepEqual((await readdir(root)).filter(name => name.startsWith('.package-')), []);
+});
 
 test('source loader declares immutable schema capabilities', () => {
   assert.deepEqual(runtime.SUPPORTED_MANIFEST_SCHEMAS, [1, 2]);

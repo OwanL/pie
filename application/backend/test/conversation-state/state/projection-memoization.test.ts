@@ -125,6 +125,26 @@ test('projection memoization: a genuine active-session delta recomputes but keep
   assert.equal(second.modelSettings, first.modelSettings, 'modelSettings unchanged → same reference');
 });
 
+test('projection memoization: snooze changes invalidate the visible sessions slice', () => {
+  const state = produce(stateWithActiveSession(SESSION_A), (draft) => {
+    draft.sessions.sessions.push(sessionSummary(SESSION_B));
+  });
+  const first = selectViewState(state);
+  const snoozed = produce(state, (draft) => {
+    draft.sessions.snoozedBySession[SESSION_B] = {
+      path: SESSION_B, name: SESSION_B, wakeAt: 1000, index: 1, pinnedIndex: -1, group: [],
+    };
+  });
+  const second = selectViewState(snoozed);
+  assert.notEqual(second.sessions, first.sessions);
+  assert.deepEqual(second.sessions.map((s) => s.path), [SESSION_A]);
+  const delta = produce(snoozed, (draft) => {
+    draft.transcript.bySession[SESSION_A] = [assistantMsg('a1')];
+  });
+  assert.equal(selectViewState(delta).sessions, second.sessions);
+  assert.deepEqual(selectViewState(state).sessions.map((s) => s.path), [SESSION_A, SESSION_B]);
+});
+
 test('projection memoization: switching active session busts the cache', () => {
   const stateA = produce(stateWithActiveSession(SESSION_A, [assistantMsg('a1')]), (draft) => {
     draft.sessions.sessions.push(sessionSummary(SESSION_B));

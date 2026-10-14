@@ -11,8 +11,8 @@ export const SESSION_SETTINGS_DIR_ENV = 'PIE_SESSION_SETTINGS_DIR';
 export const LEGACY_SESSION_SETTINGS_DIR_ENV = 'PIE_LEGACY_SESSION_SETTINGS_DIR';
 export const SESSION_SETTINGS_FILE = 'system-prompt-toggles.json';
 
-/** Serialize shared-sidecar mutations so concurrent session updates do not
- * overwrite each other. Reads wait for mutations already in progress. */
+/** Serialize shared-sidecar mutations within this process. Reads wait for
+ * mutations already in progress; this is not a cross-process lock. */
 let pendingWrite: Promise<void> = Promise.resolve();
 
 function getSessionSettingsFilePath(): string | undefined {
@@ -45,32 +45,45 @@ function normalizeMap(value: unknown): Record<string, string[]> {
   return out;
 }
 
-/** Return undefined only for a missing sidecar; malformed content remains an
- * empty settings map, preserving the existing corrupt-sidecar behavior. */
-async function readSystemPromptTogglesFromFile(file: string): Promise<Record<string, string[]> | undefined> {
+/** Return undefined only for a missing sidecar. User reads tolerate corrupt or
+ * unreadable content; mutation reads reject it to preserve existing bytes. */
+async function readSystemPromptTogglesFromFile(file: string, forMutation = false): Promise<Record<string, string[]> | undefined> {
   try {
     const content = await fs.readFile(file, 'utf8');
     try {
-      return normalizeMap(JSON.parse(content));
+      const parsed: unknown = JSON.parse(content);
+      // Tolerant session-open reads may discard invalid entries, but a mutation
+      // must never replace existing state after silently discarding any of it.
+      if (forMutation && (
+        !parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || Object.entries(parsed).some(([key, raw]) => (
+          !key || !Array.isArray(raw) || !raw.every((entry) => typeof entry === 'string')
+        ))
+      )) {
+        throw new Error(`Malformed system-prompt toggle sidecar: ${file}`);
+      }
+      return normalizeMap(parsed);
     } catch (error) {
+      if (forMutation) throw error;
       backendTrace('systemPromptToggles', 'read.failed', { level: 'debug', error: toErrorMessage(error), file });
       return {};
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if (forMutation) throw error;
     backendTrace('systemPromptToggles', 'read.failed', { level: 'debug', error: toErrorMessage(error), file });
     return {};
   }
 }
 
-async function readStoredSystemPromptToggles(): Promise<Record<string, string[]>> {
+async function readStoredSystemPromptToggles(forMutation = false): Promise<Record<string, string[]>> {
   const currentFile = getSessionSettingsFilePath();
   if (currentFile) {
-    const current = await readSystemPromptTogglesFromFile(currentFile);
+    const current = await readSystemPromptTogglesFromFile(currentFile, forMutation);
     if (current !== undefined) return current;
   }
   const legacyFile = getLegacySessionSettingsFilePath();
-  return legacyFile ? (await readSystemPromptTogglesFromFile(legacyFile) ?? {}) : {};
+  return legacyFile ? (await readSystemPromptTogglesFromFile(legacyFile, forMutation) ?? {}) : {};
 }
 
 /**
@@ -88,12 +101,14 @@ export async function readSystemPromptTogglesForSession(sessionPath: string): Pr
   return (await readSystemPromptToggles())[sessionPath] ?? [];
 }
 
-async function scrubLegacySessionEntry(sessionPath: string): Promise<void> {
+async function scrubLegacySessionEntry(
+  sessionPath: string,
+  existing: Record<string, string[]> | undefined,
+): Promise<void> {
   const legacyFile = getLegacySessionSettingsFilePath();
   const currentFile = getSessionSettingsFilePath();
   if (!legacyFile || !currentFile || legacyFile === currentFile) return;
 
-  const existing = await readSystemPromptTogglesFromFile(legacyFile);
   if (existing === undefined || !(sessionPath in existing)) return;
   delete existing[sessionPath];
   if (Object.keys(existing).length === 0) {
@@ -119,7 +134,14 @@ async function persistSystemPromptTogglesForSession(
   let tempFile: string | undefined;
   try {
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const all = await readStoredSystemPromptToggles();
+    // Validate every sidecar we may replace before publishing either one.
+    // ENOENT alone permits creating new state; all other read failures abort.
+    const legacyFile = getLegacySessionSettingsFilePath();
+    const currentFile = getSessionSettingsFilePath();
+    const legacy = legacyFile && currentFile && legacyFile !== currentFile
+      ? await readSystemPromptTogglesFromFile(legacyFile, true)
+      : undefined;
+    const all = await readStoredSystemPromptToggles(true);
     if (disabledEntries.length === 0) {
       delete all[sessionPath];
     } else {
@@ -131,7 +153,7 @@ async function persistSystemPromptTogglesForSession(
     tempFile = `${file}.${process.pid}.${randomUUID()}.tmp`;
     await fs.writeFile(tempFile, JSON.stringify(all, null, 2) + '\n', 'utf8');
     await fs.rename(tempFile, file);
-    await scrubLegacySessionEntry(sessionPath);
+    await scrubLegacySessionEntry(sessionPath, legacy);
   } catch (error) {
     backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(error), file });
     if (strict) throw error;

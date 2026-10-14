@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -621,6 +622,36 @@ test('serializes catalog writes from independent refresh coordinators', async ()
     await Promise.all([first, second]);
     assert.deepEqual(events, ['first:start', 'first:end', 'second:start', 'second:end']);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Windows catalog lock retries transient EPERM without reclaiming a lock and bounds persistent errors', { skip: process.platform !== 'win32' }, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pie-copilot-permission-'));
+  const lockPath = path.join(directory, 'catalog.lock');
+  const realOpen = fsPromises.open;
+  const denied = Object.assign(new Error('permission denied'), { code: 'EPERM' });
+  let attempts = 0;
+  let actions = 0;
+  const mockedOpen = t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof realOpen>) => {
+    if (++attempts === 1) throw denied;
+    return realOpen(...args);
+  });
+  try {
+    await withCatalogLock(lockPath, async () => { actions += 1; }, { retryDelayMs: 1 });
+    assert.equal(attempts, 2);
+    assert.equal(actions, 1);
+
+    await writeFile(lockPath, 'existing owner\n');
+    mockedOpen.mock.mockImplementation(async () => { throw denied; });
+    await assert.rejects(
+      withCatalogLock(lockPath, async () => { actions += 1; }, { retryDelayMs: 1, timeoutMs: 10, staleAfterMs: -1 }),
+      error => error === denied,
+    );
+    assert.equal(actions, 1);
+    assert.equal(await readFile(lockPath, 'utf8'), 'existing owner\n');
+  } finally {
+    mockedOpen.mock.restore();
     await rm(directory, { recursive: true, force: true });
   }
 });

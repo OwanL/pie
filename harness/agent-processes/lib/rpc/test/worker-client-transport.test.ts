@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import type * as cp from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -467,6 +469,67 @@ for (const mode of ['malformed', 'gap', 'oversize', 'raw-fd-oversize'] as const)
     }
   });
 }
+
+test('EOF while stopping immediately rejects all pending requests without labeling an intentional exit as a failure', async () => {
+  const clock = new FakeClock();
+  const client = createClient('noise', { scheduler: clock });
+  try {
+    await client.start();
+    const seam = client as unknown as {
+      handleMessage(message: unknown): void;
+      handleIpcEnd(): void;
+      pending: Map<string, unknown>;
+    };
+    // Hold responses so EOF, rather than a reply or deadline, settles shutdown.
+    seam.handleMessage = () => undefined;
+    const request = client.requestFrame({ kind: 'detail.unsubscribe', subscriptionId: 'held' }, 'detail.unsubscribed');
+    const shutdown = client.shutdown('intentional stop');
+    const requestRejected = assert.rejects(request, /descriptor closed before process exit/);
+    const shutdownRejected = assert.rejects(shutdown, /descriptor closed before process exit/);
+    assert.equal(seam.pending.size, 2);
+    seam.handleIpcEnd();
+    await Promise.all([requestRejected, shutdownRejected]);
+    assert.equal(seam.pending.size, 0);
+    assert.equal(clock.timerCount(), 1, 'only the existing heartbeat watchdog remains; request deadlines are cleared');
+    assert.equal(client.getSnapshot().status, 'stopping');
+    assert.equal(client.getSnapshot().failure, undefined);
+    await assert.rejects(client.ping(), /Worker is unavailable/);
+    await client.waitForConfirmedExit(5_000);
+    assert.equal(client.getSnapshot().failure, undefined);
+    assert.equal(clock.timerCount(), 0);
+  } finally {
+    await cleanup(client);
+  }
+});
+
+test('missing spawned IPC descriptor still observes child errors and confirms actual exit', async () => {
+  const child = new EventEmitter() as cp.ChildProcess;
+  Object.assign(child, { pid: 1234, stdio: [null, null, null, null, null] });
+  let kills = 0;
+  const clock = new FakeClock();
+  const client = createClient('noise', {
+    scheduler: clock,
+    spawn: (() => child) as typeof cp.spawn,
+    terminateTree: async (rootPid) => {
+      kills += 1;
+      return { rootPid, descendantPids: [] };
+    },
+  });
+  await assert.rejects(client.start(), /both inherited IPC descriptors/);
+  assert.equal(kills, 1);
+  assert.equal(child.listenerCount('error'), 1);
+  assert.equal(child.listenerCount('exit'), 1);
+  child.emit('error', new Error('late spawn error'));
+  assert.equal(client.getSnapshot().status, 'failed');
+  assert.equal(client.getSnapshot().exitCode, undefined, 'descriptor failure is not proof of death');
+  const confirmed = client.waitForConfirmedExit(100);
+  child.emit('exit', 17, null);
+  assert.deepEqual(await confirmed, { code: 17, signal: null });
+  assert.equal(client.getSnapshot().status, 'exited');
+  assert.equal(client.getSnapshot().exitCode, 17);
+  assert.match(client.getSnapshot().failure ?? '', /both inherited IPC descriptors/);
+  assert.equal(clock.timerCount(), 0);
+});
 
 test('EOF grace force-kills a worker that closes its descriptor but stays alive', async () => {
   const clock = new FakeClock();

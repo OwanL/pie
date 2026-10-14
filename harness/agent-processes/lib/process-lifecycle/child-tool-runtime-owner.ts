@@ -86,7 +86,11 @@ export function cleanupChildToolRuntimeOwner(owner: ChildToolRuntimeOwner): Prom
 	markChildToolRuntimeOwnerClosing(owner);
 	const cleanups = [...owner.cleanups.entries()];
 	const cleanupPromise = Promise.resolve().then(async () => {
-		const results = await Promise.allSettled(cleanups.map(async ([, cleanup]) => await cleanup()));
+		const results = await Promise.allSettled(cleanups.map(async ([key, cleanup]) => {
+			await cleanup();
+			// Record each confirmed disposal even if a sibling never settles.
+			if (owner.cleanups.get(key) === cleanup) owner.cleanups.delete(key);
+		}));
 		const errors: unknown[] = [];
 		for (let index = 0; index < results.length; index++) {
 			const [key, cleanup] = cleanups[index]!;

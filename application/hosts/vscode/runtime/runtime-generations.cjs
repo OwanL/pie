@@ -522,6 +522,8 @@ async function hashFile(filePath, buffer) {
   let size = 0;
   let handle;
   let hasPrimaryError = false;
+  let primaryError;
+  let result;
   try {
     handle = await fs.open(filePath, 'r');
     for (;;) {
@@ -530,19 +532,20 @@ async function hashFile(filePath, buffer) {
       hash.update(buffer.subarray(0, bytesRead));
       size += bytesRead;
     }
-    return { sha256: hash.digest('hex'), size };
+    result = { sha256: hash.digest('hex'), size };
   } catch (error) {
     hasPrimaryError = true;
-    throw error;
-  } finally {
-    if (handle) {
-      try {
-        await handle.close();
-      } catch (error) {
-        if (!hasPrimaryError) throw error;
-      }
+    primaryError = error;
+  }
+  if (handle) {
+    try {
+      await handle.close();
+    } catch (error) {
+      if (!hasPrimaryError) throw error;
     }
   }
+  if (hasPrimaryError) throw primaryError;
+  return result;
 }
 
 async function collectFileRecords(rootDir, { split = false, omitTooling = false, scanProfile } = {}) {

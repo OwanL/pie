@@ -272,6 +272,7 @@ test('reducer: Send command inserts optimistic message and produces SendRpc', ()
   // Pending entry recorded.
   assert.deepEqual(result.state.pending.ops['c-send'], {
     kind: 'send',
+    refreshPruning: false,
     operationId: 'c-send',
     operationAttempt: 1,
     sessionPath: '/s',

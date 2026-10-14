@@ -60,6 +60,10 @@ test('HostRuntime reports uncertain backend lifetime only after complete teardow
       },
       browserServer: { dispose: () => { calls.push('browser'); } },
       effectRunner: { dispose: () => { calls.push('effects'); } },
+      dictationService: {
+        shutdown: async () => { calls.push('dictation-stop'); },
+        isLifetimeTeardownConfirmed: () => { calls.push('dictation-lifetime-evidence'); return true; },
+      },
       tokenRateService: { dispose: () => { calls.push('rates'); } },
       aggregateStatsService: { dispose: () => { calls.push('aggregate'); } },
       statsService: { shutdown: async () => { calls.push('stats'); } },
@@ -79,9 +83,10 @@ test('HostRuntime reports uncertain backend lifetime only after complete teardow
     if (confirmed) await runtime.shutdown();
     else await assert.rejects(runtime.shutdown(), /generation lease must be retained/);
     assert.deepEqual(calls, [
-      'handoff-stop', 'browser', 'effects', 'rates', 'aggregate', 'stats',
+      'handoff-stop', 'browser', 'effects', 'dictation-stop', 'rates', 'aggregate', 'stats',
       'coordinator-exit', 'transport-stop', 'backend-dispose', 'analytics',
-      'handoff-stopped', 'transport-dispose', 'registry', 'service', 'lifetime-evidence',
+      'handoff-stopped', 'transport-dispose', 'registry', 'service',
+      'dictation-lifetime-evidence', 'lifetime-evidence',
     ]);
     if (confirmed) await runtime.shutdown();
     else await assert.rejects(runtime.shutdown(), /generation lease must be retained/);

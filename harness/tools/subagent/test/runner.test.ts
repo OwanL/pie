@@ -7,6 +7,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
+import { OrphanCleanupRegistry } from "../cleanup.js";
 import { trackSessionTempOutput } from "../../../../lib/temporary-files/session-temp-output-lifecycle.js";
 import { rootSessionAttribution } from "../../../../lib/session-attribution.js";
 import {
@@ -98,7 +99,7 @@ function createFakeSdk(options?: {
 		getAgentDir: () => ".",
 	};
 
-	return { sdk, state, sessionId };
+	return { sdk, state, sessionId, session };
 }
 
 function runFakeAgent(
@@ -107,6 +108,7 @@ function runFakeAgent(
 	signal?: AbortSignal,
 	cwd?: string,
 	parentSessionId?: string,
+	orphanRegistry?: OrphanCleanupRegistry,
 ) {
 	return runSingleAgent(
 		process.cwd(),
@@ -126,7 +128,7 @@ function runFakeAgent(
 		undefined,
 		parentSessionId,
 		undefined,
-		{ sdk: sdk as any },
+		{ sdk: sdk as any, orphanRegistry },
 	);
 }
 
@@ -834,6 +836,158 @@ test("runSingleAgent reports permanent child cleanup failure as terminal and pre
 	assert.match(result.errorMessage ?? "", /original model task failure/);
 	assert.match(result.errorMessage ?? "", /cleanup failed after one cleanup-only retry/);
 	assert.match(result.errorMessage ?? "", /permanent shutdown failure 2/);
+});
+
+test("prompt guard failure disposes the already-created session", async () => {
+	const { sdk, session } = createFakeSdk();
+	let disposals = 0;
+	session.dispose = () => { disposals++; };
+	Object.defineProperty(session, "_rebuildSystemPrompt", { get: () => { throw new Error("guard failed"); } });
+	await assert.rejects(runFakeAgent(sdk), /guard failed/);
+	assert.equal(disposals, 1);
+});
+
+test("ordinary dispose failure receives observable cleanup-only retry", async () => {
+	const orphanRegistry = new OrphanCleanupRegistry();
+	let disposals = 0;
+	let prompts = 0;
+	const { sdk, session } = createFakeSdk({ onPrompt: async () => { prompts++; } });
+	session.dispose = () => {
+		if (++disposals === 1) throw new Error("dispose once");
+	};
+	await runSingleAgent(process.cwd(), [makeAgent()], "worker", "work", undefined,
+		undefined, undefined, undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(), undefined, undefined, undefined, undefined, undefined, undefined,
+		undefined, { sdk: sdk as any, orphanRegistry });
+	await orphanRegistry.drain();
+	assert.equal(disposals, 2);
+	assert.equal(prompts, 1);
+	assert.equal(orphanRegistry.stats().completed, 1);
+});
+
+test("cancelled reload settling after another attempt starts preserves live pool listeners", async () => {
+	const controller = new AbortController();
+	let resolveReload!: () => void;
+	let started!: () => void;
+	const loading = new Promise<void>((resolve) => { started = resolve; });
+	const pools = new Map<string, { dispose(): void }>();
+	const live = () => { for (const p of pools.values()) p.dispose(); };
+	const late = () => { for (const p of pools.values()) p.dispose(); };
+	const { sdk, state } = createFakeSdk();
+	sdk.createResourceLoader = () => ({ reload: async () => {
+		started();
+		await new Promise<void>((resolve) => { resolveReload = resolve; });
+		process.on("SIGINT", late);
+	} });
+	let prompted!: () => void;
+	let finishPrompt!: () => void;
+	const promptStarted = new Promise<void>((resolve) => { prompted = resolve; });
+	const other = createFakeSdk({ onPrompt: async () => {
+		prompted();
+		await new Promise<void>((resolve) => { finishPrompt = resolve; });
+	} });
+	other.sdk.createResourceLoader = () => ({ reload: async () => {
+		process.on("SIGINT", live);
+	} });
+	let runningB: ReturnType<typeof runFakeAgent> | undefined;
+	try {
+		const runningA = runFakeAgent(sdk, undefined, controller.signal);
+		await loading;
+		controller.abort();
+		assert.equal((await runningA).stopReason, "aborted");
+		runningB = runFakeAgent(other.sdk);
+		await promptStarted;
+		resolveReload();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.ok(process.listeners("SIGINT").includes(live), "A must not reclaim B's live listener");
+		assert.ok(process.listeners("SIGINT").includes(late), "late reload leak remains unresolved without owned handles");
+		assert.equal(state.createdSessionManager, undefined);
+		assert.equal(state.promptText, undefined);
+	} finally {
+		finishPrompt?.();
+		await runningB;
+		process.removeListener("SIGINT", live);
+		process.removeListener("SIGINT", late);
+	}
+});
+
+for (const failFirstDispose of [false, true]) {
+	test(`late cancelled create preserves B listeners (retry: ${failFirstDispose})`, async () => {
+		const controller = new AbortController();
+		const orphanRegistry = new OrphanCleanupRegistry({ maxEntries: 4, initialRetryMs: 1, maxRetryMs: 1, retryMultiplier: 1, maxAttempts: 3, cleanupTimeoutMs: 1_000 });
+		let resolveCreate!: () => void;
+		let started!: () => void;
+		const creating = new Promise<void>((resolve) => { started = resolve; });
+		const pools = new Map<string, { dispose(): void }>();
+		const live = () => { for (const p of pools.values()) p.dispose(); };
+		const late = () => { for (const p of pools.values()) p.dispose(); };
+		const a = createFakeSdk({ onCreateSession: async () => {
+			started();
+			await new Promise<void>((resolve) => { resolveCreate = resolve; });
+			process.on("SIGINT", late);
+		} });
+		let disposals = 0;
+		a.session.dispose = () => {
+			if (++disposals === 1 && failFirstDispose) throw new Error("retry disposal");
+		};
+		let prompted!: () => void;
+		let finishPrompt!: () => void;
+		const promptStarted = new Promise<void>((resolve) => { prompted = resolve; });
+		const b = createFakeSdk({ onPrompt: async () => {
+			prompted();
+			await new Promise<void>((resolve) => { finishPrompt = resolve; });
+		} });
+		b.sdk.createResourceLoader = () => ({ reload: async () => { process.on("SIGINT", live); } });
+		let runningB: ReturnType<typeof runFakeAgent> | undefined;
+		try {
+			const runningA = runFakeAgent(a.sdk, undefined, controller.signal, undefined, undefined, orphanRegistry);
+			await creating;
+			controller.abort();
+			assert.equal((await runningA).stopReason, "aborted");
+			runningB = runFakeAgent(b.sdk);
+			await promptStarted;
+			resolveCreate();
+			await orphanRegistry.drain();
+			assert.equal(disposals, failFirstDispose ? 2 : 1);
+			assert.equal(a.state.promptText, undefined);
+			assert.ok(process.listeners("SIGINT").includes(live), "late disposal/retry must preserve B's live listener");
+			assert.ok(process.listeners("SIGINT").includes(late), "unowned late listeners remain unreclaimed");
+		} finally {
+			resolveCreate?.();
+			finishPrompt?.();
+			await runningB;
+			process.removeListener("SIGINT", live);
+			process.removeListener("SIGINT", late);
+		}
+	});
+}
+
+test("hung tool-runtime disposer cannot retain an aborted call", async () => {
+	const controller = new AbortController();
+	const orphanRegistry = new OrphanCleanupRegistry({ maxEntries: 4, initialRetryMs: 1, maxRetryMs: 1, retryMultiplier: 1, maxAttempts: 1, cleanupTimeoutMs: 1 });
+	let owner: ChildToolRuntimeOwner | undefined;
+	let calls = 0;
+	const { sdk } = createFakeSdk({ onPrompt: async () => {
+		owner = currentChildToolRuntimeOwner()!;
+		registerChildToolRuntimeCleanup(owner, "hung", () => {
+			calls++;
+			return new Promise<void>(() => {});
+		});
+		controller.abort();
+		await new Promise<void>(() => {});
+	} });
+	const result = await runSingleAgent(process.cwd(), [makeAgent()], "worker", "work", undefined,
+		undefined, controller.signal, undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(), undefined, undefined, undefined, undefined, undefined, undefined,
+		undefined, { sdk: sdk as any, toolCleanupGraceMs: 1, orphanRegistry });
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.retryable, false);
+	assert.equal(owner?.state, "closing");
+	assert.equal(calls, 1, "registry must await the same disposer, not replay it");
+	assert.equal((await runFakeAgent(successfulFakeSdk().sdk)).exitCode, 0);
+	assert.equal(orphanRegistry.stats().failed, 1, "unconfirmed teardown remains observable");
 });
 
 test("runSingleAgent keeps provider-reported zero cost as evidence", async () => {

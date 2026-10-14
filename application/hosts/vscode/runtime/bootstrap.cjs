@@ -144,11 +144,19 @@ function disposePendingStatus(state) {
   const item = state.pendingItem;
   state.pendingItem = null;
   if (!item) return;
+  const errors = [];
   try {
     item.hide?.();
-  } finally {
-    item.dispose?.();
+  } catch (error) {
+    errors.push(error);
   }
+  try {
+    item.dispose?.();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'Pie pending status cleanup failed.');
 }
 
 function showPendingStatus(state, vscode) {
@@ -197,6 +205,7 @@ function createBootstrap(overrides = {}) {
   const identityProvider = overrides.identityProvider;
   let active = null;
   let activationInFlight = null;
+  let deactivationInFlight = null;
 
   async function identityFor(extensionDir) {
     if (identityProvider) return identityProvider(extensionDir);
@@ -415,6 +424,7 @@ function createBootstrap(overrides = {}) {
   }
 
   async function activate(context) {
+    if (deactivationInFlight) await deactivationInFlight;
     if (active) return active.activationResult;
     if (!activationInFlight) {
       const timing = {
@@ -438,7 +448,7 @@ function createBootstrap(overrides = {}) {
     return activationInFlight;
   }
 
-  async function deactivate() {
+  async function deactivateOnce() {
     if (activationInFlight) {
       try {
         await activationInFlight;
@@ -448,9 +458,13 @@ function createBootstrap(overrides = {}) {
     }
     const state = active;
     if (!state) return;
-    active = null;
     stopWatcher(state);
-    disposePendingStatus(state);
+    const errors = [];
+    try {
+      disposePendingStatus(state);
+    } catch (error) {
+      errors.push(error);
+    }
 
     let delegateError;
     try {
@@ -462,11 +476,30 @@ function createBootstrap(overrides = {}) {
     // A failed delegated shutdown may leave a worker or backend using the
     // generation. Retain its lease; releasing it would allow cleanup to erase
     // files still needed by that partially-shutdown runtime.
-    if (delegateError) throw delegateError;
+    if (delegateError) {
+      errors.push(delegateError);
+    } else {
+      // Keep the lifecycle occupied through lease release as well as shutdown.
+      try {
+        await state.runtime.release();
+        active = null;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Pie runtime deactivation cleanup failed.');
+  }
 
-    // Keep this after the delegated deactivate. A worker can still be using
-    // runtime files until that promise has actually settled.
-    await state.runtime.release();
+  function deactivate() {
+    if (!deactivationInFlight) {
+      deactivationInFlight = deactivateOnce().finally(() => {
+        // Uncertain teardown remains terminal for this bootstrap. Do not start
+        // a second host or report a later shutdown as successfully completed.
+        if (!active) deactivationInFlight = null;
+      });
+    }
+    return deactivationInFlight;
   }
 
   return { activate, deactivate };

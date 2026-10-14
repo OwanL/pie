@@ -676,33 +676,6 @@
   line-height: 1.55;
 }
 
-.agent-activity-label {
-  display: inline-flex;
-  align-items: baseline;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.agent-activity-label::after {
-  display: none;
-}
-
-.agent-activity-text {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: clip;
-  white-space: nowrap;
-  font-family: var(--panel-font-mono);
-  font-size: 0.9em;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--panel-foreground) 68%, var(--panel-muted) 32%);
-  opacity: 0.78;
-  animation: none;
-}
-
 .activity-status-row {
   width: 100%;
   display: flex;

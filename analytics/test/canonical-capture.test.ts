@@ -16,6 +16,46 @@ function tempRoot(): string {
   return mkdtempSync(path.join(tmpdir(), 'pie-canonical-capture-'));
 }
 
+test('throwing capture diagnostics preserve rejection disposition and sequence settlement', async () => {
+  for (const mode of ['sync', 'tracked', 'async'] as const) {
+    const observations: AnalyticsObservation<object>[] = [];
+    let fail = true;
+    let reports = 0;
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical', generationId: 'generation-a', workspaceId: 'workspace-a',
+      buildId: 'build-a', processGeneration: 'process-a',
+      sink: {
+        submit: (observation) => {
+          observations.push(observation);
+          if (fail) {
+            if (mode === 'async') return Promise.reject(new Error('transport failure'));
+            throw new Error('capacity failure');
+          }
+        },
+        ...(mode === 'tracked' ? { submitTracked: (
+          observation: AnalyticsObservation<object>,
+          settle: (disposition: import('../capture/canonical-capture.js').CanonicalAnalyticsCaptureDisposition) => void,
+        ) => {
+          observations.push(observation);
+          settle(fail ? { status: 'rejected', code: 'capacity', message: 'capacity failure' } : { status: 'durable' });
+        } } : {}),
+      },
+      detailSink: { submitDetail: () => { throw new Error('detail failure'); } },
+      lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+      onCaptureError: () => { reports += 1; throw new Error('observer failure'); },
+      onDetailCaptureError: () => { throw new Error('detail observer failure'); },
+    });
+    const context = { sessionId: 'session-a', sessionPath: '/session-a' };
+    assert.equal(capture.captureBranchEdge(context, 'first', null, 1), mode === 'sync' ? 'rejected' : 'submitted');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reports, 1);
+    fail = false;
+    assert.equal(capture.captureBranchEdge(context, 'second', null, 2), 'submitted');
+    assert.equal(observations[1]?.sourceSequence, mode === 'async' ? '2' : '1');
+    assert.equal(capture.captureTool(context, { id: 'tool-a', name: 'bash', status: 'running', input: {} }, 'begin', 'tool', 3), 'rejected');
+  }
+});
+
 test('tool detail capacity is checked before traversing and encoding rich input', () => {
   let inputReads = 0;
   let submitted = 0;

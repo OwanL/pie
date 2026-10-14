@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { buildRunnerInvocation, runPackageGroup } from '../run-package-group.mjs';
+import { buildRunnerInvocation, runPackageGroup, runPackageGroupCli } from '../run-package-group.mjs';
 import { extractRuntimeArgs, withVerificationRuntime } from '../verification-runtime.mjs';
 import { parseArgs, buildTestArgs } from '../run-tests.mjs';
 import { runProject, runWithConcurrency } from '../run-typechecks.mjs';
@@ -52,6 +52,45 @@ test('package group puts runtime selection before forwarding, acquires once, and
   assert.equal(code, 0);
   assert.equal(acquisitions, 1);
   assert.equal(confirmations, 2);
+});
+
+for (const scenario of [
+  { code: 125, gone: true, uncertain: true },
+  { code: 0, gone: false, uncertain: true },
+  { code: null, signal: 'SIGTERM', gone: true, uncertain: false },
+  { code: 2, gone: true, uncertain: false },
+]) {
+  test(`package group close ${scenario.code}/${scenario.signal ?? ''} gone=${scenario.gone}`, async () => {
+    const child = new EventEmitter();
+    let confirmed = false;
+    const dependencies = {
+      spawn: () => child,
+      watchChildProcess: () => ({ settle: async () => ({ gone: scenario.gone }) }),
+      withPiRuntime: async (_options, run) => run({ artifactDir: '/fake-runtime', confirmChildCompletion() { confirmed = true; } }),
+    };
+    const pending = runPackageGroup({ args: [] }, { script: 'run-tests.mjs', args: [] }, undefined, dependencies);
+    const checked = scenario.uncertain
+      ? assert.rejects(pending, (error) => error.teardownUnconfirmed === true)
+      : pending.then((code) => assert.equal(code, scenario.code ?? 1));
+    await new Promise((resolve) => setImmediate(resolve));
+    child.emit('close', scenario.code, scenario.signal);
+    await checked;
+    assert.equal(confirmed, !scenario.uncertain);
+  });
+}
+
+test('package group CLI preserves uncertain teardown status 125', async () => {
+  const previous = process.exitCode;
+  try {
+    const child = new EventEmitter();
+    const pending = runPackageGroupCli(['tests', 'extensions', '--list'], {
+      spawn: () => child,
+      watchChildProcess: () => ({ settle: async () => ({ gone: true }) }),
+    });
+    child.emit('close', 125);
+    await pending;
+    assert.equal(process.exitCode, 125);
+  } finally { process.exitCode = previous; }
 });
 
 for (const cancel of [false, true]) {

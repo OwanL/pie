@@ -127,6 +127,19 @@ describe('lossless rules', () => {
       assert.equal(out?.text, '{"a":1,"b":[2,3]}');
     });
 
+    test('preserves numeric tokens, duplicate keys, and string escapes', () => {
+      const input = String.raw`{ "n": 9007199254740993, "n": 1e400, "z": -0, "e": 1.00E+02, "s": " spaces \" \\ \u0061 " }`;
+      const expected = String.raw`{"n":9007199254740993,"n":1e400,"z":-0,"e":1.00E+02,"s":" spaces \" \\ \u0061 "}`;
+      assert.equal(rule("minify-json", mod).run(input, ctx)?.text, expected);
+      assert.equal(rule("minify-json", mod).run(expected, ctx), null);
+    });
+
+    test('rejects multiple documents and malformed string escapes', () => {
+      for (const input of ['{} {}', String.raw`{ "s": "\q" }`, '{ "a": 1, }']) {
+        assert.equal(rule("minify-json", mod).run(input, ctx), null);
+      }
+    });
+
     test('minifies pretty JSON array', () => {
       const out = rule("minify-json", mod).run('[\n  1,\n  2\n]', ctx);
       assert.equal(out?.text, '[1,2]');

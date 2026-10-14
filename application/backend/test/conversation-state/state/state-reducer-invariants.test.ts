@@ -101,6 +101,22 @@ test('arch: SessionClosed on unknown session is a no-op', () => {
   assert.deepEqual(result.effects, []);
 });
 
+test('arch: SessionClosed retires only its pending prompt inventory ownership', () => {
+  const state = produce(initialArchState, (draft) => {
+    draft.transcript.pendingPromptInventoryBySession = {
+      '/s/a': { token: 'a', backendGeneration: 1, modelWriteFence: 0 },
+      '/s/b': { token: 'b', backendGeneration: 1, modelWriteFence: 0 },
+    };
+  });
+  const result = reducer(state, { kind: 'SessionClosed', sessionPath: '/s/a' });
+  assert.deepEqual(result.state.transcript.pendingPromptInventoryBySession, {
+    '/s/b': state.transcript.pendingPromptInventoryBySession!['/s/b'],
+  });
+  const unknown = reducer(state, { kind: 'SessionClosed', sessionPath: '/unknown' });
+  assert.deepEqual(unknown.state, state);
+  assert.deepEqual(unknown.effects, []);
+});
+
 // ─── Arch reducer: cross-session isolation ────────────────────────────────────
 
 test('arch: concurrent sends across different sessions do not interfere', () => {
@@ -140,6 +156,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
     kind: 'send',
     operationId: 'c-a',
     operationAttempt: 1,
+    refreshPruning: false,
     sessionPath: '/s/a',
     localId: 'loc-a',
     previousSummary: null,
@@ -151,6 +168,7 @@ test('arch: concurrent sends across different sessions do not interfere', () => 
     kind: 'send',
     operationId: 'c-b',
     operationAttempt: 1,
+    refreshPruning: false,
     sessionPath: '/s/b',
     localId: 'loc-b',
     previousSummary: null,
@@ -777,7 +795,7 @@ test('chatPrefs: menu sections expose all toggleable transcript prefs', () => {
   assert.ok(transcriptSection);
   assert.deepEqual(
     transcriptSection?.items.map(i => i.key),
-    ['autoExpandReasoning', 'autoExpandToolCalls', 'autoExpandSubagentCalls'],
+    ['autoExpandReasoning', 'autoExpandSubagentCalls'],
   );
 });
 

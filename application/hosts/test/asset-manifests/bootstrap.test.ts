@@ -55,6 +55,110 @@ async function createRuntimeSource(root: string, name: string, extensionContents
   return source;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const failShutdown of [false, true]) {
+  test(`joins shutdown and gates activation through delegate and lease teardown (failure=${failShutdown})`, async () => {
+    const shutdown = deferred();
+    const started = deferred();
+    const release = deferred();
+    const releasing = deferred();
+    let acquisitions = 0;
+    let shutdowns = 0;
+    let releases = 0;
+    const failure = new Error('shutdown failed');
+    const bootstrap = bootstrapModule.createBootstrap({
+      vscode: { window: {} }, identityProvider: () => IDENTITY, watch: noOpWatch,
+      runtimeGenerations: {
+        async acquireRuntimeGeneration() {
+          acquisitions += 1;
+          return { generation: null, outDir: '.', publishedAt: 0, async release() {
+            releases += 1; releasing.resolve(); await release.promise;
+          } };
+        },
+        async resolveRuntimeGeneration() { return { generation: null }; },
+      },
+      requireModule: () => ({ activate: () => ({ async deactivate() {
+        shutdowns += 1; started.resolve(); await shutdown.promise;
+        if (failShutdown) throw failure;
+      } }) }),
+    });
+    const context = makeContext('.', new Map());
+    await bootstrap.activate(context);
+    const first = bootstrap.deactivate();
+    await started.promise;
+    const second = bootstrap.deactivate();
+    const next = bootstrap.activate(context);
+    let settled = 0;
+    const observed = [first, second, next].map((promise) => promise.then(
+      () => { settled += 1; return null; },
+      (error: unknown) => { settled += 1; return error; },
+    ));
+    await new Promise((done) => setImmediate(done));
+    assert.equal(settled, 0);
+    assert.equal(acquisitions, 1);
+    assert.equal(shutdowns, 1);
+    shutdown.resolve();
+    if (!failShutdown) {
+      await releasing.promise;
+      assert.equal(acquisitions, 1, 'lease release also blocks replacement activation');
+      release.resolve();
+    }
+    const outcomes = await Promise.all(observed);
+    assert.equal(releases, failShutdown ? 0 : 1);
+    if (failShutdown) {
+      assert.deepEqual(outcomes, [failure, failure, failure]);
+      await assert.rejects(bootstrap.deactivate(), (error) => error === failure);
+      await assert.rejects(bootstrap.activate(context), (error) => error === failure);
+      assert.equal(acquisitions, 1);
+    } else {
+      assert.equal(acquisitions, 2);
+      await bootstrap.deactivate();
+    }
+  });
+}
+
+for (const failShutdown of [false, true]) {
+  test(`status cleanup errors do not skip delegate cleanup (failure=${failShutdown})`, async () => {
+    const shown = deferred();
+    const events: string[] = [];
+    const hideError = new Error('hide failed');
+    const disposeError = new Error('dispose failed');
+    const delegateError = new Error('delegate failed');
+    const bootstrap = bootstrapModule.createBootstrap({
+      identityProvider: () => IDENTITY, watch: noOpWatch,
+      vscode: { window: { createStatusBarItem: () => ({
+        show() { shown.resolve(); },
+        hide() { events.push('hide'); throw hideError; },
+        dispose() { events.push('dispose'); throw disposeError; },
+      }) } },
+      runtimeGenerations: {
+        async acquireRuntimeGeneration() {
+          return { generation: null, outDir: '.', publishedAt: 0, async release() { events.push('release'); } };
+        },
+        async resolveRuntimeGeneration() { return { generation: 'updated' }; },
+      },
+      requireModule: () => ({ activate: () => ({ async deactivate() {
+        events.push('delegate'); if (failShutdown) throw delegateError;
+      } }) }),
+    });
+    await bootstrap.activate(makeContext('.', new Map()));
+    await shown.promise;
+    await assert.rejects(bootstrap.deactivate(), (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      const uiError = failShutdown ? error.errors[0] : error;
+      assert.deepEqual(uiError.errors, [hideError, disposeError]);
+      if (failShutdown) assert.equal(error.errors[1], delegateError);
+      return true;
+    });
+    assert.deepEqual(events, failShutdown ? ['hide', 'dispose', 'delegate'] : ['hide', 'dispose', 'delegate', 'release']);
+  });
+}
+
 function noOpWatch(_directory: string, _listener: () => void) {
   return {
     on() { return this; },

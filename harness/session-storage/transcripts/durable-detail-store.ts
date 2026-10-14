@@ -172,6 +172,7 @@ interface SubscriptionRecord {
   sourceKey: string;
   durableRef: LazyDetailRef;
   totalBytes: number;
+  digest: string;
 }
 
 export interface DurableDetailStoreOptions {
@@ -195,6 +196,9 @@ export class DurableDetailStore {
   private readonly sources = new Map<string, SourceRecord>();
   private readonly subscriptions = new Map<string, SubscriptionRecord>();
   private canonicalBytes = 0;
+  // Reserve ownership before resolver I/O. Object identity fences completion
+  // even when a retired subscription ID is reused by a later attempt.
+  private readonly pending = new Map<string, LiveSubagentDetailAddress>();
 
   constructor(private readonly options: DurableDetailStoreOptions) {
     this.budgets = validateBudgets({ ...DEFAULT_DURABLE_DETAIL_BUDGETS, ...options.budgets });
@@ -210,7 +214,7 @@ export class DurableDetailStore {
     requestedPageBytes: number,
     fence: BackendDetailFence,
   ): Promise<void> {
-    if (this.subscriptions.has(subscriptionId)) {
+    if (this.owns(subscriptionId)) {
       this.error(subscriptionId, 'SUBSCRIPTION_CONFLICT', 'The durable detail subscription identity is already owned.', false, fence);
       return;
     }
@@ -223,11 +227,20 @@ export class DurableDetailStore {
     for (const [existingId, existing] of this.subscriptions) {
       if (addressKey(existing.address) === supersedeKey) this.subscriptions.delete(existingId);
     }
-    if (this.subscriptions.size >= this.budgets.maxSubscriptions) {
+    for (const [existingId, existing] of this.pending) {
+      if (addressKey(existing) === supersedeKey) this.pending.delete(existingId);
+    }
+    if (this.subscriptions.size + this.pending.size >= this.budgets.maxSubscriptions) {
       this.error(subscriptionId, 'UNAVAILABLE', 'The durable detail subscription budget is full.', true, fence);
       return;
     }
-    const resolved = await this.resolve(address, undefined, subscriptionId, fence);
+    address = cloneAddress(address);
+    const owner = address;
+    this.pending.set(subscriptionId, owner);
+    const current = () => this.pending.get(subscriptionId) === owner;
+    const resolved = await this.resolve(address, undefined, subscriptionId, fence, current);
+    if (!current()) return;
+    this.pending.delete(subscriptionId);
     if (!resolved) return;
     const serialized = canonicalSerialization(resolved.value);
     if (serialized === undefined) {
@@ -236,7 +249,8 @@ export class DurableDetailStore {
     }
     const bytes = Buffer.byteLength(serialized, 'utf8');
     const revision = stableRevision(resolved.messageId, resolved.toolCallId);
-    const sourceKey = sourceKeyOf(address.sessionPath, resolved.messageId, resolved.toolCallId);
+    const digest = contentDigest(serialized);
+    const sourceKey = sourceKeyOf(address, resolved.messageId, resolved.toolCallId, digest);
     const durableRef: LazyDetailRef = {
       key: `durable:subagent:${address.sessionPath}:${resolved.messageId}:${resolved.toolCallId}`,
       kind: 'tool-result',
@@ -272,6 +286,7 @@ export class DurableDetailStore {
       sourceKey,
       durableRef,
       totalBytes: bytes,
+      digest,
     };
     this.subscriptions.set(subscriptionId, subscription);
     const pages = segmentDetailPages(
@@ -290,12 +305,15 @@ export class DurableDetailStore {
       return;
     }
     for (const page of pages) {
+      if (this.subscriptions.get(subscriptionId) !== subscription) return;
       if (!this.options.emit({ kind: 'detail.page', subscriptionId, ...page, fence })) {
         this.error(subscriptionId, 'UNAVAILABLE', 'The durable detail stream could not be delivered.', true, fence);
         this.drop(subscriptionId);
         return;
       }
     }
+    if (this.subscriptions.get(subscriptionId) !== subscription) return;
+    subscription.state = 'terminal';
     this.options.emit({ kind: 'detail.terminal', subscriptionId, revision, durableRef, fence });
     // Keep the subscription (state `terminal`) so evicted-page refetches are
     // exact until the host unsubscribes or a fresh subscribe supersedes it.
@@ -324,6 +342,7 @@ export class DurableDetailStore {
       return;
     }
     const source = await this.sourceFor(subscription, fence);
+    if (this.subscriptions.get(subscriptionId) !== subscription) return;
     if (!source) {
       this.error(subscriptionId, 'NOT_FOUND', 'The durable detail source could not be re-read; re-subscribe for a fresh baseline.', true, fence);
       return;
@@ -349,17 +368,18 @@ export class DurableDetailStore {
   }
 
   owns(subscriptionId: string): boolean {
-    return this.subscriptions.has(subscriptionId);
+    return this.subscriptions.has(subscriptionId) || this.pending.has(subscriptionId);
   }
 
   dispose(): void {
+    this.pending.clear();
     this.sources.clear();
     this.subscriptions.clear();
     this.canonicalBytes = 0;
   }
 
   debugState(): { sources: number; subscriptions: number; canonicalBytes: number } {
-    return { sources: this.sources.size, subscriptions: this.subscriptions.size, canonicalBytes: this.canonicalBytes };
+    return { sources: this.sources.size, subscriptions: this.subscriptions.size + this.pending.size, canonicalBytes: this.canonicalBytes };
   }
 
   private async resolve(
@@ -367,17 +387,20 @@ export class DurableDetailStore {
     durableRef: LazyDetailRef | undefined,
     subscriptionId: string,
     fence: BackendDetailFence,
+    current: () => boolean,
   ): Promise<ResolvedDurableDetail | undefined> {
     let resolved: ResolvedDurableDetail;
     try {
       resolved = await this.options.resolve(address.sessionPath, address, durableRef);
     } catch (error) {
+      if (!current()) return undefined;
       const code: DetailErrorCode = error instanceof DurableDetailNotFoundError ? 'NOT_FOUND'
         : error instanceof DurableDetailNotAddressableError ? 'NOT_LIVE_ADDRESSABLE'
           : 'UNAVAILABLE';
       this.error(subscriptionId, code, error instanceof Error ? error.message : String(error), code === 'UNAVAILABLE', fence);
       return undefined;
     }
+    if (!current()) return undefined;
     if (resolved.sizeBytes > Number.MAX_SAFE_INTEGER) {
       this.error(subscriptionId, 'INTERNAL_ERROR', 'The durable detail size is not representable.', false, fence);
       return undefined;
@@ -391,7 +414,9 @@ export class DurableDetailStore {
       cached.touchedAt = Date.now();
       return cached;
     }
-    const resolved = await this.resolve(subscription.address, subscription.durableRef, subscription.subscriptionId, fence);
+    const resolved = await this.resolve(subscription.address, subscription.durableRef, subscription.subscriptionId, fence,
+      () => this.subscriptions.get(subscription.subscriptionId) === subscription);
+    if (this.subscriptions.get(subscription.subscriptionId) !== subscription) return undefined;
     if (!resolved || resolved.messageId !== subscription.durableRef.messageId
       || resolved.toolCallId !== subscription.durableRef.toolCallId) {
       return undefined;
@@ -399,7 +424,7 @@ export class DurableDetailStore {
     const serialized = canonicalSerialization(resolved.value);
     if (serialized === undefined) return undefined;
     const bytes = Buffer.byteLength(serialized, 'utf8');
-    if (bytes !== subscription.totalBytes) return undefined;
+    if (bytes !== subscription.totalBytes || contentDigest(serialized) !== subscription.digest) return undefined;
     const source: SourceRecord = {
       sessionPath: subscription.sessionPath,
       messageId: resolved.messageId,
@@ -438,6 +463,7 @@ export class DurableDetailStore {
   }
 
   private drop(subscriptionId: string): void {
+    this.pending.delete(subscriptionId);
     this.subscriptions.delete(subscriptionId);
   }
 
@@ -488,12 +514,22 @@ function stableSegmentId(sourceKey: string, revision: number, totalBytes: number
     .update(':').update(String(totalBytes)).digest('hex').slice(0, 32);
 }
 
-function sourceKeyOf(sessionPath: string, messageId: string, toolCallId: string): string {
-  return `${sessionPath}\u0000${messageId}\u0000${toolCallId}`;
+function contentDigest(serialized: string): string {
+  return createHash('sha256').update(serialized).digest('hex');
+}
+
+function lineageKey(address: LiveSubagentDetailAddress): unknown {
+  return address.lineage.map(({ childId, spawningToolCallId, attemptId }) => [childId, spawningToolCallId, attemptId]);
+}
+
+function sourceKeyOf(address: LiveSubagentDetailAddress, messageId: string, toolCallId: string, digest: string): string {
+  // Tuple encoding preserves opaque IDs (including separators); lineage is
+  // field-ordered rather than dependent on producer property insertion order.
+  return JSON.stringify([address.sessionPath, messageId, toolCallId, lineageKey(address), digest]);
 }
 
 function addressKey(address: LiveSubagentDetailAddress): string {
-  return JSON.stringify([address.sessionPath, address.rootToolCallId, address.lineage]);
+  return JSON.stringify([address.sessionPath, address.turnId, address.rootToolCallId, address.rootAttemptId, lineageKey(address)]);
 }
 
 function clampPageBytes(requested: number, maximum: number): number {
@@ -518,5 +554,5 @@ function cloneAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAdd
 }
 
 function sameAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailAddress): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return addressKey(left) === addressKey(right);
 }

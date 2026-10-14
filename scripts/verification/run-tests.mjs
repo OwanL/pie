@@ -283,6 +283,9 @@ const PACKAGE_TEST_METADATA = {
   'model-provider-catalog': {
     testGlobs: [
       'harness/model-providers/catalog/test/**/*.test.ts',
+      'harness/model-providers/management/test/**/*.test.ts',
+      'harness/model-providers/runtime/test/**/*.test.ts',
+      'application/backend/test/provider-management/**/*.test.ts',
       'test/integration/backend-model-profiles.test.ts',
     ],
     coverageIncludes: [
@@ -328,6 +331,7 @@ const PACKAGE_TEST_METADATA = {
   'session-storage-ownership': {
     testGlobs: [
       'harness/session-storage/ownership/test/**/*.test.ts',
+      'harness/session-storage/test/**/*.test.ts',
       'test/integration/session-runtime-crash-matrix.test.ts',
     ],
     coverageIncludes: [
@@ -368,6 +372,9 @@ const PACKAGE_TEST_METADATA = {
     testGlobs: [
       'application/backend/test/conversation-state/**/*.test.ts',
       'application/backend/conversation-state/test/**/*.test.ts',
+      'application/backend/conversation-state/reducers/dictation-handlers.test.ts',
+      'application/backend/test/dictation/**/*.test.ts',
+      'application/backend/test/dictation/**/*.test.mjs',
       'test/integration/sync-contract.test.ts',
     ],
     coverage: false,

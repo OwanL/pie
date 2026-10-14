@@ -19,17 +19,18 @@ tasks:
     inputs: ['/harness/pi/packages/tui/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}
   testAgent:
-    command: 'proto run pnpm -- --dir harness/pi/packages/agent exec vitest run'
+    command: 'proto run node -- scripts/verification/test-framework-offline.mjs --package agent --'
+    # Ordinary suites use private state, stripped credentials and local-LLM gates.
     deps: ['build']
-    inputs: ['/harness/pi/packages/agent/**/*', '/harness/pi/packages/ai/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    inputs: ['/harness/pi/packages/agent/**/*', '/harness/pi/packages/ai/**/*', '/scripts/verification/test-framework-offline.mjs', '/scripts/development/test/vscode-development-stub.cjs', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}
   testAi:
-    command: 'proto run pnpm -- --dir harness/pi/packages/ai exec vitest run'
+    command: 'proto run node -- scripts/verification/test-framework-offline.mjs --package ai --'
     deps: ['build']
-    inputs: ['/harness/pi/packages/ai/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    inputs: ['/harness/pi/packages/ai/**/*', '/scripts/verification/test-framework-offline.mjs', '/scripts/development/test/vscode-development-stub.cjs', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}
   testCodingAgent:
-    command: 'proto run pnpm -- --dir harness/pi/packages/coding-agent exec vitest run'
+    command: 'proto run node -- scripts/verification/test-framework-offline.mjs --package coding-agent --'
     deps: ['build']
-    inputs: ['/harness/pi/packages/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    inputs: ['/harness/pi/packages/**/*', '/scripts/verification/test-framework-offline.mjs', '/scripts/development/test/vscode-development-stub.cjs', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}

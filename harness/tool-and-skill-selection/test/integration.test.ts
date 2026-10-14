@@ -992,9 +992,35 @@ test("queued steering messages bypass the pruning prepass", async () => {
 		streamingBehavior: "steer",
 	}, {}), { action: "continue" });
 
-	const result = await runBeforeAgentStart(handlers, "small correction", realisticSkills);
-	assert.equal(result, undefined, "queued steering must not run the prepass or return a message");
+	// SDK queue delivery continues the running agent without before_agent_start.
+	// Merely admitting queued input must not create selection state.
+	assert.equal(selectorState.state.processedMainSessions.size, 0);
 });
+
+for (const streamingBehavior of ["steer", "followUp"]) {
+	test(`queued ${streamingBehavior} text does not suppress an identical idle refresh`, async () => {
+		let calls = 0;
+		__setCompleteFn(async () => {
+			calls++;
+			return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+		});
+		try {
+			const { handlers } = register(config());
+			const prompt = "Refactor the backend code";
+			await runBeforeAgentStart(handlers, prompt, realisticSkills);
+			assert.equal(calls, 1);
+			await handlers.get("input")!({ type: "input", text: prompt, streamingBehavior }, {});
+			// Production delivers the queue without a before_agent_start hook,
+			// then ends the turn. There is no selector end-turn callback to run.
+			assert.equal(calls, 1, "queue admission/delivery bypasses the scorer");
+			const refreshed = await runBeforeAgentStart(handlers, prompt, realisticSkills, undefined, "session-1", true);
+			assert.equal(calls, 2, "explicit idle refresh bypasses even an identical cached prompt");
+			assert.ok(refreshed?.message);
+		} finally {
+			__setCompleteFn(null);
+		}
+	});
+}
 
 test("unexpected prepass error (registry throw) fails open: nothing pruned, error surfaced", async () => {
 	__setCompleteFn(async () => ({ text: '{"pruneSkills":[],"pruneTools":[]}' }));
@@ -1811,8 +1837,8 @@ test("main sessions prune once, preserve recoveries and reapply skills without f
 			assert.ok(selectorState.getLoadedSkills("session-1").has("frontend-design"));
 		}
 		await handlers.get("input")!({ type: "input", text: "Queued correction", streamingBehavior: "followUp" }, {});
-		const queued = await runBeforeAgentStart(handlers, "Queued correction", realisticSkills, undefined, "session-1", true);
-		assert.equal(calls, 1, "queued continuations ignore even manual refresh");
+		const queued = await runBeforeAgentStart(handlers, "Queued correction", realisticSkills);
+		assert.equal(calls, 1, "later idle requests reuse selection without manual refresh");
 		assert.equal(queued?.message, undefined);
 		assert.doesNotMatch(queued!.systemPrompt!, /<name>frontend-design<\/name>/);
 		await runBeforeAgentStart(handlers, "A different independent session task", realisticSkills, undefined, "session-2");
@@ -1880,7 +1906,7 @@ test("sticky follow-ups reconcile new protections without scoring or restoring u
 	}
 });
 
-test("sticky queued reuse honors disabled skill visibility even when newly pinned", async () => {
+test("sticky idle reuse honors disabled skill visibility even when newly pinned", async () => {
 	let calls = 0;
 	try {
 		const { handlers } = register(config());
@@ -1890,7 +1916,7 @@ test("sticky queued reuse honors disabled skill visibility even when newly pinne
 		const skills = realisticSkills.map((entry) => entry.name === "frontend-design"
 			? { ...entry, disableModelInvocation: true } : entry);
 		await handlers.get("input")!({ type: "input", text: "Queued correction", streamingBehavior: "followUp" }, {});
-		const next = await runBeforeAgentStart(handlers, "Queued correction", skills, undefined, "session-1", true);
+		const next = await runBeforeAgentStart(handlers, "Queued correction", skills);
 		assert.doesNotMatch(next?.systemPrompt ?? systemPrompt(skills), /<name>frontend-design<\/name>/);
 		assert.ok(getHiddenSkills("session-1").has("frontend-design"), "disabled pin cannot release hidden ownership");
 		assert.equal(calls, 1);
@@ -2624,15 +2650,19 @@ test("enabled automatic compaction resume rehydrates filtered skills while rebas
 		const options = { cwd: "/repo", skills: realisticSkills };
 		const first = await handlers.get("before_agent_start")!({ type: "before_agent_start",
 			prompt: "Refactor this implementation", systemPrompt: base, systemPromptOptions: options }, ctx) as BeforeAgentStartReturn;
-		assert.doesNotMatch(first!.systemPrompt, /<available_skills>/);
+		assert.ok(first?.systemPrompt);
+		const firstSystemPrompt = first.systemPrompt;
+		assert.doesNotMatch(firstSystemPrompt, /<available_skills>/);
 		const result = await handlers.get("before_compaction_resume")!({ type: "before_compaction_resume",
 			prompt: "", refreshPruning: undefined, newUserPrompt: false,
-			systemPrompt: `${first!.systemPrompt}\nFOREIGN SUFFIX`, systemPromptOptions: options }, ctx) as BeforeAgentStartReturn;
+			systemPrompt: `${firstSystemPrompt}\nFOREIGN SUFFIX`, systemPromptOptions: options }, ctx) as BeforeAgentStartReturn;
 		assert.equal(calls, 2);
-		assert.match(result!.systemPrompt, /<name>frontend-design<\/name>/);
-		assert.match(result!.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
-		assert.doesNotMatch(result!.systemPrompt, /web_search/);
-		assert.match(result!.systemPrompt, /FOREIGN SUFFIX/);
+		assert.ok(result?.systemPrompt);
+		const resultSystemPrompt = result.systemPrompt;
+		assert.match(resultSystemPrompt, /<name>frontend-design<\/name>/);
+		assert.match(resultSystemPrompt, /<name>duckdb-query-optimization<\/name>/);
+		assert.doesNotMatch(resultSystemPrompt, /web_search/);
+		assert.match(resultSystemPrompt, /FOREIGN SUFFIX/);
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });

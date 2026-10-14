@@ -113,6 +113,88 @@ test('restart waits for confirmed old exit and advances the worker generation', 
   }
 });
 
+test('concurrent and subsequent disposal callers share failed cleanup and retain the owning generation', async () => {
+  const harness = await createHarness();
+  try {
+    const worker = await harness.supervisor.startWorker('/session-a.jsonl');
+    const client = harness.clients[0]!;
+    const deathCheck = pending<{ code: number | null; signal: NodeJS.Signals | null }>();
+    client.waitForConfirmedExit = async () => {
+      await deathCheck.promise;
+      throw new Error('exit remains unconfirmed');
+    };
+    client.forceKill = async () => { client.forceKills += 1; };
+    const first = harness.supervisor.dispose();
+    const second = harness.supervisor.dispose();
+    let secondSettled = false;
+    void second.then(() => { secondSettled = true; }, () => { secondSettled = true; });
+    const firstRejected = assert.rejects(first, /could not confirm exit for 1 worker/);
+    const secondRejected = assert.rejects(second, /could not confirm exit for 1 worker/);
+    await Promise.resolve();
+    assert.equal(secondSettled, false, 'concurrent disposal must wait for the same death confirmation');
+    assert.equal(client.shutdownCalls, 1);
+    deathCheck.resolve({ code: null, signal: null });
+    await Promise.all([firstRejected, secondRejected]);
+    await assert.rejects(harness.supervisor.dispose(), /could not confirm exit for 1 worker/);
+    assert.equal(harness.supervisor.getWorker('/session-a.jsonl'), worker, 'uncertain death retains generation ownership');
+    await assert.rejects(harness.supervisor.startWorker('/session-a.jsonl'), /disposed/);
+    assert.equal(client.shutdownCalls, 1, 'later disposal replays failure, not a second cleanup');
+    assert.equal(client.forceKills, 1);
+  } finally {
+    await harness.supervisor.dispose().catch(() => undefined);
+    await fs.rm(harness.temp, { recursive: true, force: true });
+  }
+});
+
+test('disposal fences a start awaiting ownership preparation before constructing a child', async () => {
+  const harness = await createHarness();
+  const preparation = pending<{ leasePath: string; leaseRevision: number }>();
+  let prepared = false;
+  let cleaned = false;
+  try {
+    // Ownership belongs to the caller, as in the router's failed-promotion
+    // hook: stop any child first, then reconcile the prepared lease.
+    const start = harness.supervisor.startWorker('/session-a.jsonl', async () => {
+      const assignment = await preparation.promise;
+      prepared = true;
+      return assignment;
+    }).catch(async (error) => {
+      await harness.supervisor.stopWorker('/canonical-session-a.jsonl', 'failed promotion');
+      assert.equal(prepared, true);
+      cleaned = true;
+      throw error;
+    });
+    const rejected = assert.rejects(start, /disposed/);
+    await harness.supervisor.dispose();
+    assert.equal(harness.clients.length, 0);
+    preparation.resolve({ leasePath: '/canonical-session-a.jsonl', leaseRevision: 2 });
+    await rejected;
+    assert.equal(cleaned, true, 'rejection reaches caller-owned lease cleanup');
+    assert.equal(harness.clients.length, 0, 'no client is constructed after disposal');
+    assert.deepEqual(harness.supervisor.listWorkers(), []);
+    await assert.rejects(harness.supervisor.startWorker('/session-b.jsonl'), /disposed/);
+    await harness.supervisor.dispose();
+  } finally {
+    await harness.supervisor.dispose().catch(() => undefined);
+    await fs.rm(harness.temp, { recursive: true, force: true });
+  }
+});
+
+test('disposal also fences a start without an ownership callback across its await', async () => {
+  const harness = await createHarness();
+  try {
+    const start = harness.supervisor.startWorker('/session-a.jsonl');
+    const rejected = assert.rejects(start, /disposed/);
+    await harness.supervisor.dispose();
+    await rejected;
+    assert.equal(harness.clients.length, 0);
+    assert.deepEqual(harness.supervisor.listWorkers(), []);
+  } finally {
+    await harness.supervisor.dispose().catch(() => undefined);
+    await fs.rm(harness.temp, { recursive: true, force: true });
+  }
+});
+
 test('mcpConfigPathFor resolves the per-session MCP override path at spawn time', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-supervisor-mcp-'));
   let supervisor: WorkerSupervisor | undefined;

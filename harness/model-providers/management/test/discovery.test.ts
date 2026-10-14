@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverModels } from '../discovery';
+import fs from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { discoverModels, loadDiscoveryCache, saveDiscoveryCache } from '../discovery';
 import { resolveProviderModelList } from '../../catalog/provider-model-resolution';
 
 test('Ollama optional show failures retain complete identities and offline metadata', async () => {
@@ -64,4 +68,31 @@ test('Copilot listings never publish normalized costs as USD pricing', async () 
     }] }), { status: 200, headers: { 'content-type': 'application/json' } }) });
   assert.equal(snapshot.models.listed.pricing, 'unknown');
   assert.equal(snapshot.models.listed.contextWindow, 1000);
+});
+
+test('cache replacement exposes complete old/new files and preserves old cache on staging failure', async t => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'pie-discovery-atomic-'));
+  const file = join(dir, createHash('sha256').update('local').digest('hex') + '.json');
+  const snapshot = (name: string) => ({ kind: 'account' as const, complete: true, freshness: 'fresh' as const, models: { [name]: { name } } });
+  try {
+    await saveDiscoveryCache(dir, 'local', 'p', snapshot('old'), 1);
+    const rename = fs.rename;
+    t.mock.method(fs, 'rename', async (source: string, target: string) => {
+      assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(file, 'utf8')).models), ['old']);
+      assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(source, 'utf8')).models), ['new']);
+      await rename(source, target);
+    });
+    await saveDiscoveryCache(dir, 'local', 'p', snapshot('new'), 2);
+    t.mock.restoreAll();
+    assert.deepEqual(Object.keys((await loadDiscoveryCache(dir, 'local', 'p'))!.models), ['new']);
+    const previous = await fs.readFile(file, 'utf8');
+    const write = fs.writeFile;
+    t.mock.method(fs, 'writeFile', async (path: string) => {
+      await write(path, '{partial');
+      throw new Error('synthetic staging failure');
+    });
+    await assert.rejects(saveDiscoveryCache(dir, 'local', 'p', snapshot('failed'), 3), /synthetic staging failure/);
+    assert.equal(await fs.readFile(file, 'utf8'), previous);
+    assert.deepEqual(await fs.readdir(dir), [file.split(/[\\/]/).at(-1)]);
+  } finally { t.mock.restoreAll(); await fs.rm(dir, { recursive: true, force: true }); }
 });

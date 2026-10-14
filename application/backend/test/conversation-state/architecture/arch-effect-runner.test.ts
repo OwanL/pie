@@ -5,6 +5,7 @@ import { EffectRunner, type EffectRunnerDeps, type TimerSink, type TimerHandle }
 import type { Effect } from '../../../conversation-state/effects/effects';
 import type { EffectResultEvent, CommandEvent, Event } from '../../../conversation-state/events';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../agent-connection/backend-ready-timeout';
+import { BackendRpcError } from '../../../agent-connection/client';
 import { RequestTimeoutError } from '../../../agent-connection/request-tracker';
 import { makeEffectRunnerDeps } from '../../helpers/effect-runner-deps';
 
@@ -826,7 +827,7 @@ test('EffectRunner OpenSession forwards the service-chosen transcript mode (skip
 });
 
 test('EffectRunner OpenSession calls handleSelectionFailure + dispatches OpenSessionResult{ok:false} when session.open rejects', async () => {
-  const { deps, calls, events } = makeEffectRunnerDeps({ requestImpl: (method) => method === 'session.open' ? Promise.reject(new Error('backend down')) : Promise.resolve({}) });
+  const { deps, calls, events } = makeEffectRunnerDeps({ requestImpl: (method) => method === 'session.open' ? Promise.reject(new BackendRpcError('open-rejected', 'session.open', 'OPEN_FAILED', 'backend down')) : Promise.resolve({}) });
   const runner = new EffectRunner(deps);
 
   runner.run({ kind: 'OpenSession', corrId: 'c3b', sessionPath: '/existing2', selectionToken: 'tok-2' });

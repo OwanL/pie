@@ -1,6 +1,5 @@
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
-import type { SessionSummary } from '../../../lib/protocol/index.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../lib/session-tabs/tab-behavior.js';

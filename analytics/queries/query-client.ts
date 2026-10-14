@@ -404,6 +404,7 @@ export class AnalyticsQueryClient {
       timer.unref?.();
       signal?.addEventListener('abort', onAbort, { once: true });
       child.on('message', (raw: unknown) => {
+        if (terminating || !raw || typeof raw !== 'object') return;
         const message = raw as {
           type?: string;
           requestId?: number;
@@ -425,6 +426,9 @@ export class AnalyticsQueryClient {
             return;
           }
           ready = true;
+          // Readiness is validated forward progress, not an arbitrary IPC
+          // message. Give the actual request a fresh inactivity window.
+          timer.refresh();
           this.notifyWorkerLifecycle({ state: 'ready', identity: workerIdentity }, requestId, request.type, priority);
           child.send({ ...request, requestId });
           return;

@@ -125,6 +125,14 @@ function logLoud(event: string, details: Record<string, unknown>): void {
 
 const DEFAULT_AGENT_SCOPE: AgentScope = "both";
 
+/** Explicit task projects take precedence; session and config roots remain fallbacks. */
+export function discoverSubagentAgents(sessionCwd: string, taskCwd?: string) {
+	const discoveryCwds = taskCwd
+		? [taskCwd, sessionCwd, CONFIG_ROOT]
+		: [sessionCwd, CONFIG_ROOT];
+	return discoverAgents(discoveryCwds, DEFAULT_AGENT_SCOPE);
+}
+
 /** Returns the standard response when the tool is disabled. */
 function disabledErrorResponse(): ErrorResponse {
 	return {
@@ -419,18 +427,9 @@ export async function execute(
 	// calls inherit it through the AsyncLocalStorage runtime context.
 	if (!runtimeCtx.budget) runtimeCtx.budget = { sessions: 0 };
 
-	// Project-local agents are found by walking up from a cwd looking for an
-	// `agents/` dir. The session cwd (`ctx.cwd`) is the VS Code workspace root,
-	// which may sit ABOVE the actual project (e.g. a multi-repo workspace whose
-	// `agents/` lives in a subdirectory). Include each per-task `cwd` so a caller
-	// can point at a nested project root and have its agents discovered.
-	// CONFIG_ROOT (this repo) is included as a stable walk-up anchor. Since the
-	// B3 authored-resource relocation, this repo's own agent definitions load
-	// from the user/global loader (<agentDir>/harness/agent-instructions/agents);
-	// generic project `agents/` walk-up from the session cwd is unchanged.
-	const discoveryCwds = [ctx.cwd, CONFIG_ROOT];
-	if (params.cwd) discoveryCwds.push(params.cwd);
-	const discovery = discoverAgents(discoveryCwds, DEFAULT_AGENT_SCOPE);
+	// Discovery is first-wins among project roots. The explicit task cwd must
+	// lead so the session project's same-named agent cannot shadow its agent.
+	const discovery = discoverSubagentAgents(ctx.cwd, params.cwd);
 	const agents = discovery.agents;
 	const validation = validateSubagentParams(params, agents);
 	if (!validation.ok) {

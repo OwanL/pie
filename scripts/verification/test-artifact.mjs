@@ -16,6 +16,8 @@ export const ARTIFACT_TEST_GLOB = '**/*.artifact.test.*';
 export const DEFAULT_ARTIFACT_SELECTORS = Object.freeze([
   'harness/agent-processes', 'harness/session-storage',
   'harness/tool-and-skill-selection', 'harness/tools/playwright',
+  'harness/model-providers/model-discovery', 'harness/model-providers/runtime', 'harness/tools/package-integrations/web-access',
+  'harness/tools/subagent', 'harness/tools/warm-bash', 'application/backend',
   'scripts/install/test', 'scripts/lib/test', 'scripts/development/test', 'test/integration',
 ]);
 

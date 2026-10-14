@@ -896,6 +896,24 @@ test('validateWebviewToHostMessage accepts only boolean follow-up pruning update
   }
 });
 
+test('validateWebviewToHostMessage handles optional tool-result pruning rules without throwing', () => {
+  const cases: Array<{ name: string; settings: unknown; valid: boolean }> = [
+    { name: 'rules omitted', settings: {}, valid: true },
+    { name: 'rules undefined', settings: { rules: undefined }, valid: true },
+    { name: 'rules null', settings: { rules: null }, valid: false },
+    { name: 'empty rules', settings: { rules: {} }, valid: true },
+    { name: 'valid rules', settings: { rules: { ansi: true, whitespace: false } }, valid: true },
+    { name: 'unknown rule', settings: { rules: { unknown: true } }, valid: false },
+    { name: 'unknown rule value', settings: { rules: { ansi: 'yes' } }, valid: false },
+  ];
+
+  for (const { name, settings, valid } of cases) {
+    assert.doesNotThrow(() => {
+      assert.equal(validateWebviewToHostMessage({ type: 'setToolResultPruningSettings', settings }).ok, valid, name);
+    }, name);
+  }
+});
+
 test('validateWebviewToHostMessage validates refresh after history compaction updates', () => {
   for (const refreshAfterCompaction of [true, false, undefined]) {
     assert.equal(validateWebviewToHostMessage({ type: 'setPruningSettings', settings: { refreshAfterCompaction } }).ok, true);

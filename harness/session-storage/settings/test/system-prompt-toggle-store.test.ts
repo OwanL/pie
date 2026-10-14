@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
@@ -16,7 +16,9 @@ import {
 async function withSidecarDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-system-prompt-toggles-'));
   const previous = process.env[SESSION_SETTINGS_DIR_ENV];
+  const previousLegacy = process.env[LEGACY_SESSION_SETTINGS_DIR_ENV];
   process.env[SESSION_SETTINGS_DIR_ENV] = dir;
+  delete process.env[LEGACY_SESSION_SETTINGS_DIR_ENV];
   try {
     await run(dir);
   } finally {
@@ -25,6 +27,8 @@ async function withSidecarDir(run: (dir: string) => Promise<void>): Promise<void
     } else {
       process.env[SESSION_SETTINGS_DIR_ENV] = previous;
     }
+    if (previousLegacy === undefined) delete process.env[LEGACY_SESSION_SETTINGS_DIR_ENV];
+    else process.env[LEGACY_SESSION_SETTINGS_DIR_ENV] = previousLegacy;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
@@ -81,6 +85,50 @@ test('system-prompt toggle store treats missing and malformed sidecars as empty'
   });
 });
 
+test('mutations preserve a multi-session sidecar on read I/O failure', async (t) => {
+  await withSidecarDir(async (dir) => {
+    const file = path.join(dir, 'system-prompt-toggles.json');
+    const bytes = JSON.stringify({ '/sessions/one.jsonl': ['harness'], '/sessions/two.jsonl': ['tools'] });
+    await fs.writeFile(file, bytes);
+    const readFile = fs.readFile;
+    const failure = Object.assign(new Error('injected read failure'), { code: 'EACCES' });
+    const mock = t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
+      if (args[0] === file) throw failure;
+      return readFile(...args);
+    });
+    try {
+      assert.deepEqual(await readSystemPromptToggles(), {});
+      await assert.rejects(writeSystemPromptTogglesForSession('/sessions/one.jsonl', [], true), failure);
+      await writeSystemPromptTogglesForSession('/sessions/three.jsonl', ['skills']);
+    } finally {
+      mock.mock.restore();
+    }
+    assert.equal(await fs.readFile(file, 'utf8'), bytes);
+    assert.deepEqual(await fs.readdir(dir), ['system-prompt-toggles.json']);
+    await writeSystemPromptTogglesForSession('/sessions/three.jsonl', ['skills'], true);
+    assert.deepEqual(await readSystemPromptToggles(), {
+      '/sessions/one.jsonl': ['harness'], '/sessions/two.jsonl': ['tools'], '/sessions/three.jsonl': ['skills'],
+    });
+  });
+});
+
+test('mutations reject malformed existing state without replacing its bytes', async () => {
+  await withSidecarDir(async (dir) => {
+    const file = path.join(dir, 'system-prompt-toggles.json');
+    for (const bytes of [
+      '{"/sessions/one.jsonl":["harness"],"/sessions/two.jsonl":["tools"]',
+      '{"/sessions/one.jsonl":["harness"],"/sessions/two.jsonl":42}',
+      'null', '[]',
+    ]) {
+      await fs.writeFile(file, bytes);
+      await assert.rejects(writeSystemPromptTogglesForSession('/sessions/three.jsonl', ['skills'], true));
+      await writeSystemPromptTogglesForSession('/sessions/one.jsonl', []);
+      assert.equal(await fs.readFile(file, 'utf8'), bytes);
+      assert.deepEqual(await fs.readdir(dir), ['system-prompt-toggles.json']);
+    }
+  });
+});
+
 test('system-prompt toggles read the legacy review sidecar and scrub it after migration', async () => {
   const currentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-settings-'));
   const legacyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-legacy-session-settings-'));
@@ -107,6 +155,22 @@ test('system-prompt toggles read the legacy review sidecar and scrub it after mi
       JSON.parse(await fs.readFile(path.join(legacyDir, 'system-prompt-toggles.json'), 'utf8')),
       { '/sessions/other.jsonl': ['tools'] },
     );
+
+    const currentFile = path.join(currentDir, 'system-prompt-toggles.json');
+    const legacyFile = path.join(legacyDir, 'system-prompt-toggles.json');
+    const currentBytes = await fs.readFile(currentFile, 'utf8');
+    const legacyBytes = '{"/sessions/legacy.jsonl":["harness"],"/sessions/other.jsonl":["tools"]';
+    await fs.writeFile(legacyFile, legacyBytes);
+    await assert.rejects(writeSystemPromptTogglesForSession(sessionPath, [], true));
+    assert.equal(await fs.readFile(currentFile, 'utf8'), currentBytes, 'legacy scrub is validated before current replacement');
+    assert.equal(await fs.readFile(legacyFile, 'utf8'), legacyBytes);
+    assert.deepEqual(await readSystemPromptTogglesForSession(sessionPath), ['skills']);
+
+    await fs.unlink(currentFile);
+    assert.deepEqual(await readSystemPromptToggles(), {});
+    await assert.rejects(writeSystemPromptTogglesForSession(sessionPath, ['tools'], true));
+    await assert.rejects(fs.readFile(currentFile), { code: 'ENOENT' });
+    assert.equal(await fs.readFile(legacyFile, 'utf8'), legacyBytes);
   } finally {
     if (previousCurrent === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousCurrent;

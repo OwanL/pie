@@ -4,16 +4,17 @@
  *
  * When `createSession()` is in-flight and the parent signal (or pre-spawn
  * timeout) fires first, the underlying creation promise is not cancelled.
- * If it later resolves to a session, that session must be disposed exactly
- * once, any loader-leaked exit-signal listeners must be reclaimed, and no
- * process permit may be retained. This registry tracks those detached cleanup
- * tasks, retries them with bounded exponential backoff, caps total retention,
- * exposes observable stats, and drains best-effort on process shutdown.
+ * If it later resolves to a session, detached cleanup tries to dispose that
+ * session without continuing setup or prompting. Cleanup is best effort, not an
+ * exactly-once guarantee: the registry retries with bounded exponential backoff,
+ * caps total retention, exposes observable stats, and drains best-effort on
+ * process shutdown. Cleanup must not retain a process permit.
  *
- * Important limitation: the upstream `DefaultResourceLoader` does not expose a
- * reliable `dispose()`/`destroy()` API, so the registry cannot tear down the
- * loader itself. Cleanup is limited to disposing a late-resolved session and
- * reclaiming the orphaned exit-signal listeners leaked during loader setup.
+ * Important limitations: the upstream `DefaultResourceLoader` does not expose a
+ * reliable `dispose()`/`destroy()` API, so the registry cannot tear it down.
+ * Immediate exit-signal listener reclamation is best effort, but delayed
+ * `reload()`/session-creation closures are not globally reclaimed because their
+ * ownership cannot be identified safely per attempt; late closures may accumulate.
  */
 
 /** Cancelable timer handle returned by {@link CleanupScheduler.setTimer}. */
@@ -102,9 +103,10 @@ const DEFAULT_OPTIONS: OrphanRegistryOptions = {
 /**
  * A bounded cleanup registry for orphaned subagent sessions/resource loaders.
  *
- * - Cleanup functions never reacquire execution permits; they only dispose
- *   late-resolved sessions and reclaim attempt-owned loader listeners.
- * - Retries use bounded exponential backoff with a per-attempt timeout.
+ * - Cleanup functions never reacquire execution permits; they perform detached
+ *   cleanup for late-resolved sessions.
+ * - Retries use bounded exponential backoff with a per-attempt timeout; cleanup
+ *   remains best effort and is not guaranteed exactly once.
  * - Total entries are capped; oldest terminal entries are evicted first.
  * - `drain()` awaits pending work best-effort.
  */

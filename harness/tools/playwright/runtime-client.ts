@@ -288,9 +288,16 @@ export class RuntimeClient {
   }
   get pid(): number | undefined { return this.child?.pid; }
 
+  private assertNotStopping(): void {
+    if (this.stopping || this.shutdownPromise) {
+      throw new PlaywrightRuntimeError('RUNTIME_REOPEN_REQUIRED', 'Owning pie session is shutting down; every playwright session id is invalid.', false);
+    }
+  }
+
   private start(): void {
+    this.assertNotStopping();
     if (this.child) return;
-    this.stopping = false; this.decoder = new JsonlDecoder();
+    this.decoder = new JsonlDecoder();
     const child = this.spawnSidecar(); this.child = child;
     child.stdout.on('data', (chunk) => {
       if (child !== this.child) return;
@@ -389,7 +396,9 @@ export class RuntimeClient {
   }
 
   async request(method: string, params: unknown, options: RequestOptions = {}): Promise<RuntimeResponse> {
+    this.assertNotStopping();
     if (this.recovering) await this.recovering;
+    this.assertNotStopping();
     if (this.unresolvedCleanup) throw this.unresolvedCleanup.error;
     if (this.needsReopen && !options.allowNeedsReopen && method !== 'open' && method !== 'close') {
       throw new PlaywrightRuntimeError('RUNTIME_REOPEN_REQUIRED', REOPEN_MESSAGE, false);
@@ -529,21 +538,22 @@ export class RuntimeRegistry {
   private async shutdownChild(ownerId: string): Promise<void> {
     const client = this.childClients.get(ownerId);
     await client?.shutdown();
-    this.childClients.delete(ownerId);
+    if (this.childClients.get(ownerId) === client) this.childClients.delete(ownerId);
   }
   async peek(sessionPath: string): Promise<RuntimeClient | undefined> { return this.clients.get(await canonicalSessionPath(sessionPath)); }
   async shutdownSession(sessionPath: string): Promise<void> {
     const key = await canonicalSessionPath(sessionPath);
     const client = this.clients.get(key);
     await client?.shutdown();
-    this.clients.delete(key);
+    if (this.clients.get(key) === client) this.clients.delete(key);
   }
   async shutdownAll(): Promise<void> {
     const clients = [...this.clients.entries()].map(([key, client]) => ({ key, client, child: false as const }));
     const childClients = [...this.childClients.entries()].map(([key, client]) => ({ key, client, child: true as const }));
     const results = await Promise.allSettled([...clients, ...childClients].map(async ({ key, client, child }) => {
       await client.shutdown();
-      (child ? this.childClients : this.clients).delete(key);
+      const registry = child ? this.childClients : this.clients;
+      if (registry.get(key) === client) registry.delete(key);
     }));
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failures.length === 1) throw failures[0].reason;

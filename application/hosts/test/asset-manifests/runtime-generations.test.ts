@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 
 type Identity = { publisher: string; name: string; version: string };
 type RuntimeGeneration = { generation: string | null; outDir: string; publishedAt: number };
@@ -31,6 +33,44 @@ const runtimeModulePath = fileURLToPath(new URL('../../vscode/runtime/runtime-ge
 const runtime = require(runtimeModulePath) as RuntimeApi;
 const IDENTITY: Identity = { publisher: 'pie', name: 'pie', version: '0.3.0' };
 const BUILD_ID = '0123456789abcdef0123';
+
+test('hashFile preserves primary errors and rejects close-only failures', async () => {
+  const source = await readFile(runtimeModulePath, 'utf8');
+  const functionSource = source.slice(source.indexOf('async function hashFile('), source.indexOf('\nasync function collectFileRecords('));
+  for (const failure of ['none', 'open', 'read', 'close', 'read-and-close']) {
+    const primary = new Error('primary');
+    const closeError = new Error('close');
+    let closed = 0;
+    let reads = 0;
+    const hashFile = runInNewContext(`(${functionSource})`, {
+      crypto: { createHash },
+      fs: { open: async () => {
+        if (failure === 'open') throw primary;
+        return {
+          read: async (buffer: Buffer) => {
+            if (failure.startsWith('read')) throw primary;
+            if (reads++ > 0) return { bytesRead: 0 };
+            buffer.write('abc');
+            return { bytesRead: 3 };
+          },
+          close: async () => {
+            closed++;
+            if (failure.includes('close')) throw closeError;
+          },
+        };
+      } },
+    }) as (file: string, buffer: Buffer) => Promise<{ sha256: string; size: number }>;
+    const result = hashFile('fixture', Buffer.alloc(8));
+    if (failure === 'none') {
+      const record = await result;
+      assert.equal(record.size, 3);
+      assert.equal(record.sha256, createHash('sha256').update('abc').digest('hex'));
+    } else {
+      await assert.rejects(result, error => error === (failure === 'close' ? closeError : primary));
+    }
+    assert.equal(closed, failure === 'open' ? 0 : 1);
+  }
+});
 
 async function createRuntimeSource(root: string, name: string, options: {
   sharedContents?: string;

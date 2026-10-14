@@ -176,8 +176,10 @@ test('tab context menu exposes menu semantics for every action', () => {
 
   assert.match(html, /role="menu"/);
   assert.match(html, /aria-label="Context Menu Session tab actions"/);
-  // Pin, Duplicate, Close, plus the parity actions New Session and Copy Session Path.
-  assert.equal((html.match(/role="menuitem"/g) ?? []).length, 5);
+  assert.deepEqual([...html.matchAll(/<button[^>]*role="menuitem"[^>]*>([\s\S]*?)<\/button>/g)]
+    .map((match) => match[1].replace(/<[^>]*>/g, '').trim()), [
+      'Pin Tab', 'Duplicate Tab', 'Snooze…', 'Close Tab', 'New Session', 'Copy Session Path',
+    ]);
   assert.equal((html.match(/role="separator"/g) ?? []).length, 2);
   assert.match(html, /New Session/);
   assert.match(html, /Copy Session Path/);
@@ -251,6 +253,20 @@ function clickButton(host: HTMLDivElement, label: string): HTMLButtonElement {
   act(() => { (button as HTMLButtonElement).click(); });
   return button as HTMLButtonElement;
 }
+
+test('tab context menu: Snooze exposes the contract presets without dispatching a tab action', () => {
+  const menu = renderContextMenu({ tabPath: '/sessions/a' });
+  try {
+    clickButton(menu.host, 'Snooze…');
+    assert.deepEqual(menu.buttons().map((button) => button.textContent?.trim()), [
+      'Back to tab actions', '4 hours', '8 hours', '12 hours', '24 hours', '48 hours', 'Until Monday morning',
+    ]);
+    assert.deepEqual(menu.actions, []);
+    assert.equal(menu.closes(), 0);
+  } finally {
+    cleanupContextMenu(menu.host);
+  }
+});
 
 test('tab context menu: New Session uses the onNew affordance and closes the menu', () => {
   const menu = renderContextMenu({ tabPath: '/sessions/a' });

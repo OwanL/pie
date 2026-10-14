@@ -87,11 +87,9 @@ export default function register(pi: ExtensionAPI) {
 	// One minimal recovery surface for both hidden tools and hidden skills.
 	pi.registerTool(createRequestCapabilityDefinition(toolSeams));
 
-	// Inputs submitted while an agent is running are steering/continuation
-	// messages, not independent task pivots. Remember them so their eventual
-	// before_agent_start hook can preserve the current catalog without paying for
-	// another pruning prepass (or inserting a pruning-result transcript entry).
-	const queuedPrompts = new Map<string, number>();
+	// The SDK delivers queued steering/follow-ups without before_agent_start.
+	// Do not infer hook intent from input text: a later idle request may reuse
+	// that exact text and explicitly request a fresh selection.
 	// One launch-time decision per child session owned by this extension
 	// registration. Mark before awaiting the scorer so failures and concurrent
 	// continuations never trigger an unnecessary second prepass.
@@ -100,14 +98,8 @@ export default function register(pi: ExtensionAPI) {
 		const sessionId = getSessionId(ctx);
 		clearSessionPruningState(sessionId);
 		processedChildSessions.delete(sessionId);
-		queuedPrompts.clear();
 	});
-	pi.on("input", (event: InputEvent) => {
-		if (event.streamingBehavior) {
-			queuedPrompts.set(event.text, (queuedPrompts.get(event.text) ?? 0) + 1);
-		}
-		return { action: "continue" };
-	});
+	pi.on("input", (_event: InputEvent) => ({ action: "continue" }));
 
 	// --- before_agent_start: skill + tool pruning ---
 	const selectCapabilities = async (event: Omit<BeforeAgentStartEvent, "type"> & { type: "before_agent_start" | "before_compaction_resume"; newUserPrompt?: boolean }, ctx: unknown) => {
@@ -230,14 +222,6 @@ export default function register(pi: ExtensionAPI) {
 			return promptRefreshResult();
 		};
 
-		const queuedCount = queuedPrompts.get(event.prompt) ?? 0;
-		if (queuedCount > 0 && !afterCompaction) {
-			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
-			else queuedPrompts.set(event.prompt, queuedCount - 1);
-			return processedChildSessions.has(sessionId) || state.processedMainSessions.has(sessionId)
-				? reapplySelection()
-				: promptRefreshResult();
-		}
 		if (isChildSession && processedChildSessions.has(sessionId) && !afterCompaction) {
 			// Internal continuation/re-entry: the catalog and active-tool set from
 			// the launch decision are still authoritative. Rebuild only the skills
@@ -261,7 +245,7 @@ export default function register(pi: ExtensionAPI) {
 		}
 		const rootSessionFields = rootSessionAttribution(ctx, sessionId);
 		// A fresh pruning decision owns a new hidden-skill catalog.
-		// Queued continuations returned above intentionally retain the current one.
+		// Sticky continuations returned above intentionally retain the current one.
 		const ongoingSkills = afterCompaction ? new Set(state.loadedSkills.get(sessionId) ?? []) : new Set<string>();
 		recordHiddenSkills(sessionId, []);
 		if (afterCompaction && ongoingSkills.size > 0) state.loadedSkills.set(sessionId, ongoingSkills);
