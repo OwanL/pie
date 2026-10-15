@@ -389,6 +389,7 @@ export function AppBody({ adapter }: AppBodyProps) {
       {derived.showSessionChrome && !viewState.prefs.hideStatusStrip && (
         <AggregateStatsStrip
           stats={viewState.aggregateStats}
+          snoozedSessionCount={viewState.snoozedSessions?.length ?? 0}
           deferredTriggers={viewState.deferredTriggers}
           onOpenDeferredMenu={(x, y, triggerEl) => setDeferredMenu({ x, y, triggerEl })}
         />

@@ -4,7 +4,7 @@
    Per-provider breakdowns and all-time context live in each segment's scoped
    custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
    chips. Wide panels keep a single thin line; portrait panels separate the
-   scrollable metrics from always-visible character and session counts.
+   scrollable metrics from always-visible session counts.
    Custom tooltips are used
    instead of native `title` because the strip re-renders ~7×/sec during
    streaming — native `title` tooltips close on every re-render and flicker. Host-owned: a pure projection of ViewState.aggregateStats
@@ -93,8 +93,8 @@
 }
 
 .aggregate-strip-counts {
-  color: var(--panel-muted);
-  padding-left: 4px;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .aggregate-strip-user-input {
@@ -142,29 +142,6 @@
   margin-top: 6px;
   padding-top: 5px;
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
-}
-
-.aggregate-strip-active {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  color: var(--panel-accent);
-  font-weight: 600;
-}
-
-.aggregate-strip-active-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--panel-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 18%, transparent);
-  animation: aggregate-strip-pulse 1.4s ease-in-out infinite;
-  will-change: opacity;
-}
-
-@keyframes aggregate-strip-pulse {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
 }
 
 .aggregate-strip-providers {
@@ -254,7 +231,7 @@
   }
 
   /* Only metrics scroll: provider/deferred segments remain reachable without
-     ever pushing the character and working/open counts out of the viewport. */
+     ever pushing the working/open counts out of the viewport. */
   .aggregate-strip-metrics {
     display: flex;
     align-items: center;

@@ -48,11 +48,12 @@ import { Num } from './num';
 
 interface AggregateStatsStripProps {
   stats: AggregateStats;
+  snoozedSessionCount?: number;
   deferredTriggers: DeferredTriggerView[];
   onOpenDeferredMenu: (x: number, y: number, triggerEl: HTMLElement) => void;
 }
 
-function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
+function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
   const {
     ready,
     todayCost,
@@ -63,7 +64,6 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     openTabCount,
   } = stats;
 
-  const running = runningSessionCount > 0;
   const visibleProviders = stats.providerGate.providers.filter((p) =>
     p.activeRequests > 0
     && p.maxConcurrentRequests !== PROVIDER_UNLIMITED_CONCURRENCY
@@ -73,7 +73,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     <div
       class={cx('aggregate-strip', !ready && 'aggregate-strip--placeholder')}
       role="status"
-      aria-label={ariaLabel(stats)}
+      aria-label={ariaLabel(stats, snoozedSessionCount)}
     >
       <div class="aggregate-strip-metrics">
         <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
@@ -154,30 +154,17 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
       </div>
       <span class="aggregate-strip-sep aggregate-strip-status-sep" aria-hidden="true">·</span>
       <div class="aggregate-strip-status-cluster">
-        <Tooltip contentNode={userInputTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
-          <span
-            class="aggregate-strip-seg aggregate-strip-user-input"
-            tabIndex={0}
-            aria-label={userInputSegmentAriaLabel(stats.todayProductivity)}
-          >
-            {userInputCharsNode(stats.todayProductivity)} chars
-          </span>
-        </Tooltip>
-        <Sep />
-        <Tooltip contentNode={workTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
+        <Tooltip contentNode={workTooltipNode(stats, snoozedSessionCount)} placement="top" freezeWhileVisible richRole="region">
           <span
             class="aggregate-strip-seg aggregate-strip-counts"
             tabIndex={0}
-            aria-label={`${runningSessionCount} session${runningSessionCount === 1 ? '' : 's'} working, ${openTabCount} open. Focus for 14-day work trend.`}
+            aria-label={`${runningSessionCount} session${runningSessionCount === 1 ? '' : 's'} working, ${openTabCount} open, ${snoozedSessionCount} snoozed. Focus for 14-day work trend.`}
           >
-            {running && (
-              <span class="aggregate-strip-active">
-                <span class="aggregate-strip-active-dot" aria-hidden="true" />
-                {runningSessionCount} working
-              </span>
-            )}
-            {running && ' · '}
-            {openTabCount} open
+            <span>{runningSessionCount} working</span>
+            <Sep />
+            <span>{openTabCount} open</span>
+            <Sep />
+            <span>{snoozedSessionCount} snoozed</span>
           </span>
         </Tooltip>
       </div>
@@ -202,6 +189,7 @@ function arePropsEqual(
   next: AggregateStatsStripProps,
 ): boolean {
   return (prev.stats === next.stats || aggregateStatsSignature(prev.stats) === aggregateStatsSignature(next.stats))
+    && (prev.snoozedSessionCount ?? 0) === (next.snoozedSessionCount ?? 0)
     && deferredSignature(prev.deferredTriggers) === deferredSignature(next.deferredTriggers);
 }
 
@@ -315,18 +303,6 @@ function userInputCharsLabel(p: AggregateProductivityStats): string {
   return userInputTrackingKnown(p) ? chars : `≥${chars}`;
 }
 
-function userInputCharsNode(p: AggregateProductivityStats): JSX.Element {
-  if (userInputTrackingKnown(p)) {
-    return <Num value={p.adjustedUserInputChars} format={formatCompactTokens} width={5} class="aggregate-strip-user-input-total" />;
-  }
-  return <span class="aggregate-strip-num aggregate-strip-user-input-total" style="min-width:5ch">≥{formatCompactTokens(p.adjustedUserInputChars)}</span>;
-}
-
-function userInputSegmentAriaLabel(p: AggregateProductivityStats): string {
-  const coverage = userInputTrackingKnown(p) ? 'fully tracked' : 'a lower bound because coverage is incomplete';
-  return `Today's adjusted user input: ${userInputCharsLabel(p)} characters, ${coverage}. Focus for Today and 7-day character-volume details.`;
-}
-
 function trimDec(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
@@ -434,11 +410,10 @@ function providerTokenSummary(providers: AggregateProviderCost[]): string {
     .join('  ·  ');
 }
 
-function ariaLabel(s: AggregateStats): string {
+function ariaLabel(s: AggregateStats, snoozedSessionCount: number): string {
   if (!s.ready) return 'Usage stats: computing.';
   return `Estimated API-equivalent token cost across all runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
-    + `Today's adjusted user input ${userInputCharsLabel(s.todayProductivity)} characters. `
-    + `${s.runningSessionCount} session${s.runningSessionCount === 1 ? '' : 's'} working, ${s.openTabCount} open.`;
+    + `${s.runningSessionCount} session${s.runningSessionCount === 1 ? '' : 's'} working, ${s.openTabCount} open, ${snoozedSessionCount} snoozed.`;
 }
 
 // ── Scoped rich tooltips ────────────────────────────────────────────────────
@@ -691,7 +666,7 @@ export function userInputTooltipNode(s: AggregateStats): JSX.Element {
  *  14-day dual-series work trend (sessions used vs peak concurrently working —
  *  historical run evidence, never open-tab history). */
 /** Exported for the focused Work-tooltip render test. */
-export function workTooltipNode(s: AggregateStats): JSX.Element {
+export function workTooltipNode(s: AggregateStats, snoozedSessionCount = 0): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
   const trendPoints: AggregateSeriesPoint[] = s.dailyWorkTrend.map((d) => ({
     ms: dateToMs(d.date),
@@ -707,7 +682,7 @@ export function workTooltipNode(s: AggregateStats): JSX.Element {
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
         <span>{s.runningSessionCount} working</span>
-        <span class="rich-tooltip-head-value">{s.openTabCount} open</span>
+        <span class="rich-tooltip-head-value">{s.openTabCount} open · {snoozedSessionCount} snoozed</span>
       </div>
       <div
         class="rich-tooltip-chart-group"
