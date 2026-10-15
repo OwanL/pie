@@ -10,6 +10,8 @@ share the parent process, working directory, filesystem access, extension runtim
 external credentials. An abort-ignoring SDK/provider/tool therefore cannot be forcibly
 killed or prevented from producing late external side effects by this extension alone.
 
+Static agent-facing guidance is authored in [subagent guidance](../../agent-instructions/subagent-guidance.md) and cached at module startup. Unbundled tools load it relative to their source; bundled consumers use the configured agent directory. Dynamic agent listings and prompt placement remain in code.
+
 ## Invocation and orchestration
 
 One tool call delegates one task:
