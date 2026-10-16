@@ -1403,7 +1403,9 @@
   border-radius: var(--panel-radius-sm);
   padding: 3px 0;
   box-shadow: var(--panel-shadow-overlay);
-  min-width: 220px;
+  box-sizing: border-box;
+  min-width: min(180px, calc(100vw - 8px));
+  max-width: calc(100vw - 8px);
   animation: panel-scale-in var(--panel-duration-fast) var(--panel-ease-out-expo);
   transform-origin: top left;
 }
@@ -1422,10 +1424,8 @@
 }
 
 .session-tab-context-title {
-  padding: 5px 10px 6px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  padding: 4px 10px;
+  font-size: 11px;
   color: var(--panel-muted);
   white-space: nowrap;
   overflow: hidden;

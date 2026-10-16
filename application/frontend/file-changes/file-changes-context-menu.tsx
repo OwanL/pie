@@ -111,7 +111,6 @@ export function FileChangeContextMenu({
           onClose();
         }}
       >
-        <span class="context-menu-check" aria-hidden="true" />
         Open in editor
       </button>
       <button
@@ -123,12 +122,10 @@ export function FileChangeContextMenu({
           onClose();
         }}
       >
-        <span class="context-menu-check" aria-hidden="true" />
         View diff
       </button>
       <div class="context-menu-separator" role="separator" />
       <button class="context-menu-item" role="menuitem" type="button" onClick={copyPath}>
-        <span class="context-menu-check" aria-hidden="true" />
         {copied ? 'Copied!' : 'Copy path'}
       </button>
       <button
@@ -140,7 +137,6 @@ export function FileChangeContextMenu({
           onClose();
         }}
       >
-        <span class="context-menu-check" aria-hidden="true" />
         {menu.read ? 'Mark as unread' : 'Mark as read'}
       </button>
       <div class="context-menu-separator" role="separator" />
@@ -150,7 +146,6 @@ export function FileChangeContextMenu({
         type="button"
         onClick={onRevertClick}
       >
-        <span class="context-menu-check" aria-hidden="true" />
         {confirming ? 'Confirm revert?' : 'Revert changes'}
       </button>
     </div>

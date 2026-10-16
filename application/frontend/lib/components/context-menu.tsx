@@ -124,7 +124,6 @@ export function ContextMenu({
             onClose();
           }}
         >
-          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
           Open File
         </button>
         <button
@@ -135,7 +134,6 @@ export function ContextMenu({
             copyAndClose(menu.rawData);
           }}
         >
-          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
           Copy Path
         </button>
         {copyFailureNotice}
@@ -175,7 +173,6 @@ export function ContextMenu({
     <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(
       hasSelection ? menu.selectionText : markdownToReadableText(markdownBody),
     )}>
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy
     </button>
   ) : null;
@@ -183,7 +180,6 @@ export function ContextMenu({
     <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(
       hasSelection ? menu.selectionMarkdown ?? menu.selectionText : markdownBody,
     )}>
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy as Markdown
     </button>
   ) : null;
@@ -192,14 +188,12 @@ export function ContextMenu({
   // text behavior and Copy raw action; tool JSON is not called Markdown.
   const copySelection = !hasMessageCopy && hasSelection ? (
     <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(menu.selectionText)}>
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy
     </button>
   ) : null;
   const plainText = meta?.plainText;
   const copyText = !hasMessageCopy && plainText?.trim() ? (
     <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(plainText)}>
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy text
     </button>
   ) : null;
@@ -217,7 +211,6 @@ export function ContextMenu({
         onClose();
       }}
     >
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Edit
     </button>
   ) : null;
@@ -238,7 +231,6 @@ export function ContextMenu({
         }
       }}
     >
-      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       {confirmingDelete ? 'Confirm delete?' : 'Delete from here'}
     </button>
   ) : null;
@@ -260,7 +252,6 @@ export function ContextMenu({
       {copyText}
       {!hasMessageCopy ? (
         <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(menu.rawData)}>
-          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
           Copy raw
         </button>
       ) : null}

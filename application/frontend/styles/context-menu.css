@@ -5,7 +5,9 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 10px;
+  min-height: 24px;
+  padding: 3px 10px;
+  line-height: 18px;
   border: none;
   background: transparent;
   color: var(--panel-foreground);
@@ -41,7 +43,7 @@
 
 .context-menu-separator {
   height: 1px;
-  margin: 4px 8px;
+  margin: 3px 8px;
   background: var(--panel-border-subtle);
 }
 
@@ -247,15 +249,6 @@
   padding: 4px 0;
 }
 
-.deferred-triggers-menu-title {
-  padding: 4px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--panel-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
 .deferred-triggers-menu-list {
   display: flex;
   flex-direction: column;
@@ -265,9 +258,9 @@
 
 .deferred-triggers-menu-item {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 6px 8px 6px 10px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 10px;
 }
 
 .deferred-triggers-menu-item + .deferred-triggers-menu-item {
@@ -285,7 +278,8 @@
 .deferred-triggers-menu-item-head {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 3px 6px;
   min-width: 0;
 }
 
@@ -301,8 +295,8 @@
 .deferred-triggers-menu-item-kind {
   font-size: 11px;
   color: var(--panel-accent);
-  white-space: nowrap;
-  flex-shrink: 0;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .deferred-triggers-menu-item-note {
@@ -321,16 +315,16 @@
 
 .deferred-triggers-menu-item-cancel {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: auto;
+  min-height: 24px;
   border: 1px solid transparent;
   border-radius: var(--panel-radius-sm);
   background: transparent;
   color: var(--panel-muted);
   cursor: pointer;
-  padding: 0;
-  font-size: 13px;
-  line-height: 1;
+  padding: 3px 6px;
+  font-size: 12px;
+  line-height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -339,5 +333,5 @@
 
 .deferred-triggers-menu-item-cancel:hover {
   background: var(--panel-control-hover);
-  color: var(--panel-foreground);
+  color: var(--panel-danger);
 }

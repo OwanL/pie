@@ -10,7 +10,6 @@ import { useMenuViewportClamp } from '../lib/components/useMenuViewportClamp';
 import type { PinnedItem } from '../../lib/session-tabs/tab-behavior.js';
 import type { SessionSummary } from '../../lib/protocol/index.js';
 import type { SessionTabContextMenuState } from './types';
-import { CheckmarkIcon, CloseIcon } from './icons';
 
 export interface PinnedGroupContextMenuProps {
   menu: SessionTabContextMenuState;
@@ -87,7 +86,6 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        <CheckmarkIcon />
         Open Group
       </button>
       <button
@@ -96,10 +94,9 @@ export function PinnedGroupContextMenu({
         type="button"
         onClick={copySessionPaths}
       >
-        <CheckmarkIcon />
         {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy Session Paths'}
       </button>
-      <div class="context-menu-separator" role="separator" />
+      {mergeTargets.length > 0 && <div class="context-menu-separator" role="separator" />}
       {mergeTargets.map((item) => {
         const targetPath = item.members[0] ?? '';
         const targetName = sessionByPath.get(targetPath)?.name ?? 'New Session';
@@ -114,7 +111,6 @@ export function PinnedGroupContextMenu({
               onClose();
             }}
           >
-            <CheckmarkIcon />
             Merge with {targetName} ({item.members.length})
           </button>
         );
@@ -129,7 +125,6 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        <CheckmarkIcon />
         Dissolve Group
       </button>
       <button
@@ -141,7 +136,6 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        <CloseIcon />
         Unpin Group
       </button>
     </div>

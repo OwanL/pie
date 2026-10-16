@@ -13,7 +13,7 @@ import type { DeferredTriggerView, SessionSummary, TriggerSpec } from '../../../
  * Popup listing every currently-active deferred trigger, opened from the
  * bottom status strip's waiting-trigger segment. Each item shows the target
  * session, creator when different, trigger condition, task message, elapsed
- * wait time, and a per-item cancel (×) button.
+ * wait time, and a per-item Cancel action.
  *
  * Webview-local ephemeral UI (STATE_CONTRACT § Webview-Local State — the moral
  * equivalent of `contextMenu`): position + open state live in AppBody; this
@@ -73,9 +73,6 @@ export function DeferredTriggersMenu({
       style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div class="deferred-triggers-menu-title">
-        {triggers.length} pending wakeup timer{triggers.length === 1 ? '' : 's'}
-      </div>
       <div class="deferred-triggers-menu-list">
         {triggers.map((t) => {
           const targetPath = t.targetSession ?? t.sessionPath;
@@ -111,7 +108,7 @@ export function DeferredTriggersMenu({
                 title="Cancel this wakeup timer"
                 onClick={() => onCancel(t.sessionPath, t.id)}
               >
-                ×
+                Cancel
               </button>
             </div>
           );

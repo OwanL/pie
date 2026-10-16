@@ -784,8 +784,9 @@ body.session-tab-dragging {
 
 .snoozed-session-details {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }
@@ -796,18 +797,18 @@ body.session-tab-dragging {
   white-space: nowrap;
 }
 
-.snoozed-session-details time,
-.snoozed-session-restore {
+.snoozed-session-details time {
   color: var(--panel-muted);
   font-size: 11px;
 }
 
 .snoozed-session-details time {
-  white-space: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
   line-height: 1.4;
 }
-
-.snoozed-session-restore { flex-shrink: 0; }
 
 /* ── New tab button & connecting indicator ───────────────────────────────── */
 
