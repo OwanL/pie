@@ -188,7 +188,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
     };
     return {
       state: nextState,
-      effects: [{
+      effects: [{ kind: 'HydrateModel', corrId: cmd.corrId, sessionPath }, {
         kind: 'CreateSession',
         corrId: cmd.corrId,
         sessionPath,
@@ -266,6 +266,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
     state: nextState,
     effects: [
       { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
+      ...(operationId ? [{ kind: 'HydrateModel' as const, corrId: cmd.corrId, sessionPath }] : []),
       { kind: 'CreateSession', corrId: cmd.corrId, sessionPath, cwd, selectionToken, ...(operationId ? { operationId, operationAttempt: cmd.operationAttempt ?? 1, backendGeneration } : {}) },
     ],
   };

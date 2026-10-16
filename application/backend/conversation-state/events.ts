@@ -835,6 +835,8 @@ export interface AvailableModelsChangedEvent {
   kind: 'AvailableModelsChanged';
   sessionPath: string;
   models: ModelInfo[];
+  /** Creation-only preview ownership; never substitutes for durable discovery. */
+  creationPreview?: { operationId: string; attempt: number };
   /** Required ownership metadata captured when this hydration started. */
   backendGeneration: number;
   hydrationRevision: number;

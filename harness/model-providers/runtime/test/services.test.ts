@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { currentProviderSelectorSnapshot } from '../selector-policy';
+import { availableProviderRuntimeModels } from '../services';
+import { projectProviderRuntimeModels } from '../model-info';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureProviderRuntimeProjection } from '../projection';
@@ -313,4 +316,37 @@ test('legacy request resolution stays private and provider-qualified managed mod
       assert.equal(publicRows.includes(privateValue), false);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('cold and hot selectors apply live visibility without replacing pinned runtime models', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pie-selector-'));
+  const previous = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = dir;
+  try {
+    const { sdk, legacy } = syntheticSdk();
+    const snapshot = captureProviderRuntimeProjection({ config: { version: 1, providers: {
+      a: { enabled: true, credentialRef: { source: 'legacy' }, modelPreferences: { same: { visible: false } } },
+      b: { enabled: true, credentialRef: { source: 'legacy' } },
+    } }, configRevision: canonicalRevision('selector'), legacyModels: ['a', 'b'].map(provider => ({ ...native, provider })) })!;
+    const services = await createProviderRuntimeServices(sdk, snapshot, legacy, { credentialFile: join(dir, 'credentials.json') });
+    const pinned = services.modelRegistry.find('a', 'same');
+    const compare = (expected: string[]) => {
+      const current = currentProviderSelectorSnapshot(snapshot);
+      const cold = availableProviderRuntimeModels(current, { credentialFile: join(dir, 'credentials.json'), savedCredential: () => undefined,
+        legacyHasAuth: () => true, defaultHasAuth: () => false });
+      assert.deepEqual(projectProviderRuntimeModels(current, cold).map(model => model.provider), expected);
+      assert.deepEqual(projectProviderRuntimeModels(current, services.modelRegistry.getAvailable()).map(model => model.provider), expected);
+      assert.equal(services.modelRegistry.find('a', 'same'), pinned);
+    };
+    compare(['b']);
+    await writeFile(join(dir, 'providers.yaml'), 'version: 1\nproviders:\n  a:\n    enabled: false\n    modelPreferences:\n      same: { visible: true }\n  b:\n    enabled: true\n    modelPreferences:\n      same: { visible: false }\n');
+    compare(['a']);
+    await writeFile(join(dir, 'providers.yaml'), 'version: 1\nproviders: {}\n');
+    compare(['a', 'b']);
+    assert.equal(snapshot.models[0].visible, false);
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR;
+    else process.env.PIE_PROVIDER_CONFIG_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

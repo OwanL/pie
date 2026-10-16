@@ -1,12 +1,13 @@
 /** Browser-safe controlled provider management UI. Secrets use private callbacks, never view state. */
 import type { ProviderSetupDraft, ProviderSetupKind, ProviderDefinition, ProviderConnectionMethod, ProviderAuthPrompt, ManagedProviderSummary } from '../../../harness/model-providers/management/contracts';
 export type { ProviderSetupPreference, ProviderSetupCredentialSource, ProviderSetupModel, ProviderSetupDraft, ProviderSetupKind } from '../../../harness/model-providers/management/contracts';
-export type ProviderSetupScreen = 'manage' | 'choose' | 'connect' | 'done' | 'models';
+export type ProviderSetupScreen = 'manage' | 'choose' | 'connect' | 'done' | 'models' | 'remove';
 export interface ProviderSetupFlow {
   open: boolean; screen: ProviderSetupScreen; kind?: ProviderSetupKind;
   /** Host-owned return destination, retained across renderer remounts. */
   navigationOrigin?: 'home' | 'chooser';
   definitionId?: string; connectionMethod?: ProviderConnectionMethod;
+  providerId?: string;
 }
 export interface ProviderSetupPreviewView {
   mode: 'preview' | 'management';
@@ -26,6 +27,7 @@ export type ProviderSetupCommand =
   | { type: 'open' } | { type: 'close' } | { type: 'back' }
   | { type: 'choose'; kind: ProviderSetupKind; definitionId?: string }
   | { type: 'auth-method'; method: ProviderConnectionMethod }
+  | { type: 'remove'; id: string } | { type: 'confirm-remove' }
   | { type: 'models'; id: string } | { type: 'add' } | { type: 'edit'; id: string }
   | { type: 'change'; field: 'id' | 'api' | 'baseUrl' | 'environmentName'; value: string }
   | { type: 'enabled'; value: boolean }

@@ -13,7 +13,7 @@ test('inline direct edit/models return home; add connection returns chooser', ()
   const update = () => act(() => render(h(ProviderSetupPreview, { view, presentation: 'tab', onCommand: value => commands.push(value) }), container));
   const click = (name: string) => act(() => { const button = Array.from(container.querySelectorAll('button')).find(node => node.textContent?.replace('→', '').trim() === name)!; button.focus(); button.click(); });
   try {
-    for (const [action, screen] of [['Edit', 'connect'], ['Models', 'models']] as const) {
+    for (const [action, screen] of [['Edit', 'connect'], ['Settings', 'models']] as const) {
       view.flow = { open: false, screen: 'manage' }; update(); click(action);
       view.flow = { open: true, screen, kind: 'openai' }; update(); click('Back');
       assert.equal(commands.at(-1)?.type, 'close');

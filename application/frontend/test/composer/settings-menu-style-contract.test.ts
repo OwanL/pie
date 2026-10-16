@@ -8,7 +8,10 @@ test('provider home and modal stages share compact token-based settings controls
   assert.match(css, /\.provider-setup-preview h2\s*\{[^}]*font-size:\s*13px;[^}]*font-weight:\s*500;/);
   assert.match(css, /\.provider-setup-preview-home\s*\{[^}]*gap:\s*6px;[^}]*min-width:\s*0;[^}]*font-family:\s*var\(--panel-font-sans\);[^}]*font-size:\s*11px;/);
   assert.doesNotMatch(css, /\.provider-setup-preview-home\s*\{[^}]*(?:position:\s*fixed|height:\s*100vh)/);
-  assert.match(css, /\.provider-setup-preview input, \.provider-setup-preview select, \.provider-setup-preview button\s*\{[^}]*background:\s*var\(--panel-control-surface\);[^}]*border-radius:\s*var\(--panel-radius-sm\);[^}]*min-height:\s*26px;/);
+  assert.match(css, /\.provider-setup-preview input:where\(:not\(\[type=checkbox\]\)\), \.provider-setup-preview select, \.provider-setup-preview button:where\(:not\(\[role=checkbox\]\)\)\s*\{[^}]*background:\s*var\(--panel-input-surface\);[^}]*border:\s*1px solid var\(--panel-border-subtle\);[^}]*min-height:\s*22px;/);
+  assert.match(css, /\.provider-setup-preview-action-group\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.provider-setup-preview-danger\s*\{[^}]*color:\s*var\(--panel-danger\)/);
+  assert.match(css, /\.provider-setup-preview-danger-confirm\s*\{[^}]*background:\s*var\(--panel-danger-surface\)/);
   assert.match(css, /\.provider-setup-preview :focus-visible, \.provider-setup-preview-home :focus-visible\s*\{[^}]*outline:\s*1px solid var\(--panel-accent\)/);
   assert.match(css, /\.provider-setup-preview button:not\(:disabled\):hover, \.provider-setup-preview-home button:not\(:disabled\):hover/);
   assert.match(css, /\.provider-setup-preview-list li\s*\{[^}]*flex-wrap:\s*wrap;/);
@@ -17,11 +20,14 @@ test('provider home and modal stages share compact token-based settings controls
   assert.match(css, /\.provider-setup-preview-home \.provider-setup-preview-actions\s*\{[^}]*width:\s*100%;/);
 });
 
-test('inline models reserve footer space and shrink the list within Settings height', async () => {
+test('inline models page scrolls as one region between fixed header and fixed footer', async () => {
   const css = await readFile(new URL('../../styles/settings-menu.css', import.meta.url), 'utf8');
   assert.match(css, /\.toolbar-settings-menu-body:has\(\.provider-setup-preview-inline\[data-provider-screen="models"\]\)\s*\{[^}]*overflow:\s*hidden;/);
   assert.match(css, /\.provider-setup-preview-inline\[data-provider-screen="models"\] > \.provider-setup-preview-content\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;/);
-  assert.match(css, /\.provider-setup-preview-inline\[data-provider-screen="models"\] \.provider-setup-preview-models\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*max-height:\s*none;/);
+  assert.match(css, /\.provider-setup-preview-inline\[data-provider-screen="models"\] \.provider-setup-preview-models-page\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/);
+  // The bordered model list itself never becomes a nested scroller.
+  assert.doesNotMatch(css, /\.provider-setup-preview-models \{[^}]*overflow-y:\s*auto;/);
+  assert.doesNotMatch(css, /\.provider-setup-preview-models \{[^}]*max-height:/);
   assert.match(css, /\.provider-setup-preview \.provider-setup-preview-model-footer\s*\{[^}]*flex:\s*0 0 auto;/);
   assert.doesNotMatch(css, /\.provider-setup-preview-model-footer\s*\{[^}]*position:\s*(?:sticky|absolute|fixed)/);
 });

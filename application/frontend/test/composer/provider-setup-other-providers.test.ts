@@ -39,6 +39,7 @@ function mount(id: string) {
     view: () => view,
     click(label: string) { const node = Array.from(document.querySelectorAll('button')).find(item => item.textContent === label); assert.ok(node, label); act(() => node.click()); },
     input(selector: string, value: string, event = 'input') { const node = document.querySelector<HTMLInputElement>(selector); assert.ok(node, selector); act(() => { node.value = value; node.dispatchEvent(new Event(event, { bubbles: true })); }); },
+    labeledInput(label: string, value: string) { const node = Array.from(document.querySelectorAll('label')).find(item => item.textContent?.trim() === label)?.querySelector<HTMLInputElement>('input'); assert.ok(node, `Missing ${label} input`); act(() => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); }); },
     dispose() { act(() => render(null, container)); container.remove(); },
   };
 }
@@ -93,16 +94,16 @@ test('custom: URL/protocol/environment metadata, method transition, manual model
   host.input('details label:nth-of-type(2) select', 'environment', 'change');
   assert.deepEqual(host.commands.at(-1), { type: 'credential', value: 'environment' });
   host.reply({ draft: { ...host.view().draft!, credentialSource: 'environment' } });
-  host.input('details input', 'DEMO_PROVIDER_KEY'); assert.deepEqual(host.commands.at(-1), { type: 'change', field: 'environmentName', value: 'DEMO_PROVIDER_KEY' });
+  host.labeledInput('Variable name', 'DEMO_PROVIDER_KEY'); assert.deepEqual(host.commands.at(-1), { type: 'change', field: 'environmentName', value: 'DEMO_PROVIDER_KEY' });
   host.click('Connect'); assert.deepEqual(host.connections.at(-1), { method: 'local' });
   host.input('form > label > select', 'api-key', 'change'); assert.deepEqual(host.commands.at(-1), { type: 'auth-method', method: 'api-key' });
   host.reply({ flow: { ...host.view().flow!, connectionMethod: 'api-key' } }); assert.ok(document.querySelector('input[type=password]'));
   host.reply({ flow: { ...host.view().flow!, screen: 'models' } });
-  host.input('input', 'exact-demo-model'); host.click('Add model'); assert.deepEqual(host.commands.at(-1), { type: 'manual-model-add', id: 'exact-demo-model' });
+  host.labeledInput('Exact model ID', 'exact-demo-model'); host.click('Add model'); assert.deepEqual(host.commands.at(-1), { type: 'manual-model-add', id: 'exact-demo-model' });
   host.reply({ draft: { ...host.view().draft!, models: [{ id: 'exact-demo-model', name: 'Demo model', visible: 'unset', subagentEligible: 'unset', pricing: { kind: 'unknown', tiered: false } }] } });
   assert.match(document.body.textContent!, /Price unknown/);
   host.input('select[aria-label^=Visibility]', 'no', 'change'); assert.deepEqual(host.commands.at(-1), { type: 'model-preference', id: 'exact-demo-model', field: 'visible', value: 'no' });
-  host.click('Save model visibility preferences'); assert.deepEqual(host.commands.at(-1), { type: 'save' });
+  host.click('Save settings'); assert.deepEqual(host.commands.at(-1), { type: 'save' });
   host.reply({ status: 'saved', draft: { ...host.view().draft!, models: host.view().draft!.models.map(model => ({ ...model, visible: 'no' })) } });
   assert.equal(document.querySelector<HTMLSelectElement>('select[aria-label^=Visibility]')!.value, 'no');
 }));

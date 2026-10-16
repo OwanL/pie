@@ -152,6 +152,7 @@ async function createController(file: string, container: HTMLElement) {
       case 'back': flow = { ...flow, screen: flow.screen === 'connect' && flow.navigationOrigin === 'chooser' ? 'choose' : 'manage' }; break;
       case 'models': draft = createProviderSetupDraft(config, list, command.id); flow = { open: true, screen: 'models', navigationOrigin: 'home' }; break;
       case 'change': draft = { ...draft, [command.field]: command.value }; break;
+      case 'enabled': draft = { ...draft, enabled: command.value }; break;
       case 'model-preference': draft = { ...draft, models: draft.models.map(model => model.id === command.id ? { ...model, [command.field]: command.value } : model) }; break;
       case 'save': save(); return;
       case 'reload':
@@ -195,29 +196,36 @@ test('guided manage → choose → connect → done, back and close; private key
 
 for (const conflict of [false, true]) test(`separate model preferences ${conflict ? 'retain draft on conflict until explicit reload' : 'save with comments and unknown metadata intact'}`, async () => {
   await withController(async controller => {
-    click(/^Models$/);
+    click(/^Settings$/);
     assert.equal(controller.snapshot().flow.screen, 'models');
     dialog();
     assert.equal(controller.snapshot().draft?.models[0].pricing.kind, 'unknown');
+    const enabled = document.querySelector<HTMLButtonElement>('button[role="checkbox"]');
+    assert.ok(enabled);
+    act(() => { enabled.click(); });
+    assert.equal(controller.snapshot().draft?.enabled, true);
     const select = document.querySelector<HTMLSelectElement>('select[aria-label^="Visibility"]');
     assert.ok(select);
     act(() => { select.value = 'no'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     assert.equal(controller.snapshot().draft?.models[0].visible, 'no');
     if (conflict) await writeFile(controller.file, `${fixture}# external edit\n`);
-    await act(async () => { button(/^Save(?: preferences)?$/).click(); await controller.settled(); });
+    await act(async () => { button(/^Save(?: settings)?$/).click(); await controller.settled(); });
     const bytes = await readFile(controller.file, 'utf8');
     assert.match(bytes, /keep this comment/); assert.ok(!bytes.includes(demoKey));
     if (conflict) {
       assert.equal(bytes, `${fixture}# external edit\n`);
       assert.equal(controller.snapshot().status, 'conflict'); assert.equal(select.value, 'no');
       assert.equal(controller.snapshot().draft?.models[0].visible, 'no');
+      assert.equal(controller.snapshot().draft?.enabled, true);
       await act(async () => { button(/^Reload$/).click(); await controller.settled(); });
       assert.equal(controller.snapshot().draft?.models[0].visible, 'unset');
+      assert.equal(controller.snapshot().draft?.enabled, false);
       assert.equal(await readFile(controller.file, 'utf8'), bytes);
     } else {
       assert.equal(controller.snapshot().status, 'saved');
       const saved = await readProviderConfig(controller.file); assert.equal(saved.status, 'valid');
       if (saved.status === 'valid') {
+        assert.equal(saved.config.providers.demo.enabled, true);
         assert.equal(saved.config.providers.demo.modelPreferences?.['model-a'].visible, false);
         assert.deepEqual(saved.config.providers.demo.manualModels, ['model-a']);
         assert.equal(saved.config.providers.demo.modelOverrides?.['model-a'].pricing, 'unknown');

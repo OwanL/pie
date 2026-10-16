@@ -4,14 +4,14 @@ import { validateWebviewToHostMessage } from '../protocol-validation.js';
 import { validateBrowserToHostMessage } from '../browser-ingress.js';
 const clientCommandId = '11111111-1111-4111-8111-111111111111';
 test('provider commands accept only exact bounded nested fields in both ingress validators', () => {
-  for (const command of [{ type: 'open' }, { type: 'choose', kind: 'custom' }, { type: 'choose', kind: 'ollama', definitionId: 'ollama' }, { type: 'change', field: 'baseUrl', value: 'https://example.test/v1' }, { type: 'model-preference', id: 'model', field: 'visible', value: 'no' }]) {
+  for (const command of [{ type: 'remove', id: 'existing' }, { type: 'confirm-remove' }, { type: 'enabled', value: false }, { type: 'open' }, { type: 'choose', kind: 'custom' }, { type: 'choose', kind: 'ollama', definitionId: 'ollama' }, { type: 'change', field: 'baseUrl', value: 'https://example.test/v1' }, { type: 'model-preference', id: 'model', field: 'visible', value: 'no' }]) {
     const message = { type: 'providerManagementCommand', command, clientCommandId, viewGeneration: 1 };
     assert.equal(validateWebviewToHostMessage(message).ok, true);
     assert.equal(validateBrowserToHostMessage(message, 512).ok, true);
     assert.equal(validateWebviewToHostMessage({ ...message, command: { ...command, apiKey: 'PRIVATE' } }).ok, false);
     assert.equal(validateBrowserToHostMessage({ ...message, command: { ...command, apiKey: 'PRIVATE' } }, 512).ok, false);
   }
-  for (const command of [{ type: 'change', field: 'apiKey', value: 'PRIVATE' }, { type: 'change', field: 'id', value: 'x'.repeat(4097) }, { type: 'enabled', value: 'yes' }, { type: 'save', draft: {} }, { type: 'choose', kind: 'unknown' }, { type: 'constructor' }]) {
+  for (const command of [{ type: 'remove', id: '' }, { type: 'remove', id: 'x'.repeat(257) }, { type: 'confirm-remove', id: 'other' }, { type: 'change', field: 'apiKey', value: 'PRIVATE' }, { type: 'change', field: 'id', value: 'x'.repeat(4097) }, { type: 'enabled', value: 'yes' }, { type: 'save', draft: {} }, { type: 'choose', kind: 'unknown' }, { type: 'constructor' }]) {
     assert.equal(validateWebviewToHostMessage({ type: 'providerManagementCommand', command }).ok, false);
   }
 });

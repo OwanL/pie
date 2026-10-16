@@ -14,6 +14,7 @@ export interface NativeAuthStorage<Model> {
   getOAuthProviders(): NativeOAuthProvider<Model>[];
   get(providerId: string): StagedProviderCredential | undefined;
   set(providerId: string, credential: StagedProviderCredential): void;
+  remove(providerId: string): void;
   drainErrors(): Error[];
   login(providerId: string, callbacks: ProviderOAuthCallbacks): Promise<void>;
   getApiKey(providerId: string, options: { includeFallback: false }): Promise<string | undefined>;
@@ -135,6 +136,15 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
         native.set(providerId, structuredClone(credential));
         checkErrors(native);
         replaceScope(providerId);
+      } catch { throw failure(); }
+    },
+    async removeCredential(providerId) {
+      // Revoke prior runtime captures before touching the canonical managed store.
+      replaceScope(providerId, null);
+      try {
+        const native = storage();
+        native.remove(providerId);
+        checkErrors(native);
       } catch { throw failure(); }
     },
     async getApiKey(providerId) {

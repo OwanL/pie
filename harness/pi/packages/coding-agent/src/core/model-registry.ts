@@ -365,6 +365,7 @@ export class ModelRegistry {
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private configModelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
+	private configuredProviderIds: string[] = [];
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
@@ -411,6 +412,7 @@ export class ModelRegistry {
 	}
 
 	private loadModels(): void {
+		this.configuredProviderIds = [];
 		// Load custom models and overrides from models.json
 		const {
 			models: customModels,
@@ -539,7 +541,9 @@ export class ModelRegistry {
 				}
 			}
 
-			return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
+			const models = this.parseModels(config);
+			this.configuredProviderIds = Object.keys(config.providers);
+			return { models, overrides, modelOverrides, error: undefined };
 		} catch (error) {
 			if (error instanceof SyntaxError) {
 				return emptyCustomModelsResult(`Failed to parse models.json: ${error.message}\n\nFile: ${modelsJsonPath}`);
@@ -649,6 +653,15 @@ export class ModelRegistry {
 		}
 
 		return models;
+	}
+
+	/**
+	 * Credential-free IDs explicitly configured in valid models.json or registered dynamically.
+	 * Includes keyless/override-only providers; does not imply authentication or model availability.
+	 * Returns a detached array without resolving config values or exposing request metadata.
+	 */
+	getConfiguredProviderIds(): string[] {
+		return [...new Set([...this.configuredProviderIds, ...this.registeredProviders.keys()])];
 	}
 
 	/**

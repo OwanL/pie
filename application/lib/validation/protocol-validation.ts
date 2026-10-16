@@ -92,7 +92,7 @@ function isProviderSetupCommand(value: unknown): boolean {
   if (!isObject(value) || !isString(value.type)) return false;
   const keys: Record<string, string[]> = {
     open: [], close: [], back: [], add: [], save: [], cancel: [], reload: [],
-    choose: ['kind', 'definitionId'], 'auth-method': ['method'], models: ['id'], edit: ['id'], refresh: ['id'],
+    choose: ['kind', 'definitionId'], 'auth-method': ['method'], models: ['id'], edit: ['id'], refresh: ['id'], remove: ['id'], 'confirm-remove': [],
     change: ['field', 'value'], enabled: ['value'], credential: ['value'],
     'model-preference': ['id', 'field', 'value'], 'manual-model-add': ['id'],
   };
@@ -100,7 +100,7 @@ function isProviderSetupCommand(value: unknown): boolean {
   switch (value.type) {
     case 'choose': return ['chatgpt', 'openai', 'anthropic', 'copilot', 'ollama', 'custom'].includes(value.kind as string) && (value.definitionId === undefined || boundedProviderString(value.definitionId, 128));
     case 'auth-method': return ['oauth', 'api-key', 'local'].includes(value.method as string);
-    case 'models': case 'edit': case 'refresh': case 'manual-model-add': return boundedProviderString(value.id, 256) && value.id.length > 0;
+    case 'remove': case 'models': case 'edit': case 'refresh': case 'manual-model-add': return boundedProviderString(value.id, 256) && value.id.length > 0;
     case 'change': return ['id', 'api', 'baseUrl', 'environmentName'].includes(value.field as string) && boundedProviderString(value.value);
     case 'enabled': return typeof value.value === 'boolean';
     case 'credential': return ['default', 'saved', 'environment'].includes(value.value as string);

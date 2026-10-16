@@ -87,6 +87,24 @@ test('hydrateModelState never requests settings or models for any pending-path v
   assert.deepEqual(events, []);
 });
 
+test('pending NEW creation hydrates only the path-free creation authority', async () => {
+  const path = '__pending__:new';
+  const requested: unknown[] = [];
+  const backend = { request: async (method: string, params: unknown) => {
+    requested.push([method, params]);
+    return [MODEL];
+  } };
+  const initial = reducer(stateWithPath(path), { kind: 'Command', cmd: {
+    kind: 'CreateSession', corrId: 'c', operationId: 'new', backendGeneration: 0,
+    sessionPath: path, cwd: '/workspace', placeholderSummary: { ...SUMMARY, path }, selectionToken: 's',
+  } }).state;
+  const { actions, getState } = createActions(backend, initial);
+  await actions.hydrateModelState(path);
+  assert.deepEqual(requested, [['models.creationPreview', undefined]]);
+  assert.deepEqual(getState().settings.availableModelsBySession[path], [MODEL]);
+  assert.equal(getState().settings.availableModelsStatusBySession[path], 'provisional');
+});
+
 test('settings and catalog hydration settle independently in either failure direction', async () => {
   const cases: Array<{ fail: 'settings' | 'models'; expected: Event['kind'] }> = [
     { fail: 'settings', expected: 'AvailableModelsChanged' },

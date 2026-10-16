@@ -44,11 +44,19 @@ export function createProviderSetupDraft(config: ProviderConfig, resolvedList: P
 
 export type PreparedProviderSetupSave = { status: 'valid'; config: ProviderConfig; edits: ProviderConfigEdit[] }
   | { status: 'invalid'; diagnostic: ProviderConfigDiagnostic };
-export function prepareProviderSetupSave(config: ProviderConfig, draft: ProviderSetupDraft): PreparedProviderSetupSave {
+/** Existing settings never manufacture a replacement transport or credential policy. */
+export function createExistingProviderSetupDraft(config: ProviderConfig, resolvedList: ProviderModelList, id: string): ProviderSetupDraft {
+  const draft = createProviderSetupDraft(config, resolvedList, id);
+  return { ...draft, originalId: id, enabled: own(config.providers, id)?.enabled ?? true,
+    api: '', baseUrl: '', credentialSource: 'legacy', environmentName: '' };
+}
+
+export function prepareProviderSetupSave(config: ProviderConfig, draft: ProviderSetupDraft,
+  options: { existingConnection?: boolean } = {}): PreparedProviderSetupSave {
   const invalid = (path: string, message: string): PreparedProviderSetupSave => ({ status: 'invalid', diagnostic: {
     code: 'schema-invalid', message: 'Provider configuration edit is invalid.', issues: [{ path, message }],
   } });
-  if (draft.originalId !== null && (draft.id !== draft.originalId || !own(config.providers, draft.originalId))) {
+  if (draft.originalId !== null && (draft.id !== draft.originalId || (!own(config.providers, draft.originalId) && !options.existingConnection))) {
     return invalid('/providers', 'Existing provider identities cannot be renamed or replaced.');
   }
   if (draft.originalId === null && own(config.providers, draft.id)) return invalid('/providers', 'Provider identity is already configured.');
@@ -71,11 +79,16 @@ export function prepareProviderSetupSave(config: ProviderConfig, draft: Provider
     }
   };
   change(['enabled'], draft.enabled);
-  change(['api'], draft.api === '' ? undefined : draft.api);
-  change(['baseUrl'], draft.baseUrl === '' ? undefined : draft.baseUrl);
-  change(['credentialRef'], draft.credentialSource === 'default' ? undefined
-    : draft.credentialSource === 'saved' ? { source: 'saved' }
-      : draft.credentialSource === 'none' ? { source: 'none' } : { source: 'environment', name: draft.environmentName });
+  if (options.existingConnection) {
+    change(['credentialRef'], { source: 'legacy' });
+  } else {
+    change(['api'], draft.api === '' ? undefined : draft.api);
+    change(['baseUrl'], draft.baseUrl === '' ? undefined : draft.baseUrl);
+    change(['credentialRef'], draft.credentialSource === 'default' ? undefined
+      : draft.credentialSource === 'saved' ? { source: 'saved' }
+        : draft.credentialSource === 'legacy' ? { source: 'legacy' }
+          : draft.credentialSource === 'none' ? { source: 'none' } : { source: 'environment', name: draft.environmentName });
+  }
   for (const model of draft.models) {
     for (const flag of ['visible', 'subagentEligible'] as const) {
       const value = model[flag];
@@ -85,7 +98,7 @@ export function prepareProviderSetupSave(config: ProviderConfig, draft: Provider
         : value === 'yes' ? true : value === 'no' ? false : value);
     }
   }
-  if (draft.manualModelIds !== undefined) change(['manualModels'], draft.manualModelIds);
+  if (!options.existingConnection && draft.manualModelIds !== undefined) change(['manualModels'], draft.manualModelIds);
   const validated = validateProviderConfig(next);
   return validated.status === 'valid' ? { ...validated, edits } : validated;
 }

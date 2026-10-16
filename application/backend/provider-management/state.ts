@@ -13,6 +13,7 @@ export interface ProviderManagementState {
   generation: number;
   refreshFence: number;
   selectedId: string | null;
+  removal?: { id: string; operationId?: string; expectedRevision: string | null };
   authOperationId: string | null;
   message?: string;
 }

@@ -30,6 +30,7 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'session.loadDetail',
   'session.truncateAfter',
   'models.list',
+  'models.creationPreview',
   'settings.get',
   'systemPromptToggles.set',
 ]);

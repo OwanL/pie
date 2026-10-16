@@ -31,10 +31,12 @@ export interface ProviderModelOverride {
 }
 export interface ProviderEntry {
   enabled: boolean;
+  /** Explicit removal masks inherited inventory; must remain disabled. */
+  removed?: true;
   /** Omitted for built-in providers whose integration supplies the protocol. */
   api?: ProviderApi;
   baseUrl?: string;
-  credentialRef?: { source: 'saved' } | { source: 'environment'; name: string } | { source: 'none' };
+  credentialRef?: { source: 'saved' } | { source: 'legacy' } | { source: 'environment'; name: string } | { source: 'none' };
   manualModels?: string[];
   modelOverrides?: Record<string, ProviderModelOverride>;
   modelPreferences?: Record<string, { visible?: boolean; subagentEligible?: boolean }>;

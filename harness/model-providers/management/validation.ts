@@ -22,7 +22,7 @@ const draft = (value: unknown) => record(value)
   && keys(value, ['originalId', 'id', 'enabled', 'api', 'baseUrl', 'credentialSource', 'environmentName', 'models', 'manualModelIds'])
   && (value.originalId === null || identity(value.originalId)) && identity(value.id) && boolean(value.enabled)
   && text(value.api, 256) && text(value.baseUrl, 8192) && text(value.environmentName, 256)
-  && choice(value.credentialSource, ['default', 'saved', 'environment', 'none']) && array(value.models, model)
+  && choice(value.credentialSource, ['default', 'saved', 'environment', 'none', 'legacy']) && array(value.models, model)
   && optional(value, 'manualModelIds', ids => array(ids, identity));
 const method = (value: unknown) => choice(value, ['oauth', 'api-key', 'local']);
 
@@ -32,6 +32,7 @@ export function isProviderManagementRequest(value: unknown): value is ProviderMa
   switch (value.type) {
     case 'read': return keys(value, ['type', 'operationId']);
     case 'read-provider': case 'refresh': return keys(value, ['type', 'operationId', 'id']) && identity(value.id);
+    case 'remove': return keys(value, ['type', 'operationId', 'expectedRevision', 'id']) && revision(value.expectedRevision) && identity(value.id);
     case 'cancel': return keys(value, ['type', 'operationId', 'targetOperationId']) && identity(value.targetOperationId);
     case 'auth-response': return keys(value, ['type', 'operationId', 'targetOperationId', 'promptId', 'value'])
       && identity(value.targetOperationId) && identity(value.promptId) && text(value.value, 32_768);
@@ -46,7 +47,11 @@ const definition = (value: unknown) => record(value) && keys(value, ['id', 'name
   && identity(value.id) && text(value.name) && choice(value.kind, ['chatgpt', 'openai', 'anthropic', 'copilot', 'ollama', 'custom'])
   && text(value.api, 256) && text(value.baseUrl, 8192) && array(value.authMethods, method, 3)
   && choice(value.discovery, ['openai', 'copilot', 'ollama', 'unsupported']);
-const summary = (value: unknown) => record(value) && keys(value, ['id', 'name', 'configured', 'enabled', 'modelCount', 'credentials', 'discovery'])
+const summary = (value: unknown) => record(value) && keys(value, ['id', 'name', 'configured', 'enabled', 'modelCount', 'credentials', 'discovery', 'origin', 'readOnly', 'capabilities'])
+  && optional(value, 'origin', v => choice(v, ['managed', 'existing'])) && optional(value, 'readOnly', boolean)
+  && optional(value, 'capabilities', v => record(v) && keys(v, ['settings', 'editConnection', 'remove', 'forgetCredential'])
+    && ['settings', 'editConnection', 'remove', 'forgetCredential'].every(key => boolean(v[key])))
+  && (value.origin !== 'existing' || value.readOnly === true || record(value.capabilities) && value.capabilities.settings === true)
   && identity(value.id) && text(value.name) && boolean(value.configured) && boolean(value.enabled) && integer(value.modelCount)
   && choice(value.credentials, ['saved', 'missing', 'environment', 'default', 'none'])
   && choice(value.discovery, ['idle', 'refreshing', 'fresh', 'cached', 'error', 'unsupported']);

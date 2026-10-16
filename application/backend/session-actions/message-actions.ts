@@ -121,9 +121,30 @@ export class SessionMessageActions {
   }
 
   async hydrateModelState(sessionPath: string, metadata: HydrateModelMetadata = {}): Promise<void> {
-    // A pending path is a host-only picker sentinel. In particular, never let
-    // a normalized form such as `C:\\repo\\__pending__:1` reach models.list.
-    if (!sessionPath || isPendingTabPath(sessionPath)) {
+    if (!sessionPath) return;
+    // Pending NEW sessions consult the existing creation authority, never a
+    // pseudo-path or a predecessor's catalog. Duplicates retain source ownership.
+    if (isPendingTabPath(sessionPath)) {
+      const operation = Object.values(this.getArchState().operations).find(candidate =>
+        candidate.kind === 'session.create' && candidate.session.pendingPath === sessionPath
+        && !candidate.terminal && !candidate.hidden);
+      if (!operation) return;
+      const backendGeneration = this.state.getBackendGeneration();
+      const modelWriteFence = this.getArchState().settings.modelWriteFence;
+      const hydrationRevision = metadata.hydrationRevision ?? this.getArchState().settings.modelHydrationRevision;
+      this.hydrationRevision = Math.max(this.hydrationRevision, hydrationRevision);
+      try {
+        const models = await this.backend.request<ModelInfo[]>('models.creationPreview');
+        if (this.state.getBackendGeneration() !== backendGeneration) return;
+        this.dispatchArch({
+          kind: 'AvailableModelsChanged', sessionPath, models, backendGeneration,
+          hydrationRevision, modelWriteFence,
+          creationPreview: { operationId: operation.operationId, attempt: operation.attempt },
+        });
+        this.scheduleRender();
+      } catch (error) {
+        auditLog('session-service', 'creationModelPreview.failed', { error: toErrorMessage(error) });
+      }
       return;
     }
 

@@ -83,22 +83,28 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
   const models: RuntimeModelProjection[] = [];
   for (const provider of Object.values(resolved.providers)) {
     const entry = input.config.providers[provider.id];
+    if (entry?.removed) continue;
+    const legacyOverlay = entry?.credentialRef?.source === 'legacy';
     for (const item of Object.values(provider.models)) {
       // Managed Ollama tags are the installed/remote-alias inventory, not a
       // vendor catalog. A last-known complete listing remains authoritative
       // offline; without one, retain the known-model fallback. This only affects
       // new captures, never an already persisted session pin.
       const inventory = input.discovered?.[provider.id];
-      if (provider.id === 'ollama' && entry && inventory?.kind === 'account' && inventory.complete
+      if (provider.id === 'ollama' && entry && !legacyOverlay && inventory?.kind === 'account' && inventory.complete
         && !Object.hasOwn(inventory.models, item.id)) continue;
-      const metadata = item.metadata;
-      const pricing = metadata.pricing;
       const native = input.legacyModels.find(model => model.provider === provider.id && model.id === item.id);
+      // Legacy entries are policy overlays only. Native/custom registry definitions
+      // remain authoritative, including identities absent from the approved catalog.
+      if (legacyOverlay && !native) continue;
+      const metadata = legacyOverlay ? { ...native!, pricing: Object.fromEntries(
+        Object.entries(native!.cost).filter(([key, value]) => key !== 'tiers' || value !== undefined)) } : item.metadata;
+      const pricing = metadata.pricing;
       const nativeProtocol = input.legacyModels.some(model => model.provider === provider.id && model.api === metadata.api);
       const completePricing = pricing === 'unknown' ? undefined : parseModelPricing(pricing);
       const candidate = { ...(native?.compat ? { compat: native.compat } : {}),
         ...(native?.thinkingLevelMap ? { thinkingLevelMap: native.thinkingLevelMap } : {}),
-        provider: provider.id, id: item.id, name: item.label, api: metadata.api, baseUrl: metadata.baseUrl,
+        provider: provider.id, id: item.id, name: legacyOverlay ? native!.name : item.label, api: metadata.api, baseUrl: metadata.baseUrl,
         input: metadata.input, reasoning: metadata.reasoning, contextWindow: metadata.contextWindow, maxTokens: metadata.maxTokens,
         cost: completePricing ? Object.fromEntries(rateChannels.map(key => [key, completePricing[key]])) : undefined };
       // Header-bearing baselines may contain credential material. This DTO does not
@@ -112,13 +118,14 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
       const explicitPricing = [entry?.modelOverrides?.[item.id]?.pricing, input.discovered?.[provider.id]?.models[item.id]?.pricing]
         .some(value => !!parseModelPricing(value) && typeof value === 'object'
           && rateChannels.every(key => typeof value[key] === 'number'));
-      const pricingProved = explicitPricing || !entry || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || (!!native && provedBaseline(native))
+      const pricingProved = (legacyOverlay && !!native && flatCost(native.cost)) || explicitPricing || !entry || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || (!!native && provedBaseline(native))
         || flatCost(entry.modelOverrides?.[item.id]?.pricing)
         || flatCost(input.discovered?.[provider.id]?.models[item.id]?.pricing);
       const supported = pricingProved && validNativeModel(candidate) && (!(nativeHeaders && Object.keys(nativeHeaders).length) || trustedHeaders)
         && (runtimeProtocols.includes(candidate.api as typeof runtimeProtocols[number]) || nativeProtocol)
         && !!completePricing
-        && ((!pricing || pricing === 'unknown' || pricing.tiers === undefined) || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || explicitPricing);
+        && (legacyOverlay ? !!native && flatCost(native.cost)
+          : ((!pricing || pricing === 'unknown' || pricing.tiers === undefined) || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || explicitPricing));
       const row: RuntimeModelProjection = { providerId: provider.id, id: item.id,
         enabled: !provider.configured || provider.enabled, visible: item.preferences.visible !== false,
         subagentEligible: item.preferences.subagentEligible !== false,

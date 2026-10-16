@@ -444,6 +444,8 @@ export interface SdkCatalogModel {
 }
 
 export interface SdkModelRegistry {
+  /** Explicit valid legacy/dynamic configuration identities only; never credentials or access claims. */
+  getConfiguredProviderIds?: () => string[];
   refresh?: () => void;
   getError?: () => string | undefined;
   getAvailable: () => SdkCatalogModel[];
@@ -452,6 +454,12 @@ export interface SdkModelRegistry {
     id: string;
     provider: string;
     baseUrl?: string;
+    name?: string;
+    input?: ('text' | 'image')[];
+    reasoning?: boolean;
+    contextWindow?: number;
+    maxTokens?: number;
+    cost?: unknown;
   }>;
   find: (provider: string, modelId: string) => unknown;
   getApiKeyAndHeaders?: (model: { provider: string; id: string }) => Promise<import('../../../model-providers/runtime/services').RuntimeRequestAuth>;
@@ -461,6 +469,8 @@ export interface SdkModelRegistry {
 }
 
 export interface SdkAuthStorage {
+  remove?: (providerId: string) => void;
+  list?: () => string[];
   reload?: () => void;
   get?: (providerId: string) => import('../../../model-providers/management/auth-port').StagedProviderCredential | undefined;
   getApiKey?: (providerId: string, options?: { includeFallback?: boolean }) => Promise<string | undefined>;

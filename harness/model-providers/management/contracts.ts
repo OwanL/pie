@@ -1,6 +1,6 @@
 /** Browser-safe provider management contracts. Credentials are never snapshot data. */
 export type ProviderSetupPreference = 'unset' | 'yes' | 'no';
-export type ProviderSetupCredentialSource = 'default' | 'saved' | 'environment' | 'none';
+export type ProviderSetupCredentialSource = 'default' | 'saved' | 'environment' | 'none' | 'legacy';
 export type ProviderSetupKind = 'chatgpt' | 'openai' | 'anthropic' | 'copilot' | 'ollama' | 'custom';
 export interface ProviderSetupModel {
   id: string; name: string; visible: ProviderSetupPreference; subagentEligible: ProviderSetupPreference;
@@ -18,6 +18,10 @@ export interface ProviderDefinition {
   discovery: 'openai' | 'copilot' | 'ollama' | 'unsupported';
 }
 export interface ManagedProviderSummary {
+  /** Absent on older managed snapshots. Counts are definitions, not account entitlement. */
+  origin?: 'managed' | 'existing'; readOnly?: boolean;
+  /** Explicit authority; absent capabilities retain the old readOnly guard. */
+  capabilities?: { settings: boolean; editConnection: boolean; remove: boolean; forgetCredential: boolean };
   id: string; name: string; configured: boolean; enabled: boolean; modelCount: number;
   credentials: 'saved' | 'missing' | 'environment' | 'default' | 'none';
   discovery: 'idle' | 'refreshing' | 'fresh' | 'cached' | 'error' | 'unsupported';
@@ -49,6 +53,7 @@ export type ProviderManagementRequest =
   | { type: 'read-provider'; operationId: string; id: string }
   | { type: 'save'; operationId: string; expectedRevision: string | null; draft: ProviderSetupDraft }
   | { type: 'connect'; operationId: string; expectedRevision: string | null; draft: ProviderSetupDraft; method: ProviderConnectionMethod; apiKey?: string }
+  | { type: 'remove'; operationId: string; expectedRevision: string | null; id: string }
   | { type: 'refresh'; operationId: string; id: string }
   | { type: 'cancel'; operationId: string; targetOperationId: string }
   | { type: 'auth-response'; operationId: string; targetOperationId: string; promptId: string; value: string };

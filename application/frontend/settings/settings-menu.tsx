@@ -788,9 +788,19 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
 
   // Close the menu and refocus the trigger button.
   const closeMenu = useCallback((refocus?: boolean) => {
+    const providerProps = providerManagement ?? providerSetupPreview;
+    // An active provider subflow follows the surface's own safe close
+    // lifecycle: the reducer's close resets the unsaved draft and cancels
+    // in-flight auth (never persisting secrets) without mutating backend
+    // configuration. Saving and host-disabled surfaces keep suspension
+    // semantics; connection screens stay on the launcher's own close wiring.
+    if (providerProps && providerProps.view.flow?.open === true
+      && providerProps.view.status !== 'saving' && !providerProps.disabled) {
+      providerProps.onCommand({ type: 'close' });
+    }
     setOpen(false);
     if (refocus) triggerRef.current?.focus();
-  }, []);
+  }, [providerManagement, providerSetupPreview]);
 
   useLayoutEffect(() => {
     // The settings surface is portaled outside its toolbar fieldset. Close it

@@ -44,6 +44,7 @@ import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
 import { subagentSettlementPricingResolver } from '../../model-providers/pricing/subagent-settlement-pricing';
 import { readProviderRuntimeProjection, createProviderRuntimeServices, buildProviderRuntimePricingFacts, type RuntimeSnapshot, type ProviderRuntimeReference } from '../../model-providers/runtime/index';
 import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
+import { currentProviderSelectorSnapshot } from '../../model-providers/runtime/selector-policy';
 import { resolveCapturedInvocationPricing } from '../../model-providers/pricing/captured-invocation-pricing';
 import type { CapturedPricingFacts } from '../../../analytics/contracts/model-pricing-facts';
 import type { SubagentSettlementPricingResolver } from '../../../analytics/contracts/transport';
@@ -406,6 +407,19 @@ export class WorkerRuntimeHost {
         && typeof params.attemptId === 'string' && params.attemptId) {
         return this.commandLiveTurnCheckpoint(params, publicRequestId);
       }
+    }
+    // A hot catalog is a synchronous projection of this session's registry,
+    // not a runtime mutation. Keep it off the command FIFO: title generation
+    // can hold that queue on provider I/O for many seconds. Do not substitute
+    // the coordinator catalog, which may have different credential/provider
+    // availability from this worker's captured registry.
+    if (operation === 'models.list' && this.runtimeReady && this.context && this.sdk) {
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params
+        : payload;
+      return handleBackendRequest(this.requestDeps(), {
+        id: publicRequestId, method: operation, params,
+      } as RequestEnvelope).then(asWorkerJson);
     }
     this.pendingCommands++;
     const owned = this.commandTail.then(async () => {
@@ -2168,7 +2182,7 @@ export class WorkerRuntimeHost {
         // pricing resolver used by session cost tracking.
         const available = registry.getAvailable();
         models = this.providerSnapshot
-          ? projectProviderRuntimeModels(this.providerSnapshot, available)
+          ? projectProviderRuntimeModels(currentProviderSelectorSnapshot(this.providerSnapshot), available)
           : projectRegistryModels(available, this.agentDir);
       }
     } catch {

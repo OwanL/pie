@@ -335,6 +335,16 @@ export function handleAvailableModelsChanged(
     || isStaleHydrationResult(state, event, 'session-catalog')) {
     return { state, effects: [] };
   }
+  if (event.creationPreview) {
+    const operation = state.operations[event.creationPreview.operationId];
+    if (!operation || operation.kind !== 'session.create' || operation.terminal
+      || operation.hidden || operation.session.pendingPath !== event.sessionPath
+      || operation.attempt !== event.creationPreview.attempt
+      || operation.backendGeneration !== event.backendGeneration
+      || state.settings.availableModelsStatusBySession[event.sessionPath] === 'authoritative') {
+      return { state, effects: [] };
+    }
+  }
   const settings = nextModelHydrationSettings(state, event);
   return {
     state: {
@@ -350,7 +360,7 @@ export function handleAvailableModelsChanged(
         // merely because one branch failed.
         availableModelsStatusBySession: {
           ...settings.availableModelsStatusBySession,
-          [event.sessionPath]: 'authoritative',
+          [event.sessionPath]: event.creationPreview ? 'provisional' : 'authoritative',
         },
       },
     },

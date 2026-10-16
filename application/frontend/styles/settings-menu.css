@@ -146,19 +146,24 @@
 dialog.provider-setup-preview { position: fixed; inset: 0; margin: auto; border-radius: var(--panel-radius-md); }
 .provider-setup-preview-inline { width: 100%; max-width: none; max-height: none; padding: 2px; border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: visible; }
 .provider-setup-preview-inline header { justify-content: flex-start; }
-.provider-setup-preview-models { max-height: min(240px, 35dvh); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent; scrollbar-gutter: stable; min-width: 0; padding: 0 4px; border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-sm); }
-.provider-setup-preview-models::-webkit-scrollbar { width: 6px; }
-.provider-setup-preview-models::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
+/* Models page: the bordered list is plain content. The page div is the one
+   intentional scroll region (inline Settings) or flows inside the launcher
+   dialog, so the model list never becomes a tiny nested scroller. */
+.provider-setup-preview-models { min-width: 0; padding: 0 4px; border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-sm); }
 .provider-setup-preview-model-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.provider-setup-preview .provider-setup-preview-model-footer { flex: 0 0 auto; margin-top: 0; padding: 8px 0; }
+.provider-setup-preview .provider-setup-preview-model-footer { flex: 0 0 auto; margin-top: 0; padding: 8px 0 0; border-top: 1px solid var(--panel-border-subtle); }
 /* Carry Settings' available height through every models-page wrapper. */
 .toolbar-settings-menu-body:has(.provider-setup-preview-inline[data-provider-screen="models"]) { overflow: hidden; }
 .toolbar-settings-section:has(> .provider-setup-preview-inline[data-provider-screen="models"]),
 .provider-setup-preview-inline[data-provider-screen="models"],
 .provider-setup-preview-inline[data-provider-screen="models"] > .provider-setup-preview-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .provider-setup-preview-inline[data-provider-screen="models"] > header,
-.provider-setup-preview-inline[data-provider-screen="models"] > .provider-setup-preview-content > :not(.provider-setup-preview-models) { flex: 0 0 auto; }
-.provider-setup-preview-inline[data-provider-screen="models"] .provider-setup-preview-models { flex: 1 1 auto; min-height: 0; max-height: none; }
+.provider-setup-preview-inline[data-provider-screen="models"] > .provider-setup-preview-content > :not(.provider-setup-preview-models-page):not(.provider-setup-preview-model-footer) { flex: 0 0 auto; }
+/* The models page scrolls as one region between a fixed header and a fixed
+   footer; Save stays reachable and Advanced rows only grow the scroll. */
+.provider-setup-preview-inline[data-provider-screen="models"] .provider-setup-preview-models-page { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent; scrollbar-gutter: stable; padding-right: 4px; }
+.provider-setup-preview-inline[data-provider-screen="models"] .provider-setup-preview-models-page::-webkit-scrollbar { width: 6px; }
+.provider-setup-preview-inline[data-provider-screen="models"] .provider-setup-preview-models-page::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
 .provider-setup-preview::backdrop { background: rgb(0 0 0 / 45%); }
 .provider-setup-preview header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .provider-setup-preview header > button { flex: 0 0 auto; }
@@ -180,7 +185,15 @@ dialog.provider-setup-preview { position: fixed; inset: 0; margin: auto; border-
 .provider-setup-preview-model strong { min-width: 0; overflow-wrap: anywhere; }
 .provider-setup-preview input:not([type=checkbox]), .provider-setup-preview select { min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
 .provider-setup-preview-model select { flex: 0 1 140px; width: auto; }
-.provider-setup-preview input, .provider-setup-preview select, .provider-setup-preview button { color: var(--panel-foreground); background: var(--panel-control-surface); border: 1px solid var(--panel-border); border-radius: var(--panel-radius-sm); font: inherit; font-size: 11px; min-height: 26px; padding: 4px 8px; }
+.provider-setup-preview input:where(:not([type=checkbox])), .provider-setup-preview select, .provider-setup-preview button:where(:not([role=checkbox])) { color: var(--panel-foreground); background: var(--panel-input-surface); border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-sm); font: inherit; font-size: 11px; min-height: 22px; padding: 2px 6px; }
+/* The shared Settings checkbox owns its check, label and checked appearance. */
+.provider-setup-preview > .provider-setup-preview-content > button[role=checkbox] { justify-self: stretch; }
+.provider-setup-preview .provider-setup-preview-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; grid-column: 1 / -1; }
+.provider-setup-preview .provider-setup-preview-danger { color: var(--panel-danger); }
+.provider-setup-preview .provider-setup-preview-danger-confirm { background: var(--panel-danger-surface); border-color: color-mix(in srgb, var(--panel-danger) 28%, var(--panel-border)); }
+.provider-setup-preview .provider-setup-preview-danger:not(:disabled):hover { border-color: var(--panel-danger); }
+.provider-setup-preview-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--panel-danger); }
+.provider-setup-preview-error p { flex: 1 1 200px; }
 .provider-setup-preview button, .provider-setup-preview-home button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
 .provider-setup-preview button:not(:disabled):hover, .provider-setup-preview-home button:not(:disabled):hover { border-color: var(--panel-accent); }
 .provider-setup-preview button:disabled, .provider-setup-preview-home button:disabled { cursor: default; }
@@ -194,7 +207,7 @@ dialog.provider-setup-preview { position: fixed; inset: 0; margin: auto; border-
 .provider-setup-preview-home li { padding: 6px 0; border-bottom: 1px solid var(--panel-border-subtle); }
 .provider-setup-preview-home li > div { min-width: 0; overflow-wrap: anywhere; }
 .provider-setup-preview-home small { display: block; color: var(--panel-foreground-soft); }
-.provider-setup-preview-home button { color: var(--panel-foreground); background: var(--panel-control-surface); border: 1px solid var(--panel-border); border-radius: var(--panel-radius-sm); font: inherit; min-height: 24px; padding: 3px 6px; }
+.provider-setup-preview-home button { color: var(--panel-foreground); background: var(--panel-input-surface); border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-sm); font: inherit; min-height: 22px; padding: 2px 6px; }
 .provider-setup-preview-home .provider-setup-preview-primary { background: var(--panel-accent); color: var(--panel-accent-contrast); justify-self: start; }
 .provider-setup-preview-content { margin-top: 8px; }
 .provider-setup-preview-content > button { justify-self: start; }
@@ -203,7 +216,10 @@ dialog.provider-setup-preview { position: fixed; inset: 0; margin: auto; border-
 .provider-setup-preview form > button { justify-self: start; }
 .provider-setup-preview-list strong { font-weight: 500; }
 .provider-setup-preview-model strong { font-weight: 500; }
-.provider-setup-preview-auth { display: grid; min-width: 0; gap: 8px; overflow-wrap: anywhere; }
+.provider-setup-preview-auth { display: grid; min-width: 0; gap: 6px; padding: 6px; border: 1px solid var(--panel-border-subtle); border-radius: var(--panel-radius-sm); overflow-wrap: anywhere; }
+.provider-setup-preview-auth form { grid-template-columns: minmax(0, 1fr); }
+.provider-setup-preview-auth a { justify-self: start; }
+.provider-setup-preview-model:last-child { border-bottom: 0; }
 .provider-setup-preview-auth a { color: var(--panel-accent); }
 @media (max-width: 420px) {
   dialog.provider-setup-preview { padding: 8px; width: calc(100vw - 24px); }

@@ -11,15 +11,17 @@ import type { ProviderSetupPreviewView, ProviderSetupCommand } from '../../../li
 test('management tab integrates inline navigation, Escape, tab switching and Settings closing', () => {
   const container = document.createElement('div'); document.body.append(container);
   const commands: ProviderSetupCommand[] = [];
-  const view: ProviderSetupPreviewView = { mode: 'management', providers: [{ id: 'opaque', name: 'Friendly provider', configured: true, enabled: true, modelCount: 2 }], protocols: [], definitions: [{ id: 'opaque', name: 'Friendly provider', kind: 'custom', api: 'test', baseUrl: '', authMethods: ['local'], discovery: 'unsupported' }], loaded: true, draft: null, status: 'idle' };
+  const view: ProviderSetupPreviewView = { mode: 'management', providers: [{ id: 'opaque', name: 'Friendly provider', configured: true, enabled: false, modelCount: 2, discovery: 'unsupported' }], protocols: [], definitions: [{ id: 'opaque', name: 'Friendly provider', kind: 'custom', api: 'test', baseUrl: '', authMethods: ['local'], discovery: 'unsupported' }], loaded: true, draft: null, status: 'idle' };
   const update = () => act(() => render(h(ComposerSettingsMenu, { prefs: DEFAULT_CHAT_PREFS, pruningSettings: DEFAULT_PRUNING_SETTINGS, pruningCatalog: { skills: [], tools: [] }, pruningResult: null, toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, availableExtensions: [], availableModels: [], providerGateStats: EMPTY_PROVIDER_GATE_STATS, mcpServers: [], mcpPendingApply: false, onSetPrefs() {}, onMcpListRequested() {}, onMcpSetServerEnabled() {}, onSetPruningSettings() {}, onSetToolResultPruningSettings() {}, providerManagement: { view, onCommand: command => commands.push(command) } }), container));
   const click = (selector: string) => act(() => (document.querySelector(selector) as HTMLButtonElement).click());
   try {
     update(); click('.toolbar-settings-trigger'); click('[data-tab=providers]');
     assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /Friendly provider/);
+    assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /2 models · add model IDs manually/);
+    assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /Disabled/);
     assert.equal(document.querySelector('dialog'), null);
-    for (const label of ['Edit', 'Models', 'Refresh', 'Add provider']) act(() => Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview-home button')).find(button => button.textContent === label)!.click());
-    assert.deepEqual(commands.map(command => command.type), ['edit', 'models', 'refresh', 'add']);
+    for (const label of ['Edit', 'Settings', 'Remove', 'Add provider']) act(() => Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview-home button')).find(button => button.textContent === label)!.click());
+    assert.deepEqual(commands.map(command => command.type), ['edit', 'models', 'remove', 'add']);
     view.flow = { open: true, screen: 'choose' }; update();
     const page = document.querySelector('.provider-setup-preview-inline')!;
     assert.equal(document.querySelector('dialog'), null);
@@ -47,8 +49,11 @@ test('management tab integrates inline navigation, Escape, tab switching and Set
     assert.ok(document.querySelector('.provider-setup-preview-inline'));
     click('.toolbar-settings-close');
     assert.equal(document.querySelector('.toolbar-settings-menu'), null);
+    // Closing Settings now follows the surface's safe close lifecycle: the
+    // active subflow is closed, so its unsaved draft is reset (no secrets).
+    assert.equal(commands.at(-1)?.type, 'close');
     escape();
-    assert.equal(commands.length, count);
+    assert.equal(commands.length, count + 1);
 
     view.status = 'idle'; view.flow = { open: false, screen: 'manage' }; update();
     click('.toolbar-settings-trigger'); click('[data-tab=providers]');

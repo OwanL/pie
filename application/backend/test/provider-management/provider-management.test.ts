@@ -13,6 +13,12 @@ import { makeEffectRunnerDeps } from '../helpers/effect-runner-deps.js';
 const snapshot = (revision: number): ProviderManagementSnapshot => ({ revision, configRevision: providerConfigRevision(`# snapshot ${revision}\n`), loaded: true, providers: [], definitions: [{ id: 'other', name: 'Other', kind: 'custom', api: 'openai-completions', baseUrl: '', authMethods: ['api-key', 'local'], discovery: 'openai' }], protocols: [] });
 function fresh(): ArchState { const s = createInitialArchState(); return { ...s, settings: { ...s.settings, backendReady: true }, providerManagement: { ...s.providerManagement, snapshot: snapshot(0), generation: 1 } }; }
 function command(state: ArchState, c: ProviderSetupCommand, operationId = 'op') { return reducer(state, { kind: 'Command', cmd: { kind: 'ProviderManagement', command: c, operationId, corrId: operationId, generation: 1 } }); }
+for (const edit of [{ type: 'change', field: 'baseUrl', value: 'http://localhost' }, { type: 'enabled', value: false }, { type: 'credential', value: 'environment' }, { type: 'manual-model-add', id: 'new-model' }, { type: 'model-preference', id: 'model', field: 'visible', value: 'no' }] as const) test(`draft edit ${edit.type} retires saved acknowledgement`, () => {
+  const s = command(fresh(), { type: 'choose', kind: 'custom' }).state;
+  s.providerManagement.status = 'saved';
+  assert.equal(command(s, edit).state.providerManagement.status, 'idle');
+});
+
 test('live saving mutation locks cancellation and late phases cannot override settlement', () => {
   let s = command(fresh(), { type: 'choose', kind: 'custom' }).state;
   s = { ...s, providerManagement: { ...s.providerManagement, status: 'connecting', operationId: 'connect', authOperationId: 'connect' } };

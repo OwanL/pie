@@ -25,7 +25,7 @@ test('closed by default; caller controls all stages and dialog restores focus', 
     button('Manage providers').focus(); click('Manage providers');
     assert.deepEqual(ui.commands, [{ type: 'open' }]); assert.equal(document.querySelector('dialog'), null);
     ui.view.flow = { open: true, screen: 'manage' }; ui.update();
-    assert.ok(document.querySelector('dialog[open]')); assert.match(document.body.textContent!, /OpenAI API.*1 model definition/s);
+    assert.ok(document.querySelector('dialog[open]')); assert.match(document.body.textContent!, /OpenAI API.*1 model/s);
     click('Add provider'); assert.equal(ui.commands.at(-1)?.type, 'add');
     ui.view.flow.screen = 'choose'; ui.update(); click('ChatGPT');
     assert.deepEqual(ui.commands.at(-1), { type: 'choose', kind: 'chatgpt' });
@@ -191,6 +191,9 @@ test('browser link and manual code coexist with operation-scoped context and saf
   try {
     const section = document.querySelector('.provider-setup-preview-auth')!;
     assert.equal(section.querySelectorAll('a').length, 1);
+    assert.equal(Array.from(document.querySelectorAll('button')).some(button => button.textContent === 'Sign in'), false, 'active auth replaces the initial action');
+    assert.equal(section.querySelector('[role="status"]')?.textContent, 'Waiting for sign-in…');
+    assert.ok(section.querySelector('.provider-setup-preview-action-group button'));
     assert.equal(section.querySelector('a')!.getAttribute('href'), 'https://example.test/signin');
     assert.equal(section.querySelector('a')!.getAttribute('rel'), 'noopener noreferrer');
     assert.match(section.textContent!, /Finish browser sign-in first/);
@@ -216,24 +219,53 @@ test('browser link and manual code coexist with operation-scoped context and saf
     view.auth = undefined; ui.update(); assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
   } finally { ui.cleanup(); }
 });
+test('legacy settings overlay hides unsupported inventory actions while saving existing model preferences', () => {
+  const view = fixture(); view.mode = 'management'; view.flow = { open: true, screen: 'models' }; view.draft!.credentialSource = 'legacy';
+  const ui = mount(view);
+  try {
+    const overlay = document.querySelector('dialog')!;
+    assert.ok(overlay);
+    assert.equal(Array.from(overlay.querySelectorAll('button')).some(node => node.textContent?.trim() === 'Refresh models'), false);
+    assert.equal(Array.from(overlay.querySelectorAll('summary')).some(node => node.textContent?.trim() === 'Add model manually'), false);
+    assert.match(overlay.textContent!, /1 model/);
+    assert.match(overlay.textContent!, /Friendly model/);
+    assert.equal(button('Save settings').disabled, false);
+    const visibility = overlay.querySelector<HTMLSelectElement>('select[aria-label="Visibility for Friendly model"]')!;
+    act(() => { visibility.value = 'no'; visibility.dispatchEvent(new Event('change', { bubbles: true })); });
+    click('Save settings');
+    assert.deepEqual(ui.commands, [{ type: 'model-preference', id: 'technical-id', field: 'visible', value: 'no' }, { type: 'save' }]);
+  } finally { ui.cleanup(); }
+});
 test('models are separate, inherit remains unset, save is controlled and saving gates all actions', () => {
   const view = fixture(); view.mode = 'management'; view.flow = { open: true, screen: 'models' }; const ui = mount(view);
   try {
-    assert.match(document.body.textContent!, /Friendly model/); assert.match(document.body.textContent!, /1 model definition/); assert.match(document.body.textContent!, /Catalog entries do not confirm account access/); assert.doesNotMatch(document.body.textContent!, /technical-id|Pricing/);
+    // One page region scrolls with the pinned footer outside it; the bordered
+    // model list stays plain content inside that page.
+    const page = document.querySelector('.provider-setup-preview-models-page')!;
+    assert.ok(page && page.contains(document.querySelector('.provider-setup-preview-models')));
+    const modelFooter = document.querySelector('.provider-setup-preview-model-footer')!;
+    assert.ok(modelFooter && !page.contains(modelFooter));
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Visibility for Friendly model"]')!; assert.equal(select.value, 'unset'); assert.equal(select.selectedOptions[0]!.textContent, 'Default');
+    assert.match(document.body.textContent!, /Friendly model/); assert.match(document.body.textContent!, /1 model/); assert.match(document.body.textContent!, /Listed models may still be unavailable/); assert.doesNotMatch(document.body.textContent!, /technical-id|Pricing/);
     assert.equal(document.querySelector('details')!.open, false);
     const manualDetails = Array.from(document.querySelectorAll('details')).find(node => node.querySelector('summary')?.textContent === 'Add model manually')!;
     assert.equal(manualDetails.open, false);
     act(() => { manualDetails.open = true; });
-    const manual = manualDetails.querySelector<HTMLInputElement>('input')!; manual.value = 'exact/vendor-id';
+    const manual = Array.from(manualDetails.querySelectorAll('label')).find(label => label.textContent?.trim() === 'Exact model ID')?.querySelector<HTMLInputElement>('input'); assert.ok(manual); manual.value = 'exact/vendor-id';
     act(() => { manual.closest('form')!.dispatchEvent(new Event('submit', { cancelable: true })); });
     assert.deepEqual(ui.commands.pop(), { type: 'manual-model-add', id: 'exact/vendor-id' }); assert.equal(manual.value, '');
     click('Refresh models'); assert.deepEqual(ui.commands.pop(), { type: 'refresh', id: 'openai' });
-    const select = document.querySelector('select')!; assert.equal(select.value, 'unset');
     act(() => { select.value = 'yes'; select.dispatchEvent(new Event('change', { bubbles: true })); });
-    assert.equal(view.draft!.models[0].visible, 'unset'); click('Save model visibility preferences');
+    assert.equal(view.draft!.models[0].visible, 'unset');
+    const enabled = document.querySelector<HTMLButtonElement>('button[role="checkbox"]'); assert.ok(enabled); assert.equal(enabled.textContent?.trim(), 'Enabled'); assert.equal(enabled.getAttribute('aria-checked'), 'true'); assert.ok(enabled.classList.contains('toolbar-settings-item'));
+    act(() => { enabled.click(); });
+    assert.deepEqual(ui.commands.pop(), { type: 'enabled', value: false });
+    click('Save settings');
     assert.deepEqual(ui.commands, [{ type: 'model-preference', id: 'technical-id', field: 'visible', value: 'yes' }, { type: 'save' }]);
-    assert.match(document.body.textContent!, /Save model visibility preferences/); assert.match(document.body.textContent!, /apply to new chats only/);
-    view.draft!.models = []; ui.update(); assert.match(document.body.textContent!, /No model definitions available/); assert.match(document.body.textContent!, /Catalog entries do not confirm account access/);
+    assert.match(document.body.textContent!, /Only new chats pick up these changes/); assert.match(document.body.textContent!, /new chats/);
+    view.status = 'saved'; ui.update(); assert.equal(document.querySelector('[role="status"]')?.textContent, 'Settings saved.');
+    view.status = 'idle'; ui.update(); assert.equal(document.querySelector('[role="status"]'), null, 'the confirmation clears when reducer status returns to idle after edits');
+    view.draft!.models = []; ui.update(); assert.match(document.body.textContent!, /No models available/); assert.match(document.body.textContent!, /Listed models may still be unavailable/);
     view.status = 'saving'; ui.update(); assert.ok(Array.from(document.querySelectorAll('button, select')).every(node => (node as HTMLButtonElement).disabled));
     act(() => { document.querySelector('dialog')!.dispatchEvent(new Event('cancel', { cancelable: true })); });
     assert.equal(ui.commands.length, 2);

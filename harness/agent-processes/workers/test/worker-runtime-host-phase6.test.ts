@@ -765,11 +765,17 @@ test('priority interrupt closes a semantic turn when abort emits no agent_end', 
   );
 });
 
-test('live-turn checkpoint bypasses a held session-title provider request', async () => {
+test('live-turn checkpoint and model catalog bypass a held session-title provider request', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
   const sessionPath = path.join(os.tmpdir(), `pie-worker-checkpoint-${process.pid}`, 'session.jsonl');
+  host.applySync('catalog', 1, {
+    models: [{ id: 'configured-only', name: 'Unavailable fallback', provider: 'mock', reasoning: false }],
+  });
   const context = makeSessionEventContext(sessionPath);
+  context.runtime = {
+    services: { modelRegistry: { getAvailable: () => [] } },
+  } as unknown as SessionContext['runtime'];
   context.activeRequest = {
     id: 'request-checkpoint', messageIndex: 1, aborted: false,
     liveTurnAccumulator: new BackendLiveTurnAccumulator({
@@ -834,6 +840,14 @@ test('live-turn checkpoint bypasses a held session-title provider request', asyn
   try {
     await providerStarted;
     assert.equal(providerCalls, 1, 'the title command is held inside its real async provider wait');
+    const catalog = host.command('models.list', { params: { sessionPath } }, 'models-during-title');
+    const catalogOutcome = await Promise.race([
+      catalog.then((result) => ({ state: 'settled' as const, result })),
+      waitForAsyncEvent().then(() => ({ state: 'blocked' as const })),
+    ]);
+    assert.equal(catalogOutcome.state, 'settled', 'model discovery must not wait for title provider I/O');
+    if (catalogOutcome.state === 'settled') assert.deepEqual(catalogOutcome.result, []);
+    assert.equal(providerCalls, 1, 'catalog discovery does not issue another provider request');
     checkpoint = host.command('liveTurn.checkpoint', {
       params: { sessionPath, turnId: 'turn-checkpoint', attemptId: 'attempt-checkpoint' },
     }, 'live-checkpoint');

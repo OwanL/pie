@@ -1,12 +1,32 @@
 import type { ArchState } from '../arch-state.js';
 import type { ReducerResult } from './helpers.js';
-import type { ProviderManagementCommand, ProviderManagementEvent, ProviderManagementEffect, ProviderManagementState, SafeProviderRequest } from '../../provider-management/state.js';
+import type { ProviderManagementCommand, ProviderManagementEvent, ProviderManagementState, SafeProviderRequest } from '../../provider-management/state.js';
+import type { Effect } from '../effects/effects.js';
+import { isPendingTabPath } from '../../../../lib/session-path.js';
 import type { ProviderSetupDraft } from '../../../../harness/model-providers/management/contracts.js';
 
 export function handleProviderManagement(state: ArchState, input: ProviderManagementCommand | ProviderManagementEvent): ReducerResult {
   let p: ProviderManagementState = { ...state.providerManagement };
-  const effects: ProviderManagementEffect[] = [];
-  const done = (): ReducerResult => ({ state: { ...state, providerManagement: p }, effects });
+  const effects: Effect[] = [];
+  const done = (): ReducerResult => {
+    let settings = state.settings;
+    // Both the save response and providers.changed carry the same committed
+    // revision. Advance the catalog fence once, regardless of arrival order.
+    if (p.snapshot.loaded && p.snapshot.configRevision !== state.providerManagement.snapshot.configRevision) {
+      const revision = settings.modelHydrationRevision + 1;
+      settings = { ...settings, modelHydrationRevision: revision,
+        modelHydrationRevisionBySession: { ...settings.modelHydrationRevisionBySession } };
+      for (const sessionPath of state.sessions.openTabPaths) {
+        if (isPendingTabPath(sessionPath) && !Object.values(state.operations).some(operation =>
+          operation.kind === 'session.create' && operation.session.pendingPath === sessionPath
+          && !operation.terminal && !operation.hidden)) continue;
+        settings.modelHydrationRevisionBySession[sessionPath] = revision;
+        effects.push({ kind: 'HydrateModel', corrId: `providers:${p.generation}:${revision}:${sessionPath}`,
+          sessionPath, hydrationRevision: revision, modelWriteFence: settings.modelWriteFence });
+      }
+    }
+    return { state: { ...state, settings, providerManagement: p }, effects };
+  };
   const rpc = (request: SafeProviderRequest, ticket?: string): void => {
     p.refreshFence++;
     p.operationId = request.operationId;
@@ -37,6 +57,7 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
     if (input.kind === 'ProviderManagementResult') {
       if (input.fence !== p.refreshFence || input.response.operationId !== p.operationId) return done();
       const status = input.response.status;
+      if (input.requestType === 'read' && status === 'ok' && p.flow.screen === 'remove' && p.removal) p.removal = { id: p.removal.id, expectedRevision: snapshot.configRevision };
       if (input.requestType === 'read-provider' && input.selectedId === p.selectedId && input.response.draft && status === 'ok' && snapshot.revision >= state.providerManagement.snapshot.revision) {
         p.draft = input.response.draft; p.draftConfigRevision = snapshot.configRevision;
       }
@@ -53,6 +74,15 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
       if ((input.requestType === 'save' || input.requestType === 'connect') && status === 'ok') {
         p.draftConfigRevision = snapshot.configRevision;
         if (p.draft) p.draft = input.response.draft ?? { ...p.draft, originalId: p.draft.id };
+      }
+      // The effect runner synthesizes an unloaded snapshot on transport failure:
+      // completion is unknown, so keep the dedup ID until replay/read reconciles it.
+      if (input.requestType === 'remove' && status === 'error' && snapshot.loaded && p.removal) {
+        p.removal = { id: p.removal.id, expectedRevision: snapshot.configRevision };
+      }
+      if (input.requestType === 'remove' && status === 'ok') {
+        p.draft = null; p.draftConfigRevision = null; p.selectedId = null; p.removal = undefined;
+        p.flow = { open: true, screen: 'manage' };
       }
       if (input.requestType === 'connect' && status === 'ok') p.flow = { ...p.flow, screen: 'done' };
       if (input.requestType === 'connect') p.authOperationId = null;
@@ -90,15 +120,15 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
   const op = input.operationId;
   switch (c.type) {
     case 'open': p.flow = { open: true, screen: 'manage' }; p.status = 'loading'; rpc({ type: 'read', operationId: op }); break;
-    case 'reload': p.status = 'loading'; rpc(p.selectedId ? { type: 'read-provider', operationId: op, id: p.selectedId } : { type: 'read', operationId: op }); break;
-    case 'close': case 'cancel': cancelAuth(op); p.refreshFence++; p.operationId = null; p.draft = null; p.selectedId = null; p.status = 'idle'; p.flow = { open: c.type !== 'close', screen: 'manage' }; break;
+    case 'reload': if (p.flow.screen === 'remove') { p.status = 'loading'; rpc({ type: 'read', operationId: op }); break; } p.status = 'loading'; rpc(p.selectedId ? { type: 'read-provider', operationId: op, id: p.selectedId } : { type: 'read', operationId: op }); break;
+    case 'close': case 'cancel': cancelAuth(op); p.refreshFence++; p.operationId = null; p.draft = null; p.selectedId = null; p.removal = undefined; p.status = 'idle'; p.flow = { open: c.type !== 'close', screen: 'manage' }; break;
     case 'back': {
       const screen = p.flow.screen === 'connect' && p.flow.navigationOrigin === 'chooser' ? 'choose' : 'manage';
       cancelAuth(op); p.refreshFence++; p.operationId = null; p.status = 'idle';
-      if (screen === 'manage') { p.draft = null; p.selectedId = null; }
+      if (screen === 'manage') { p.draft = null; p.selectedId = null; p.removal = undefined; }
       p.flow = { open: true, screen, navigationOrigin: screen === 'choose' ? 'chooser' : 'home' }; break;
     }
-    case 'add': cancelAuth(op); p.refreshFence++; p.operationId = null; p.selectedId = null; p.draft = null; p.status = 'idle'; p.flow = { open: true, screen: 'choose', navigationOrigin: 'chooser' }; break;
+    case 'add': p.removal = undefined; cancelAuth(op); p.refreshFence++; p.operationId = null; p.selectedId = null; p.draft = null; p.status = 'idle'; p.flow = { open: true, screen: 'choose', navigationOrigin: 'chooser' }; break;
     case 'choose': {
       if (!p.snapshot.loaded) break;
       const definition = p.snapshot.definitions.find(d => c.definitionId ? d.id === c.definitionId : d.kind === c.kind);
@@ -117,7 +147,22 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
       p.draft = { originalId: null, id, enabled: true, api: definition?.api ?? '', baseUrl: definition?.baseUrl ?? '', credentialSource: 'default', environmentName: '', models: [] };
       p.status = 'idle'; p.flow = { open: true, screen: 'connect', navigationOrigin: 'chooser', kind: definition.kind, definitionId: definition.id, connectionMethod: definition.authMethods[0] }; break;
     }
+    case 'remove': {
+      const provider = p.snapshot.providers.find(item => item.id === c.id);
+      if (!provider || !(provider.capabilities?.remove ?? !provider.readOnly)) break;
+      cancelAuth(op); p.refreshFence++; p.operationId = null; p.selectedId = c.id; p.draft = null; p.status = 'idle'; p.message = undefined;
+      p.removal = { id: c.id, expectedRevision: p.snapshot.configRevision };
+      p.flow = { open: true, screen: 'remove', navigationOrigin: 'home', providerId: c.id }; break;
+    }
+    case 'confirm-remove': {
+      if (p.flow.screen !== 'remove' || p.status === 'loading' || p.status === 'conflict' || !p.removal || p.removal.id !== p.flow.providerId) break;
+      p.removal = { ...p.removal, operationId: p.removal.operationId ?? op };
+      p.status = 'saving'; p.message = undefined;
+      rpc({ type: 'remove', operationId: p.removal.operationId!, expectedRevision: p.removal.expectedRevision, id: p.removal.id }); break;
+    }
     case 'models': case 'edit': {
+      const provider = p.snapshot.providers.find(item => item.id === c.id);
+      if (provider && !(c.type === 'models' ? provider.capabilities?.settings ?? !provider.readOnly : provider.capabilities?.editConnection ?? !provider.readOnly)) break;
       cancelAuth(op); p.selectedId = c.id; p.draft = null;
       const definition = p.snapshot.definitions.find(d => d.id === c.id) ?? p.snapshot.definitions.find(d => d.id === 'other');
       p.flow = c.type === 'models' ? { open: true, screen: 'models', navigationOrigin: 'home' } : { open: true, screen: 'connect', navigationOrigin: 'home', kind: definition?.kind, definitionId: definition?.id, connectionMethod: definition?.authMethods[0] };
@@ -138,6 +183,7 @@ export function handleProviderManagement(state: ArchState, input: ProviderManage
         d.manualModelIds = [...(d.manualModelIds ?? []), c.id];
       }
       p.draft = d;
+      if (p.status === 'saved') p.status = 'idle';
       // Edits retire a pending read-provider so its late response cannot overwrite the draft.
       if (p.status === 'loading') { p.refreshFence++; p.operationId = null; p.status = 'idle'; }
       break;

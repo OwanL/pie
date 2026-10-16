@@ -9,6 +9,7 @@ import { THINKING_LEVELS } from './thinking-level.js';
 import type { SdkCatalogModel, SdkModelRegistry } from '../../agent-processes/lib/sdk-integration/sdk';
 import { findSubagentProfile, loadSubagentProfiles } from '../../tools/subagent/subagent-profiles';
 import { backendTrace } from '../../../lib/structured-logging/backend-log';
+import { filterCurrentProviderSelectorModels } from '../runtime/selector-policy';
 
 export interface ModelCatalogContext {
   session: { model?: { id?: string; provider?: string } };
@@ -85,7 +86,7 @@ export function projectRegistryModels(
   agentDir?: string,
 ): ModelInfo[] {
   const profiles = agentDir ? loadSubagentProfiles(agentDir) : new Map();
-  return models.map((model) => {
+  return filterCurrentProviderSelectorModels(models).map((model) => {
     const info: ModelInfo = {
       id: model.id,
       name: model.name,
@@ -140,7 +141,7 @@ export async function loadConfiguredModels(
         result.push(info);
       }
     }
-    return { ok: true, models: result };
+    return { ok: true, models: filterCurrentProviderSelectorModels(result) };
   } catch (error) {
     const message = toErrorMessage(error);
     backendTrace('sessionMetadata', 'loadConfiguredModels.failed', { level: 'debug', error: message });

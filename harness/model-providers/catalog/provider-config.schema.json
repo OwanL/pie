@@ -60,6 +60,7 @@
     },
     "credentialRef": {
       "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["source"], "properties": { "source": { "const": "legacy" } } },
         { "type": "object", "additionalProperties": false, "required": ["source"], "properties": { "source": { "const": "saved" } } },
         { "type": "object", "additionalProperties": false, "required": ["source"], "properties": { "source": { "const": "none" } } },
         { "type": "object", "additionalProperties": false, "required": ["source", "name"], "properties": { "source": { "const": "environment" }, "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } } }
@@ -67,8 +68,10 @@
     },
     "provider": {
       "type": "object", "additionalProperties": false, "required": ["enabled"],
+      "allOf": [{ "if": { "required": ["removed"], "properties": { "removed": { "const": true } } }, "then": { "properties": { "enabled": { "const": false } } } }],
       "properties": {
         "enabled": { "type": "boolean" },
+        "removed": { "const": true },
         "baseUrl": { "type": "string", "pattern": "^https?://[^\\s/?#]+(?:[^\\s]*)$" },
         "api": { "enum": ["openai-completions", "mistral-conversations", "openai-responses", "azure-openai-responses", "openai-codex-responses", "anthropic-messages", "bedrock-converse-stream", "google-generative-ai", "google-vertex"] },
         "credentialRef": { "$ref": "#/definitions/credentialRef" },

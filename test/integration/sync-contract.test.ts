@@ -25,6 +25,14 @@ import {
   EMPTY_AGGREGATE_STATS,
 } from '../../application/lib/protocol/index.js';
 
+test('pending new-session preview uses creation authority without borrowing session catalogs', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /existing runtime-free creation-model authority through `models.creationPreview`/u);
+  assert.match(contract, /fenced by backend generation, creation operation\/attempt and configuration-write ownership/u);
+  assert.match(contract, /durable session discovery replaces and revalidates the provisional choices/u);
+  assert.match(contract, /an authoritative empty catalog remains empty/u);
+});
+
 test('local dictation owns only its captured draft span and never sends', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /dictation never auto-sends/iu);

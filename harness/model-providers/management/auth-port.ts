@@ -19,6 +19,8 @@ export interface ProviderManagementAuthPort {
   hasSavedCredential(providerId: string): boolean;
   stageOAuthLogin(providerId: string, callbacks: ProviderOAuthCallbacks): Promise<StagedProviderCredential>;
   saveCredential(providerId: string, credential: StagedProviderCredential): Promise<void>;
+  /** Optional for older adapters; removal must fail closed when unavailable. */
+  removeCredential?(providerId: string): Promise<void>;
   /** Explicit discovery effect only. OAuth may refresh through Pi's storage lock. */
   getApiKey(providerId: string): Promise<string | undefined>;
   /** Backend-private saved credential epoch; never include in public state. */

@@ -5,7 +5,7 @@ import type { BrowserServerViewState, ChatPrefs, ExtensionInfo, LastCompactionSu
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from './thinking-level-options.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
-import { useMemo } from 'preact/hooks';
+import { useMemo, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip } from '../lib/components/panel-chip';
@@ -198,7 +198,25 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const selectedProviderDisabled = selectedModelProvider
     ? prefs.providerToggles[selectedModelProvider] === false
     : false;
-  const selectedModelBaseLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
+  // Retain display metadata, never catalog choices: discovery may temporarily
+  // have no entries, but must not replace a known concise label with a raw id.
+  const previousModelLabel = useRef<{ sessionPath: string | null; id: string; provider: string; label: string } | null>(null);
+  const selectedModelIdentityProvider = selectedProvider ?? selectedModelEntry?.model.provider;
+  if (selectedModelEntry && selectedModelIdentityProvider) {
+    previousModelLabel.current = {
+      sessionPath,
+      id: selectedModel,
+      provider: selectedModelIdentityProvider,
+      label: selectedModelEntry.selectedLabel,
+    };
+  } else if (previousModelLabel.current?.sessionPath !== sessionPath
+    || previousModelLabel.current?.id !== selectedModel
+    || !previousModelLabel.current?.provider
+    || (selectedProvider && previousModelLabel.current.provider !== selectedProvider)) {
+    previousModelLabel.current = null;
+  }
+  const selectedModelBaseLabel = selectedModelEntry?.selectedLabel
+    ?? previousModelLabel.current?.label ?? (selectedModel || fallbackModelLabel);
   const selectedModelLabel = selectedProviderDisabled
     ? `${selectedModelBaseLabel} (disabled)`
     : selectedModelBaseLabel;
@@ -252,9 +270,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         />
       ) : (
         <ToolbarChip
-          label={availableModelsStatus === 'authoritative'
-            ? selectedModel || 'No models available'
-            : selectedModel ? `${selectedModel} — Loading models…` : 'Loading models…'}
+          label={selectedModelLabel || (availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…')}
           tooltip={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
           ariaLabel={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
         />

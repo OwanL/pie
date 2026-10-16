@@ -502,7 +502,11 @@ export class BackendServer {
 
   private getProviderManagement() {
     return this.providerManagementPromise ??= createCoordinatorProviderManagement(this.sdk,
-      snapshot => this.emit('providers.changed', { snapshot, backendGeneration: this.backendGeneration }));
+      snapshot => this.emit('providers.changed', { snapshot, backendGeneration: this.backendGeneration }),
+      () => {
+        if (!this.authStorage || !this.modelRegistry) throw new Error('Legacy provider metadata unavailable');
+        return { auth: this.authStorage, models: this.modelRegistry, canForgetCredential: this.canForgetLegacyCredential };
+      });
   }
 
   private async sessionProviderRuntime(sessionPath: string) {
@@ -640,6 +644,7 @@ export class BackendServer {
    * so completion order must never be allowed to roll this mirror back. */
   private durableDetailStore?: DurableDetailStore;
   private authPath = '';
+  private canForgetLegacyCredential = false;
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
   private readonly hostPid?: number;
   private readonly lifetimeFd?: number;
@@ -1038,6 +1043,13 @@ export class BackendServer {
       await ensureDir(path.dirname(authPath));
 
       this.authPath = authPath;
+      // Only Pie's default private authority is forgettable. Explicit overrides and
+      // arbitrary agent/plugin stores remain read-only, even when outside Git.
+      const privateAuthDir = path.resolve(getDefaultAuthDir());
+      this.canForgetLegacyCredential = !authDir
+        && path.resolve(authPath) === path.join(privateAuthDir, 'auth.json')
+        && await fs.realpath(privateAuthDir).catch(() => '') === privateAuthDir
+        && !(await fs.lstat(authPath).catch(() => undefined))?.isSymbolicLink();
       this.authStorage = this.sdk.AuthStorage.create(authPath);
       this.modelRegistry = this.sdk.ModelRegistry.create(
         this.authStorage,
@@ -5010,6 +5022,19 @@ export class BackendServer {
       request = { ...request, params };
     }
     const router = this.workerRuntimeRouter;
+    if (request.method === 'models.creationPreview') {
+      if (request.params !== undefined && (request.params === null
+        || typeof request.params !== 'object' || Array.isArray(request.params)
+        || Object.keys(request.params).length > 0)) {
+        throw new BackendError('INVALID_PARAMS', 'Creation preview takes no session parameters.');
+      }
+      onRequestValidated?.();
+      const catalog = await this.creationModelCatalog();
+      if (!catalog.ok) {
+        throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to load the creation model catalog: ${catalog.error}`);
+      }
+      return catalog.models;
+    }
     if (request.method === 'session.snoozeReserve' || request.method === 'session.snoozeRelease') {
       const params = request.params as { sessionPath?: unknown; reservationId?: unknown; wakeAt?: unknown } | undefined;
       if (!router || !params || typeof params.sessionPath !== 'string' || !params.sessionPath
@@ -5313,10 +5338,7 @@ export class BackendServer {
       providerManagement: {
         request: async request => {
           if (this.disposed) throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
-          const manager = await (this.providerManagementPromise ??= createCoordinatorProviderManagement(
-            this.sdk,
-            snapshot => this.emit('providers.changed', { snapshot, backendGeneration: this.backendGeneration }),
-          ));
+          const manager = await this.getProviderManagement();
           if (this.disposed) { manager.dispose(); throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.'); }
           return manager.request(request);
         },

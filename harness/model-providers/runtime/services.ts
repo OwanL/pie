@@ -3,6 +3,7 @@ import { createPiProviderAuth, isRuntimeCredentialScopeCurrent, type NativeAuthS
 import type { StagedProviderCredential } from '../management/auth-port';
 import type { CredentialSource, NativeRuntimeModel, RuntimeSnapshot } from './contracts';
 import { builtinHeaderDigest, immutable, runtimeProtocols, validNativeModel } from './projection';
+import { currentProviderSelectorSnapshot } from './selector-policy';
 
 export interface RuntimeAuthStatus { configured: boolean; source?: string; label?: string }
 /** Private structural facade consumed by the native registry/session. No credential DTO is published. */
@@ -209,7 +210,7 @@ export function createProviderRuntimeServices(
   // cannot replace the captured headers or introduce a different API-key source.
   const requestRegistry = nativeSdk.ModelRegistry.inMemory(authStorage);
   const nativeRequestAuth = requestRegistry.getApiKeyAndHeaders.bind(requestRegistry);
-  // Unconfigured providers retain Pi's existing private models.json request
+  // Legacy-policy providers (including settings-only overlays) retain Pi's private models.json request
   // configuration. It is never copied into the managed snapshot or registered
   // on the exposed frozen registry.
   const legacyRequestRegistry = options.legacyModelsFile && [...sources.values()].some(source => source.source === 'legacy')
@@ -238,7 +239,7 @@ export function createProviderRuntimeServices(
   modelRegistry.isModelEligibleForSubagent = (provider, id) => !!admitted(provider, id)?.subagentEligible;
   modelRegistry.find = model;
   modelRegistry.getAll = () => captured.models.filter(row => admitted(row.providerId, row.id)).map(row => model(row.providerId, row.id)!);
-  modelRegistry.getAvailable = () => availableProviderRuntimeModels(captured, {
+  modelRegistry.getAvailable = () => availableProviderRuntimeModels(currentProviderSelectorSnapshot(captured), {
     credentialFile: options.credentialFile,
     savedCredential: id => currentSaved(id, policy(id) as Extract<CredentialSource, { source: 'saved' }>)?.credential,
     legacyHasAuth: id => legacy?.hasAuth?.(id) ?? false,
