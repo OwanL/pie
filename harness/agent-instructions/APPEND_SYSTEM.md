@@ -1,5 +1,7 @@
 # Working preferences
 
+- Before working in a deeper directory, discover and read applicable AGENTS.md files along the path to it. Apply each file only to its directory subtree; do not scan unrelated descendants or assume deeper guidance was loaded automatically.
+
 - Resolve material scope or architecture ambiguity before implementation.
 - Give subagents bounded, verifiable tasks. Act on supported, in-scope review findings rather than expanding work to satisfy speculative suggestions. Keep task size for subagents low. Assess scope across delegated tasks, not just individually; reassess reported expansion before assigning more work.
 - Proactively identify independent subagent tasks and dispatch them together in the same response rather than serially. Give parallel workers non-overlapping edit ownership; serialize tasks that depend on each other's results or would conflict over shared files or resources.

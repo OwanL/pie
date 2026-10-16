@@ -354,14 +354,22 @@ Content`,
 			expect(themes.some((t) => t.sourcePath?.endsWith("skip.json"))).toBe(false);
 		});
 
-		it("should discover AGENTS.md context files", async () => {
-			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
+		it("should include global and ancestor AGENTS.md through cwd but exclude descendants", async () => {
+			writeFileSync(join(agentDir, "AGENTS.md"), "Global guidelines");
+			writeFileSync(join(tempDir, "AGENTS.md"), "Ancestor guidelines");
+			writeFileSync(join(cwd, "AGENTS.md"), "Project guidelines");
+			mkdirSync(join(cwd, "deeper"));
+			writeFileSync(join(cwd, "deeper", "AGENTS.md"), "Deeper guidelines");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
 
 			const { agentsFiles } = loader.getAgentsFiles();
-			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
+			expect(agentsFiles.filter((f) => f.path.startsWith(tempDir)).map((f) => f.path)).toEqual([
+				join(agentDir, "AGENTS.md"),
+				join(tempDir, "AGENTS.md"),
+				join(cwd, "AGENTS.md"),
+			]);
 		});
 
 		it("should skip AGENTS.md and CLAUDE.md discovery when noContextFiles is true", async () => {
