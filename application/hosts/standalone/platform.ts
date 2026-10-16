@@ -24,6 +24,7 @@ import { StandaloneHostStorage } from './storage';
 import type { StandaloneDependencyPaths } from './startup';
 import { createBackendStartupPlatform } from '../lib/backend-startup';
 import { readImagePreviewWithFallback } from '../lib/image-preview.js';
+import { performImageAction, copyNativeImage, openNativeImage, revealNativeImage } from '../lib/image-actions.js';
 
 const UNSUPPORTED_EDITOR_MESSAGE = 'Opening files in VS Code is unavailable in standalone mode.';
 
@@ -185,6 +186,13 @@ export function createStandaloneHostRuntimePlatform(
   };
 
   const editor: HostEditorCapabilities = {
+    performImageAction: (request) => performImageAction(request, {
+      exists: async (candidate) => fs.stat(candidate).then(() => true, () => false),
+      findFiles: async () => [],
+      copyImage: copyNativeImage,
+      openInBrowser: openNativeImage,
+      reveal: revealNativeImage,
+    }),
     openFilePicker: async () => {
       postNotice('File picking is unavailable in standalone mode.', 'warning');
       return undefined;

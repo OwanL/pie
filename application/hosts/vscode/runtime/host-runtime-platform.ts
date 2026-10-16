@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import * as vscode from 'vscode';
+import { performImageAction, copyNativeImage } from '../../lib/image-actions.js';
 
 import type { HostRuntimePlatform, HostRendererSurface } from '../../../lib/platform-contracts/platform.js';
 import { buildWorkspaceAnalyticsId } from '../../../../analytics/legacy/run-analytics/storage';
@@ -231,6 +232,14 @@ export function createVscodeHostRuntimePlatform(
           showError: (message) => { void vscode.window.showErrorMessage(message); },
         });
       },
+      performImageAction: (request) => performImageAction(request, {
+        ...createFilePathResolver(),
+        copyImage: copyNativeImage,
+        openInBrowser: async (filePath) => {
+          if (!await vscode.env.openExternal(vscode.Uri.file(filePath))) throw new Error('Could not open image externally.');
+        },
+        reveal: async (filePath) => { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(filePath)); },
+      }),
       previewImageFile: async (filePath, options) => readImagePreviewWithFallback(
         { path: filePath, ...options },
         {
