@@ -1,0 +1,10 @@
+.block-context-menu.snooze-submenu {
+  z-index: 10001;
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+  animation: none;
+}
+.session-tab-context-menu .snooze-submenu-arrow {
+  margin-left: auto;
+  padding-left: 16px;
+}

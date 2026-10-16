@@ -13,6 +13,7 @@
 @import './model-picker.css';
 @import './settings-menu.css';
 @import './context-menu.css';
+@import './snooze-submenu.css';
 @import './file-changes.css';
 @import './extension-ui-prompt.css';
 @import './ask-user-prompt.css';

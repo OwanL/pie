@@ -16,7 +16,7 @@ const session = { path, name: 'A quiet session' } as SessionSummary;
 const idle: SessionCapabilities = { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true };
 const noop = () => {};
 function button(container: HTMLElement, label: string): HTMLButtonElement {
-  const result = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.trim() === label);
+  const result = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.replace('›', '').trim() === label);
   assert.ok(result, `Missing button: ${label}`);
   return result;
 }
@@ -42,32 +42,35 @@ for (const preset of SNOOZE_PRESETS) test(`snooze preset ${preset.label} sends a
   }
   act(() => render(h(Harness, {}), container));
   act(() => button(container, 'Snooze…').click());
-  assert.equal(container.querySelector('[role="menu"]')?.getAttribute('aria-label'), 'Snooze A quiet session');
-  act(() => button(container, preset.label).click());
+  assert.ok(container.querySelector('[aria-label="A quiet session tab actions"]'));
+  assert.ok(document.body.querySelector('[aria-label="Snooze A quiet session"]'));
+  act(() => button(document.body, preset.label).click());
   assert.deepEqual(posted, [{ type: 'snoozeSession', sessionPath: path, durationHours: preset.duration }]);
   assert.equal(closed, 1);
 }));
 
-test('snooze secondary menu supports arrow navigation, Back and one-layer Escape', () => fixture((container) => {
+test('snooze cascading menu supports arrow navigation and one-layer Escape', () => fixture((container) => {
   let closed = 0;
   act(() => render(h(SessionTabContextMenu, {
     tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
     runSummary: null, isPinned: false, hasDeferredTriggers: false,
     onNew: noop, onContextAction: noop, onSnooze: noop, onClose: () => { closed++; },
   }), container));
-  act(() => button(container, 'Snooze…').click());
-  assert.equal(document.activeElement, button(container, 'Back to tab actions'));
+  act(() => button(container, 'Snooze…').focus());
+  press('ArrowRight');
+  assert.equal(document.activeElement, button(document.body, '4 hours'));
   press('ArrowDown');
-  assert.equal(document.activeElement, button(container, '4 hours'));
+  press('ArrowUp');
+  assert.equal(document.activeElement, button(document.body, '4 hours'));
   press('End');
-  assert.equal(document.activeElement, button(container, 'Until Monday morning'));
+  assert.equal(document.activeElement, button(document.body, 'Until Monday morning'));
   press('Escape');
   assert.equal(document.activeElement, button(container, 'Snooze…'));
   act(() => button(container, 'Snooze…').click());
   press('ArrowLeft');
   assert.equal(document.activeElement, button(container, 'Snooze…'));
   act(() => button(container, 'Snooze…').click());
-  act(() => button(container, 'Back to tab actions').click());
+  press('Escape');
   assert.equal(document.activeElement, button(container, 'Snooze…'));
   assert.equal(closed, 0);
   press('Escape');
@@ -115,7 +118,8 @@ test('idle-only guard covers pending, running, billable, primary operations and 
     const snooze = button(container, 'Snooze…');
     assert.equal(snooze.disabled, true);
     assert.ok(snooze.title);
-    assert.ok(container.querySelector('.session-snooze-reason')?.textContent);
+    assert.equal(container.querySelector('.session-snooze-reason'), null);
+    assert.ok(snooze.getAttribute('aria-label')?.includes(snooze.title));
     act(() => snooze.click());
     assert.equal(container.querySelector('[aria-label="Snooze A quiet session"]'), null);
   }
@@ -136,7 +140,7 @@ test('pending tabs and activity arriving while presets are open cannot snooze', 
   act(() => button(container, 'Snooze…').click());
   act(() => render(h(SessionTabContextMenu, { ...props, snoozeBlockedReason: 'Wait for session activity to finish before snoozing.' }), container));
   for (const preset of SNOOZE_PRESETS) {
-    const item = button(container, preset.label);
+    const item = button(document.body, preset.label);
     assert.equal(item.disabled, true);
     act(() => item.click());
   }
@@ -178,7 +182,7 @@ test('tab action menus bound long titles to the compact viewport width', () => {
   assert.match(css, /\.block-context-menu\.session-tab-context-menu\s*\{[^}]*min-width:\s*min\(190px, calc\(100vw - 8px\)\)/);
   assert.match(css, /\.block-context-menu\.session-tab-context-menu\s*\{[^}]*max-width:\s*min\(340px, calc\(100vw - 8px\)\)/);
   assert.match(css, /\.block-context-menu\.snoozed-sessions-menu\s*\{[^}]*min-width:\s*min\(220px, calc\(100vw - 8px\)\)/);
-  assert.match(css, /\.block-context-menu\.session-tab-context-menu \.context-menu-item\s*\{[^}]*white-space:\s*normal/);
+  assert.ok(imports.includes("'./snooze-submenu.css'"));
 });
 
 test('host restoration focuses adjacent manager rows, then stable New session without selecting', () => fixture((container) => {
