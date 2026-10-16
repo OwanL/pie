@@ -156,7 +156,7 @@ export function ToolResultContentParts({ result, languageHint }: ToolResultConte
           );
         }
         if (part.kind === 'image') {
-          return <img class="tool-call-result-image" key={index} src={part.src} alt={part.alt} />;
+          return <img class="tool-call-result-image" tabIndex={0} role="button" key={index} src={part.src} alt={part.alt} />;
         }
         return <div class="tool-call-result-unsupported" key={index}>{truncate(part.message, FALLBACK_MAX)}</div>;
       })}

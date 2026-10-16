@@ -1,0 +1,10 @@
+.image-viewer { position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column; background: rgba(0,0,0,.88); color: var(--panel-foreground); overscroll-behavior: contain; }
+.image-viewer-toolbar { display: flex; justify-content: center; flex-wrap: wrap; gap: 5px; padding: 12px; z-index: 1; }
+.image-viewer-toolbar button { border: 1px solid var(--panel-border); background: var(--panel-control-surface); border-radius: var(--panel-radius-md); padding: 6px 9px; cursor: pointer; }
+.image-viewer-toolbar button:hover { background: var(--panel-control-hover); }
+.image-viewer-toolbar button:disabled { opacity: .5; cursor: wait; }
+.image-viewer-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; }
+.image-viewer-stage img { max-width: calc(100% - 32px); max-height: 100%; object-fit: contain; user-select: none; cursor: grab; flex-shrink: 0; }
+.image-viewer-stage img:active { cursor: grabbing; }
+.image-viewer-status { min-height: 32px; padding: 8px 12px; text-align: center; overflow-wrap: anywhere; }
+.message-user-image-element, .tool-call-result-image, .attachment-card-image, .image-path-preview img, [data-pie-inline-image] img { cursor: zoom-in; }

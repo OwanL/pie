@@ -18,6 +18,7 @@ import {
   setDetailStoreContext,
   type DetailStreamMessage,
 } from '../../transcript/detail-subscription-store';
+import { clearImageViewer } from '../../transcript/image-viewer-store';
 import { clearImagePreviewRequests, receiveImagePreviewResult } from '../../transcript/image-preview-store';
 
 import type {
@@ -660,6 +661,7 @@ export function useHostSync(
   const hydrateViewState = useHydrateViewState();
 
   const clearTransientUi = useCallback(() => {
+    clearImageViewer();
     clearImagePreviewRequests();
     setDraftRestore(null);
     setInputsRestore(null);

@@ -370,6 +370,11 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       {preview.status === 'ready' && preview.data && (
         <img
           ref={previewImageRef}
+          tabIndex={0}
+          role="button"
+          data-pie-image-path={activeRef.current?.path}
+          data-pie-image-reference={activeRef.current?.reference}
+          data-pie-image-cwd={activeRef.current?.workingDirectory}
           src={preview.data.dataUrl}
           alt={`Preview of ${activeRef.current?.reference ?? 'image'}`}
           draggable={false}

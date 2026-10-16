@@ -110,6 +110,12 @@ export function InlineMarkdownImages({ rootRef, sessionPath, workingDirectory, p
               image.alt = node.getAttribute('data-pie-image-alt') ?? '';
               if (node.title) image.title = node.title;
               image.draggable = false;
+              image.tabIndex = 0;
+              image.setAttribute('role', 'button');
+              image.setAttribute('aria-label', `View ${image.alt || 'image'}`);
+              image.dataset.pieImagePath = path;
+              image.dataset.pieImageReference = owner.reference;
+              if (workingDirectory) image.dataset.pieImageCwd = workingDirectory;
               image.addEventListener('error', () => {
                 resetDom(node, owner);
                 releaseEmpty(node, owner);

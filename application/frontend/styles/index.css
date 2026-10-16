@@ -19,6 +19,7 @@
 @import './ask-user-prompt.css';
 @import './tooltip.css';
 @import './image-preview.css';
+@import './image-viewer.css';
 @import './charts.css';
 
 @source "../**/*.tsx";

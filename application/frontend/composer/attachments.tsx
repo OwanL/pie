@@ -41,7 +41,7 @@ export function ComposerAttachments({
             <div key={input.id} class="attachment-card" title={composerInputTitle(input)}>
               {input.kind === 'imageBlob' ? (
                 <div class="attachment-card-thumb">
-                  <img class="attachment-card-image" src={imagePreviewSrc(input)} alt={displayName} />
+                  <img tabIndex={0} role="button" class="attachment-card-image" src={imagePreviewSrc(input)} alt={displayName} />
                 </div>
               ) : (
                 <div class="attachment-card-icon" aria-hidden="true">

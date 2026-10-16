@@ -5,6 +5,7 @@ import type { ViewState, WebviewToHostMessage } from '../../lib/protocol/index.j
 import type { ClientTransport } from '../transport/client-transport';
 import { EMPTY_VIEW_STATE } from '../lib/hooks/use-host-sync';
 import { AppBody } from './app-body';
+import { ImageViewer } from '../transcript/image-viewer';
 
 export { EMPTY_VIEW_STATE };
 
@@ -17,5 +18,5 @@ export interface AppAdapter {
 }
 
 export function App({ adapter }: { adapter: AppAdapter }) {
-  return <AppBody adapter={adapter} />;
+  return <><AppBody adapter={adapter} /><ImageViewer adapter={adapter} /></>;
 }

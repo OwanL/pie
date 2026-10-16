@@ -274,6 +274,8 @@ function UserParts({
           <figure key={`user-image-${messageId}-${index}`} class="message-user-image">
             <img
               class="message-user-image-element"
+              tabIndex={0}
+              role="button"
               src={userImageSrc(part)}
               alt={part.name || 'Attached image'}
             />
