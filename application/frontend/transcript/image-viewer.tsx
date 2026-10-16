@@ -16,6 +16,7 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
   const request = useRef<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>();
   const dialog = useRef<HTMLDivElement>(null);
+  const imageElement = useRef<HTMLImageElement | null>(null);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const dragged = useRef(false);
   useEffect(() => subscribeImageViewer(setImage), []);
@@ -54,6 +55,8 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
   useEffect(() => {
     request.current = null; clearTimeout(timer.current); drag.current = null; dragged.current = false; setPending(false); setError(''); setZoom(1); setPan({ x: 0, y: 0 });
     if (!image) return;
+    const loadedImage = imageElement.current;
+    if (loadedImage?.complete && loadedImage.naturalWidth === 0) setError('Image could not be loaded.');
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.querySelector('button')?.focus();
     const trap = (event: KeyboardEvent) => {
@@ -97,7 +100,7 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
       onPointerDown={event => { if (event.button !== 0 || event.target === event.currentTarget) return; event.preventDefault(); dragged.current = false; event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, y: event.clientY, px: pan.x, py: pan.y }; }}
       onPointerMove={event => { const start = drag.current; if (start) { dragged.current = dragged.current || Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 3; setPan({ x: start.px + event.clientX - start.x, y: start.py + event.clientY - start.y }); } }}
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; dragged.current = false; }}>
-      <img src={image.src} alt={image.alt} draggable={false} style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }} onError={() => setError('Image could not be loaded.')} />
+      <img ref={imageElement} src={image.src} alt={image.alt} draggable={false} style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }} onError={event => { if (event.currentTarget === imageElement.current) setError('Image could not be loaded.'); }} />
     </div>
   </div>;
 }
