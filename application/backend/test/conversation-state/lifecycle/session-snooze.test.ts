@@ -63,6 +63,40 @@ test('early restore is background; explicit ordinary open restores and selects; 
   assert.deepEqual(open.state.sessions.snoozedBySession, {});
 });
 
+test('manual, timer and startup restores append ordinary tabs without stealing selection', () => {
+  const base = fixture();
+  base.sessions.pinnedTabPaths = [];
+  base.sessions.pinnedTabGroups = [];
+  const hidden = snooze(base).state;
+  for (const event of [
+    { kind: 'SessionSnoozeRestoreRequested' as const, sessionPath: '/a' },
+    { kind: 'SessionSnoozeTimerFired' as const, now: 2000 },
+    { kind: 'SessionSnoozesRestored' as const, entries: normalizeStoredSnoozes(hidden.sessions.snoozedBySession, () => true), now: 2000 },
+  ]) {
+    const restored = reducer(hidden, event);
+    assert.deepEqual(restored.state.sessions.openTabPaths, ['/b', '/c', '/a']);
+    assert.equal(restored.state.sessions.activeSessionPath, '/b');
+    assert.deepEqual(restored.state.sessions.snoozedBySession, {});
+  }
+});
+
+test('closing a snoozed session cancels its deadline without reopening or selecting it', () => {
+  for (const privacyMode of [false, true]) {
+    const base = fixture();
+    base.sessions.privacyModeBySession = { '/a': privacyMode };
+    const hidden = snooze(base).state;
+    const closed = reducer(hidden, { kind: 'Command', cmd: { kind: 'CloseSession', corrId: 'close-snooze', sessionPath: '/a' } });
+    assert.deepEqual(closed.state.sessions.snoozedBySession, {});
+    assert.deepEqual(closed.state.sessions.openTabPaths, ['/b', '/c']);
+    assert.equal(closed.state.sessions.activeSessionPath, '/b');
+    assert.ok(closed.effects.some((e) => e.kind === 'ReleaseSessionSnooze'));
+    assert.ok(closed.effects.some((e) => e.kind === 'ScheduleSessionSnooze' && e.wakeAt === null));
+    assert.ok(!closed.effects.some((e) => e.kind === 'OpenSession' || e.kind === 'SelectSnoozeSuccessor'));
+    const expired = reducer(closed.state, { kind: 'SessionSnoozeTimerFired', now: 3000 });
+    assert.deepEqual(expired.state.sessions.openTabPaths, ['/b', '/c']);
+  }
+});
+
 test('busy, billable, queued backend work, pending operations and deferred trigger targets reject snooze', () => {
   const base = fixture();
   for (const state of [

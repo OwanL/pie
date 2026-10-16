@@ -21,7 +21,7 @@ import { handleProviderManagement } from './reducers/provider-management-handler
 import { createInitialArchState } from './arch-state.js';
 import type { ArchState } from './arch-state.js';
 import type { Event } from './events.js';
-import { reduceSessionSnooze, canSnoozeSession } from './session-snooze.js';
+import { reduceSessionSnooze, canSnoozeSession, snoozeEffects } from './session-snooze.js';
 
 // Re-export for downstream consumers that import from './reducer'
 export type { ArchState, PendingOp, CurrentTurn } from './arch-state.js';
@@ -224,6 +224,17 @@ function reduceSnoozeAware(state: ArchState, event: Event): ReducerResult {
     const restored = reduceSessionSnooze(state, { kind: 'SessionSnoozeRestoreRequested', sessionPath: event.cmd.sessionPath });
     state = restored.state;
     restoredEffects = restored.effects;
+  }
+  if (event.kind === 'Command' && event.cmd.kind === 'CloseSession') {
+    const entry = state.sessions.snoozedBySession[event.cmd.sessionPath];
+    if (entry) {
+      const snoozedBySession = { ...state.sessions.snoozedBySession };
+      delete snoozedBySession[entry.path];
+      state = { ...state, sessions: { ...state.sessions, snoozedBySession } };
+      restoredEffects = snoozeEffects(state);
+      if (entry.reservationId) restoredEffects.push({ kind: 'ReleaseSessionSnooze', corrId: entry.reservationId,
+        sessionPath: entry.path, reservationId: entry.reservationId });
+    }
   }
   const addressed = event.kind === 'Command' ? event.cmd : event;
   if ('sessionPath' in addressed && typeof addressed.sessionPath === 'string' && state.sessions.snoozedBySession[addressed.sessionPath]

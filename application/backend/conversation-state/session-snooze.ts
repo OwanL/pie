@@ -56,8 +56,9 @@ function wake(state: ArchState, path: string): ArchState {
   const entries = { ...state.sessions.snoozedBySession };
   delete entries[path];
   const open = state.sessions.openTabPaths.filter((p) => p !== path);
-  const absentBefore = Object.values(entries).filter((e) => e.index < entry.index).length;
-  open.splice(Math.min(Math.max(0, entry.index - absentBefore), open.length), 0, path);
+  // Restored ordinary tabs return at the right edge. Pins and groups retain
+  // their recovery intent and remain in the pinned prefix below.
+  open.push(path);
   const pinned = [...state.sessions.pinnedTabPaths];
   const absentPinnedBefore = Object.values(entries).filter((e) => e.pinnedIndex >= 0 && e.pinnedIndex < entry.pinnedIndex).length;
   if (entry.pinnedIndex >= 0 && !pinned.includes(path)) pinned.splice(Math.min(Math.max(0, entry.pinnedIndex - absentPinnedBefore), pinned.length), 0, path);
