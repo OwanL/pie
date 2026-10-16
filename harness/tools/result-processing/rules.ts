@@ -34,25 +34,19 @@ function stripAnsi(text: string, _ctx: RuleContext): RuleResult | null {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Trailing-whitespace trim per line.
-//
-// Removes spaces/tabs/CR/FF/VT from the end of every line. Also incidentally
-// normalizes CRLF → LF (the \r is trailing whitespace). Per-line so it never
-// touches leading indentation, which is semantically meaningful.
+// 2. CRLF normalization. Keep the historical rule name/config key for compatibility.
+// Trailing whitespace may be filename or matched content, not presentation.
+// Only CR immediately followed by LF is treated as a line-ending sequence.
 // ---------------------------------------------------------------------------
-const TRAILING_WS_RE = /[ \t\r\f\v]+$/gm;
-
 function trimTrailingWhitespace(text: string, _ctx: RuleContext): RuleResult | null {
-  // Multiline check: any line ending with horizontal/CR/FF/VT whitespace.
-  if (!/[ \t\r\f\v]+$/m.test(text)) return null;
-  return maybe(text, text.replace(TRAILING_WS_RE, ""));
+  return maybe(text, text.replace(/\r\n/g, "\n"));
 }
 
 // ---------------------------------------------------------------------------
 // 3. Blank-run collapse (3+ → 1) + trim leading blank lines + trim trailing
 //    blank *runs* (2+) down to a single newline.
 //
-// A "blank" line is one with no non-whitespace chars. Three or more in a row
+// A "blank" line is empty; whitespace-only lines may contain meaningful bytes. Three or more in a row
 // collapse to a single blank line; leading blank lines trim fully; trailing
 // blank runs (2+) trim down to a single newline. A *single* trailing newline
 // (the terminal `\n` that ends almost all command output) is deliberately
@@ -65,21 +59,16 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
   // Detect whether any rewrite is warranted:
   //   - a blank-run of 3+ (collapse to 1)
   //   - leading or trailing blank lines (trim)
-  //   - any whitespace-only line that is non-empty (normalize to "") —
-  //     trim-trailing-whitespace only strips ASCII horizontal ws; a line of
-  //     U+00A0 (NBSP) survives it and would otherwise stay as a noisy line.
   let hasLongRun = false;
-  let hasNonEmptyBlank = false;
   let run = 0;
   let leadingBlanks = 0;
   let firstNonBlank = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const blank = line.trim() === "";
+    const blank = line === "";
     if (blank) {
       run++;
       if (run >= 3) hasLongRun = true;
-      if (line !== "") hasNonEmptyBlank = true;
     } else {
       run = 0;
       if (firstNonBlank === -1) {
@@ -91,26 +80,26 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
   const trailingBlanks = firstNonBlank === -1 ? lines.length : lines.length - 1 - lastNonBlankIndex(lines);
   // A single trailing blank is the terminal newline of normal command output —
   // not worth rewriting (see header). Only a trailing *run* (2+) triggers.
-  const needsCollapse = hasLongRun || hasNonEmptyBlank || leadingBlanks > 0 || trailingBlanks > 1;
+  const needsCollapse = hasLongRun || leadingBlanks > 0 || trailingBlanks > 1;
   if (!needsCollapse) return null;
 
   const out: string[] = [];
   let blankRun = 0;
   for (const line of lines) {
-    if (line.trim() === "") {
+    if (line === "") {
       blankRun++;
-      if (blankRun <= 1) out.push(""); // normalize whitespace-only → empty
+      if (blankRun <= 1) out.push("");
     } else {
       blankRun = 0;
       out.push(line);
     }
   }
   // Trim leading blank lines fully.
-  while (out.length > 0 && out[0].trim() === "") out.shift();
+  while (out.length > 0 && out[0] === "") out.shift();
   // Trim trailing blank lines, but keep at most one — a terminal newline is
   // the natural end of command output, and trimming it fires on ~every result
   // for a ~1-token gain (pure noise). Only genuine trailing runs (2+) trim.
-  while (out.length > 1 && out[out.length - 1].trim() === "" && out[out.length - 2].trim() === "") {
+  while (out.length > 1 && out[out.length - 1] === "" && out[out.length - 2] === "") {
     out.pop();
   }
   return maybe(text, out.join("\n"));
@@ -118,7 +107,7 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
 
 function lastNonBlankIndex(lines: string[]): number {
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].trim() !== "") return i;
+    if (lines[i] !== "") return i;
   }
   return -1;
 }

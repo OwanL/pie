@@ -108,7 +108,22 @@ describe('pipeline composition', () => {
   test('lossless rules compose: ANSI + trailing ws + blank collapse', () => {
     const text = '\u001B[32mok\u001B[0m   \n\n\n\n\nafter';
     const out = runPipeline(ev({ content: [{ type: 'text', text }] }), ENABLED);
-    assert.deepEqual(out?.patch.content, [{ type: 'text', text: 'ok\n\nafter' }]);
+    assert.deepEqual(out?.patch.content, [{ type: 'text', text: 'ok   \n\nafter' }]);
+  });
+
+  test('full pipeline preserves filename and grep trailing bytes in both profiles', () => {
+    for (const profile of ['default', 'security']) {
+      for (const [toolName, input, text] of [
+        ['ls', {}, 'name \nname\t\n \n\t\n'],
+        ['bash', { command: 'ls' }, 'name \nname\t\n'],
+        ['grep', { pattern: '.' }, 'src/a.ts:1:content \nsrc/b.ts:2:content\t\n'],
+        ['bash', { command: 'rg .' }, 'src/a.ts:1:content \nsrc/b.ts:2:content\t\n'],
+      ] as const) {
+        const out = runPipeline(ev({ toolName, input, content: [{ type: 'text', text }] }), { ...ENABLED, profile });
+        assert.equal(out?.meta.losslessText ?? text, text);
+        assert.equal(out?.meta.afterText ?? text, text);
+      }
+    }
   });
 
   test('JSON minify fires end-to-end', () => {
@@ -138,12 +153,11 @@ describe('pipeline rule toggles', () => {
   });
 
   test('a disabled rule is skipped entirely (never fires)', () => {
-    // ANSI + trailing ws: with ansi disabled, only trim-trailing-whitespace fires.
+    // With ANSI disabled, only CRLF normalization fires.
     const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false } };
-    const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), cfg);
+    const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   \r\n' }] }), cfg);
     assert.ok(out);
-    // ANSI escapes are preserved (ansi-strip skipped); trailing ws stripped.
-    assert.deepEqual(out?.patch.content, [{ type: 'text', text: '\u001B[31ma\u001B[0m' }]);
+    assert.deepEqual(out?.patch.content, [{ type: 'text', text: '\u001B[31ma\u001B[0m   \n' }]);
     assert.deepEqual(out?.meta.rules, ['trim-trailing-whitespace']);
   });
 
@@ -172,9 +186,9 @@ describe('pipeline metadata (analytics)', () => {
   });
 
   test('meta.rules lists only the rules that fired, in order', () => {
-    // ANSI strip + trailing-ws fire; blank-collapse and minify do not.
+    // ANSI strip fires; trailing spaces are retained.
     const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), ENABLED);
-    assert.deepEqual(out?.meta.rules, ['ansi-strip', 'trim-trailing-whitespace']);
+    assert.deepEqual(out?.meta.rules, ['ansi-strip']);
   });
 
   test('meta.beforeText is the pre-pruning text, meta.afterText the result', () => {
@@ -210,6 +224,14 @@ describe('pipeline lossy tier', () => {
     const lossyText = (out?.patch.content?.[0] as { text: string } | undefined)?.text;
     assert.equal(lossyText, 'src/\nreadme.md\n');
     assert.equal(out?.meta.afterText, 'src/\nreadme.md\n');
+  });
+
+  test('ls-long receives and retains trailing spaces and tabs through the pipeline', () => {
+    const text = '-rw-r--r-- 1 user group 12 Jan 1 12:00 name \n-rw-r--r-- 1 user group 12 Jan 1 12:00 name\t\n';
+    const out = runPipeline(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text }] }), ENABLED);
+    assert.equal(out?.meta.losslessText, text);
+    assert.equal(out?.meta.afterText, 'name \nname\t\n');
+    assert.deepEqual(out?.meta.recallRules, ['ls-long']);
   });
 
   test('git log fires under default profile and yields oneline', () => {

@@ -129,7 +129,7 @@ describe('index handler (visibility badge + analytics)', () => {
     assert.ok(out);
     const badge = badgeOf(out);
     assert.ok(badge);
-    assert.deepEqual(badge!.rules, ['ansi-strip', 'trim-trailing-whitespace']);
+    assert.deepEqual(badge!.rules, ['ansi-strip']);
     assert.equal(typeof badge!.tokensSaved, 'number');
     assert.ok(badge!.tokensSaved > 0, `expected tokensSaved > 0, got ${badge!.tokensSaved}`);
   });
@@ -166,11 +166,10 @@ describe('index handler (visibility badge + analytics)', () => {
       profile: 'default',
       rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false },
     });
-    const out = await handler(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), {});
+    const out = await handler(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m\r\n' }] }), {});
     assert.ok(out);
-    // ANSI preserved (ansi disabled), trailing ws stripped.
-    assert.equal(out!.content![0]!.text, '\u001B[31ma\u001B[0m');
-    assert.deepEqual(badgeOf(out)!.rules, ['trim-trailing-whitespace']);
+    // ANSI preserved (ansi disabled), CRLF normalized.
+    assert.equal(out!.content![0]!.text, '\u001B[31ma\u001B[0m\n');
   });
 
   test('records a tool_result_pruned analytics event', async () => {
@@ -184,19 +183,15 @@ describe('index handler (visibility badge + analytics)', () => {
     const evt = JSON.parse(lines[0]!);
     assert.equal(evt.event, 'tool_result_pruned');
     assert.equal(evt.sessionId, 'sess-1');
-    assert.deepEqual(evt.rules, ['ansi-strip', 'trim-trailing-whitespace']);
+    assert.deepEqual(evt.rules, ['ansi-strip']);
     assert.ok(evt.tokensSaved > 0);
   });
 
   test('noise gate: no badge when tokensSaved === 0, but content still patched', async () => {
-    // A lossless rewrite that changes bytes but not the BPE count (normalizing
-    // a whitespace-only middle line: "a\n   \nb" -> "a\n\nb" is 3->3 tokens on
-    // cl100k). The content patch still applies (lossless hygiene), but no
-    // visibility chip — ~45% of rewrites saved 0 tokens in production, all
-    // noise. Analytics still records it (measurement stays complete).
-    const out = await handler(ev({ content: [{ type: 'text', text: 'a\n   \nb' }] }), {});
+    // CRLF normalization changes bytes without changing the BPE count.
+    const out = await handler(ev({ content: [{ type: 'text', text: 'a\r\nb' }] }), {});
     assert.ok(out, 'expected a content patch');
-    assert.equal(out!.content![0]!.text, 'a\n\nb');
+    assert.equal(out!.content![0]!.text, 'a\nb');
     assert.equal(badgeOf(out), undefined, 'no badge when tokensSaved === 0');
     await loggerMod.flushLog();
     const lines = readFileSync(logPath, 'utf-8').trim().split('\n');

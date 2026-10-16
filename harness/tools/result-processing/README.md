@@ -18,8 +18,8 @@ cache-safe (only new results are touched, never stored history — see §6).
 | Rule | What it does |
 |------|--------------|
 | `ansi-strip` | Strip ANSI color / OSC escape sequences (agents can't see color) |
-| `trim-trailing-whitespace` | Trim trailing spaces/tabs/CR per line (also normalizes CRLF→LF) |
-| `collapse-blank-runs` | Collapse 3+ blank lines → 1; trim leading blanks; trim trailing *runs* (2+) to one (a terminal newline is kept — trimming it fired on ~94% of results for a ~1-token gain, pure noise) |
+| `trim-trailing-whitespace` | Normalize CRLF→LF only; preserve trailing spaces/tabs and standalone CR/FF/VT. Historical name and `whitespace` config key retained for compatibility |
+| `collapse-blank-runs` | Collapse 3+ empty lines → 1; trim leading empty lines; trim trailing empty *runs* (2+) to one; preserve non-empty whitespace-only lines (a terminal newline is kept — trimming it fired on ~94% of results for a ~1-token gain, pure noise) |
 | `minify-json` | Validate-then-minify a single JSON document (falls back to raw on parse failure) |
 
 Lossless ⇒ semantically identical, fewer bytes ⇒ **no recall stash needed**.

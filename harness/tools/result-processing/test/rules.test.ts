@@ -49,19 +49,23 @@ describe('lossless rules', () => {
   });
 
   describe('trim-trailing-whitespace', () => {
-    test('removes trailing spaces and tabs per line', () => {
+    test('preserves trailing spaces and tabs per line', () => {
       const out = rule("trim-trailing-whitespace", mod).run("a   \nb\t\t\nc", ctx);
-      assert.equal(out?.text, "a\nb\nc");
+      assert.equal(out, null);
     });
 
-    test('normalizes CRLF to LF (CR is trailing ws)', () => {
+    test('normalizes CRLF to LF', () => {
       const out = rule("trim-trailing-whitespace", mod).run("a\r\nb\r\n", ctx);
       assert.equal(out?.text, "a\nb\n");
     });
 
     test('preserves leading indentation', () => {
       const out = rule("trim-trailing-whitespace", mod).run("  a  \n\t b\t", ctx);
-      assert.equal(out?.text, "  a\n\t b");
+      assert.equal(out, null);
+    });
+
+    test('preserves standalone CR, FF, and VT', () => {
+      assert.equal(rule("trim-trailing-whitespace", mod).run("a\r\nb\r\fc\v", ctx)?.text, "a\nb\r\fc\v");
     });
 
     test('no-op when no trailing whitespace', () => {
@@ -102,16 +106,15 @@ describe('lossless rules', () => {
       assert.equal(out?.text, "a\n");
     });
 
-    test('treats whitespace-only lines as blank', () => {
+    test('preserves whitespace-only lines', () => {
       const out = rule("collapse-blank-runs", mod).run("a\n   \n  \n  \nb", ctx);
-      assert.equal(out?.text, "a\n\nb");
+      assert.equal(out, null);
     });
 
-    test('normalizes non-ASCII whitespace-only lines (NBSP) to empty', () => {
-      // U+00A0 is whitespace to String.trim but NOT stripped by
-      // trim-trailing-whitespace (ASCII-only), so this rule must own it.
+    test('preserves non-ASCII whitespace-only lines (NBSP)', () => {
+      // Non-empty whitespace is content, not an empty line.
       const out = rule("collapse-blank-runs", mod).run("a\n\u00A0\nb", ctx);
-      assert.equal(out?.text, "a\n\nb");
+      assert.equal(out, null);
     });
 
     test('no-op on single-line input', () => {

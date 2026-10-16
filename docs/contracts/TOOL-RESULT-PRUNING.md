@@ -63,9 +63,10 @@ multi-part and image results, is left untouched.
 Lossless rules run under either profile and need no recall:
 
 - Strip ANSI escape sequences.
-- Trim trailing whitespace per line.
-- Collapse blank-line runs and trim leading/trailing blank runs, while keeping
-a single terminal newline.
+- Normalize CRLF line endings to LF; preserve other trailing whitespace,
+  including spaces, tabs, and standalone CR/FF/VT (potential filename/content bytes).
+- Collapse empty-line runs and trim leading/trailing empty runs, while keeping
+  a single terminal newline. Whitespace-only non-empty lines are preserved.
 - Minify a single valid JSON document; parse failures and non-JSON text pass
 through unchanged.
 
@@ -125,7 +126,9 @@ a list restricts pruning to those tools and `[]` disables it for all tools.
 
 The `rules` object independently toggles `ansi`, `whitespace`, `blankRun`,
 `jsonMinify`, `lsLong`, `gitLog`, `grepGroup`, `duplicateCollapse`, and
-`progressNoise`. Invalid fields warn and use their defaults; invalid tool
+`progressNoise`. For compatibility, `whitespace` still controls the historical
+`trim-trailing-whitespace` rule name, but now only normalizes CRLF to LF;
+it no longer trims trailing content bytes. Invalid fields warn and use their defaults; invalid tool
 allowlist entries are dropped. The extension can also be disabled with
 `PIE_EXTENSION_TOGGLES_JSON={"tool-result-pruner": false}`.
 
