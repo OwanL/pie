@@ -40,6 +40,25 @@ Date:   Thu Jul 3 10:30:00 2025
     Initial commit
 `;
 
+describe('single-command safety guards', () => {
+  test('ls-long and git-log skip input redirects and background sequences', async () => {
+    const mod = (await import(lossyUrl)) as LossyModule;
+    for (const [name, command, output] of [
+      ['ls-long', 'ls -l', LS_L_OUTPUT],
+      ['git-log', 'git log', GIT_LOG_OUTPUT],
+    ]) {
+      for (const suffix of [' < input.txt', ' <<EOF', ' <<< text', ' & echo done']) {
+        assert.equal(rule(name!, mod).run(output!, bash(command + suffix)), null, command + suffix);
+      }
+    }
+  });
+
+  test('git-log preserves explicitly requested file-change summaries', async () => {
+    const mod = (await import(lossyUrl)) as LossyModule;
+    assert.equal(rule('git-log', mod).run(GIT_LOG_OUTPUT + ' create mode 100644 new.txt\n', bash('git log --summary')), null);
+  });
+});
+
 describe('ls-long rule', () => {
   let mod: LossyModule;
   test.before(async () => {

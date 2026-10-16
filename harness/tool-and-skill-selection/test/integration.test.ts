@@ -1083,7 +1083,7 @@ test("recent conversation from the session is fed to the prepass so follow-ups g
 		// so it is excluded from the walk and only prior turns are surfaced.
 		const entries = [
 			{ id: "m1", parentId: null, type: "message", message: { role: "user", content: [{ type: "text", text: "Make a pass over the pruner for robustness" }] } },
-			{ id: "m2", parentId: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Reviewing the extension" }, { type: "tool_use", name: "read" }] } },
+			{ id: "m2", parentId: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Reviewing the extension" }, { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }] } },
 			{ id: "m3", parentId: "m2", type: "message", message: { role: "user", content: [{ type: "text", text: "Leave it uncommitted" }] } },
 			{ id: "m4", parentId: "m3", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Got it" }] } },
 		];
@@ -1106,6 +1106,7 @@ test("recent conversation from the session is fed to the prepass so follow-ups g
 
 		assert.ok(capturedUserMessage.includes("Recent conversation"), "prepass user message includes recent conversation");
 		assert.ok(capturedUserMessage.includes("Make a pass over the pruner"), "prior user turn is surfaced");
+		assert.ok(capturedUserMessage.includes("[tools used: read]"), "SDK tool calls inform follow-up relevance");
 		assert.ok(capturedUserMessage.includes("Fix this"), "current prompt is still present");
 	} finally {
 		__setCompleteFn(null);

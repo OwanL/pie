@@ -44,7 +44,7 @@ function lsLong(text: string, ctx: RuleContext): RuleResult | null {
 function isLsLongCommand(command: string): boolean {
   const cmd = command.trim();
   if (!/^ls\b/.test(cmd)) return false;
-  if (/[|;\n]|\|\||&&|>>?/.test(cmd)) return false; // not a lone ls (skip pipelines, sequences, redirects, multi-line scripts)
+  if (/[|;&<>\n]/.test(cmd)) return false; // not a lone ls (skip pipelines, background/sequences, redirects, multi-line scripts)
   const tokens = cmd.split(/\s+/);
   for (const tok of tokens.slice(1)) {
     if (tok === "--") break; // end of options
@@ -133,14 +133,14 @@ function gitLog(text: string, ctx: RuleContext): RuleResult | null {
 function isGitLogCommand(command: string): boolean {
   const cmd = command.trim();
   if (!/^git\s+log\b/.test(cmd)) return false;
-  if (/[|;\n]|\|\||&&|>>?/.test(cmd)) return false; // not a lone git log (skip pipelines, sequences, redirects, multi-line scripts)
+  if (/[|;&<>\n]/.test(cmd)) return false; // not a lone git log (skip pipelines, background/sequences, redirects, multi-line scripts)
   if (/\b--oneline\b/.test(cmd)) return false; // already compact
   if (/--pretty[= ](?:oneline|format:)/.test(cmd)) return false;
   if (/--format[= ](?:oneline|%h)/.test(cmd)) return false;
   // Diff/stat content requested → the agent wants detail, not the list.
   // --cc / --remerge-diff are condensed/re-merged combined diffs; -u is the
   // documented synonym for -p/--patch; -c is combined diff (all imply patch).
-  if (/(?:\s|^)--patch\b|(?:\s|^)--stat\b|(?:\s|^)--numstat\b|(?:\s|^)--shortstat\b|(?:\s|^)--raw\b|(?:\s|^)--name-only\b|(?:\s|^)--name-status\b|(?:\s|^)--cc\b|(?:\s|^)--remerge-diff\b/.test(cmd)) return false;
+  if (/(?:\s|^)--patch\b|(?:\s|^)--stat\b|(?:\s|^)--numstat\b|(?:\s|^)--shortstat\b|(?:\s|^)--summary\b|(?:\s|^)--raw\b|(?:\s|^)--name-only\b|(?:\s|^)--name-status\b|(?:\s|^)--cc\b|(?:\s|^)--remerge-diff\b/.test(cmd)) return false;
   // Short flag groups requesting patch/combined diff: -p (--patch), -u (alias
   // of --patch), -c (combined). (-m alone does NOT emit diffs — verified — so
   // it stays list-intent and is pruned.)

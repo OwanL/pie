@@ -102,7 +102,7 @@ function summarizeMessageContent(content: unknown): string {
 		const b = block as { type?: unknown; text?: unknown; name?: unknown };
 		if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
 			textParts.push(b.text.trim());
-		} else if (b.type === "tool_use" && typeof b.name === "string" && !tools.includes(b.name)) {
+		} else if ((b.type === "toolCall" || b.type === "tool_use") && typeof b.name === "string" && !tools.includes(b.name)) {
 			tools.push(b.name);
 		}
 	}
