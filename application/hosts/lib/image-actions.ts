@@ -29,7 +29,7 @@ export async function performImageAction(request: ImageActionRequest, adapter: I
     const { base64, mimeType } = request.source;
     const extension = Object.entries(IMAGE_PREVIEW_MIME_BY_EXTENSION).find(([, mime]) => mime === mimeType)?.[0];
     if (!extension || base64.length === 0 || base64.length > Math.ceil(MAX_IMAGE_PREVIEW_BYTES / 3) * 4
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+      || (base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64))) {
       throw new Error('Invalid or oversized image payload.');
     }
     const bytes = Buffer.from(base64, 'base64');

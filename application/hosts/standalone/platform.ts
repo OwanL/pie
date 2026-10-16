@@ -186,6 +186,7 @@ export function createStandaloneHostRuntimePlatform(
   };
 
   const editor: HostEditorCapabilities = {
+    imageActionCapabilities: { copy: process.platform === 'win32', openInBrowser: true, reveal: true },
     performImageAction: (request) => performImageAction(request, {
       exists: async (candidate) => fs.stat(candidate).then(() => true, () => false),
       findFiles: async () => [],

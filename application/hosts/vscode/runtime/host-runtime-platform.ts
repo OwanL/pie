@@ -232,6 +232,7 @@ export function createVscodeHostRuntimePlatform(
           showError: (message) => { void vscode.window.showErrorMessage(message); },
         });
       },
+      imageActionCapabilities: { copy: process.platform === 'win32', openInBrowser: true, reveal: true },
       performImageAction: (request) => performImageAction(request, {
         ...createFilePathResolver(),
         copyImage: copyNativeImage,

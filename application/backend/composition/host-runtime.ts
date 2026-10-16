@@ -616,6 +616,7 @@ export class HostRuntime {
         postState: () => this.platform.renderer.postState(),
         postSelectionState: () => this.platform.renderer.postSelectionState?.(),
         requestState: (rendererId) => this.platform.renderer.requestState?.(rendererId),
+        getViewGeneration: () => this.platform.renderer.getViewGeneration(),
         postImperative: (msg) => this.platform.renderer.postImperative(msg),
         postImperativeToRenderer: (rendererId, msg) =>
           this.platform.renderer.postImperativeToRenderer(rendererId, msg),
@@ -638,6 +639,9 @@ export class HostRuntime {
         showLogs: () => this.platform.showLogs?.(),
         setBrowserServerLanEnabled: (enabled) => this.setBrowserServerLanEnabled(enabled),
         setBrowserServerEnabled: (enabled) => this.setBrowserServerEnabled(enabled),
+        performImageAction: this.platform.editor.performImageAction
+          ? (request) => this.platform.editor.performImageAction!(request)
+          : undefined,
         previewImageFile: (request) => this.platform.editor.previewImageFile
           ? this.platform.editor.previewImageFile(request.path, request)
           : Promise.resolve(undefined),
@@ -1087,6 +1091,11 @@ export class HostRuntime {
       ...projected,
       ...canonicalActivityViews,
       browserServer: this.projectBrowserServerViewState(),
+      imageActionCapabilities: {
+        copy: !!this.platform.editor.performImageAction && this.platform.editor.imageActionCapabilities?.copy === true,
+        openInBrowser: !!this.platform.editor.performImageAction && this.platform.editor.imageActionCapabilities?.openInBrowser === true,
+        reveal: !!this.platform.editor.performImageAction && this.platform.editor.imageActionCapabilities?.reveal === true,
+      },
       // Transcript-derived usage is migration-only. The live and recovered UI
       // always receives the host-owned immutable invocation-ledger projection.
       sessionUsage: projected.activeSession

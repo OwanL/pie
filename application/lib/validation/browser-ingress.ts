@@ -12,7 +12,7 @@
  *   - wrong types are rejected;
  *   - every string/array length and nesting depth is bounded;
  *   - base64 is rejected everywhere except the explicitly enumerated
- *     `imageBlob`/`ComposerInputDraft` image fields, with strict base64
+ *     `imageBlob`/`ComposerInputDraft` and image-action source fields, with strict base64
  *     decoding and the attachment bounds below;
  *   - `extensionUiResponse` payloads are validated against their closed
  *     schema rather than arbitrary JSON;
@@ -102,6 +102,7 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   requestSnapshot: ['type', 'assetVersion', 'buildId', 'sessionPath'],
   openFilePicker: ['type'],
   openFile: ['type', 'path', 'reference', 'workingDirectory'],
+  performImageAction: ['type', 'requestId', 'action', 'source'],
   addComposerInput: ['type', 'sessionPath', 'input'],
   removeComposerInput: ['type', 'sessionPath', 'inputId'],
   setComposerDraft: ['type', 'sessionPath', 'text'],
@@ -221,7 +222,7 @@ function decodedBase64Length(encoded: string): number {
   return Math.floor((encoded.length * 3) / 4) - padding;
 }
 
-/** Only the allowlisted imageBlob `dataBase64` locations are exempt from the
+/** Only allowlisted imageBlob `dataBase64` and image-action `source.base64` locations are exempt from the
  *  generic string bound; the image-specific checks bound them exactly. A
  *  `dataBase64` key anywhere else (e.g. smuggled inside prefs or extension-UI
  *  payloads) stays under the generic string bound. The walk is type-agnostic,
@@ -229,7 +230,8 @@ function decodedBase64Length(encoded: string): number {
  *  `editMessage.inputs[i]`); any other message carrying a top-level
  *  `input`/`inputs` key is still rejected by the exact-key allowlist. */
 function isAllowlistedImageBase64Path(path: string): boolean {
-  return path === 'message.input.dataBase64'
+  return path === 'message.source.base64'
+    || path === 'message.input.dataBase64'
     || /^message\.inputs\[\d+\]\.dataBase64$/.test(path);
 }
 
@@ -237,7 +239,7 @@ function isAllowlistedImageBase64Path(path: string): boolean {
  * Walk the parsed JSON tree once, enforcing JSON-safety (no `undefined`,
  * functions, BigInt, class instances, or cycles), nesting depth, string
  * bounds, array bounds, and object key bounds. Only the allowlisted
- * imageBlob `dataBase64` strings are exempt from the generic string bound.
+ * imageBlob `dataBase64` and image-action `source.base64` strings are exempt from the generic string bound.
  * Path-like fields (`sessionPath`, `path`, `filePath`, `sourcePath`,
  * `targetPath`) use the tighter 4 KiB bound.
  */
@@ -586,6 +588,16 @@ export function validateBrowserToHostMessage(
       return validateExtensionUiResponse(value);
     case 'requestDetail':
       return validateRequestDetailRef(value);
+    case 'performImageAction': {
+      const source = value.source as Record<string, unknown>;
+      if (!boundedString(value.requestId, 256)) return fail('performImageAction: oversized requestId');
+      if (source.kind === 'file' && ['path', 'reference', 'workingDirectory'].some(key => source[key] !== undefined
+        && !boundedString(source[key], MAX_IMAGE_PREVIEW_PATH_BYTES))) return fail('performImageAction: oversized file context');
+      if (!hasOnlyKeys(source, source.kind === 'file'
+        ? ['kind', 'path', 'reference', 'workingDirectory'] : ['kind', 'base64', 'mimeType'])) return fail('performImageAction: unknown source fields');
+      if (source.kind === 'inline' && decodedBase64Length(source.base64 as string) > BROWSER_INGRESS_LIMITS.maxImageRawBytes) return fail('performImageAction: oversized image');
+      return { ok: true, value: value as unknown as WebviewToHostMessage };
+    }
     case 'requestImagePreview':
       if (!boundedString(value.requestId, 256) || value.requestId.length === 0) {
         return fail('requestImagePreview: invalid requestId');

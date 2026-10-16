@@ -1277,6 +1277,16 @@ test('webview behavior contract: collapsed cards never subscribe; expansion subs
   assert.equal(posts.length, 2, 'unmount after collapse does not double-post');
 });
 
+test('image viewer actions are targeted platform effects with actual host capabilities', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /type:'performImageAction'/u);
+  assert.match(contract, /type:'imageActionResult'/u);
+  assert.match(contract, /ViewState.imageActionCapabilities/u);
+  assert.match(contract, /checked before execution and after completion/u);
+  assert.match(contract, /results never fall back to broadcast/u);
+  assert.match(contract, /browser transport does not invent native clipboard or file-shell support/u);
+});
+
 test('renderer-local image previews extend only to bounded inline Markdown raster presentation', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /same narrow allowance covers inline presentation of local Markdown raster images/u);

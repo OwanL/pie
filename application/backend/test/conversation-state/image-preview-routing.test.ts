@@ -40,6 +40,7 @@ function createRouter(options: {
   openTabPaths?: string[];
   preview?: (request: { path: string; reference?: string; workingDirectory?: string }) => Promise<unknown>;
   ownerCurrent?: boolean;
+  action?: (request: unknown) => Promise<void>;
 } = {}) {
   const state = {
     sessions: {
@@ -60,11 +61,12 @@ function createRouter(options: {
       postImperative: (message: unknown) => broadcast.push(message),
       postImperativeToRenderer: (rendererId: string, message: unknown) => targeted.push({ rendererId, message }),
       isRendererOwnerCurrent: () => options.ownerCurrent ?? true,
+      getViewGeneration: () => 4,
     } as never,
     () => undefined,
     (text: string) => ({ name: text, isPlaceholder: false }),
     () => false,
-    { previewImageFile: options.preview ?? (async () => undefined) } as never,
+    { previewImageFile: options.preview ?? (async () => undefined), performImageAction: options.action } as never,
   );
   return { router, state, targeted, broadcast, notices };
 }
@@ -84,6 +86,35 @@ const context: RendererCommandContext = {
   rendererGeneration: 7,
   kind: 'browser',
 };
+
+test('image actions delegate once and target success/failure without broadcasting', async () => {
+  const command = { type: 'performImageAction', requestId: 'action:1', action: 'copy', source: { kind: 'file', path: '/a.png' } } as const;
+  let calls = 0;
+  const success = createRouter({ action: async (request) => { calls++; assert.deepEqual(request, { action: command.action, source: command.source }); } });
+  await success.router.handle(command, context);
+  assert.equal(calls, 1);
+  assert.deepEqual(success.targeted, [{ rendererId: context.rendererId, message: { type: 'imageActionResult', requestId: command.requestId, success: true } }]);
+  const failure = createRouter({ action: async () => { throw new Error('clipboard failed'); } });
+  await failure.router.handle(command, context);
+  assert.deepEqual(failure.targeted[0].message, { type: 'imageActionResult', requestId: command.requestId, success: false, error: 'clipboard failed' });
+  assert.deepEqual([...success.broadcast, ...failure.broadcast, ...failure.notices], []);
+});
+
+test('image actions require current ownership and discard completion after replacement', async () => {
+  const command = { type: 'performImageAction', requestId: 'action:2', action: 'reveal', source: { kind: 'file', path: '/a.png' } } as const;
+  let calls = 0;
+  const stale = createRouter({ ownerCurrent: false, action: async () => { calls++; } });
+  await stale.router.handle(command, context);
+  await stale.router.handle(command);
+  assert.equal(calls, 0);
+  const options = { ownerCurrent: true, action: async () => { options.ownerCurrent = false; } };
+  const replaced = createRouter(options);
+  await replaced.router.handle(command, context);
+  assert.deepEqual(replaced.targeted, []);
+  const unavailable = createRouter();
+  await unavailable.router.handle(command, context);
+  assert.equal((unavailable.targeted[0].message as { success: boolean }).success, false);
+});
 
 test('image preview replies only to the requesting current renderer', async () => {
   const reads: unknown[] = [];

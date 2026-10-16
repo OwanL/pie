@@ -35,7 +35,7 @@ import type {
 } from '../protocol/index.js';
 import { isThinkingLevel, THINKING_LEVEL_SET } from '../protocol/thinking-level.js';
 import { isFiniteNumber } from '../../../lib/validation/type-guards.js';
-import { MAX_IMAGE_PREVIEW_PATH_BYTES } from '../protocol/image-preview.js';
+import { MAX_IMAGE_PREVIEW_PATH_BYTES, MAX_IMAGE_PREVIEW_BYTES, IMAGE_PREVIEW_MIME_BY_EXTENSION } from '../protocol/image-preview.js';
 import {
   DEFAULT_SUBAGENT_MAX_INFLIGHT,
   isSubagentConcurrencyLimit,
@@ -739,6 +739,25 @@ export function validateWebviewToHostMessage(
         return fail('retrySend: `disablePruning` must be a boolean when provided');
       }
       return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'performImageAction': {
+      if (!isString(value.requestId) || value.requestId.length === 0 || value.requestId.length > 256) return fail('performImageAction: invalid requestId');
+      if (!['copy', 'openInBrowser', 'reveal'].includes(value.action as string)) return fail('performImageAction: invalid action');
+      const source = value.source;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return fail('performImageAction: invalid source');
+      const s = source as Record<string, unknown>;
+      if (s.kind === 'file') {
+        if (!isString(s.path) || !s.path.length || s.path.length > MAX_IMAGE_PREVIEW_PATH_BYTES
+          || !isOptionalString(s.reference) || !isOptionalString(s.workingDirectory)
+          || (typeof s.reference === 'string' && s.reference.length > MAX_IMAGE_PREVIEW_PATH_BYTES)
+          || (typeof s.workingDirectory === 'string' && s.workingDirectory.length > MAX_IMAGE_PREVIEW_PATH_BYTES)) return fail('performImageAction: invalid file source');
+      } else if (s.kind === 'inline') {
+        if (!isString(s.base64) || !s.base64.length || s.base64.length > Math.ceil(MAX_IMAGE_PREVIEW_BYTES / 3) * 4
+          || (s.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s.base64))
+          || !Object.values(IMAGE_PREVIEW_MIME_BY_EXTENSION).includes(s.mimeType as string)) return fail('performImageAction: invalid inline source');
+      } else return fail('performImageAction: invalid source kind');
+      return { ok: true, value: value as WebviewToHostMessage };
+    }
 
     case 'openFile':
       if (!isString(value.path)) return fail('openFile: missing string `path`');

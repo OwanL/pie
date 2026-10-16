@@ -38,6 +38,7 @@ export interface SidebarProviderLike {
    *  responses answer the INITIATING renderer, not the sidebar. */
   postImperativeToRenderer?(rendererId: string, msg: any): void;
   isRendererOwnerCurrent?(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
+  getViewGeneration?(): number;
 }
 
 /** Narrow host capabilities used by side-effect-only router actions. */
@@ -57,6 +58,7 @@ export interface MessageRouterPlatform {
    *  listener. Hosts whose only renderer surface is the browser server must
    *  reject rather than stop the sole UI. */
   setBrowserServerEnabled(enabled: boolean): Promise<void>;
+  performImageAction?(request: import('../../lib/platform-contracts/image-actions.js').ImageActionRequest): Promise<void>;
   /** Read a bounded display-safe image preview through the host file adapter. */
   previewImageFile?(request: {
     path: string;
@@ -263,6 +265,9 @@ export class MessageRouter {
 
       case 'removeComposerInput':
         return this.onRemoveComposerInput(msg as Extract<WebviewToHostMessage, { type: 'removeComposerInput' }>);
+
+      case 'performImageAction':
+        return await this.onPerformImageAction(msg, context);
 
       case 'openFile':
         return await this.onOpenFile(msg as Extract<WebviewToHostMessage, { type: 'openFile' }>, context);
@@ -888,6 +893,29 @@ export class MessageRouter {
     });
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
     this.sidebarProvider.postState();
+  }
+
+  private async onPerformImageAction(
+    msg: Extract<WebviewToHostMessage, { type: 'performImageAction' }>,
+    context?: RendererCommandContext,
+  ): Promise<void> {
+    // Capture trusted ownership, not a renderer-supplied view generation.
+    const viewGeneration = this.sidebarProvider.getViewGeneration?.();
+    const current = () => !!context?.rendererId && viewGeneration !== undefined
+      && this.sidebarProvider.isRendererOwnerCurrent?.(context.rendererId, viewGeneration, context.rendererGeneration) === true;
+    if (!current()) return;
+    let error: string | undefined;
+    try {
+      if (!this.platform.performImageAction) throw new Error('Image actions are unavailable on this host.');
+      await this.platform.performImageAction({ action: msg.action, source: msg.source });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Image action failed.';
+    }
+    if (!current()) return;
+    this.sidebarProvider.postImperativeToRenderer?.(context!.rendererId, {
+      type: 'imageActionResult', requestId: msg.requestId, success: error === undefined,
+      ...(error !== undefined ? { error } : {}),
+    });
   }
 
   private async onRequestImagePreview(

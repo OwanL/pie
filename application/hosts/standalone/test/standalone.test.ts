@@ -110,6 +110,13 @@ test('standalone never offers stopping the sole UI: the listener switch seam rej
       getBrowserServer: () => undefined,
     });
 
+    assert.equal(typeof platform.editor.performImageAction, 'function');
+    assert.deepEqual(platform.editor.imageActionCapabilities, {
+      copy: process.platform === 'win32', openInBrowser: true, reveal: true,
+    }, 'browser controls describe the actual standalone adapter, not browser clipboard APIs');
+    await assert.rejects(() => platform.editor.performImageAction!({
+      action: 'copy', source: { kind: 'inline', base64: 'bad', mimeType: 'image/png' },
+    }), /Invalid or oversized image payload/);
     assert.equal(platform.supportsBrowserServerToggle, undefined,
       'the standalone composition never claims an independent renderer surface');
     await assert.rejects(

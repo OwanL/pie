@@ -484,6 +484,8 @@ export interface ViewState {
   prefs: ChatPrefs;
   /** Actual browser-server state plus the persisted LAN exposure preference. */
   browserServer?: BrowserServerViewState;
+  /** Actual underlying host image actions; absent means unavailable. */
+  imageActionCapabilities?: { copy: boolean; openInBrowser: boolean; reveal: boolean };
   /** Configured MCP servers with their effective disabled state, discovered
    *  host-side from the adapter's config files (`~/.config/mcp/mcp.json`,
    *  `<agent dir>/mcp.json`, `.mcp.json`, `.pi/mcp.json`, …). The host fetches
@@ -616,6 +618,12 @@ export type HostToWebviewMessage =
   | {
       type: 'detailResult';
       result: DetailResult;
+    }
+  | {
+      type: 'imageActionResult';
+      requestId: string;
+      success: boolean;
+      error?: string;
     }
   | {
       /** Bounded, renderer-targeted ephemeral image preview response. */
@@ -777,6 +785,7 @@ type WebviewToHostMessagePayload =
       viewGeneration?: number;
       sessionPath?: string;
     }
+  | ({ type: 'performImageAction'; requestId: string } & import('../platform-contracts/image-actions.js').ImageActionRequest)
   | { type: 'openFilePicker' }
   | { type: 'openFile'; path: string; reference?: string; workingDirectory?: string }
   | { type: 'addComposerInput'; sessionPath: string; input: ComposerInputDraft }

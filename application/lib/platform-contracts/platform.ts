@@ -65,6 +65,7 @@ export interface HostNotifications {
 /** Host editor/file capabilities used by router actions and effects. */
 export interface HostEditorCapabilities {
   /** One-shot native action; failures must be returned to the initiating renderer. */
+  readonly imageActionCapabilities?: { copy: boolean; openInBrowser: boolean; reveal: boolean };
   performImageAction?(request: import('./image-actions.js').ImageActionRequest): Promise<void>;
   /** Show the host file picker and return selected filesystem paths. */
   openFilePicker(options: { title: string; openLabel: string }): Promise<readonly string[] | undefined>;
