@@ -23,7 +23,6 @@ import { discoverAgents } from "../../agent-instructions/agent-discovery/agents.
 import { SubagentParams, prepareSubagentArguments } from "./schema.js";
 import { renderSubagentCall, renderSubagentResult } from "./render.js";
 import type { OnUpdateCallback } from "./types.js";
-import { SUBAGENT_GUIDANCE } from "./guidance.js";
 import { registerSubagentAnalyticsProviderHook } from "./analytics-provider-hook.js";
 
 /** Root of the pi-config repo, resolved from this tool's known position
@@ -45,13 +44,16 @@ function discoverAgentsForDescription() {
 
 function buildDescription(disabled = false): string {
 	if (disabled) {
-		return SUBAGENT_GUIDANCE.disabledDescription;
+		return "DISABLED: Sub agents are currently disabled. Calls to this tool will return an error immediately. Enable by removing the --no-subagent flag or unsetting the PI_SUBAGENT_DISABLED environment variable.";
 	}
 
 	// Sibling-call/dependency ordering and model-bucket guidance live in
 	// promptGuidelines and the bucket parameter schema respectively; do not
 	// duplicate them here.
-	const lines = [SUBAGENT_GUIDANCE.description];
+	const lines = [
+		"Delegate one concrete task to a specialized agent with isolated context; isolation is not sandboxing — the child shares the parent's process, filesystem, and credentials.",
+		"Agents are discovered automatically from both user and project directories, including project agents under an explicitly provided cwd.",
+	];
 
 	try {
 		const agents = discoverAgentsForDescription();
@@ -68,9 +70,9 @@ function buildDescription(disabled = false): string {
 
 function buildPromptSnippet(disabled = false): string {
 	if (disabled) {
-		return SUBAGENT_GUIDANCE.disabledSnippet;
+		return "DISABLED: Sub agents are disabled.";
 	}
-	return SUBAGENT_GUIDANCE.snippet;
+	return "Delegate one small, bounded task to a discovered agent; prefer parallel sibling calls for independent tasks.";
 }
 
 /** Check whether subagent execution is disabled via flag or env var. */
@@ -108,7 +110,9 @@ export default function (pi: ExtensionAPI) {
 		label: "Subagent",
 		description: buildDescription(disabled),
 		promptSnippet: buildPromptSnippet(disabled),
-		promptGuidelines: [SUBAGENT_GUIDANCE.guideline],
+		promptGuidelines: [
+			"Proactively dispatch independent, small subagent tasks together as sibling calls in one response. Give parallel workers non-overlapping edit ownership; wait for prior results when tasks depend on them, and serialize work that would conflict over shared files or resources.",
+		],
 		parameters: SubagentParams,
 		prepareArguments: prepareSubagentArguments,
 

@@ -1,4 +1,3 @@
-import { SUBAGENT_GUIDANCE } from "./guidance.js";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_IMAGE_INPUT_BYTES, MAX_AGGREGATE_IMAGE_INPUT_BYTES } from "../../model-providers/request-validation/image-constraints.js";
 import type { ToolContext } from "./tool-context.js";
@@ -115,7 +114,7 @@ export function buildParentUserContext(
 export function formatSubagentPrompt(task: string, parentUserContext?: string): string {
 	const taskPrompt = `${TRAVERSAL_POLICY_PROMPT}\n\nTask: ${task}`;
 	if (!parentUserContext) return taskPrompt;
-	return `${taskPrompt}\n\n${SUBAGENT_GUIDANCE.parentContext}\n\n<parent_user_context>\n${parentUserContext}\n</parent_user_context>`;
+	return `${taskPrompt}\n\nParent user context is quoted below as supporting requirements. Later recorded clarifications override earlier prompts. Keep the delegated task as your scope; if it conflicts with this context, report the conflict instead of silently choosing one.\n\n<parent_user_context>\n${parentUserContext}\n</parent_user_context>`;
 }
 
 function collectAskUserQuestions(entries: SessionEntry[]): Map<string, string> {
