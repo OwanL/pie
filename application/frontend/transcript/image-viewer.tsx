@@ -28,7 +28,8 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
       const source = target.dataset.pieImagePath
         ? { kind: 'file' as const, path: target.dataset.pieImagePath, reference: target.dataset.pieImageReference, workingDirectory: target.dataset.pieImageCwd }
         : inlineViewerSource(target.src);
-      if (!source) return;
+      // Reuse supported inline embeds without granting native raster actions.
+      if (!source && !/^data:image\/svg\+xml[;,]/i.test(target.src)) return;
       event.preventDefault(); event.stopImmediatePropagation();
       target.focus();
       openImageViewer({ src: target.src, alt: target.alt || 'Image', source });
@@ -51,7 +52,7 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
     return () => { document.removeEventListener('click', open, true); document.removeEventListener('keydown', open, true); disconnect(); unsubscribe(); clearImageViewer(); };
   }, [adapter]);
   useEffect(() => {
-    request.current = null; clearTimeout(timer.current); setPending(false); setError(''); setZoom(1); setPan({ x: 0, y: 0 });
+    request.current = null; clearTimeout(timer.current); drag.current = null; dragged.current = false; setPending(false); setError(''); setZoom(1); setPan({ x: 0, y: 0 });
     if (!image) return;
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.querySelector('button')?.focus();
@@ -70,6 +71,7 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
   }, [image]);
   if (!image) return null;
   const action = (action: 'copy' | 'openInBrowser' | 'reveal') => {
+    if (!image.source || !capabilities?.[action] || pending) return;
     const requestId = `image-action:${Date.now()}:${Math.random()}`;
     request.current = requestId; setPending(true); setError('');
     timer.current = setTimeout(() => { if (request.current === requestId) { request.current = null; setPending(false); setError('Image action timed out. Please retry.'); } }, 15000);
@@ -84,18 +86,18 @@ export function ImageViewer({ adapter }: { adapter: AppAdapter }) {
       <button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button>
       <button aria-label="Reset image view" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>Fit · {Math.round(zoom * 100)}%</button>
       <button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button>
-      <button disabled={pending || !capabilities?.copy} onClick={() => action('copy')}>Copy image</button>
-      <button disabled={pending || !capabilities?.openInBrowser} onClick={() => action('openInBrowser')}>Open in browser</button>
-      <button disabled={pending || !capabilities?.reveal} onClick={() => action('reveal')}>Show in file system</button>
+      {image.source && capabilities?.copy && <button disabled={pending} onClick={() => action('copy')}>Copy image</button>}
+      {image.source && capabilities?.openInBrowser && <button disabled={pending} onClick={() => action('openInBrowser')}>Open in browser</button>}
+      {image.source && capabilities?.reveal && <button disabled={pending} onClick={() => action('reveal')}>Show in file system</button>}
       <button aria-label="Close image viewer" onClick={clearImageViewer}>×</button>
     </div>
+    <div class="image-viewer-status" role="status">{error || (pending ? 'Working…' : image.alt)}</div>
     <div class="image-viewer-stage" onClick={event => { if (dragged.current) { dragged.current = false; return; } if (event.target === event.currentTarget) clearImageViewer(); }}
       onWheel={event => { event.preventDefault(); changeZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12); }}
-      onPointerDown={event => { if (event.button !== 0 || event.target === event.currentTarget) return; event.preventDefault(); dragged.current = true; event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, y: event.clientY, px: pan.x, py: pan.y }; }}
-      onPointerMove={event => { const start = drag.current; if (start) { dragged.current = true; setPan({ x: start.px + event.clientX - start.x, y: start.py + event.clientY - start.y }); } }}
-      onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
+      onPointerDown={event => { if (event.button !== 0 || event.target === event.currentTarget) return; event.preventDefault(); dragged.current = false; event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, y: event.clientY, px: pan.x, py: pan.y }; }}
+      onPointerMove={event => { const start = drag.current; if (start) { dragged.current = dragged.current || Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 3; setPan({ x: start.px + event.clientX - start.x, y: start.py + event.clientY - start.y }); } }}
+      onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; dragged.current = false; }}>
       <img src={image.src} alt={image.alt} draggable={false} style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }} onError={() => setError('Image could not be loaded.')} />
     </div>
-    <div class="image-viewer-status" role="status">{error || (pending ? 'Working…' : image.alt)}</div>
   </div>;
 }

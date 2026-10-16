@@ -1,5 +1,5 @@
 export type ViewerSource = { kind: 'file'; path: string; reference?: string; workingDirectory?: string } | { kind: 'inline'; base64: string; mimeType: string };
-export interface ViewerImage { src: string; alt: string; source: ViewerSource }
+export interface ViewerImage { src: string; alt: string; source: ViewerSource | null }
 let image: ViewerImage | null = null;
 const listeners = new Set<(image: ViewerImage | null) => void>();
 export function openImageViewer(next: ViewerImage): void { image = next; for (const listener of listeners) listener(image); }

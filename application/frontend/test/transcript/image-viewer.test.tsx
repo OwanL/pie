@@ -17,6 +17,7 @@ test('inline sources reject non-raster and remote bytes', () => {
 test('viewer fits, zooms, routes correlated actions, exposes errors and restores focus', () => {
   const dom = new JSDOM('<body><button id="before">Before</button><div id="mount"></div></body>');
   for (const key of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'HTMLImageElement', 'KeyboardEvent'] as const) Object.defineProperty(globalThis, key, { configurable: true, value: key === 'window' ? dom.window : dom.window[key] });
+  for (const name of ['onpointerdown', 'onpointermove', 'onpointerup', 'onpointercancel']) Object.defineProperty(dom.window.HTMLElement.prototype, name, { configurable: true, value: null });
   const mount = document.getElementById('mount')!;
   const before = document.getElementById('before')!;
   before.focus();
@@ -27,7 +28,7 @@ test('viewer fits, zooms, routes correlated actions, exposes errors and restores
   act(() => openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Chart', source: { kind: 'inline', mimeType: 'image/png', base64: 'YQ==' } }));
   assert.ok(mount.querySelector('[role="dialog"]'));
   const button = (label: string) => Array.from(mount.querySelectorAll('button')).find(node => node.textContent === label)!;
-  assert.equal(button('Open in browser').disabled, true);
+  assert.equal(button('Open in browser'), undefined);
   act(() => button('+').click());
   assert.match(mount.querySelector('img')!.style.transform, /scale\(1.25\)/);
   act(() => button('Copy image').click());
@@ -53,6 +54,27 @@ test('viewer fits, zooms, routes correlated actions, exposes errors and restores
   act(() => receive({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/b' } }));
   assert.equal(mount.querySelector('img'), null);
   act(() => clearImageViewer());
+  thumbnail.src = 'data:image/svg+xml;base64,PHN2Zy8+';
+  act(() => thumbnail.click());
+  assert.ok(mount.querySelector('[role="dialog"]'), 'rendered SVG opens');
+  assert.equal(button('Copy image'), undefined);
+  assert.equal(button('Open in browser'), undefined);
+  assert.equal(button('Show in file system'), undefined);
+  const viewerImage = mount.querySelector('img')!;
+  act(() => viewerImage.dispatchEvent(new dom.window.Event('error')));
+  assert.match(mount.querySelector('[role="status"]')!.textContent!, /could not be loaded/);
+  assert.equal(mount.querySelector('.image-viewer-toolbar')!.nextElementSibling, mount.querySelector('[role="status"]'));
+  const stage = mount.querySelector('.image-viewer-stage')!;
+  (stage as any).setPointerCapture = () => {};
+  const pointer = (type: string, x: number) => new dom.window.MouseEvent(type, { bubbles: true, button: 0, clientX: x });
+  act(() => viewerImage.dispatchEvent(pointer('pointerdown', 0)));
+  act(() => stage.dispatchEvent(pointer('pointermove', 20)));
+  act(() => stage.dispatchEvent(pointer('pointerup', 20)));
+  act(() => (stage as HTMLElement).click());
+  assert.ok(mount.querySelector('[role="dialog"]'), 'drag release does not dismiss');
+  act(() => (stage as HTMLElement).click());
+  assert.equal(mount.querySelector('[role="dialog"]'), null, 'next backdrop click dismisses');
+  assert.equal(sent.length, 1, 'SVG never requests native actions');
   act(() => render(null, mount));
   dom.window.close();
 });
