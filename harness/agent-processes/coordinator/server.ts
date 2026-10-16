@@ -5128,11 +5128,15 @@ export class BackendServer {
         // command has claimed the cold lease they must wait and reselect the
         // winning authority. Falling through to the coordinator while the
         // route is promoting/retiring only guarantees a stale cold read.
+        // models.list alone may use the provisional, session-specific catalog
+        // during promotion: it publishes no conversation/runtime state. Hot
+        // availability still comes from the worker; retirement still waits.
         if (sessionPath
           && !ISOLATED_PROMOTION_METHODS.has(request.method)
           && isCoordinatorOperationAllowed(request.method, request.params)
           && (WorkerRuntimeRouter.isHotOperation(request.method) || request.method === 'session.duplicate')
-          && (routeState?.state === 'promoting' || routeState?.state === 'retiring')) {
+          && (routeState?.state === 'promoting' || routeState?.state === 'retiring')
+          && !(request.method === 'models.list' && routeState.state === 'promoting')) {
           await this.waitForSessionBrowseAuthority(sessionPath);
           routeState = router.getRoute(sessionPath);
         }
