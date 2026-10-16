@@ -11,10 +11,18 @@ export interface ImageActionAdapter extends FilePathResolverAdapter {
   copyImage(filePath: string): Promise<void>;
   openInBrowser(filePath: string): Promise<void>;
   reveal(filePath: string): Promise<void>;
+  /** Optional OS-temp parent and clock for deterministic lifecycle tests. */
+  tempRoot?: string;
+  now?: () => number;
 }
 
-/** No state, cache, or transcript retention: only the action owns these bytes. */
+const IMAGE_ACTION_TEMP_DIRECTORY = 'pie-image-actions';
+const IMAGE_ACTION_TEMP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const IMAGE_ACTION_TEMP_FILE = /^image-action-(\d+)-[0-9a-f-]+\.(?:html|png|jpe?g|gif|webp|bmp)$/i;
+
+/** Retain artifacts for delayed browser/file consumers; later image actions reap owned files after 7 days. */
 export async function performImageAction(request: ImageActionRequest, adapter: ImageActionAdapter): Promise<void> {
+  const tempDirectory = await prepareImageActionTemp(adapter);
   let filePath: string;
   if (request.source.kind === 'file') {
     const resolved = await resolveFilePathWithFallback(request.source, adapter);
@@ -34,16 +42,15 @@ export async function performImageAction(request: ImageActionRequest, adapter: I
     }
     const bytes = Buffer.from(base64, 'base64');
     if (bytes.length > MAX_IMAGE_PREVIEW_BYTES) throw new Error('Image exceeds 10 MiB.');
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-image-'));
-    filePath = path.join(directory, `image${extension}`);
+    filePath = imageActionTempFile(tempDirectory, adapter.now?.() ?? Date.now(), extension);
     try {
-      await fs.writeFile(filePath, bytes);
+      await fs.writeFile(filePath, bytes, { flag: 'wx' });
       const preview = await readImagePreviewWithFallback({ path: filePath }, {
         ...adapter, exists: async () => true, readFile: readBoundedImageFile,
       });
       if (!preview) throw new Error('Image data does not match a supported image format.');
     } catch (error) {
-      await fs.rm(directory, { recursive: true, force: true });
+      await fs.rm(filePath, { force: true });
       throw error;
     }
     // Keep the OS-temp copy: reveal/browser consumers may read it after return.
@@ -52,7 +59,7 @@ export async function performImageAction(request: ImageActionRequest, adapter: I
     case 'copy':
       try { await adapter.copyImage(filePath); }
       finally {
-        if (request.source.kind === 'inline') await fs.rm(path.dirname(filePath), { recursive: true, force: true });
+        if (request.source.kind === 'inline') await fs.rm(filePath, { force: true });
       }
       return;
     case 'openInBrowser': {
@@ -61,15 +68,37 @@ export async function performImageAction(request: ImageActionRequest, adapter: I
       const preview = await readImagePreviewWithFallback({ path: filePath }, {
         ...adapter, exists: async () => true, readFile: readBoundedImageFile,
       });
-      if (request.source.kind === 'inline') await fs.rm(path.dirname(filePath), { recursive: true, force: true });
+      if (request.source.kind === 'inline') await fs.rm(filePath, { force: true });
       if (!preview) throw new Error('Image is unavailable.');
-      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-image-browser-'));
-      const browserPath = path.join(directory, 'image.html');
-      await fs.writeFile(browserPath, `<!doctype html><meta charset="utf-8"><title>Image</title><style>body{margin:0;background:#222;display:grid;place-items:center;min-height:100vh}img{max-width:100%;height:auto}</style><img src="${preview.dataUrl}" alt="Image">`);
+      const browserPath = imageActionTempFile(tempDirectory, adapter.now?.() ?? Date.now(), '.html');
+      await fs.writeFile(browserPath, `<!doctype html><meta charset="utf-8"><title>Image</title><style>body{margin:0;background:#222;display:grid;place-items:center;min-height:100vh}img{max-width:100%;height:auto}</style><img src="${preview.dataUrl}" alt="Image">`, { flag: 'wx' });
       return adapter.openInBrowser(browserPath);
     }
     case 'reveal': return adapter.reveal(filePath);
   }
+}
+
+function imageActionTempFile(directory: string, now: number, extension: string): string {
+  return path.join(directory, `image-action-${Math.floor(now)}-${crypto.randomUUID()}${extension}`);
+}
+
+async function prepareImageActionTemp(adapter: ImageActionAdapter): Promise<string> {
+  const directory = path.join(adapter.tempRoot ?? os.tmpdir(), IMAGE_ACTION_TEMP_DIRECTORY);
+  await fs.mkdir(directory, { recursive: true });
+  const now = adapter.now?.() ?? Date.now();
+  let entries: import('node:fs').Dirent[];
+  try { entries = await fs.readdir(directory, { withFileTypes: true }); }
+  catch { return directory; }
+  await Promise.all(entries.filter((entry) => entry.isFile() && IMAGE_ACTION_TEMP_FILE.test(entry.name)).map(async (entry) => {
+    const match = IMAGE_ACTION_TEMP_FILE.exec(entry.name);
+    if (!match || now - Number(match[1]) <= IMAGE_ACTION_TEMP_RETENTION_MS) return;
+    const filePath = path.join(directory, entry.name);
+    try {
+      const stat = await fs.lstat(filePath);
+      if (stat.isFile() && now - stat.mtimeMs > IMAGE_ACTION_TEMP_RETENTION_MS) await fs.unlink(filePath);
+    } catch { /* Best-effort cleanup; action availability does not depend on reaping. */ }
+  }));
+  return directory;
 }
 
 async function readBoundedImageFile(filePath: string, maxBytes: number): Promise<Uint8Array> {
@@ -97,11 +126,19 @@ function run(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<
 }
 
 /** Native clipboard image, never the path or data URL as clipboard text. */
+export function buildWindowsClipboardCommand(filePath: string): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
+  return {
+    command: 'powershell.exe',
+    args: ['-NoProfile', '-NonInteractive', '-STA', '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $image = [System.Drawing.Image]::FromFile($env:PIE_IMAGE_FILE); try { [System.Windows.Forms.Clipboard]::SetImage($image) } finally { $image.Dispose() }'],
+    env: { ...process.env, PIE_IMAGE_FILE: filePath },
+  };
+}
+
 export async function copyNativeImage(filePath: string): Promise<void> {
   if (process.platform === 'win32') {
-    await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command',
-      'Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $image = [System.Drawing.Image]::FromFile($env:PIE_IMAGE_FILE); try { [System.Windows.Forms.Clipboard]::SetImage($image) } finally { $image.Dispose() }'],
-    { ...process.env, PIE_IMAGE_FILE: filePath });
+    const invocation = buildWindowsClipboardCommand(filePath);
+    await run(invocation.command, invocation.args, invocation.env);
     return;
   }
   // No portable image clipboard API exists in Node. Do not claim text is an image.
