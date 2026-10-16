@@ -90,6 +90,17 @@ describe('ls-long rule', () => {
     assert.equal(out?.text, 'my file name.txt\n');
   });
 
+  test('preserves repeated whitespace in names, directories and symlink targets', () => {
+    const input = LS_L_OUTPUT.replace('src', 'my  dir').replace('readme.md', 'my\t\tfile.md').replace('link -> target', 'my  link -> some  target');
+    assert.equal(rule('ls-long', mod).run(input, bash('ls -l'))?.text, 'my  dir/\nmy\t\tfile.md\nmy  link -> some  target\n');
+  });
+
+  test('keeps output with any unmatched diagnostic even above the old threshold', () => {
+    for (const diagnostic of ["ls: cannot access missing: No such file", 'total 24 unexpected', 'subdirectory:']) {
+      assert.equal(rule('ls-long', mod).run(LS_L_OUTPUT + diagnostic + '\n', bash('ls -l')), null);
+    }
+  });
+
   test('no-op for plain ls (no -l flag)', () => {
     const out = rule('ls-long', mod).run(LS_L_OUTPUT, bash('ls'));
     assert.equal(out, null);
@@ -280,6 +291,18 @@ extension/src/b.ts:30:const y = 2
     for (const cmd of ['git grep foo', 'grep -rn foo .', 'egrep foo .', 'rga foo']) {
       const out = rule('grep-group', mod).run(RG_OUTPUT, bash(cmd));
       assert.ok(out, `${cmd} should be detected as grep-family`);
+    }
+  });
+
+  test('does not infer grep invocation from arguments or ambiguous shell syntax', () => {
+    for (const cmd of ['echo rg', 'printf "grep"', 'cat grep-results.txt', 'git show grep', 'echo foo | grep bar', 'rg foo; echo done', 'rg foo && echo done', 'rg $(echo foo)', 'rg foo > output', 'rg foo | cat', 'rg "unterminated', 'rg foo || head', 'rg"-report"', 'git"-x" grep', 'rg foo"bar"', 'rg"foo" bar']) {
+      assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash(cmd)), null, cmd);
+    }
+  });
+
+  test('supports simple wrappers, quoted arguments and sorting', () => {
+    for (const cmd of ['time rg foo', 'sudo rg foo', 'rg "foo bar"', "grep 'foo bar' .", 'rg foo | sort | head -20']) {
+      assert.ok(rule('grep-group', mod).run(RG_OUTPUT, bash(cmd)), cmd);
     }
   });
 

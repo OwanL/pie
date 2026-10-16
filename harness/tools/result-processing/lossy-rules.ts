@@ -62,37 +62,31 @@ const MONTH_RE = new RegExp(`^(?:${MONTHS.join("|")})$`);
 function parseLsLongLine(line: string): string | null {
   // First char is the type indicator: d, -, l, b, c, p, s.
   if (!/^[dlsbcpst\-]/.test(line)) return null;
-  const fields = line.split(/\s+/);
+  const fields = /^(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)[ \t](.+)$/.exec(line)?.slice(1);
+  if (!fields) return null;
   // perms(0) links(1) owner(2) group(3) size(4) month(5) day(6) time/year(7) name(8+)
   if (fields.length < 9) return null;
   if (!MONTH_RE.test(fields[5]!)) return null;
   if (!/^\d{1,2}$/.test(fields[6]!)) return null;
   if (!/^(?:\d{1,2}:\d{2}|\d{4})$/.test(fields[7]!)) return null;
-  const name = fields.slice(8).join(" ");
+  const name = fields[8]!;
   if (!name) return null;
   return line[0] === "d" ? `${name}/` : name; // dir → trailing slash; symlink keeps " -> target"
 }
 
-/** Parse -l output into display entries. Returns null unless a strong majority
- *  of non-blank lines are -l-shaped (uncertain → keep). */
+/** Parse -l output only when every non-blank line is understood. */
 function parseLsLong(text: string): { entries: string[] } | null {
   const lines = text.split(/\r?\n/);
   const entries: string[] = [];
-  let matched = 0;
-  let nonBlank = 0;
   for (const line of lines) {
     if (line.trim() === "") continue;
-    if (/^total\s+\d+/i.test(line.trim())) continue; // block summary — drop (don't count toward the threshold)
-    nonBlank++;
+    if (/^total[ \t]+\d+$/.test(line)) continue; // exact block summary only
     const entry = parseLsLongLine(line);
-    if (entry === null) continue;
+    if (entry === null) return null; // never discard unmatched diagnostics
     entries.push(entry);
-    matched++;
   }
-  if (matched === 0) return null;
-  // Require 60% of non-blank lines to parse — guards against mis-detecting
-  // other columnar output that happens to start with d/-/l.
-  if (matched < Math.ceil(nonBlank * 0.6)) return null;
+  if (entries.length === 0) return null;
+  // All non-summary lines parsed; no diagnostics are discarded.
   return { entries };
 }
 
@@ -211,25 +205,35 @@ function parseGitLog(text: string): GitCommit[] {
 // group arbitrary `word:number:text` tables; shape confirms a strong majority
 // of lines are `path:line:content` with a pathy first field. Unlike ls-long /
 // git-log we do NOT skip pipelines — grep's `path:line:` shape survives
-// `| head`, `| sort`, etc. (common rg idioms), and mixed output is rejected by
+// `| head`, `| sort` (supported simple pipelines), and mixed output is checked by
 // the 60% shape threshold. Multi-line scripts are still skipped (output is
 // ambiguous). Only applied when a path *repeats* — otherwise grouping adds
 // newlines/indents for zero savings; a shrink guard backstops that.
 // ---------------------------------------------------------------------------
 
-/** Commands whose output is grep-family `path:line:content`. Matches the
- *  invocation as a word anywhere in the command (handles `git grep`, `time rg`,
- *  `sudo rg`, `rg foo | head`). `git grep` is covered by the bare `grep` token. */
-const GREP_TOKEN_RE = /\b(?:rg|ripgrep|rga|grep|egrep|fgrep)\b/;
-
+/** Small invocation recognizer, not a shell parser. Ambiguous shell syntax
+ * is kept unchanged; only simple head/sort pipelines are supported. */
 function isGrepCommand(command: string): boolean {
-  const cmd = command.trim();
-  if (!GREP_TOKEN_RE.test(cmd)) return false;
-  // A real newline (post-trim) means a multi-line script — the output could
-  // be several commands' and isn't safely attributable to grep. (Pipes and
-  // `;`/`&&` are fine: grep's path:line: shape survives them.)
-  if (/\n/.test(cmd)) return false;
-  return true;
+  if (/[\r\n;#$`\\&<>(){}]/.test(command)) return false;
+  // Shell concatenates adjacent quoted/unquoted fragments into one argument
+  // (e.g. rg"-report" or git"-x" grep). This recognizer deliberately does not
+  // parse that syntax; reject it rather than treating fragments as separate words.
+  if (/(?:"[^"|]*"|'[^'|]*')[^\s|]|[^\s|](?:"[^"|]*"|'[^'|]*')/.test(command)) return false;
+  const words = command.trim().match(/"[^"|]*"|'[^'|]*'|[^\s'"|]+|\|/g);
+  if (!words || words.join("").replace(/\s/g, "") !== command.replace(/\s/g, "")) return false;
+  const segments: string[][] = [[]];
+  for (const word of words) {
+    if (word === "|") segments.push([]);
+    else segments[segments.length - 1]!.push(word);
+  }
+  const first = segments[0]!;
+  let i = 0;
+  if (first[i] === "time") i++;
+  if (first[i] === "sudo") i++;
+  if (first[i] === "git") {
+    if (first[++i] !== "grep") return false;
+  } else if (!/^(?:rg|ripgrep|rga|grep|egrep|fgrep)$/.test(first[i] ?? "")) return false;
+  return segments.slice(1).every((segment) => /^(?:head|sort)$/.test(segment[0] ?? ""));
 }
 
 /** Does `path` look like a real file path rather than a bare token? grep/rg
