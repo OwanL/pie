@@ -37,6 +37,8 @@
 }
 
 .context-menu-check {
+  order: 1;
+  margin-left: auto;
   flex-shrink: 0;
   color: var(--panel-accent);
 }
@@ -308,6 +310,7 @@
 }
 
 .deferred-triggers-menu-item-wait {
+  overflow-wrap: anywhere;
   font-size: 11px;
   color: var(--panel-muted);
   font-variant-numeric: tabular-nums;

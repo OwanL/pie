@@ -124,7 +124,7 @@ export function ContextMenu({
             onClose();
           }}
         >
-          Open File
+          Open file
         </button>
         <button
           class="context-menu-item"
@@ -134,7 +134,7 @@ export function ContextMenu({
             copyAndClose(menu.rawData);
           }}
         >
-          Copy Path
+          Copy path
         </button>
         {copyFailureNotice}
       </div>
@@ -147,7 +147,8 @@ export function ContextMenu({
   const expandToggle = prefType ? (
     <button
       class="context-menu-item"
-      role="menuitem"
+      role="menuitemcheckbox"
+      aria-checked={checked}
       type="button"
       onClick={() => {
         onSetPrefs(toggleChatPrefForContext(prefs, prefType));
@@ -219,7 +220,7 @@ export function ContextMenu({
   // confirm guards the destructive dispatch.
   const truncateItem = meta?.canTruncate && messageId && menu.sessionPath ? (
     <button
-      class={`context-menu-item${confirmingDelete ? ' is-danger' : ''}`}
+      class="context-menu-item is-danger"
       role="menuitem"
       type="button"
       onClick={() => {
@@ -239,6 +240,7 @@ export function ContextMenu({
     <>
       <div class="context-menu-separator" role="separator" />
       {editItem}
+      {editItem && truncateItem && <div class="context-menu-separator" role="separator" />}
       {truncateItem}
     </>
   ) : null;
@@ -246,6 +248,7 @@ export function ContextMenu({
   return (
     <div ref={ref} class="block-context-menu" role="menu" style={style} onMouseDown={(e) => e.stopPropagation()}>
       {expandToggle}
+      {expandToggle && <div class="context-menu-separator" role="separator" />}
       {copyMessageText}
       {copyMessageMarkdown}
       {copySelection}

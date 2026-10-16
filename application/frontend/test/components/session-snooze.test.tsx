@@ -37,7 +37,7 @@ for (const preset of SNOOZE_PRESETS) test(`snooze preset ${preset.label} sends a
     return h(SessionTabContextMenu, {
       tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
       runSummary: null, isPinned: false, hasDeferredTriggers: false,
-      onNew: noop, onContextAction: noop, onSnooze: commands.snooze, onClose: () => { closed++; },
+      onContextAction: noop, onSnooze: commands.snooze, onClose: () => { closed++; },
     });
   }
   act(() => render(h(Harness, {}), container));
@@ -54,7 +54,7 @@ test('snooze cascading menu supports arrow navigation and one-layer Escape', () 
   act(() => render(h(SessionTabContextMenu, {
     tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
     runSummary: null, isPinned: false, hasDeferredTriggers: false,
-    onNew: noop, onContextAction: noop, onSnooze: noop, onClose: () => { closed++; },
+    onContextAction: noop, onSnooze: noop, onClose: () => { closed++; },
   }), container));
   act(() => button(container, 'Snooze…').focus());
   press('ArrowRight');
@@ -81,20 +81,20 @@ test('hover-open submenu leaves parent keyboard navigation available', () => fix
   act(() => render(h(SessionTabContextMenu, {
     tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
     runSummary: null, isPinned: false, hasDeferredTriggers: false,
-    onNew: noop, onContextAction: noop, onSnooze: noop, onClose: noop,
+    onContextAction: noop, onSnooze: noop, onClose: noop,
   }), container));
   const trigger = button(container, 'Snooze…');
   act(() => { trigger.focus(); trigger.dispatchEvent(new MouseEvent('mouseenter')); });
   assert.ok(document.body.querySelector('[aria-label="Snooze A quiet session"]'));
   assert.equal(document.activeElement, trigger);
   press('ArrowDown');
-  assert.equal(document.activeElement, button(container, 'Close Tab'));
+  assert.equal(document.activeElement, button(container, 'Close tab'));
   press('ArrowUp');
   assert.equal(document.activeElement, trigger);
   press('Home');
-  assert.equal(document.activeElement, button(container, 'Pin Tab'));
+  assert.equal(document.activeElement, button(container, 'Copy session path'));
   press('End');
-  assert.equal(document.activeElement, button(container, 'Copy Session Path'));
+  assert.equal(document.activeElement, button(container, 'Close tab'));
   act(() => trigger.focus());
   press('ArrowRight');
   assert.equal(document.activeElement, button(document.body, '4 hours'));
@@ -154,7 +154,7 @@ test('pending tabs and activity arriving while presets are open cannot snooze', 
   const props = {
     tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
     runSummary: null, isPinned: false, hasDeferredTriggers: false,
-    onNew: noop, onContextAction: noop, onSnooze: () => { posted++; }, onClose: noop,
+    onContextAction: noop, onSnooze: () => { posted++; }, onClose: noop,
   };
   act(() => render(h(SessionTabContextMenu, { ...props,
     tabContextMenu: { ...props.tabContextMenu, tabPath: '__pending__:one' } }), container));

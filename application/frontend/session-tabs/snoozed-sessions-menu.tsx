@@ -36,6 +36,7 @@ function SnoozedMenu({ sessions, trigger, onRestore, onClose, available }: {
   return (
     <div ref={ref} class="block-context-menu snoozed-sessions-menu" role="menu"
       aria-label="Snoozed sessions" style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}>
+      <div class="session-tab-context-title">Snoozed sessions · select to restore early</div>
       {sessions.map((session) => (
         <button key={session.path} class="context-menu-item snoozed-session-item" role="menuitem" type="button"
           disabled={!available} title={session.name} data-session-path={session.path}

@@ -59,7 +59,7 @@ function keydown(key: string): void {
   });
 }
 
-test('file-path context menu offers Open File and Copy Path without Copy raw', async () => {
+test('file-path context menu offers Open file and Copy path without Copy raw', async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   const opened: Array<{ path: string; reference?: string; workingDirectory?: string }> = [];
@@ -93,7 +93,7 @@ test('file-path context menu offers Open File and Copy Path without Copy raw', a
     });
 
     const labels = Array.from(container.querySelectorAll('button')).map((button) => button.textContent?.trim());
-    assert.deepEqual(labels, ['Open File', 'Copy Path']);
+    assert.deepEqual(labels, ['Open file', 'Copy path']);
 
     act(() => {
       (container.querySelector('button') as HTMLButtonElement).click();
@@ -108,7 +108,7 @@ test('file-path context menu offers Open File and Copy Path without Copy raw', a
       (container.querySelectorAll('button')[1] as HTMLButtonElement).click();
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(copied, ['/workspace/pie/reveal/docs/foo.md'], 'Copy Path keeps using the resolved rawData');
+    assert.deepEqual(copied, ['/workspace/pie/reveal/docs/foo.md'], 'Copy path keeps using the resolved rawData');
   } finally {
     render(null, container);
     container.remove();
@@ -117,7 +117,7 @@ test('file-path context menu offers Open File and Copy Path without Copy raw', a
   }
 });
 
-test('file-path Open File keeps its captured cwd after the active session changes', () => {
+test('file-path Open file keeps its captured cwd after the active session changes', () => {
   const menuContainer = document.createElement('div');
   document.body.appendChild(menuContainer);
   const activeSessionPathRef = { current: '/sessions/old' };
@@ -162,8 +162,8 @@ test('file-path Open File keeps its captured cwd after the active session change
   // replace the renderer-captured cwd used by basename fallback.
   activeSessionPathRef.current = '/sessions/new';
   const openButton = Array.from(menuContainer.querySelectorAll('button'))
-    .find((button) => button.textContent?.trim() === 'Open File');
-  assert.ok(openButton, 'the captured file menu should render Open File');
+    .find((button) => button.textContent?.trim() === 'Open file');
+  assert.ok(openButton, 'the captured file menu should render Open file');
   act(() => { (openButton as HTMLButtonElement).click(); });
   assert.deepEqual(posted, [{
     type: 'openFile',

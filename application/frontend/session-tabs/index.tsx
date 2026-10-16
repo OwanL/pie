@@ -706,7 +706,6 @@ function SessionTabsView({
             deferredPathSet.has(tabContextMenu.tabPath),
             hasPendingRequest(pendingExtensionUIRequestsBySession, tabContextMenu.tabPath)) ?? (!backendReady ? 'Snoozing is available when the backend is ready.' : undefined)}
           onSnooze={onSnooze}
-          onNew={onNew}
           onContextAction={onContextAction}
           onGroupPinnedTab={onGroupPinnedTab}
           onUngroupPinnedTab={onUngroupPinnedTab}

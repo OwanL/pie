@@ -311,11 +311,13 @@ test('right-clicking a group chip opens its dedicated menu without Close Group',
     act(() => { chip!.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 12 })); });
     const menu = container.querySelector('.pinned-group-context-menu');
     assert.ok(menu, 'group chip context menu opens');
-    assert.match(menu!.textContent ?? '', /Open Group/);
-    assert.match(menu!.textContent ?? '', /Copy Session Paths/);
+    assert.match(menu!.textContent ?? '', /Open group/);
+    assert.match(menu!.textContent ?? '', /Copy session paths/);
     assert.match(menu!.textContent ?? '', /Merge with Gamma \(2\)/);
-    assert.match(menu!.textContent ?? '', /Dissolve Group/);
-    assert.match(menu!.textContent ?? '', /Unpin Group/);
+    assert.match(menu!.textContent ?? '', /Dissolve group/);
+    assert.match(menu!.textContent ?? '', /Unpin group/);
+    const unpin = Array.from(menu!.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Unpin group');
+    assert.ok(unpin && !unpin.classList.contains('is-danger'), 'unpinning is reversible, not deletion');
     assert.doesNotMatch(menu!.textContent ?? '', /Close Group/);
   } finally {
     unmount();
@@ -347,18 +349,17 @@ test('right-clicking a dropdown member opens the full session menu with its grou
     assert.ok(menu);
     const menuText = menu!.textContent ?? '';
     for (const label of [
-      'Unpin Tab',
-      'Remove from Group',
+      'Unpin tab',
+      'Remove from group',
       'Continue task',
       'Start new task',
-      'Duplicate Tab',
-      'Close Tab',
-      'New Session',
-      'Copy Session Path',
+      'Duplicate tab',
+      'Close tab',
+      'Copy session path',
     ]) {
       assert.match(menuText, new RegExp(label), `group member menu includes ${label}`);
     }
-    const remove = Array.from(menu!.querySelectorAll('button')).find((button) => button.textContent?.includes('Remove from Group')) as HTMLButtonElement | undefined;
+    const remove = Array.from(menu!.querySelectorAll('button')).find((button) => button.textContent?.includes('Remove from group')) as HTMLButtonElement | undefined;
     assert.ok(remove);
     act(() => { remove!.click(); });
     assert.deepEqual(removed, { path: '/a', index: 0 });
@@ -368,7 +369,7 @@ test('right-clicking a dropdown member opens the full session menu with its grou
   }
 });
 
-test('a grouped dropdown member exposes Close Tab and closes that session', () => {
+test('a grouped dropdown member exposes Close tab and closes that session', () => {
   const restore = mockResizeObserver();
   const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
   let closedPath: string | null = null;
@@ -389,8 +390,8 @@ test('a grouped dropdown member exposes Close Tab and closes that session', () =
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu, 'the grouped member uses the full session context menu');
     const close = Array.from(menu!.querySelectorAll('button'))
-      .find((button) => button.textContent?.includes('Close Tab')) as HTMLButtonElement | undefined;
-    assert.ok(close, 'the session context menu includes Close Tab');
+      .find((button) => button.textContent?.includes('Close tab')) as HTMLButtonElement | undefined;
+    assert.ok(close, 'the session context menu includes Close tab');
     act(() => { close!.click(); });
     assert.equal(closedPath, '/b');
     assert.equal(container.querySelector('.session-tab-context-menu'), null, 'the menu closes after the action');
@@ -446,7 +447,7 @@ test('a group context menu copy uses newline-delimited paths and feedback', asyn
     act(() => { chip!.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 12 })); });
     const menu = container.querySelector('.pinned-group-context-menu');
     assert.ok(menu);
-    const copy = Array.from(menu!.querySelectorAll('button')).find((button) => button.textContent?.includes('Copy Session Paths')) as HTMLButtonElement | undefined;
+    const copy = Array.from(menu!.querySelectorAll('button')).find((button) => button.textContent?.includes('Copy session paths')) as HTMLButtonElement | undefined;
     assert.ok(copy);
     act(() => { copy!.click(); });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -519,7 +520,7 @@ test('the ContextMenu key on a pinned-group chip opens its dedicated group menu'
     act(() => { chipButton!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true })); });
     const menu = container.querySelector('.pinned-group-context-menu');
     assert.ok(menu, 'the keyboard request opens the group chip menu');
-    assert.match(menu!.textContent ?? '', /Open Group/);
+    assert.match(menu!.textContent ?? '', /Open group/);
   } finally {
     unmount();
     restore();
@@ -545,7 +546,7 @@ test('Shift+F10 on a dropdown member closes the dropdown and opens its member me
     assert.equal(container.querySelector('.pinned-tab-group-dropdown'), null, 'opening the member menu closes the dropdown (same as right-click)');
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu, 'the keyboard request opens the member menu');
-    assert.match(menu!.textContent ?? '', /Remove from Group/);
+    assert.match(menu!.textContent ?? '', /Remove from group/);
     act(() => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     assert.equal(container.querySelector('.session-tab-context-menu'), null);
     assert.equal(document.activeElement, chipButton, 'closing returns focus to the still-mounted group chip');

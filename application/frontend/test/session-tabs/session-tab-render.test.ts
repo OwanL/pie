@@ -178,11 +178,11 @@ test('tab context menu exposes menu semantics for every action', () => {
   assert.match(html, /aria-label="Context Menu Session tab actions"/);
   assert.deepEqual([...html.matchAll(/<button[^>]*role="menuitem"[^>]*>([\s\S]*?)<\/button>/g)]
     .map((match) => match[1].replace(/<[^>]*>/g, '').trim()), [
-      'Pin Tab', 'Duplicate Tab', 'Snooze…', 'Close Tab', 'New Session', 'Copy Session Path',
+      'Copy session path', 'Pin tab', 'Duplicate tab', 'Snooze…›', 'Close tab',
     ]);
   assert.equal((html.match(/role="separator"/g) ?? []).length, 2);
-  assert.match(html, /New Session/);
-  assert.match(html, /Copy Session Path/);
+  assert.doesNotMatch(html, />New Session<\/button>/);
+  assert.match(html, /Copy session path/);
 });
 
 test('delayed create exposes an explicit retry affordance', () => {
@@ -208,7 +208,7 @@ test('delayed create exposes an explicit retry affordance', () => {
   assert.match(html, /Retry session creation/);
 });
 
-// ─── SessionTabContextMenu: New Session / Copy Session Path / pending pin ──
+// ─── SessionTabContextMenu: New Session / Copy session path / pending pin ──
 
 function renderContextMenu(props: {
   tabPath: string;
@@ -218,7 +218,6 @@ function renderContextMenu(props: {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const actions: Array<{ action: import('../../session-tabs/types').SessionTabContextAction; tabPath: string }> = [];
-  let newCount = 0;
   let closes = 0;
   act(() => {
     render(h(SessionTabContextMenu, {
@@ -227,7 +226,6 @@ function renderContextMenu(props: {
       runSummary: props.runSummary ?? null,
       isPinned: props.isPinned ?? false,
       hasDeferredTriggers: false,
-      onNew: () => { newCount += 1; },
       onContextAction: (action, path) => { actions.push({ action, tabPath: path }); },
       onClose: () => { closes += 1; },
     }), host);
@@ -235,7 +233,6 @@ function renderContextMenu(props: {
   return {
     host,
     actions,
-    newClicked: () => newCount,
     closes: () => closes,
     buttons: () => Array.from(host.querySelectorAll('button')),
   };
@@ -258,8 +255,7 @@ test('tab context menu: Snooze exposes the contract presets without dispatching 
   const menu = renderContextMenu({ tabPath: '/sessions/a' });
   try {
     clickButton(menu.host, 'Snooze…');
-    assert.deepEqual(menu.buttons().map((button) => button.textContent?.trim()), [
-      'Back to tab actions', '4 hours', '8 hours', '12 hours', '24 hours', '48 hours', 'Until Monday morning',
+    assert.deepEqual(Array.from(document.body.querySelectorAll('.snooze-submenu button')).map((button) => button.textContent?.trim()), [ '4 hours', '8 hours', '12 hours', '24 hours', '48 hours', 'Until Monday morning',
     ]);
     assert.deepEqual(menu.actions, []);
     assert.equal(menu.closes(), 0);
@@ -268,16 +264,13 @@ test('tab context menu: Snooze exposes the contract presets without dispatching 
   }
 });
 
-test('tab context menu: New Session uses the onNew affordance and closes the menu', () => {
+test('tab context menu omits the unrelated New Session action', () => {
   const menu = renderContextMenu({ tabPath: '/sessions/a' });
-  clickButton(menu.host, 'New Session');
-  assert.equal(menu.newClicked(), 1);
-  assert.equal(menu.closes(), 1);
-  assert.deepEqual(menu.actions, [], 'New Session is not a per-tab context action');
+  assert.ok(!menu.buttons().some((button) => button.textContent?.trim() === 'New Session'));
   cleanupContextMenu(menu.host);
 });
 
-test('tab context menu: Copy Session Path stays webview-local with copied feedback', async () => {
+test('tab context menu: Copy session path stays webview-local with copied feedback', async () => {
   const writes: string[] = [];
   const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   try {
@@ -286,7 +279,7 @@ test('tab context menu: Copy Session Path stays webview-local with copied feedba
       value: { writeText: async (text: string) => { writes.push(text); } },
     });
     const menu = renderContextMenu({ tabPath: '/sessions/copy-me' });
-    const button = clickButton(menu.host, 'Copy Session Path');
+    const button = clickButton(menu.host, 'Copy session path');
     assert.equal(menu.closes(), 0, 'copy stays open to show feedback');
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(writes, ['/sessions/copy-me']);
@@ -301,14 +294,14 @@ test('tab context menu: Copy Session Path stays webview-local with copied feedba
 test('tab context menu: pending tabs cannot offer or pin (pin disabled)', () => {
   const menu = renderContextMenu({ tabPath: `${PENDING_SESSION_PREFIX}wait` });
   const pin = Array.from(menu.host.querySelectorAll('button'))
-    .find((el) => el.textContent?.trim().includes('Pin Tab'));
-  assert.ok(pin, 'expected a Pin Tab button');
+    .find((el) => el.textContent?.trim().includes('Pin tab'));
+  assert.ok(pin, 'expected a Pin tab button');
   assert.equal((pin as HTMLButtonElement).disabled, true, 'pin is disabled for pending tabs');
-  clickButton(menu.host, 'Pin Tab');
+  clickButton(menu.host, 'Pin tab');
   assert.deepEqual(menu.actions, [], 'a disabled pin must not dispatch');
-  // Copy Session Path is equally meaningless for a pending sentinel path.
+  // Copy session path is equally meaningless for a pending sentinel path.
   const copy = Array.from(menu.host.querySelectorAll('button'))
-    .find((el) => el.textContent?.trim().includes('Copy Session Path'));
+    .find((el) => el.textContent?.trim().includes('Copy session path'));
   assert.equal((copy as HTMLButtonElement).disabled, true);
   cleanupContextMenu(menu.host);
 });

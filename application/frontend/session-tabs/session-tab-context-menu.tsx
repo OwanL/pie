@@ -11,7 +11,6 @@ import { useMenuViewportClamp } from '../lib/components/useMenuViewportClamp';
 import { getSessionTabRunMenuItems } from './run-state';
 import type { SessionTabContextAction, SessionTabContextMenuState } from './types';
 import type { PinnedItem } from '../../lib/session-tabs/tab-behavior.js';
-import { CloseIcon, DuplicateIcon } from './icons';
 import { type SnoozeDuration } from './snooze';
 import { SnoozeSubmenu } from './snooze-submenu';
 
@@ -23,11 +22,9 @@ export interface SessionTabContextMenuProps {
   /** Rendered pinned strip items used for dynamic Group with… actions. */
   pinnedItems?: PinnedItem[];
   /** True when this tab's session is the delivery target of a pending
-   *  deferred trigger — greys out the Close Tab item with an explanatory
+   *  deferred trigger — greys out the Close tab item with an explanatory
    *  tooltip. */
   hasDeferredTriggers: boolean;
-  /** Create a new session (the strip's existing "+" affordance). */
-  onNew: () => void;
   snoozeBlockedReason?: string;
   onSnooze?: (path: string, duration: SnoozeDuration) => void;
   onContextAction: (action: SessionTabContextAction, tabPath: string) => void;
@@ -43,7 +40,6 @@ export function SessionTabContextMenu({
   isPinned,
   pinnedItems = [],
   hasDeferredTriggers,
-  onNew,
   snoozeBlockedReason,
   onSnooze,
   onContextAction,
@@ -59,7 +55,7 @@ export function SessionTabContextMenu({
   const groupActions = isPinned && target?.kind === 'tab'
     ? pinnedItems.filter((item) => item.kind === 'group' || item.path !== tabContextMenu.tabPath)
     : [];
-  // "Pin and Merge" is only offered to unpinned, non-pending tabs with at
+  // "Pin and group" is only offered to unpinned, non-pending tabs with at
   // least one pinned strip item to merge into (the leftmost one).
   const canPinAndMerge = !isPinned && !isPending && target?.kind !== 'group' && pinnedItems.length > 0;
   const runItems = getSessionTabRunMenuItems(runSummary);
@@ -102,7 +98,7 @@ export function SessionTabContextMenu({
     },
   });
 
-  // Webview-local copy feedback for "Copy Session Path" (same pattern as the
+  // Webview-local copy feedback for "Copy session path" (same pattern as the
   // changed-file menu's Copy path). The timer is cleared on unmount.
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,10 +129,21 @@ export function SessionTabContextMenu({
         role="menuitem"
         type="button"
         disabled={isPending}
+        title={isPending ? 'The session path exists once the session has been created.' : undefined}
+        onClick={copySessionPath}
+      >
+        {copied ? 'Copied!' : 'Copy session path'}
+      </button>
+      <div class="context-menu-separator" role="separator" />
+      <button
+        class="context-menu-item"
+        role="menuitem"
+        type="button"
+        disabled={isPending}
         title={isPending ? 'A pending session cannot be pinned yet.' : undefined}
         onClick={() => onContextAction(isPinned ? 'unpin' : 'pin', tabContextMenu.tabPath)}
       >
-        {isPinned ? 'Unpin Tab' : 'Pin Tab'}
+        {isPinned ? 'Unpin tab' : 'Pin tab'}
       </button>
       {canPinAndMerge && (
         <button
@@ -146,7 +153,7 @@ export function SessionTabContextMenu({
           title="Pin this tab and group it with the leftmost pinned tab (merging into a group when the leftmost item is one)"
           onClick={() => onContextAction('pin-merge', tabContextMenu.tabPath)}
         >
-          Pin and Merge
+          Pin and group
         </button>
       )}
       {isGroupMember && (
@@ -159,7 +166,7 @@ export function SessionTabContextMenu({
             onClose?.();
           }}
         >
-          Remove from Group
+          Remove from group
         </button>
       )}
       {groupActions.length > 0 && (
@@ -188,7 +195,6 @@ export function SessionTabContextMenu({
           })}
         </>
       )}
-      <div class="context-menu-separator" role="separator" />
       {runItems.map((item) => (
         <button
           key={item.action}
@@ -200,7 +206,6 @@ export function SessionTabContextMenu({
           {item.label}
         </button>
       ))}
-      {runItems.length > 0 && <div class="context-menu-separator" role="separator" />}
       <button
         class="context-menu-item"
         role="menuitem"
@@ -208,8 +213,7 @@ export function SessionTabContextMenu({
         disabled={isPending}
         onClick={() => onContextAction('duplicate', tabContextMenu.tabPath)}
       >
-        <DuplicateIcon />
-        Duplicate Tab
+        Duplicate tab
       </button>
       <button ref={snoozeItemRef} class="context-menu-item" role="menuitem" type="button"
         disabled={!!snoozeReason} title={snoozeReason}
@@ -223,6 +227,7 @@ export function SessionTabContextMenu({
         menuRef={childRef} label={ctxLabel} reason={snoozeReason} keyboard={keyboardOpen}
         onClose={closeChild} onEnter={cancelClose} onLeave={scheduleClose}
         onSelect={(duration) => { onSnooze?.(tabContextMenu.tabPath, duration); onClose?.(); }} />}
+      <div class="context-menu-separator" role="separator" />
       <button
         class="context-menu-item"
         role="menuitem"
@@ -231,31 +236,7 @@ export function SessionTabContextMenu({
         title={hasDeferredTriggers ? 'Pending deferred trigger(s) — cancel from the status bar first.' : undefined}
         onClick={() => onContextAction('close', tabContextMenu.tabPath)}
       >
-        <CloseIcon />
-        Close Tab
-      </button>
-      <div class="context-menu-separator" role="separator" />
-      <button
-        class="context-menu-item"
-        role="menuitem"
-        type="button"
-        title="Create a new session in this tab strip"
-        onClick={() => {
-          onNew();
-          onClose?.();
-        }}
-      >
-        New Session
-      </button>
-      <button
-        class="context-menu-item"
-        role="menuitem"
-        type="button"
-        disabled={isPending}
-        title={isPending ? 'The session path exists once the session has been created.' : undefined}
-        onClick={copySessionPath}
-      >
-        {copied ? 'Copied!' : 'Copy Session Path'}
+        Close tab
       </button>
     </div>
   );

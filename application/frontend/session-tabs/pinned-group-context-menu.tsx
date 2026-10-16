@@ -86,7 +86,7 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        Open Group
+        Open group
       </button>
       <button
         class="context-menu-item"
@@ -94,7 +94,7 @@ export function PinnedGroupContextMenu({
         type="button"
         onClick={copySessionPaths}
       >
-        {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy Session Paths'}
+        {copyState === 'copied' ? 'Copied!' : copyState === 'failed' ? 'Copy failed' : 'Copy session paths'}
       </button>
       {mergeTargets.length > 0 && <div class="context-menu-separator" role="separator" />}
       {mergeTargets.map((item) => {
@@ -125,10 +125,10 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        Dissolve Group
+        Dissolve group
       </button>
       <button
-        class="context-menu-item is-danger"
+        class="context-menu-item"
         role="menuitem"
         type="button"
         onClick={() => {
@@ -136,7 +136,7 @@ export function PinnedGroupContextMenu({
           onClose();
         }}
       >
-        Unpin Group
+        Unpin group
       </button>
     </div>
   );

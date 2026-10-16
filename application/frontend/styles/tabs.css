@@ -784,17 +784,17 @@ body.session-tab-dragging {
 
 .snoozed-session-details {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
   flex: 1;
 }
 
 .snoozed-session-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .snoozed-session-details time {
@@ -803,9 +803,7 @@ body.session-tab-dragging {
 }
 
 .snoozed-session-details time {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
   min-width: 0;
   line-height: 1.4;
 }

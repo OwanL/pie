@@ -128,6 +128,7 @@ export function FileChangeContextMenu({
       <button class="context-menu-item" role="menuitem" type="button" onClick={copyPath}>
         {copied ? 'Copied!' : 'Copy path'}
       </button>
+      <div class="context-menu-separator" role="separator" />
       <button
         class="context-menu-item"
         role="menuitem"
@@ -141,7 +142,7 @@ export function FileChangeContextMenu({
       </button>
       <div class="context-menu-separator" role="separator" />
       <button
-        class={`context-menu-item${confirming ? ' is-danger' : ''}`}
+        class="context-menu-item is-danger"
         role="menuitem"
         type="button"
         onClick={onRevertClick}
