@@ -240,3 +240,157 @@ test('host restoration focuses adjacent manager rows, then stable New session wi
   assert.equal(selected, 0);
   assert.deepEqual(restored, [snoozed[1].path, snoozed[2].path, snoozed[0].path]);
 }));
+
+/* Right-click context menu on snoozed entries. */
+
+const snoozedEntries = [
+  { path: '/s/A.jsonl', name: 'Alpha', wakeAt: Date.UTC(2026, 9, 19, 20) },
+  { path: '/s/B.jsonl', name: 'Beta', wakeAt: Date.UTC(2026, 10, 23, 20) },
+];
+
+function mountSnoozedManager(container: HTMLDivElement, options: { withCloseCallback?: boolean } = {}) {
+  const posted: WebviewToHostMessage[] = [];
+  const closedPaths: string[] = [];
+  const restored: string[] = [];
+  function Harness() {
+    const commands = useSnoozeCommands((message) => posted.push(message));
+    return h(SessionTabs, { ...tabsProps, snoozedSessions: snoozedEntries, openTabPaths: [], activeSession: null,
+      onSnooze: commands.snooze, onRestoreSnoozed: (path: string) => { restored.push(path); commands.restore(path); },
+      ...(options.withCloseCallback !== false ? { onClose: (p: string) => closedPaths.push(p) } : {}) });
+  }
+  act(() => render(h(Harness, {}), container));
+  const manage = container.querySelector<HTMLButtonElement>('[aria-label="Manage snoozed sessions"]');
+  assert.ok(manage, 'manage trigger present');
+  act(() => manage.click());
+  return { posted, closedPaths, restored, manage };
+}
+
+function snoozedRow(container: HTMLElement, name: string) {
+  const row = container.querySelector<HTMLButtonElement>(`[aria-label="Restore early: ${name}"]`);
+  assert.ok(row, `missing snoozed row: ${name}`);
+  return row;
+}
+function entryMenu(container: HTMLElement) {
+  const menu = container.querySelector<HTMLDivElement>('[role="menu"][aria-label="Beta snoozed session actions"]');
+  assert.ok(menu, 'entry context menu missing');
+  return menu;
+}
+function openEntryViaRightClick(container: HTMLElement, name: string,
+  pointer: { clientX: number; clientY: number } = { clientX: 24, clientY: 24 }) {
+  const row = snoozedRow(container, name);
+  let consumed = true;
+  act(() => {
+    consumed = row.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, ...pointer,
+    }));
+  });
+  return { row, consumed };
+}
+function entryItems(container: HTMLElement) {
+  const buttons = Array.from(entryMenu(container).querySelectorAll<HTMLButtonElement>('button'));
+  assert.equal(buttons[0]?.textContent?.trim(), 'Restore early', 'Restore is the first entry menu item');
+  return buttons;
+}
+
+test('right-click opens a per-entry menu focused on Restore; Close uses the close-session callback',
+() => fixture((container) => {
+  const controls = mountSnoozedManager(container);
+  const { consumed } = openEntryViaRightClick(container, 'Beta');
+  assert.equal(consumed, false, 'native context menu is prevented');
+  assert.match(entryMenu(container).textContent ?? '', /Beta/);
+  const buttons = entryItems(container);
+  const close = buttons.find((item) => item.textContent?.trim() === 'Close');
+  assert.ok(close, 'Close item present with a close-session callback');
+  assert.equal(document.activeElement, buttons[0], 'Restore receives initial focus');
+  assert.equal(controls.posted.length, 0);
+  act(() => close!.click());
+  assert.deepEqual(controls.closedPaths, ['/s/B.jsonl']);
+  assert.equal(controls.posted.length, 0, 'close posts no snooze commands');
+  assert.equal(container.querySelector('[role="menu"][aria-label="Beta snoozed session actions"]'), null);
+  assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
+  assert.equal(document.activeElement, snoozedRow(container, 'Beta'), 'focus returns to the row');
+}));
+
+test('entry menu Restore mirrors left-click restore while the manager stays open',
+() => fixture((container) => {
+  const controls = mountSnoozedManager(container);
+  openEntryViaRightClick(container, 'Beta');
+  act(() => entryItems(container)[0].click());
+  assert.deepEqual(controls.posted, [{ type: 'restoreSnoozedSession', sessionPath: '/s/B.jsonl' }]);
+  assert.deepEqual(controls.closedPaths, []);
+  assert.ok(snoozedRow(container, 'Beta'), 'no optimistic local removal; membership stays host-owned');
+  assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
+  assert.equal(document.activeElement, snoozedRow(container, 'Beta'));
+}));
+
+test('Escape dismisses the entry menu, then the manager, one layer at a time',
+() => fixture((container) => {
+  mountSnoozedManager(container);
+  openEntryViaRightClick(container, 'Beta');
+  assert.ok(entryMenu(container));
+  const row = snoozedRow(container, 'Beta');
+  press('Escape');
+  assert.equal(container.querySelector('[role="menu"][aria-label="Beta snoozed session actions"]'), null);
+  assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
+  assert.equal(document.activeElement, row, 'focus returns to the row');
+  press('Escape');
+  assert.equal(container.querySelector('[aria-label="Snoozed sessions"]'), null);
+  assert.equal(document.activeElement, container.querySelector('[aria-label="Manage snoozed sessions"]'));
+}));
+
+test('entry menu navigation and outside clicks keep layered dismissal intact',
+() => fixture((container) => {
+  mountSnoozedManager(container);
+  openEntryViaRightClick(container, 'Beta');
+  press('ArrowDown');
+  assert.equal(document.activeElement, entryItems(container)[1], 'Close reachable by arrow');
+  act(() => { entryMenu(container).querySelector('button')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+  assert.ok(entryMenu(container), 'mousedown inside the entry menu keeps both layers open');
+  assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'));
+  act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+  assert.equal(container.querySelector('[role="menu"][aria-label="Beta snoozed session actions"]'), null);
+  assert.equal(container.querySelector('[aria-label="Snoozed sessions"]'), null, 'outside click closes both layers');
+}));
+
+test('manager row pointer interaction does not dismiss the manager', () => fixture((container) => {
+  mountSnoozedManager(container);
+  act(() => { snoozedRow(container, 'Beta').dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+  assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'));
+}));
+
+test('left-click restore and keyboard context-menu dismissal coexist', () => fixture((container) => {
+  const controls = mountSnoozedManager(container);
+  // Left click remains the primary restore path.
+  act(() => snoozedRow(container, 'Beta').click());
+  assert.deepEqual(controls.posted, [{ type: 'restoreSnoozedSession', sessionPath: '/s/B.jsonl' }]);
+  act(() => snoozedRow(container, 'Alpha').focus());
+  act(() => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'F10', shiftKey: true, bubbles: true, cancelable: true,
+  })); });
+  const menu = container.querySelector<HTMLDivElement>('[role="menu"][aria-label="Alpha snoozed session actions"]');
+  assert.ok(menu, 'keyboard context menu opens the entry menu for Alpha');
+  assert.equal(document.activeElement, menu.querySelector('button'));
+  press('Escape');
+  assert.equal(document.activeElement, snoozedRow(container, 'Alpha'));
+  press('ContextMenu');
+  assert.ok(container.querySelector('[aria-label="Alpha snoozed session actions"]'));
+}));
+
+test('host membership updates dismiss removed entry actions and focus the neighboring row', () => fixture((container) => {
+  const publish = (sessions: typeof snoozedEntries, backendReady = true) => act(() => render(h(SessionTabs, {
+    ...tabsProps, snoozedSessions: sessions, openTabPaths: [], activeSession: null,
+    onRestoreSnoozed: noop, backendReady,
+  }), container));
+  publish(snoozedEntries);
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="Manage snoozed sessions"]')!.click());
+  openEntryViaRightClick(container, 'Beta');
+  publish([snoozedEntries[0]]);
+  assert.equal(container.querySelector('[aria-label="Beta snoozed session actions"]'), null);
+  assert.equal(document.activeElement, snoozedRow(container, 'Alpha'));
+  openEntryViaRightClick(container, 'Alpha');
+  publish([snoozedEntries[0]], false);
+  assert.equal(container.querySelector('[aria-label="Alpha snoozed session actions"]'), null);
+  assert.equal(snoozedRow(container, 'Alpha').disabled, true);
+  publish([]);
+  assert.equal(document.activeElement, container.querySelector('[aria-label="New session"]'));
+}));

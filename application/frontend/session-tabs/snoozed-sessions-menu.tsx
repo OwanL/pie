@@ -3,13 +3,57 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { useMenuListeners } from '../lib/components/useMenuListeners';
 import { useMenuViewportClamp } from '../lib/components/useMenuViewportClamp';
-import { useMenuTriggerAria } from '../lib/components/useMenuTriggerAria';
+import { useMenuTriggerAria, getContextMenuTrigger } from '../lib/components/useMenuTriggerAria';
 import type { SnoozedSession } from './snooze';
 
-function SnoozedMenu({ sessions, trigger, onRestore, onClose, available }: {
+/** Entry menu state is a point-in-time overlay; membership stays host-owned. */
+interface SnoozedEntryMenuState {
+  path: string;
+  name: string;
+  x: number;
+  y: number;
+  triggerEl: HTMLElement;
+}
+
+function SnoozedEntryMenu({ session, x, y, triggerEl, onRestore, onCloseSession, onClose, onNode }: {
+  session: { path: string; name: string };
+  x: number;
+  y: number;
+  triggerEl: HTMLElement;
+  onRestore: (path: string) => void;
+  onCloseSession?: (path: string) => void;
+  onClose: () => void;
+  onNode?: (node: HTMLDivElement | null) => void;
+}) {
+  const { ref, pos } = useMenuViewportClamp({
+    x, y, triggerEl, restoreFocusOnClose: true,
+  });
+  useMenuListeners(ref, onClose);
+  return (
+    <div ref={(node) => { ref.current = node; onNode?.(node); }} class="block-context-menu snoozed-entry-context-menu"
+      role="menu" aria-label={`${session.name} snoozed session actions`}
+      style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}>
+      <div class="session-tab-context-title" title={session.name}>{session.name}</div>
+      <button class="context-menu-item" role="menuitem" type="button"
+        onClick={() => { onRestore(session.path); onClose(); }}>
+        Restore early
+      </button>
+      {onCloseSession && (
+        <button class="context-menu-item" role="menuitem" type="button"
+          title="Close the session and remove it from the snoozed list"
+          onClick={() => { onCloseSession(session.path); onClose(); }}>
+          Close
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SnoozedMenu({ sessions, trigger, onRestore, onCloseSession, onClose, available }: {
   sessions: SnoozedSession[];
   trigger: HTMLElement;
   onRestore: (path: string) => void;
+  onCloseSession?: (path: string) => void;
   onClose: () => void;
   available: boolean;
 }) {
@@ -32,7 +76,44 @@ function SnoozedMenu({ sessions, trigger, onRestore, onClose, available }: {
     previousPaths.current = paths;
   }, [sessions]);
   useMenuTriggerAria(trigger);
-  useMenuListeners(ref, onClose);
+  useMenuListeners(ref, onClose, {
+    onOutsideClick: (event) => {
+      // The entry menu is a nested overlay: keep the manager open while the
+      // pointer interacts inside it and let only the entry menu dismiss.
+      if (ref.current?.contains(event.target as Node) || entryNode.current?.contains(event.target as Node)) return;
+      onClose();
+    },
+  });
+  // Per-entry Restore/Close overlay anchored to a right-clicked row. The node
+  // ref is only used for outside-click containment; the entry menu owns its
+  // own dismissal and focus lifecycle.
+  const entryNode = useRef<HTMLDivElement | null>(null);
+  const [entry, setEntry] = useState<SnoozedEntryMenuState | null>(null);
+  const closeEntry = useCallback(() => setEntry(null), []);
+  useMenuTriggerAria(entry?.triggerEl, !!entry);
+  useEffect(() => () => { entryNode.current = null; }, []);
+  useLayoutEffect(() => {
+    if (entry && (!available || !sessions.some((session) => session.path === entry.path))) closeEntry();
+  }, [sessions, available, entry, closeEntry]);
+  const openEntry = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const triggerEl = getContextMenuTrigger(event);
+    if (!triggerEl) return;
+    if (!available) return;
+    // Keyboard-triggered context menus (Menu key / Shift+F10) carry no pointer
+    // coordinates; anchor to the row like the manager trigger.
+    const keyboard = event.clientX === 0 && event.clientY === 0;
+    const rowRect = triggerEl.getBoundingClientRect();
+    focusedPath.current = triggerEl.dataset.sessionPath ?? null;
+    setEntry({
+      path: (triggerEl as HTMLButtonElement).dataset.sessionPath ?? '',
+      name: sessions.find((session) => session.path === (triggerEl as HTMLButtonElement).dataset.sessionPath)?.name ?? '',
+      x: keyboard ? rowRect.right : event.clientX,
+      y: keyboard ? rowRect.bottom : event.clientY,
+      triggerEl,
+    });
+  };
   return (
     <div ref={ref} class="block-context-menu snoozed-sessions-menu" role="menu"
       aria-label="Snoozed sessions" style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}>
@@ -42,7 +123,14 @@ function SnoozedMenu({ sessions, trigger, onRestore, onClose, available }: {
           disabled={!available} title={session.name} data-session-path={session.path}
           onFocus={() => { focusedPath.current = session.path; }}
           aria-label={`Restore early: ${session.name}`}
-          onClick={() => onRestore(session.path)}>
+          onClick={() => onRestore(session.path)}
+          onContextMenu={openEntry}
+          onKeyDown={(event) => {
+            if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+          }}>
           <span class="snoozed-session-details">
             <span class="snoozed-session-name">{session.name}</span>
             <time dateTime={new Date(session.wakeAt).toISOString()}>
@@ -53,14 +141,19 @@ function SnoozedMenu({ sessions, trigger, onRestore, onClose, available }: {
           </span>
         </button>
       ))}
+      {entry && available && sessions.some((session) => session.path === entry.path) &&
+        <SnoozedEntryMenu key={`entry:${entry.path}`} session={entry} x={entry.x} y={entry.y}
+        triggerEl={entry.triggerEl} onRestore={onRestore}
+        onCloseSession={onCloseSession} onClose={closeEntry} onNode={(node) => { entryNode.current = node; }} />}
     </div>
   );
 }
 
 /** Only the overlay is local; wake/restore membership always comes from the host. */
-export function SnoozedSessionsAction({ sessions, onRestore, available, fallbackFocusRef }: {
+export function SnoozedSessionsAction({ sessions, onRestore, onCloseSession, available, fallbackFocusRef }: {
   sessions: SnoozedSession[];
   onRestore: (path: string) => void;
+  onCloseSession?: (path: string) => void;
   available: boolean;
   fallbackFocusRef: { current: HTMLButtonElement | null };
 }) {
@@ -81,6 +174,6 @@ export function SnoozedSessionsAction({ sessions, onRestore, available, fallback
       </svg>
     </button>
     {trigger && <SnoozedMenu sessions={sessions} trigger={trigger} onRestore={onRestore}
-      onClose={close} available={available} />}
+      onCloseSession={onCloseSession} onClose={close} available={available} />}
   </>;
 }

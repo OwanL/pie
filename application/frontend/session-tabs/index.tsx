@@ -637,7 +637,7 @@ function SessionTabsView({
       </div>
       <div class="session-tabs-actions">
         {onRestoreSnoozed && <SnoozedSessionsAction sessions={snoozedSessions}
-          onRestore={onRestoreSnoozed} available={!!backendReady} fallbackFocusRef={newSessionRef} />}
+          onRestore={onRestoreSnoozed} onCloseSession={onClose} available={!!backendReady} fallbackFocusRef={newSessionRef} />}
         {backendReady && sessionCatalogProgress?.complete === false && (
           <span
             class="session-tabs-indexing"
