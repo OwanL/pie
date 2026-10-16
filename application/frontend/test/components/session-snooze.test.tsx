@@ -77,6 +77,29 @@ test('snooze cascading menu supports arrow navigation and one-layer Escape', () 
   assert.equal(closed, 1);
 }));
 
+test('hover-open submenu leaves parent keyboard navigation available', () => fixture((container) => {
+  act(() => render(h(SessionTabContextMenu, {
+    tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
+    runSummary: null, isPinned: false, hasDeferredTriggers: false,
+    onNew: noop, onContextAction: noop, onSnooze: noop, onClose: noop,
+  }), container));
+  const trigger = button(container, 'Snooze…');
+  act(() => { trigger.focus(); trigger.dispatchEvent(new MouseEvent('mouseenter')); });
+  assert.ok(document.body.querySelector('[aria-label="Snooze A quiet session"]'));
+  assert.equal(document.activeElement, trigger);
+  press('ArrowDown');
+  assert.equal(document.activeElement, button(container, 'Close Tab'));
+  press('ArrowUp');
+  assert.equal(document.activeElement, trigger);
+  press('Home');
+  assert.equal(document.activeElement, button(container, 'Pin Tab'));
+  press('End');
+  assert.equal(document.activeElement, button(container, 'Copy Session Path'));
+  act(() => trigger.focus());
+  press('ArrowRight');
+  assert.equal(document.activeElement, button(document.body, '4 hours'));
+}));
+
 const tabsProps: ComponentProps<typeof SessionTabs> = {
   sessions: [session], openTabPaths: [path], pinnedTabPaths: [], pinnedTabGroups: [],
   runningSessionPaths: [], startingModelSessionPaths: [], unreadFinishedSessionPaths: [],

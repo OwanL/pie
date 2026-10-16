@@ -85,7 +85,12 @@ export function useMenuListeners(
       }
     };
     const onKey = (event: KeyboardEvent) => {
-      if (menuStack[menuStack.length - 1] !== entry) return;
+      const top = menuStack[menuStack.length - 1];
+      // Hover-open cascades do not take focus. Route navigation to the
+      // innermost focused menu, while Escape still dismisses the top overlay.
+      const focused = [...menuStack].reverse().find((menu) =>
+        menu.ref.current?.contains(document.activeElement));
+      if ((event.key === 'Escape' ? top : focused ?? top) !== entry) return;
       const current = entry.latest.current;
       if (event.key === 'Escape') {
         event.preventDefault();
