@@ -34,7 +34,7 @@ try {
 function installSdkResolverForTests(): () => void {
 	const mockDir = mkdtempSync(path.join(tmpdir(), "subagent-register-mock-"));
 	const sdkPath = path.join(mockDir, "pi-coding-agent.cjs");
-	writeFileSync(sdkPath, "exports.getMarkdownTheme = () => ({});\n", "utf-8");
+	writeFileSync(sdkPath, "exports.getMarkdownTheme = () => ({}); exports.getAgentDir = () => '';\n", "utf-8");
 	const tuiPath = path.join(mockDir, "pi-tui.cjs");
 	writeFileSync(tuiPath, "exports.Container = class {}; exports.Markdown = class {}; exports.Spacer = class {}; exports.Text = class {};\n", "utf-8");
 

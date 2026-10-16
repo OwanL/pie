@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as path from "node:path";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
@@ -92,7 +92,7 @@ function createFakeSdk(options?: {
 			await options?.onCreateSession?.(args.sessionManager);
 			return { session };
 		},
-		createResourceLoader: () => ({
+		createResourceLoader: (_args?: any) => ({
 			reload: async () => { state.resourceReloadCalls++; },
 		}),
 		createSessionManager: () => ({ getSessionId: () => sessionId }),
@@ -101,6 +101,32 @@ function createFakeSdk(options?: {
 
 	return { sdk, state, sessionId, session };
 }
+
+test("runner explicitly attaches only cached child guidance for an empty role", async () => {
+	const root = mkdtempSync(path.join(tmpdir(), "pie-runner-system-"));
+	try {
+		const instructions = path.join(root, "harness", "agent-instructions");
+		mkdirSync(instructions, { recursive: true });
+		writeFileSync(path.join(instructions, "SUBAGENT_SYSTEM.md"), "child guidance");
+		writeFileSync(path.join(instructions, "APPEND_SYSTEM.md"), "main guidance");
+		const { sdk } = successfulFakeSdk();
+		sdk.getAgentDir = () => root;
+		let options: any;
+		const create = sdk.createResourceLoader;
+		sdk.createResourceLoader = (args) => { options = args; return create(args); };
+		await runFakeAgent(sdk);
+		assert.equal(options.agentDir, root);
+		assert.deepEqual(options.appendSystemPrompt, ["child guidance"]);
+		writeFileSync(path.join(instructions, "SUBAGENT_SYSTEM.md"), "changed");
+		await runFakeAgent(sdk);
+		assert.deepEqual(options.appendSystemPrompt, ["child guidance"]);
+		sdk.getAgentDir = () => path.join(root, "absent-config");
+		await runFakeAgent(sdk);
+		assert.deepEqual(options.appendSystemPrompt, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 function runFakeAgent(
 	sdk: unknown,

@@ -7,6 +7,7 @@
  */
 
 import { readRuntimeContext, type TreeBudget } from "./runtime-context.js";
+import { subagentSystemPrompt } from "./system-prompt.js";
 export { subagentRuntime, readRuntimeContext, type TreeBudget, type ProcessPermitScope, type SubagentRuntimeContext } from "./runtime-context.js";
 import { createHash } from "node:crypto";
 import type { Message, Model } from "@mariozechner/pi-ai";
@@ -1343,13 +1344,8 @@ export async function runSingleAgent(
 	const sdk = _internal?.sdk ?? (await loadSubagentSdk());
 
 	// 4. Build an isolated resource loader and create the session.
-	// - appendSystemPrompt threads the agent's instructions into the system
-	//   prompt. It must own the append source: with empty role instructions it
-	//   is `undefined` and no override is set, but Pie's centralized
-	//   APPEND_SYSTEM.md is authored out of every native discovery path (see
-	//   `harness/agent-instructions/prompt-assembly/append-system-prompt.ts`),
-	//   so this empty-role fallback can never inherit the maintainer's main
-	//   append.
+	// - Explicit appends own the child prompt, including empty roles/config:
+	//   shared child guidance first, selected role second, never main appends.
 	// - noExtensions is intentionally false so the subagent extension (and others)
 	//   load into nested sessions, enabling further delegation. Nesting is bounded
 	//   by the depth/trail/tree-budget guards in execute()/modes.ts, not by hiding
@@ -1376,10 +1372,11 @@ export async function runSingleAgent(
 			!dropSet.has(toolName) && !UNSUPPORTED_SUBAGENT_TOOLS.has(toolName));
 	}
 
+	const agentDir = sdk.getAgentDir();
 	const resourceLoader = sdk.createResourceLoader({
 		cwd: sessionCwd,
-		agentDir: sdk.getAgentDir(),
-		appendSystemPrompt: agent.systemPrompt.trim() ? [agent.systemPrompt] : undefined,
+		agentDir,
+		appendSystemPrompt: subagentSystemPrompt(agentDir, agent.systemPrompt),
 		noExtensions: false,
 	});
 

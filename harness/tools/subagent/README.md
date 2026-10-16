@@ -56,6 +56,17 @@ not duplicated into task text or handoff metadata. Task-only calls remain explic
 There is no full-transcript mode, temporary-file export, or implicit tool-image
 inheritance. The explicit `task` remains the delegated scope.
 
+## Child system guidance
+
+`<agent-dir>/harness/agent-instructions/SUBAGENT_SYSTEM.md` is the shared child
+system append. Registration reads it into an in-memory snapshot; direct runner
+consumers initialize the same cache when their SDK starts. Each configured root
+is read only once, including absent/blank/unreadable files. Restart to reload it.
+The runner passes shared guidance followed by the selected role Markdown as
+explicit appends, including an explicit empty list when both are absent. Main
+`APPEND_SYSTEM.md` is never used for children, even with an empty role; the shared
+child file is never attached to main sessions. Role discovery remains independent.
+
 ## Agent Discovery
 
 Agents are discovered automatically from both locations:

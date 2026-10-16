@@ -16,7 +16,8 @@
  *   - ./schema.ts       — typebox parameter schema
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { initializeSubagentSystemPrompt } from "./system-prompt.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../../agent-instructions/agent-discovery/agents.js";
@@ -83,6 +84,7 @@ function isDisabled(pi: ExtensionAPI): () => boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+	initializeSubagentSystemPrompt(getAgentDir());
 	// Register a CLI flag so users can disable subagent execution.
 	// When set, the tool still registers (preventing LLM tool-call hangs)
 	// but execute() returns an immediate error.
