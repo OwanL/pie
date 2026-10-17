@@ -20,6 +20,7 @@ import type {
   BrowserServerSettings,
   HostRuntimeBrowserServerOptions,
 } from './browser-server-seam.js';
+import type { LocalFileOpenCommand } from './local-file-open.js';
 import type { FileDiffCorePort, FileDiffViewerPort } from '../file-changes/contracts.js';
 import type { SessionHostPlatform } from './session-platform.js';
 
@@ -79,6 +80,17 @@ export interface HostEditorCapabilities {
     filePath: string,
     options?: { reference?: string; workingDirectory?: string },
   ): Promise<ImagePreviewData | undefined>;
+  /** Prepare an ephemeral isolated loopback origin serving one requested file
+   *  plus its canonical parent directory (scripts/relative assets), verify it
+   *  is reachable, and return the verified URL. `openIn:'external'` surfaces
+   *  additionally open it in the OS default browser before resolving;
+   *  `openIn:'popup'` openers are browser renderers, which open the returned
+   *  URL themselves and never shell out from the host. Must be disposed via
+   *  `disposeLocalFileOpen` at host shutdown; every listener also owns its
+   *  idle-expiry disposal. */
+  prepareLocalFileOpen?(request: LocalFileOpenCommand): Promise<{ url: string }>;
+  /** Close every live local-file-open listener and its idle timers. */
+  disposeLocalFileOpen?(): Promise<void>;
 }
 
 /**

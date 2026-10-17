@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 import { performImageAction, copyNativeImage } from '../../lib/image-actions.js';
+import { createLocalFileOpenService, type LocalFileOpenService } from '../../lib/local-file-open.js';
 
 import type { HostRuntimePlatform, HostRendererSurface } from '../../../lib/platform-contracts/platform.js';
 import { buildWorkspaceAnalyticsId } from '../../../../analytics/legacy/run-analytics/storage';
@@ -180,6 +181,12 @@ export function createVscodeHostRuntimePlatform(
   renderer: HostRendererSurface,
 ): HostRuntimePlatform {
   const sessionPlatform = createSessionHostPlatform(context);
+  // Lazily created so the module also stays importable outside VS Code.
+  let localFileOpenService: LocalFileOpenService | undefined;
+  const getLocalFileOpenService = (): LocalFileOpenService => {
+    if (!localFileOpenService) localFileOpenService = createLocalFileOpenService();
+    return localFileOpenService;
+  };
   return {
     ...sessionPlatform,
     createBrowserServer: (options) => createBrowserServer({
@@ -265,6 +272,18 @@ export function createVscodeHostRuntimePlatform(
           },
         },
       ),
+      prepareLocalFileOpen: async (request) => {
+        const prepared = await getLocalFileOpenService().open(request, createFilePathResolver());
+        // Desktop openers (`vscode` renderers) open the verified loopback URL
+        // in the OS default browser; browser renderers open the returned URL
+        // themselves as a popup and never shell out host-side.
+        if (request.openIn === 'external'
+          && !await vscode.env.openExternal(vscode.Uri.parse(prepared.url))) {
+          throw new Error('Could not open the prepared URL in the default browser.');
+        }
+        return { url: prepared.url };
+      },
+      disposeLocalFileOpen: () => getLocalFileOpenService().dispose(),
     },
     getWorkspaceAnalyticsId: () => getWorkspaceAnalyticsId(context),
     getLegacyWorkspaceAnalyticsIds: () => getLegacyWorkspaceAnalyticsIds(),

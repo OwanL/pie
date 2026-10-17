@@ -24,6 +24,7 @@ import { StandaloneHostStorage } from './storage';
 import type { StandaloneDependencyPaths } from './startup';
 import { createBackendStartupPlatform } from '../lib/backend-startup';
 import { readImagePreviewWithFallback } from '../lib/image-preview.js';
+import { createLocalFileOpenService, openNativeUrl, type LocalFileOpenService } from '../lib/local-file-open.js';
 import { performImageAction, copyNativeImage, openNativeImage, revealNativeImage } from '../lib/image-actions.js';
 
 const UNSUPPORTED_EDITOR_MESSAGE = 'Opening files in VS Code is unavailable in standalone mode.';
@@ -151,6 +152,9 @@ export function createStandaloneHostRuntimePlatform(
     }
   };
   const browserSettings = options.browserServerSettings;
+  /** Owns the isolated ephemeral local-file-open listeners; idle-expired,
+   *  disposed at host shutdown via `disposeLocalFileOpen`. */
+  const localFileOpenService: LocalFileOpenService = createLocalFileOpenService();
   const storage = options.storage ?? new StandaloneHostStorage({
     stateDir: options.dataPaths.stateDir,
     workspaceCwd: options.workspaceCwd,
@@ -204,6 +208,20 @@ export function createStandaloneHostRuntimePlatform(
     openFileInEditor: async () => {
       throw new Error(UNSUPPORTED_EDITOR_MESSAGE);
     },
+    prepareLocalFileOpen: async (request) => {
+      const prepared = await localFileOpenService.open(request, {
+        exists: async (candidate) => fs.stat(candidate).then(() => true, () => false),
+        // Standalone has no indexed workspace finder. Never recursively walk
+        // dependency, runtime-data, or generated trees for a bare name.
+        findFiles: async () => [],
+      });
+      // Standalone's only renderer surface is the browser; popups open the
+      // verified URL themselves. The desktop shell-out exists purely as a
+      // fail-safe seam for an `external` request.
+      if (request.openIn === 'external') await openNativeUrl(prepared.url);
+      return { url: prepared.url };
+    },
+    disposeLocalFileOpen: () => localFileOpenService.dispose(),
     previewImageFile: async (filePath, previewOptions) => readImagePreviewWithFallback(
       { path: filePath, ...previewOptions },
       {

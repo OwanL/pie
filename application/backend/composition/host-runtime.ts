@@ -642,6 +642,9 @@ export class HostRuntime {
         performImageAction: this.platform.editor.performImageAction
           ? (request) => this.platform.editor.performImageAction!(request)
           : undefined,
+        prepareLocalFileOpen: this.platform.editor.prepareLocalFileOpen
+          ? (request) => this.platform.editor.prepareLocalFileOpen!(request)
+          : undefined,
         previewImageFile: (request) => this.platform.editor.previewImageFile
           ? this.platform.editor.previewImageFile(request.path, request)
           : Promise.resolve(undefined),
@@ -1429,6 +1432,11 @@ export class HostRuntime {
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / renderer after dispose.
       this.effectRunner.dispose();
+      // Ephemeral local-file-open listeners are host-owned: dispose them here
+      // (idle expiry is the normal path) rather than outliving shutdown.
+      try { await this.platform.editor.disposeLocalFileOpen?.(); } catch (error) {
+        appendPieLog('warn', 'local-file-open', 'dispose failed', { error: toErrorMessage(error) });
+      }
       // Drain local microphone/model ownership before allowing runtime collection.
       // A failed drain must not prevent the other owned services from cleaning up.
       let dictationShutdownError: unknown;
