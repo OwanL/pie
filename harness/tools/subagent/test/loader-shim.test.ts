@@ -19,7 +19,17 @@ const registerDiscoveryShim = ((require('../../../../extensions/subagent/index.j
 function installSdkResolverForTests(): void {
 	const mockDir = mkdtempSync(path.join(tmpdir(), 'subagent-shim-mock-'));
 	const sdkPath = path.join(mockDir, 'pi-coding-agent.cjs');
-	writeFileSync(sdkPath, 'exports.getMarkdownTheme = () => ({});\n', 'utf-8');
+	writeFileSync(sdkPath, 'exports.getMarkdownTheme = () => ({}); exports.getAgentDir = () => __dirname;\n', 'utf-8');
+	const aiPath = path.join(mockDir, 'pi-ai.cjs');
+	writeFileSync(
+		aiPath,
+		[
+			'const schema = (kind) => (options = {}) => ({ kind, ...options });',
+			'exports.StringEnum = (values, options = {}) => ({ kind: "StringEnum", values, ...options });',
+			'exports.Type = { Optional: (value) => ({ kind: "Optional", value }), Object: (properties, options = {}) => ({ kind: "Object", properties, ...options }), Array: schema("Array"), String: schema("String") };',
+		].join('\n'),
+		'utf-8',
+	);
 	const tuiPath = path.join(mockDir, 'pi-tui.cjs');
 	writeFileSync(
 		tuiPath,
@@ -39,6 +49,7 @@ function installSdkResolverForTests(): void {
 	const original = M._resolveFilename;
 	M._resolveFilename = function resolveFilename(request, parent, isMain, options): string {
 		if (request === '@mariozechner/pi-coding-agent') return sdkPath;
+		if (request === '@mariozechner/pi-ai') return aiPath;
 		if (request === '@mariozechner/pi-tui') return tuiPath;
 		return original.call(this, request, parent, isMain, options);
 	};

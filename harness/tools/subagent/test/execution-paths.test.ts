@@ -73,6 +73,7 @@ function createFakeSdk(options?: {
 	onSubscribe?: () => void;
 	onPrompt?: (emit: (event: any) => void, session: any) => Promise<void>;
 	sessionState?: Record<string, unknown>;
+	agentDir?: string;
 }) {
 	const state = {
 		setUIContextCalls: 0,
@@ -137,7 +138,7 @@ function createFakeSdk(options?: {
 			return { reload: async () => undefined };
 		},
 		createSessionManager: () => ({}),
-		getAgentDir: () => ".",
+		getAgentDir: () => options?.agentDir ?? ".",
 	};
 
 	return { sdk, state, emit };
@@ -270,7 +271,9 @@ test("production terminal path preserves bounded file changes through projection
 	assert.deepEqual(transportedChanges, result.fileChanges);
 });
 
-test("runSingleAgent wires Pie ownership through child prompt and tool/resource rebuilds", async () => {
+test("runSingleAgent wires Pie ownership through child prompt and tool/resource rebuilds", async (t) => {
+	const agentDir = await mkdtemp(path.join(os.tmpdir(), "subagent-prompt-agent-dir-"));
+	t.after(async () => rm(agentDir, { recursive: true, force: true }));
 	const sdkPrompt = await loadPinnedSystemPrompt();
 	const agentBody = "Preserved child agent body.";
 	const options: PieSystemPromptOptions = {
@@ -292,6 +295,7 @@ test("runSingleAgent wires Pie ownership through child prompt and tool/resource 
 		return stockBuild(next);
 	};
 	const { sdk, state } = createFakeSdk({
+		agentDir,
 		sessionState,
 		onPrompt: async (emit, session) => {
 			assert.match(session._baseSystemPrompt, /^You are a coding assistant operating inside Pie/u);
@@ -311,7 +315,7 @@ test("runSingleAgent wires Pie ownership through child prompt and tool/resource 
 			assert.equal(toolRebuilt, buildPieSystemPrompt(
 				{ ...options, selectedTools: ["bash"] },
 				stockBuild,
-				".",
+				agentDir,
 			));
 			assert.match(toolRebuilt, /^You are a coding assistant operating inside Pie/u);
 			assert.match(toolRebuilt, /Preserved child agent body\./u);
@@ -357,7 +361,7 @@ test("runSingleAgent wires Pie ownership through child prompt and tool/resource 
 		{ sdk: sdk as any },
 	);
 
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.exitCode, 0, result.errorMessage);
 	assert.deepEqual(state.createResourceLoaderArgs[0]?.appendSystemPrompt, [agentBody]);
 	assert.equal(state.promptCalls, 1);
 });
