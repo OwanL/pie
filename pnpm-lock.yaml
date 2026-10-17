@@ -106,6 +106,9 @@ importers:
       immer:
         specifier: ^11.1.8
         version: 11.1.21
+      photoswipe:
+        specifier: 5.4.4
+        version: 5.4.4
       ws:
         specifier: ^8.21.0
         version: 8.22.0
@@ -3381,6 +3384,10 @@ packages:
     resolution: {integrity: sha512-GEazpTWwTZaEQ9RhL7Nyz0WwqilbqgLahDM3D0hxWwmVDI52nXEybHqiN6/elwpkJBhcuj+WbBu+QfT0uhPGfQ==}
     engines: {node: '>= 8'}
     deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
+
+  photoswipe@5.4.4:
+    resolution: {integrity: sha512-WNFHoKrkZNnvFFhbHL93WDkW3ifwVOXSW3w1UuZZelSmgXpIGiZSNlZJq37rR8YejqME2rHs9EhH9ZvlvFH2NA==}
+    engines: {node: '>= 0.12.0'}
 
   pi-mcp-adapter@2.20.1:
     resolution: {integrity: sha512-bBna74NHM/YXHE2wYgA4atXD9XTPqHhTVS4f6TLYstWNgXUZyuegaTuM07oeAIYjZE3xPvBn0Wl71bSdUSTQVg==}
@@ -7268,6 +7275,8 @@ snapshots:
       centra: 2.7.0
     transitivePeerDependencies:
       - debug
+
+  photoswipe@5.4.4: {}
 
   pi-mcp-adapter@2.20.1(@earendil-works/pi-ai@file:harness/pi/packages/ai(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@file:harness/pi/packages/tui)(typebox@1.1.38):
     dependencies:

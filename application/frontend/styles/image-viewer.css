@@ -3,8 +3,14 @@
 .image-viewer-toolbar button { border: 1px solid var(--panel-border); background: var(--panel-control-surface); border-radius: var(--panel-radius-md); padding: 6px 9px; cursor: pointer; }
 .image-viewer-toolbar button:hover { background: var(--panel-control-hover); }
 .image-viewer-toolbar button:disabled { opacity: .5; cursor: wait; }
-.image-viewer-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; }
-.image-viewer-stage img { max-width: calc(100% - 32px); max-height: 100%; object-fit: contain; user-select: none; cursor: grab; flex-shrink: 0; }
-.image-viewer-stage img:active { cursor: grabbing; }
 .image-viewer-status { min-height: 32px; padding: 8px 12px; text-align: center; overflow-wrap: anywhere; }
 .message-user-image-element, .tool-call-result-image, .attachment-card-image, .image-path-preview img, [data-pie-inline-image] img { cursor: zoom-in; }
+
+/* PhotoSwipe owns the modal, zoom, pan and keyboard surface (class comes from
+   the `mainClass` option). Custom correlated action buttons and the status
+   row are registered as PhotoSwipe UI elements in the top bar. */
+.pie-image-viewer .image-viewer-action { width: auto; height: auto; padding: 6px 9px; border: 1px solid var(--panel-border); border-radius: var(--panel-radius-md); background: var(--panel-control-surface); color: inherit; font: inherit; cursor: pointer; }
+.pie-image-viewer .image-viewer-action:hover { background: var(--panel-control-hover); }
+.pie-image-viewer .image-viewer-action:disabled { opacity: .5; cursor: wait; }
+.image-viewer-action-hidden { display: none !important; }
+.pie-image-viewer .image-viewer-status { width: 100%; min-height: 32px; padding: 8px 12px; text-align: center; overflow-wrap: anywhere; align-self: center; color: var(--panel-foreground); font: inherit; }
