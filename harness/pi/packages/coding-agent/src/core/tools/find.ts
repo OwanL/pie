@@ -277,7 +277,7 @@ export function createFindToolDefinition(
 									rejectFd(new Error("Operation aborted"));
 									return;
 								}
-								const child = spawn(fdPath, fdArgs, { stdio: ["ignore", "pipe", "pipe"] });
+								const child = spawn(fdPath, fdArgs, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 								const rl = createInterface({ input: child.stdout });
 								let stderr = "";
 								let stderrBytes = 0;
