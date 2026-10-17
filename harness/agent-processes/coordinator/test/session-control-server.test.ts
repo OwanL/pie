@@ -2215,6 +2215,61 @@ test('operation status reports pending and known evidence without replay and rea
   assert.equal(sends, 1);
 });
 
+test('post-admission title assignment failure reports an unknown create and receipt without replay', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-create-unknown-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  installSessionControlSettingsHarness(server);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  const creates: Array<{ id: string; method: string; params?: unknown }> = [];
+  server.handleRequest = async (request) => {
+    if (request.method !== 'session.create') return mockSettingsReply(request);
+    creates.push(request);
+    // The create was admitted and its cold session durably committed before
+    // the required title assignment failed.
+    throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', 'LIVE_TITLE_ASSIGNMENT_FAILED: durable title write failed');
+  };
+  const create = frame('create', { bucket: 'medium', title: 'Unknown create', requestKey });
+  const outcome = await server.handleWorkerSessionControl(create, currentPath);
+  assert.equal((outcome.result.creation as { status: string }).status, 'unknown');
+  assert.equal(creates.length, 1);
+
+  const receipt = (await server.handleWorkerSessionControl(
+    frame('operation.status', { requestKey }), currentPath,
+  )).result.operation as Record<string, unknown>;
+  assert.equal(receipt.status, 'known');
+  assert.equal(receipt.outcome, 'unknown');
+  assert.equal((receipt.result as { creation?: { status?: string } }).creation?.status, 'unknown');
+
+  const repeated = await server.handleWorkerSessionControl(create, currentPath);
+  assert.equal(creates.length, 1, 'the retained receipt is returned instead of replaying the create');
+  assert.equal((repeated.result.operation as Record<string, unknown>).outcome, 'unknown');
+});
+
+test('pre-admission create validation failure remains a known failed creation', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-create-invalid-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  installSessionControlSettingsHarness(server);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  server.handleRequest = async (request) => {
+    if (request.method !== 'session.create') return mockSettingsReply(request);
+    // Pre-admission validation, such as an invalid normalized title, proves
+    // no durable session exists.
+    throw new BackendError('INVALID_PARAMS', 'create requires a valid title');
+  };
+  const outcome = await server.handleWorkerSessionControl(
+    frame('create', { bucket: 'medium', title: 'Invalid title', requestKey }), currentPath,
+  );
+  assert.equal((outcome.result.creation as { status: string }).status, 'failed');
+  const receipt = (await server.handleWorkerSessionControl(
+    frame('operation.status', { requestKey }), currentPath,
+  )).result.operation as Record<string, unknown>;
+  assert.equal(receipt.status, 'known');
+  assert.equal(receipt.outcome, 'known');
+  assert.equal((receipt.result as { creation?: { status?: string } }).creation?.status, 'failed');
+});
+
 test('agent close emits a typed host bridge request and reports acceptance for the caller session', async () => {
   const server = serverForTests();
   const events: Array<{ event: string; payload?: unknown }> = [];

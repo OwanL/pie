@@ -4915,9 +4915,15 @@ export class BackendServer {
         );
         rawCreated = created.result;
       } catch (error) {
+        // The required title is assigned inside the durable create flow, after
+        // the cold session was committed. Only an explicit pre-admission
+        // validation rejection proves no session exists; a post-admission
+        // title failure (including LIVE_TITLE_ASSIGNMENT_FAILED) leaves the
+        // create outcome unknown and must never authorize automatic replay.
+        const failedBeforeAdmission = error instanceof BackendError && error.code === 'INVALID_PARAMS';
         return { result: workerJson({
           creation: {
-            status: error instanceof BackendError && /INVALID|TITLE/u.test(error.code) ? 'failed' : 'unknown',
+            status: failedBeforeAdmission ? 'failed' : 'unknown',
             error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
           },
           configuration: { status: 'not_started' },
