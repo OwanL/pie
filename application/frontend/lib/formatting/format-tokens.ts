@@ -62,6 +62,11 @@ function trimDecimal(value: number): string {
  */
 export function formatCompactTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${trimDecimal(tokens / 1_000_000)}M`;
-  if (tokens >= 1_000) return `${trimDecimal(tokens / 1_000)}k`;
+  if (tokens >= 1_000) {
+    const thousands = tokens / 1_000;
+    // One-decimal rounding can reach "1000.0"; promote to M instead of printing "1000k".
+    if (Number(thousands.toFixed(1)) >= 1_000) return `${trimDecimal(tokens / 1_000_000)}M`;
+    return `${trimDecimal(thousands)}k`;
+  }
   return String(tokens);
 }
