@@ -2,16 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionService } from '../../../session-actions/service.js';
 import { SessionServiceEvents } from '../../../session-actions/events.js';
-import { createInitialArchState } from '../../../conversation-state/arch-state.js';
+import { createInitialArchState, type ArchState } from '../../../conversation-state/arch-state.js';
 import { reducer } from '../../../conversation-state/reducer.js';
 import { startSessionOperation } from '../../../conversation-state/operation-registry.js';
 import type { SessionOpenedPayload } from '../../../../lib/protocol/sessions.js';
+import type { SystemPromptEntry } from '../../../../../harness/agent-processes/lib/rpc/session-events.js';
 
 test('retained open bridge preserves selection ownership and fences close, removal, and generation death', () => {
   const operation = startSessionOperation({ operationId: 'open', kind: 'session.open', source: { kind: 'host' },
     pendingPath: '/a', selectionToken: 'old-selection', backendGeneration: 7 });
   const initial = createInitialArchState();
-  let arch = { ...initial, operations: { open: operation },
+  let arch: ArchState = { ...initial, operations: { open: operation },
     sessions: { ...initial.sessions, openTabPaths: ['/a', '/b'], activeSessionPath: '/b' } };
   let generation = 7;
   let epoch = 1;
@@ -49,10 +50,13 @@ test('retained open bridge preserves selection ownership and fences close, remov
   events.applySessionOpened = (payload) => { projectedCount += 1; applyOpened(payload); };
   const host = { getArchState: () => arch, backend: { getGeneration: () => generation },
     state, events };
-  const systemPrompts = [{ name: 'project', content: 'Project prompt', toggleable: true, disabled: false }];
-  const snapshot = { operationId: 'open', selectionToken: 'old-selection',
+  const systemPrompts: SystemPromptEntry[] = [{ source: 'user', title: 'project', text: 'Project prompt',
+    summary: 'Project prompt', availability: 'available', toggleable: true, disabled: false }];
+  const snapshot: SessionOpenedPayload = { operationId: 'open', selectionToken: 'old-selection',
     runtimeReady: false, promptInventoryToken: 'inventory-token', busy: false,
-    transcript: [], session: { path: '/a' } } as SessionOpenedPayload;
+    transcript: [], transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0,
+      hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+    session: { path: '/a', name: 'A', cwd: '/', modifiedAt: '2026-10-17T00:00:00Z', messageCount: 0 } };
   const apply = () => SessionService.prototype.applyRetainedOpenSnapshot.call(host as unknown as SessionService, snapshot, 'open', 7);
   assert.equal(apply(), true);
   assert.deepEqual(arch.transcript.pendingPromptInventoryBySession?.['/a'], {
@@ -69,7 +73,7 @@ test('retained open bridge preserves selection ownership and fences close, remov
   arch = { ...arch, sessions: { ...arch.sessions, openTabPaths: ['/a', '/b'] } };
   const close = startSessionOperation({ operationId: 'close', kind: 'session.close', source: { kind: 'host' },
     pendingPath: '/a', selectionToken: 'close-selection', backendGeneration: 7 });
-  arch = { ...arch, operations: { ...arch.operations, close } } as typeof arch;
+  arch = { ...arch, operations: { ...arch.operations, close } };
   assert.equal(apply(), false, 'close reservation wins before tab removal');
   arch = { ...arch, operations: { open: operation } };
   epoch = 2;
