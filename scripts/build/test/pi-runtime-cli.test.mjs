@@ -4,7 +4,29 @@ import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertPrivateOutput, parsePiRuntimeArguments, runPiRuntimeCli, resolvePinnedPnpmCli, piRuntimeDeployArguments } from '../pi-runtime.mjs';
+import { buildPiRuntime, assertPrivateOutput, parsePiRuntimeArguments, runPiRuntimeCli, resolvePinnedPnpmCli, piRuntimeDeployArguments } from '../pi-runtime.mjs';
+
+test('runtime reader diagnostics identify only its owned output and a fresh invocation', async () => {
+  const owner = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-runtime-reader-'));
+  const invocations = [];
+  try {
+    for (const name of ['first', 'second']) {
+      const output = path.join(owner, name);
+      await assert.rejects(buildPiRuntime({ output }, {
+        async acquireReader(root, { metadata }) {
+          assert.equal(root, path.join(process.cwd(), 'harness', 'pi'));
+          assert.equal(metadata.operation, 'build-pi-runtime');
+          assert.equal(metadata.evidence, output);
+          assert.match(metadata.invocation, /^[0-9a-f-]{36}$/u);
+          invocations.push(metadata.invocation);
+          assert.ok((await fs.stat(output)).isDirectory());
+          throw new Error('stop before source reads or children');
+        },
+      }), /stop before source reads or children/u);
+    }
+    assert.notEqual(invocations[0], invocations[1]);
+  } finally { await fs.rm(owner, { recursive: true, force: true }); }
+});
 
 test('private output accepts canonical OS-temp spelling without creating missing parents', async () => {
   const owner = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cli-alias-'));

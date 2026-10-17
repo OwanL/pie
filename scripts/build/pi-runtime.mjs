@@ -542,7 +542,7 @@ export async function detachIsolatedDeployHardlinks(staging, ownedWork, compiled
 }
 
 /** Explicit output owns all scratch and artifact bytes. A failed build is retained for diagnosis. */
-export async function buildPiRuntime({ output, refreshLock, context, pnpmCli, privateStore, networkPolicy } = {}) {
+export async function buildPiRuntime({ output, refreshLock, context, pnpmCli, privateStore, networkPolicy } = {}, { acquireReader = acquireDevelopmentReader } = {}) {
   check(refreshLock === undefined, 'The npm --refresh-lock route is retired; use the shared pnpm lock');
   const selected = resolvePiBuildContext(context);
   const REPOSITORY = selected.repositoryRoot;
@@ -554,7 +554,9 @@ export async function buildPiRuntime({ output, refreshLock, context, pnpmCli, pr
   const work = path.join(output, 'work'); await mkdir(work);
   const env = buildChildEnvironment(selected.env, work);
   for (const key of ['HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'npm_config_cache']) await mkdir(env[key], { recursive: true });
-  const reader = await acquireDevelopmentReader(SOURCE);
+  const reader = await acquireReader(SOURCE, {
+    metadata: { operation: 'build-pi-runtime', invocation: randomUUID(), evidence: output },
+  });
   let teardownConfirmed = true;
   try {
   const piSourceVersion = readPinnedPiSourceVersion(REPOSITORY);

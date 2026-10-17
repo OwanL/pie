@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,7 +63,9 @@ export async function withDevelopmentSdkReader(sdkPath, operation, { root = repo
   const workspaceRoot = resolveDevelopmentSdkWorkspaceRoot(sdkPath, { root });
   if (!workspaceRoot) return operation();
 
-  const reader = await acquireReader(workspaceRoot);
+  const reader = await acquireReader(workspaceRoot, {
+    metadata: { operation: 'development-sdk-reader', invocation: randomUUID() },
+  });
   let teardownConfirmed = false;
   let result;
   let operationError;

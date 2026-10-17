@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -86,7 +86,11 @@ test('unconfirmed child teardown retains the reader, while pre-child setup error
   const { root, sdkPath, workspaceRoot } = makeWorkspace(t);
   await withDevelopmentSdkReader(sdkPath, async () => ({ teardownConfirmed: false }), { root });
   assert.equal(readerEntries(workspaceRoot).length, 1);
-  await assert.rejects(withDevelopmentWriter(workspaceRoot, async () => {}), /writer denied[\s\S]*reader/u);
+  const record = JSON.parse(readFileSync(path.join(workspaceRoot, '.cache', 'development-runtime', 'readers', readerEntries(workspaceRoot)[0]), 'utf8'));
+  assert.equal(record.metadata.operation, 'development-sdk-reader');
+  assert.match(record.metadata.invocation, /^[0-9a-f-]{36}$/u);
+  assert.equal(record.metadata.evidence, undefined, 'an SDK selection is not an owned diagnostic artifact');
+  await assert.rejects(withDevelopmentWriter(workspaceRoot, async () => {}), /writer denied[\s\S]*development-sdk-reader/u);
 
   const setupWorkspace = makeWorkspace(t);
   await assert.rejects(withDevelopmentSdkReader(setupWorkspace.sdkPath, async () => {
