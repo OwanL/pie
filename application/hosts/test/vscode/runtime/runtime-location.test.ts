@@ -3,12 +3,15 @@ import test from 'node:test';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { configureRuntimeLocation, runtimeOutputDirectory, runtimeRendererSelection, runtimeWebviewAssetDirectory } from '../../../vscode/runtime/runtime-location';
 import { resolvePublishedWebviewDir } from '../../../lib/asset-manifests/published-generations';
 import { BrowserStaticAssets } from '../../../browser/static-assets/static-assets';
 import { publishRendererGeneration } from '../../../../../scripts/build/publication.mjs';
 import { hasRuntimeBootstrap, installRuntimeBootstrap } from '../../../../../scripts/build/runtime-publication.mjs';
 
+const require = createRequire(import.meta.url);
+const runtime = require('../../../vscode/runtime/runtime-generations.cjs');
 const identity = { publisher: 'pie', name: 'pie', version: '0.3.0' };
 
 test('VS Code browser server takes assets from the context-selected runtime output', async () => {
@@ -80,13 +83,30 @@ test('one-time loader migration selects immutable bootstrap without replacing th
     await writeFile(path.join(root, 'out/extension.js'), 'running-old-host');
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ ...identity, main: './out/extension.js' }));
     assert.equal(await hasRuntimeBootstrap(root), false);
-    const installed = await installRuntimeBootstrap({ extensionDir: root, pkg: identity });
-    assert.equal(await hasRuntimeBootstrap(root), true);
-    assert.equal(await readFile(path.join(root, 'out/extension.js'), 'utf8'), 'running-old-host');
-    const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-    assert.equal(pkg.main, `./pie-bootstrap/${installed}/bootstrap.cjs`);
-    assert.equal(await installRuntimeBootstrap({ extensionDir: root, pkg: identity }), installed);
-    await assert.rejects(installRuntimeBootstrap({ extensionDir: root, pkg: { ...identity, version: '9.9.9' } }), /identity changed/);
+    const sourceOutDir = await mkdtemp(path.join(os.tmpdir(), 'pie-bootstrap-runtime-'));
+    try {
+      await mkdir(path.join(sourceOutDir, 'webview/panel/.vite'), { recursive: true });
+      for (const file of ['extension.js', 'backend.js', 'worker-entry.js', 'webview/panel/entry.js']) {
+        await writeFile(path.join(sourceOutDir, file), '// fixture');
+      }
+      for (const file of ['pie-build-id.txt', 'webview/panel/pie-build-id.txt']) {
+        await writeFile(path.join(sourceOutDir, file), 'fixture-build');
+      }
+      await writeFile(path.join(sourceOutDir, 'webview/panel/.vite/manifest.json'), JSON.stringify({ entry: { file: 'entry.js', isEntry: true } }));
+      await runtime.publishRuntimeGeneration({ sourceOutDir, extensionDir: root, identity });
+      const installed = await installRuntimeBootstrap({ extensionDir: root, pkg: identity });
+      assert.equal(await hasRuntimeBootstrap(root), true);
+      assert.equal(await readFile(path.join(root, 'out/extension.js'), 'utf8'), 'running-old-host');
+      const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+      assert.equal(pkg.main, `./pie-bootstrap/${installed}/bootstrap.cjs`);
+      assert.equal(await installRuntimeBootstrap({ extensionDir: root, pkg: identity }), installed);
+      const mismatched = { ...identity, version: '9.9.9' };
+      await writeFile(path.join(sourceOutDir, 'extension.js'), '// mismatched fixture');
+      await runtime.publishRuntimeGeneration({ sourceOutDir, extensionDir: root, identity: mismatched });
+      await assert.rejects(installRuntimeBootstrap({ extensionDir: root, pkg: mismatched }), /identity changed/);
+    } finally {
+      await rm(sourceOutDir, { recursive: true, force: true });
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
