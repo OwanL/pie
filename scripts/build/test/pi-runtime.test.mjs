@@ -119,7 +119,7 @@ test('production role packing preserves ordered compilation, smoke, stability an
   const builder = source.slice(source.indexOf('export async function buildPiRuntime'), source.indexOf('\nif (process.argv[1]'));
   const checkpoints = [
     'assertPrivateOutput(output)',
-    'acquireDevelopmentReader(SOURCE)',
+    'const reader = await acquireReader(SOURCE, {',
     'const inputEvidence = await capturePiRuntimeInputs(inputOptions)',
     'const compilation = await assertPiWorkspaceBuildStamp',
     'await materializeDeployedNodeModules',

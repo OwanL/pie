@@ -363,9 +363,12 @@ test('packaging failure stops before doctor and confirms artifact teardown', asy
   assert.equal(confirmations, 1, 'artifact teardown is confirmed after packaging failure');
 });
 
-test('mocked bootstrap owns a private writer gate while a canonical development reader remains live', async (t) => {
+test('mocked bootstrap owns a private writer gate while an independent workspace reader remains live', async (t) => {
   const { root, artifactDir } = await createBootstrapFixture(t);
-  const reader = await acquireDevelopmentReader(path.join(repoRoot, 'harness', 'pi'));
+  // Model a separate canonical workspace without registering against the real
+  // checkout, where Moon may concurrently own the Pi compilation writer.
+  const { root: readerRoot } = await createBootstrapFixture(t);
+  const reader = await acquireDevelopmentReader(path.join(readerRoot, 'harness', 'pi'));
   const calls = [];
   let confirmations = 0;
   try {
