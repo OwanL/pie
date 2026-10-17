@@ -24,7 +24,7 @@ Only cooperating updated writers are protected; older binaries do not acquire th
 
 ## Remaining cleanup limitation
 
-The subagent resource loader exposes no reliable per-attempt handles for provider/pool signal listeners registered after cancelled reload or session creation. Delayed cleanup must not remove listeners belonging to another live attempt. The pass removed unsafe delayed global-snapshot reclamation; late closures can still accumulate. An SDK-owned disposal or registration handle is needed to close this gap. See [subagent lifecycle notes](../../harness/tools/subagent/README.md).
+The subagent resource loader exposes no reliable per-attempt handles for provider/pool signal listeners registered after cancelled reload or session creation. Delayed cleanup must not remove listeners belonging to another live attempt. The pass removed unsafe delayed global-snapshot reclamation. Mock-based regressions demonstrate the ownership gap; a current real-SDK reproduction of the listener leak remains unverified. Existing loader, provider-registration and session-disposal APIs do not supply the missing ownership handle. Establish that reproduction before designing SDK-owned disposal or registration handles. See [subagent lifecycle notes](../../harness/tools/subagent/README.md).
 
 ## Verification limitations
 
@@ -38,6 +38,12 @@ The subagent resource loader exposes no reliable per-attempt handles for provide
 Verified reload used `pie-runtime-v2` generation `1feff01a5781f87aca76868c32582cd93187a6ddb7d8db0d59cd7b8c75056f44`; packaged host/renderer markers were `dedd15c096b58208fb99`. The live backend/worker run reached `backend.ready` successfully. A screenshot confirms the current conversation, tabs, and composer rendered in Pie, and there were no fresh startup errors. The old `--analyticsBuildId 84d09…` value identifies the canonical analytics descriptor, not a compiled host build.
 
 This is evidence of the observed reload and rendering only. It does not attest the live renderer build or qualify all recovery scenarios or full installed acceptance.
+
+### Isolated source validation (2026-10-18)
+
+The subsequent session-control/title, settings-lock, Playwright cleanup and test-fixture maintenance is committed, but not installed or loaded. Nine affected typecheck owners passed using explicitly verified installed runtime/tooling artifacts. The host/renderer validation build, covering source through `6556c723`, completed with identity `f83703e98bc270fa1937` in `%TEMP%/pie-maintenance-validation-20261018-01a1490e`; no loader selection, installation or running host was changed. Later source commits are not implicitly qualified by this build receipt.
+
+This build reused Pi runtime identity `94c1af2347bfa7f2cc7d5cd2d63d7fedcfc0213f4e25b5b3e817074bbd982047`. It does **not** compile or include the subsequent Pi-source Windows background-console fixes. Those changes have focused source tests but still require a fresh qualified SDK build. Retained workspace reader registrations were not reclaimed. Full artifact and installed acceptance remain unqualified; successful targeted SDK-resolution and session-control artifact fixtures do not establish the full matrix.
 
 ## Optional structural work
 
