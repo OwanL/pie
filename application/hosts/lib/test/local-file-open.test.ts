@@ -63,7 +63,7 @@ function createFakeClock(): { clock: LocalFileOpenClock; fireIdleTimers(): void 
         timers.set(handle, callback);
         return handle;
       },
-      clearTimeout: (handle) => { timers.delete(handle); },
+      clearTimeout: (handle) => { timers.delete(handle as object); },
     },
     fireIdleTimers: () => {
       const callbacks = [...timers.values()];
