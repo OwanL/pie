@@ -1,14 +1,14 @@
 # Maintenance follow-ups
 
-Open findings from the October 2026 maintenance pass. These are not completed fixes or evidence of installed-host behavior. The owning [state contract](../contracts/STATE_CONTRACT.md) and [analytics contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) remain authoritative.
+Status from the October 2026 maintenance pass. Staging is not evidence of loaded behavior. The owning [state contract](../contracts/STATE_CONTRACT.md) and [analytics contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) remain authoritative.
 
-## Coordination changes requiring design
+## Coordination findings
 
 ### Runtime lock takeover
 
-[`acquireDirectoryLock`](../../application/hosts/vscode/runtime/runtime-generations.cjs) can have two contenders observe the same abandoned lock. One can remove the other's newly acquired lock because inspection and removal are not an atomic ownership check. Re-reading metadata or renaming the canonical pathname does not close that race.
+**Implemented and staged (2026-10-17), not yet loaded.** The legacy directory-lock takeover race is replaced by [kernel-owned Windows named-pipe exclusion](../../application/hosts/vscode/runtime/windows-runtime-lock.cjs), with automatic release on process death. Supported storage is a stable-mounted, fixed local NTFS volume; unsupported platforms/storage fail explicitly. No native dependency or VS Code minimum-version increase was added.
 
-**Approved direction (2026-10-17):** retain automatic crash recovery, with Windows-first support; unsupported platforms must fail explicitly. Implement kernel-owned named-pipe exclusion and a separate versioned runtime store so older helpers cannot interfere. No native dependency or minimum VS Code version increase is intended. Stage a complete new-store generation before switching the loader; preserve the legacy store and its leases. Implementation and qualification are pending. Do not reclaim development-workspace gate records as a workaround.
+The separate `pie-runtime-v2` store isolates older helpers. Every loader switch requires a verified selected v2 generation first. Legacy selections, leases, old bootstrap and running-generation sentinels were unchanged across staging. Development-workspace reader records are separate and must not be reclaimed as a workaround.
 
 ### Cross-process session-settings updates
 
@@ -18,9 +18,7 @@ Define one cross-process transaction owner and lock order for current and legacy
 
 ### Ambiguous session-open recovery
 
-Transport failures now retain uncertainty rather than rolling back selection. However, [`misc-handlers.ts`](../../application/backend/conversation-state/reducers/misc-handlers.ts) still reconciles ambiguous opens by issuing another `OpenSession`. The contract calls for read-only reconciliation; the coordinator's current `operation.status` ledger does not cover cold opens.
-
-Design retained, generation-addressed open outcomes across the coordinator and host before replacing the retry. Test acknowledgement loss with exactly one state-changing open, late success, supersession, and backend death.
+**Implemented and staged (2026-10-17), not yet loaded.** Coordinator outcomes are retained for the backend generation; heavy snapshots are byte-bounded without a lifetime open limit. Host recovery uses read-only `operation.status`, never another open. Acknowledgement without a snapshot remains recoverable. Retained inventory ownership, post-commit serialization failure, supersession, close fences and confirmed backend death have regression coverage. Unknown or evicted evidence never authorizes rollback or replay.
 
 ## Remaining cleanup limitation
 
@@ -29,8 +27,15 @@ The subagent resource loader exposes no reliable per-attempt handles for provide
 ## Verification limitations
 
 - The native test runner's SDK alias overlay can fail dynamic ESM imports in SDK-independent warm-bash and relocated-owner tests. Their SDK-free routes pass; this does not qualify SDK-overlay parity. Build/package-resolution fixtures also need SDK-free execution to avoid ambient compiler-selection interference.
-- On Windows, `run-test-files-sdk-path.test.mjs` intermittently reports unconfirmed child-tree teardown after its inner test succeeds. It reproduced in broad and focused runs, followed by successful isolated runs. Logs did not distinguish a surviving child from an inconclusive process census. Preserve fail-closed runtime retention; collect ownership diagnostics before changing watchdog behavior.
-- Full artifact, coverage, live-provider, visible-browser/Electron, and installed-host acceptance were not run. Ordinary typechecks reused a verified existing runtime rather than rebuilding the workspace with an active reader.
+- Ordinary project suites and all four typechecks passed across serial runs, with their existing skips. Follow-up fixture/routing corrections were verified. This does not establish that the default highly parallel route's Windows process census is reliable; uncertain teardown remains fail-closed. Failed packing now releases parent IPC/stderr handles while preserving uncertainty and diagnostic paths.
+- Pi suites passed before the test-only Moon aggregator correction. Fresh Pi compilation remains blocked by three retained workspace reader registrations. Delivery explicitly reused the verified installed SDK: its source/lock/target inputs matched before that test-configuration-only change. No reader records were reclaimed.
+- Full artifact, coverage, live-provider, visible-browser/Electron, and installed-host acceptance remain unqualified.
+
+### Staging receipt
+
+Runtime `1feff01a5781f87aca76868c32582cd93187a6ddb7d8db0d59cd7b8c75056f44`, host/renderer build `dedd15c096b58208fb99`, is verified and selected in `pie-runtime-v2`. The immutable three-file loader matches source. Renderer selection was published; no host restart or live adoption was observed. The user approved including the pre-existing working-tree changes, which remain uncommitted unless separately owned by this maintenance work.
+
+Before/after checks and successful build log: `%TEMP%/pie-maintenance-stage-01a1490e-D3h8Lh/`. Other staged repairs include the Windows guardian environment limit, installed title-completion resolution, and replies to live sessions awaiting a title.
 
 ## Optional structural work
 
