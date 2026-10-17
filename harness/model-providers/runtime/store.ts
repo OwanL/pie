@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
-import type { ProviderRuntimeReference, RuntimeEntryManager, RuntimeSnapshot } from './contracts';
+import type { BuiltinRuntimeModelResolver, ProviderRuntimeReference, RuntimeEntryManager, RuntimeSnapshot } from './contracts';
 import { immutable, validNativeModel } from './projection';
 import { parseModelPricing } from '../pricing/pricing-core';
+import { repairRejectedLegacyRuntimeRows } from './recovery';
 
 const marker = 'pie-provider-runtime-v1';
 const maxBytes = 4 * 1024 * 1024;
@@ -103,7 +104,8 @@ export async function saveProviderRuntimeProjection(artifactDir: string, project
   } finally { await unlink(temporary).catch(e => { if (e.code !== 'ENOENT') throw e; }); }
   return immutable(ref);
 }
-export async function readProviderRuntimeProjection(artifactDir: string, supplied: ProviderRuntimeReference): Promise<RuntimeSnapshot> {
+export async function readProviderRuntimeProjection(artifactDir: string, supplied: ProviderRuntimeReference,
+  resolveBuiltinModels?: BuiltinRuntimeModelResolver): Promise<RuntimeSnapshot> {
   const ref = reference(supplied);
   const path = join(await existingArtifactDirectory(artifactDir), `${ref.sha256}.json`);
   const file = await open(path, 'r');
@@ -114,12 +116,13 @@ export async function readProviderRuntimeProjection(artifactDir: string, supplie
     if (bytesRead > maxBytes) throw failure();
     const text = buffer.subarray(0, bytesRead).toString('utf8');
     if (hash(text) !== ref.sha256) throw failure();
-    try { return snapshot(JSON.parse(text)); } catch { throw failure(); }
+    try { return repairRejectedLegacyRuntimeRows(snapshot(JSON.parse(text)), resolveBuiltinModels); } catch { throw failure(); }
   } finally { await file.close(); }
 }
 /** Synchronous accounting read uses the same bounded hash/schema validation as promotion.
  * It never creates directories or resolves credentials. */
-export function readProviderRuntimeProjectionSync(artifactDir: string, supplied: ProviderRuntimeReference): RuntimeSnapshot {
+export function readProviderRuntimeProjectionSync(artifactDir: string, supplied: ProviderRuntimeReference,
+  resolveBuiltinModels?: BuiltinRuntimeModelResolver): RuntimeSnapshot {
   const ref = reference(supplied);
   if (!isAbsolute(artifactDir)) throw failure();
   const check = (path: string) => {
@@ -147,7 +150,7 @@ export function readProviderRuntimeProjectionSync(artifactDir: string, supplied:
     if (length > maxBytes) throw failure();
     const text = buffer.subarray(0, length).toString('utf8');
     if (hash(text) !== ref.sha256) throw failure();
-    try { return snapshot(JSON.parse(text)); } catch { throw failure(); }
+    try { return repairRejectedLegacyRuntimeRows(snapshot(JSON.parse(text)), resolveBuiltinModels); } catch { throw failure(); }
   } finally { closeSync(descriptor); }
 }
 

@@ -42,7 +42,7 @@ import type { ModelSettingsUnsetKey } from '../coordinator/request-handler-share
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
 import { subagentSettlementPricingResolver } from '../../model-providers/pricing/subagent-settlement-pricing';
-import { readProviderRuntimeProjection, createProviderRuntimeServices, buildProviderRuntimePricingFacts, type RuntimeSnapshot, type ProviderRuntimeReference } from '../../model-providers/runtime/index';
+import { readProviderRuntimeProjection, createProviderRuntimeServices, buildProviderRuntimePricingFacts, repairRejectedLegacyRuntimeRows, type RuntimeSnapshot, type ProviderRuntimeReference } from '../../model-providers/runtime/index';
 import { projectProviderRuntimeModels } from '../../model-providers/runtime/model-info';
 import { currentProviderSelectorSnapshot } from '../../model-providers/runtime/selector-policy';
 import { resolveCapturedInvocationPricing } from '../../model-providers/pricing/captured-invocation-pricing';
@@ -159,15 +159,19 @@ export interface WorkerRuntimePromotionPayload {
   providerRuntime?: { artifactDir: string; reference: ProviderRuntimeReference; credentialFile: string };
 }
 
-/** Adapt captured invocation pricing to the existing single analytics bridge. */
-export function capturedWorkerSettlementPricingResolver(facts: CapturedPricingFacts): SubagentSettlementPricingResolver {
+/** Adapt captured invocation pricing to the existing single analytics bridge.
+ *  `facts` may be an up-to-date getter so late read-time recovery (which needs
+ *  the loaded SDK builtin authority) can replace the captured facts object. */
+export function capturedWorkerSettlementPricingResolver(
+  facts: CapturedPricingFacts | (() => CapturedPricingFacts | undefined),
+): SubagentSettlementPricingResolver {
   const timestamp = (value: number | undefined): string | undefined => {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
     const date = new Date(value);
     return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
   };
   return request => {
-    const result = resolveCapturedInvocationPricing({ facts, provider: request.provider, modelId: request.model,
+    const result = resolveCapturedInvocationPricing({ facts: typeof facts === 'function' ? facts() : facts, provider: request.provider, modelId: request.model,
       usage: { inputTokens: request.usage.input, outputTokens: request.usage.output,
         cacheReadTokens: request.usage.cacheRead, cacheWriteTokens: request.usage.cacheWrite,
         startedAt: timestamp(request.startedAtMs),
@@ -862,7 +866,9 @@ export class WorkerRuntimeHost {
         activation,
         `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
         this.analyticsWriterAdmission,
-        this.capturedModelFacts ? capturedWorkerSettlementPricingResolver(this.capturedModelFacts) : subagentSettlementPricingResolver(this.agentDir),
+        this.capturedModelFacts
+          ? capturedWorkerSettlementPricingResolver(() => this.capturedModelFacts)
+          : subagentSettlementPricingResolver(this.agentDir),
       );
       this.analyticsTransport.install();
     }
@@ -906,6 +912,15 @@ export class WorkerRuntimeHost {
     const loadMode = sdkRuntimeLoadMode(this.options.sdkRuntime, 'full');
     const sourceSdk: SourceArtifactSdkModule = await (this.options.sdkLoader ?? loadSdk)(selectedSdkPath, loadMode);
     this.sdk = sourceSdk as unknown as SdkModule;
+    // Read-time recovery from bundled overrides needs the loaded SDK builtin
+    // authority. Remaining rejected legacy rows are recomposed here, before any
+    // runtime service, picker projection or settlement pricing observes them;
+    // this is pure composition and never writes artifacts or resolves auth.
+    if (this.providerSnapshot) {
+      this.providerSnapshot = repairRejectedLegacyRuntimeRows(this.providerSnapshot,
+        (provider, id) => this.sdk?.getProviderRuntimeBuiltinModel?.(provider, id));
+      this.capturedModelFacts = buildProviderRuntimePricingFacts(this.providerSnapshot);
+    }
     // Isolated workers perform provider I/O but never install an independent
     // ProviderGate admission/circuit. The coordinator lease above is the sole
     // cross-worker capacity and circuit authority.

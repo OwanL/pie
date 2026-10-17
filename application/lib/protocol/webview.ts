@@ -479,8 +479,10 @@ export interface ViewState {
   systemPrompts: SystemPromptEntry[];
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
-  /** Freshness of the active session's picker catalog. */
-  availableModelsStatus: 'provisional' | 'loading' | 'authoritative';
+  /** Freshness of the active session's picker catalog. `error` is a terminal
+   *  hydration failure with a retry affordance; a last good catalog stays
+   *  visible and an error never claims an authoritative empty catalog. */
+  availableModelsStatus: 'provisional' | 'loading' | 'authoritative' | 'error';
   contextUsage: ContextWindowUsage | null;
   /** Cold empty-session inventory estimate. Provider usage and hot runtime
    * catalog state supersede it; null means the fail-open estimate is absent. */

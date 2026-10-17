@@ -17,6 +17,31 @@ import type { NativeRuntimeModel } from '../contracts';
 import type { StagedProviderCredential } from '../../management/auth-port';
 import type { SdkModule } from '../../../agent-processes/lib/sdk-integration/sdk';
 
+test('native configured auth admits entryless legacy providers only', () => {
+  const fixture = syntheticSdk();
+  fixture.legacy.hasAuth = () => false;
+  const models = ['ollama', 'unauthenticated', 'managed'].map(provider => ({ ...native, provider }));
+  const snapshot = captureProviderRuntimeProjection({ config: { version: 1, providers: {
+    managed: { enabled: true, credentialRef: { source: 'none' } },
+  } }, configRevision: canonicalRevision('configured-auth'), legacyModels: models, builtinModels: models })!;
+  (fixture.sdk.ModelRegistry as any).create = () => ({
+    hasConfiguredAuth: (model: NativeRuntimeModel) => model.provider === 'ollama',
+    getError: () => undefined,
+    getApiKeyAndHeaders() { throw new Error('Admission must not resolve credentials'); },
+  });
+  const services = createProviderRuntimeServices(fixture.sdk, snapshot, fixture.legacy, {
+    credentialFile: unopenedCredentialFile, legacyModelsFile: 'private-models.json',
+  });
+  assert.deepEqual(services.modelRegistry.getAvailable().map(model => model.provider).sort(), ['managed', 'ollama']);
+  assert.equal(services.modelRegistry.hasConfiguredAuth(models[0]), true);
+  assert.equal(services.modelRegistry.hasConfiguredAuth(models[1]), false);
+  assert.equal(services.modelRegistry.hasConfiguredAuth(models[2]), true);
+  assert.deepEqual(availableProviderRuntimeModels(snapshot, {
+    credentialFile: unopenedCredentialFile, savedCredential: () => undefined,
+    legacyHasAuth: (_id, model) => model.provider === 'ollama', defaultHasAuth: () => false,
+  }).map(model => model.provider).sort(), ['managed', 'ollama']);
+});
+
 const canonicalRevision = (label: string) => `sha256:${createHash('sha256').update(label).digest('hex')}`;
 const unopenedCredentialFile = join(tmpdir(), `pie-unopened-credentials-${process.pid}.json`);
 const native: NativeRuntimeModel = { provider: 'saved', id: 'same', name: 'Captured', api: 'openai-completions', baseUrl: 'https://captured.example/v1', input: ['text'], reasoning: false, contextWindow: 1000, maxTokens: 100, cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } };
@@ -98,6 +123,10 @@ test('saved capture: scoped central native auth, refresh retains epoch, reconnec
 
 test('immutable masks: hidden dispatch allowed; disabled, unsupported and unpriced fail closed; local none never saved lookup', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pie-services-'));
+  // getAvailable() applies live selector policy from the provider config dir; pin it
+  // to the private fixture so assertions stay independent of the real profile.
+  const previous = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = dir;
   try {
     const fixture = syntheticSdk();
     fixture.central.set('local', { type: 'api_key', key: 'must-not-be-used' });
@@ -126,7 +155,11 @@ test('immutable masks: hidden dispatch allowed; disabled, unsupported and unpric
     const before = services.modelRegistry.getAll();
     services.modelRegistry.refresh();
     assert.deepEqual(services.modelRegistry.getAll(), before);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR;
+    else process.env.PIE_PROVIDER_CONFIG_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('raw native auth false does not make an otherwise eligible captured model ineligible', () => {

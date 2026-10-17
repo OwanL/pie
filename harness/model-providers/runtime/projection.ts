@@ -16,14 +16,35 @@ export function builtinHeaderDigest(model: NativeRuntimeModel): string | undefin
     Object.keys(headers).sort().map(key => [key, headers[key]])])).digest('hex');
 }
 const rateChannels = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
-function flatCost(value: unknown): value is NativeRuntimeModel['cost'] {
+function completeRates(value: unknown): value is NativeRuntimeModel['cost'] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const rates = value as Record<string, unknown>;
+  return Object.keys(rates).every(key => rateChannels.includes(key as typeof rateChannels[number]) || key === 'tiers')
+    && rateChannels.every(key => typeof rates[key] === 'number' && Number.isFinite(rates[key]) && Number(rates[key]) >= 0);
+}
+function flatCost(value: unknown): value is NativeRuntimeModel['cost'] {
+  if (!completeRates(value)) return false;
   const rates = value as Record<string, unknown>;
   // Native SDK merges can materialize the optional tiers field as undefined.
   // That is not tiered pricing; actual tiers (including []) still fail closed.
-  return Object.keys(rates).every(key => rateChannels.includes(key as typeof rateChannels[number])
-      || (key === 'tiers' && rates[key] === undefined))
-    && rateChannels.every(key => typeof rates[key] === 'number' && Number.isFinite(rates[key]) && Number(rates[key]) >= 0);
+  return rates.tiers === undefined;
+}
+/** Legacy overlay native baselines are the authoritative definition, including
+ *  their actual tier tables. Complete flat rates must be present, and an
+ *  advertised tier table must be non-empty with complete per-tier rates;
+ *  unknown, incomplete or malformed tier prices fail closed instead of being
+ *  flattened or defaulted into applicable rates. */
+function overlayTierProved(tier: unknown): boolean {
+  if (!tier || typeof tier !== 'object' || Array.isArray(tier)) return false;
+  const rates = tier as Record<string, unknown>;
+  return typeof rates.inputTokensAbove === 'number' && Number.isFinite(rates.inputTokensAbove) && rates.inputTokensAbove >= 0
+    && rateChannels.every(key => typeof rates[key] === 'number' && Number.isFinite(rates[key]) && rates[key] >= 0);
+}
+export function overlayCostProved(value: unknown): value is NativeRuntimeModel['cost'] {
+  if (!completeRates(value)) return false;
+  const rates = value as Record<string, unknown>;
+  if (rates.tiers === undefined) return true;
+  return Array.isArray(rates.tiers) && rates.tiers.length > 0 && rates.tiers.every(overlayTierProved);
 }
 const positive = (n: unknown) => Number.isSafeInteger(n) && Number(n) > 0;
 export function validNativeModel(value: unknown): value is NativeRuntimeModel {
@@ -118,13 +139,13 @@ export function captureProviderRuntimeProjection(input: CaptureProviderRuntimeIn
       const explicitPricing = [entry?.modelOverrides?.[item.id]?.pricing, input.discovered?.[provider.id]?.models[item.id]?.pricing]
         .some(value => !!parseModelPricing(value) && typeof value === 'object'
           && rateChannels.every(key => typeof value[key] === 'number'));
-      const pricingProved = (legacyOverlay && !!native && flatCost(native.cost)) || explicitPricing || !entry || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || (!!native && provedBaseline(native))
+      const pricingProved = (legacyOverlay && !!native && overlayCostProved(native.cost)) || explicitPricing || !entry || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || (!!native && provedBaseline(native))
         || flatCost(entry.modelOverrides?.[item.id]?.pricing)
         || flatCost(input.discovered?.[provider.id]?.models[item.id]?.pricing);
       const supported = pricingProved && validNativeModel(candidate) && (!(nativeHeaders && Object.keys(nativeHeaders).length) || trustedHeaders)
         && (runtimeProtocols.includes(candidate.api as typeof runtimeProtocols[number]) || nativeProtocol)
         && !!completePricing
-        && (legacyOverlay ? !!native && flatCost(native.cost)
+        && (legacyOverlay ? !!native && overlayCostProved(native.cost)
           : ((!pricing || pricing === 'unknown' || pricing.tiers === undefined) || !!input.shippedCatalog?.[provider.id]?.models?.[item.id] || explicitPricing));
       const row: RuntimeModelProjection = { providerId: provider.id, id: item.id,
         enabled: !provider.configured || provider.enabled, visible: item.preferences.visible !== false,

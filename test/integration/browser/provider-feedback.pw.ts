@@ -5,8 +5,50 @@ import os from 'node:os';
 import path from 'node:path';
 import { BrowserServer } from '../../../application/hosts/browser/http/browser-server.js';
 import { EMPTY_VIEW_STATE } from '../../../application/frontend/lib/hooks/use-host-sync.js';
+import type { ViewState } from '../../../application/lib/protocol/webview.js';
 import type { ProviderSetupDraft } from '../../../harness/model-providers/management/contracts.js';
 import { createProviderManagementState, projectProviderManagementView } from '../../../application/backend/provider-management/state.js';
+
+test('empty catalog error retries into loaded choices', async ({ page }) => {
+  const artifacts = await mkdtemp(path.join(os.tmpdir(), 'pie-empty-catalog-retry-'));
+  console.log(`Catalog retry screenshots: ${artifacts}`);
+  const session = { path: path.join(artifacts, 'synthetic.jsonl'), name: 'Synthetic catalog retry', cwd: artifacts, modifiedAt: new Date().toISOString(), messageCount: 0 };
+  const viewState: ViewState = { ...EMPTY_VIEW_STATE, sessions: [session], openTabPaths: [session.path], activeSession: session, backendReady: true, transcriptLoaded: true, availableModelsStatus: 'error' };
+  let retryCount = 0;
+  let retryArmed = false;
+  const server = new BrowserServer({
+    getSettings: () => ({ enabled: true, port: 0, allowLan: false, requirePreferredPort: true }),
+    getViewState: () => viewState,
+    getRunningSessionCount: () => 0,
+    assetDir: path.resolve('application/hosts/vscode/out-dev/webview/panel'),
+    routeMessage: async (message, context) => {
+      if (message.type === 'refreshState' && retryArmed) {
+        retryCount++;
+        viewState.availableModelsStatus = 'authoritative';
+        viewState.availableModels = [{ id: 'synthetic-model', name: 'Synthetic loaded model', provider: 'synthetic', reasoning: false, inputKinds: ['text'] }];
+      }
+      if (['ready', 'refreshState', 'requestSnapshot'].includes(message.type)) server.requestState(context.rendererId);
+    },
+  });
+  try {
+    const started = await server.start();
+    if (started.kind !== 'started') throw new Error('Server did not start');
+    await page.setViewportSize({ width: 420, height: 800 });
+    await page.goto(started.url);
+    const retry = page.getByRole('button', { name: 'Retry loading the model catalog', exact: true });
+    await expect(retry).toBeVisible();
+    await expect(retry).toHaveText('Models unavailable — Retry');
+    expect(retryCount).toBe(0);
+    await page.screenshot({ path: path.join(artifacts, 'after-empty-error.png') });
+    retryArmed = true;
+    await retry.click();
+    await expect(retry).toHaveCount(0);
+    expect(retryCount).toBe(1);
+    await page.getByRole('button', { name: 'Model', exact: true }).click();
+    await expect(page.getByRole('option').filter({ hasText: 'Synthetic loaded model' })).toBeVisible();
+    await page.screenshot({ path: path.join(artifacts, 'after-retry-loaded.png') });
+  } finally { await server.stop(); server.dispose(); }
+});
 
 test('provider feedback after-only synthetic interaction', async ({ page }) => {
   const artifacts = await mkdtemp(path.join(os.tmpdir(), 'pie-provider-feedback-after-'));
@@ -19,10 +61,9 @@ test('provider feedback after-only synthetic interaction', async ({ page }) => {
   const drafts: Record<string, ProviderSetupDraft> = Object.fromEntries(rows.map(row => [row.id, { id: row.id, originalId: row.id, enabled: true, api: '', baseUrl: 'http://synthetic.invalid', credentialSource: 'saved', environmentName: '', models: [{ ...model }] }]));
   const session = { path: path.join(artifacts, 'synthetic.jsonl'), name: 'Synthetic UI verification', cwd: artifacts, modifiedAt: new Date().toISOString(), messageCount: 0 };
   const viewState = { ...EMPTY_VIEW_STATE, sessions: [session], openTabPaths: [session.path], activeSession: session, backendReady: true, transcriptLoaded: true, providerManagement: projectProviderManagementView(p) };
-  let server: BrowserServer;
   const publish = () => { viewState.providerManagement = projectProviderManagementView(p); server.requestState(rendererId); };
   let rendererId = '';
-  server = new BrowserServer({
+  const server = new BrowserServer({
     getSettings: () => ({ enabled: true, port: 0, allowLan: false, requirePreferredPort: true }),
     getViewState: () => viewState,
     getRunningSessionCount: () => 0,

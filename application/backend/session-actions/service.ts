@@ -965,6 +965,13 @@ export class SessionService implements HostDisposable {
     await this.messages.hydrateModelState(sessionPath, metadata);
   }
 
+  /** Re-run hydrations that failed with "Backend is not running" before the
+   *  backend was ready. The host calls this whenever `settings.backendReady`
+   *  transitions to `true` (startup publish, restart recovery). */
+  flushDeferredModelHydrations(): void {
+    this.messages.flushDeferredModelHydrations();
+  }
+
   normalizeAttachUris<T extends { scheme: string }>(uris: T[]): T[] {
     return this.messages.normalizeAttachUris(uris);
   }

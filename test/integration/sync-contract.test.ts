@@ -31,6 +31,33 @@ test('pending new-session preview uses creation authority without borrowing sess
   assert.match(contract, /fenced by backend generation, creation operation\/attempt and configuration-write ownership/u);
   assert.match(contract, /durable session discovery replaces and revalidates the provisional choices/u);
   assert.match(contract, /an authoritative empty catalog remains empty/u);
+  // Terminal catalog hydration failure: fenced, keeps the last good catalog,
+  // offers retry; pre-ready unavailability defers instead of failing.
+  assert.match(contract, /A durable catalog read that fails after backend readiness is terminal: it records an `error` catalog status/u);
+  assert.match(contract, /the toolbar renders a retry affordance in the `error` state that re-requests hydration/u);
+  assert.match(contract, /A catalog or settings read that fails before `backend\.ready` \(the `Backend is not running` host boundary\) is not a terminal failure: the host defers it and re-runs it on the next backend ready transition/u);
+  const { createInitialArchState } = await import('../../application/backend/conversation-state/arch-state.js');
+  const { reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const model = { id: 'm', name: 'M', provider: 'p', reasoning: false, inputKinds: ['text'] } satisfies ModelInfo;
+  const sessionPath = '/catalog-failure.jsonl';
+  const initial = { ...createInitialArchState(),
+    settings: { ...createInitialArchState().settings, backendReady: true, modelWriteFence: 0, modelHydrationRevision: 2 },
+    sessions: { ...createInitialArchState().sessions, activeSessionPath: sessionPath, openTabPaths: [sessionPath] } };
+  // A terminal failure on a loading catalog surfaces the error status.
+  const failed = reducer(initial, { kind: 'AvailableModelsHydrationFailed', sessionPath,
+    error: 'catalog exploded', backendGeneration: 1, hydrationRevision: 2, modelWriteFence: 0 });
+  assert.equal(selectViewState(failed.state).availableModelsStatus, 'error');
+  // It keeps a last good catalog visible and never claims authoritative-empty.
+  const good = { ...initial, settings: { ...initial.settings, availableModelsBySession: { [sessionPath]: [model] }, modelHydrationRevision: 2 } };
+  const kept = reducer(good, { kind: 'AvailableModelsHydrationFailed', sessionPath,
+    error: 'refresh failed', backendGeneration: 1, hydrationRevision: 2, modelWriteFence: 0 });
+  assert.equal(selectViewState(kept.state).availableModelsStatus, 'authoritative');
+  assert.deepEqual(selectViewState(kept.state).availableModels, [model]);
+  // A stale failure (older revision) is rejected.
+  const old = reducer(kept.state, { kind: 'AvailableModelsHydrationFailed', sessionPath,
+    error: 'stale', backendGeneration: 1, hydrationRevision: 1, modelWriteFence: 0 });
+  assert.equal(old.state, kept.state);
 });
 
 test('local dictation owns only its captured draft span and never sends', async () => {

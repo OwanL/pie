@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buildProviderRuntimePricingFacts } from '../pricing-facts';
+import { resolveCapturedInvocationPricing } from '../../pricing/captured-invocation-pricing';
 import { captureProviderRuntimeProjection } from '../projection';
 import { appendProviderRuntimeReference, readProviderRuntimeReference, saveProviderRuntimeProjection, readProviderRuntimeProjection } from '../store';
 import type { NativeRuntimeModel, RuntimeEntryManager } from '../contracts';
@@ -108,6 +110,42 @@ test('managed pricing requires compiled proof or declared complete rates', () =>
     const rejected = capture(native, [native], pricing).models[0];
     assert.equal(rejected.model, undefined);
     assert.equal(rejected.pricingFacts, undefined);
+    assert.equal(rejected.rejection, 'unsupported-or-incomplete-runtime-model');
+  }
+});
+test('legacy existing-provider save keeps native tier-priced models supported with tier facts', () => {
+  // Realistic shipped tier-priced native baseline (models.json: openai-codex/gpt-6-astra).
+  const tiers = [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }];
+  const tieredCost = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, tiers };
+  const tiered: NativeRuntimeModel = { ...native, provider: 'openai-codex', id: 'gpt-6-astra',
+    name: 'GPT 6 Astra', api: 'openai-codex-responses', cost: tieredCost };
+  const capture = (cost: NativeRuntimeModel['cost']) => captureProviderRuntimeProjection({
+    // Saving model settings for an existing provider writes the legacy credential policy.
+    config: { version: 1, providers: { 'openai-codex': { enabled: true, credentialRef: { source: 'legacy' } } } },
+    configRevision: canonicalRevision('legacy-tiers'),
+    legacyModels: [{ ...tiered, cost }],
+  })!;
+  const row = capture(tieredCost as NativeRuntimeModel['cost']).models[0];
+  assert.ok(row.model);
+  assert.deepEqual(row.model?.cost, { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
+  assert.deepEqual(row.pricingFacts, tieredCost);
+  const facts = buildProviderRuntimePricingFacts(capture(tieredCost as NativeRuntimeModel['cost']));
+  assert.equal(resolveCapturedInvocationPricing({ facts, provider: 'openai-codex', modelId: 'openai-codex/gpt-6-astra',
+    usage: { inputTokens: 300_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 } })?.rateSnapshot.outputTokensUsdPerMillion, 75);
+  // Native SDK merges materialize the optional tiers field as undefined; flat price.
+  assert.deepEqual(capture({ ...tieredCost, tiers: undefined } as NativeRuntimeModel['cost']).models[0].pricingFacts,
+    { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
+  // Tier-priced natives are never flattened or laundered: advertised tiers must
+  // be a complete, parseable table over complete base rates, or the row fails closed.
+  for (const cost of [
+    { ...tieredCost, tiers: [] },
+    { ...tieredCost, tiers: [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2 }] },
+    { ...tieredCost, tiers: [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2, cacheWrite: -1 }] },
+    { input: 10, output: 50, tiers },
+    { ...tieredCost, tiers: 'unknown' },
+  ] as NativeRuntimeModel['cost'][]) {
+    const rejected = capture(cost).models[0];
+    assert.equal(rejected.model, undefined);
     assert.equal(rejected.rejection, 'unsupported-or-incomplete-runtime-model');
   }
 });

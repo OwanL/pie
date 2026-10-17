@@ -830,6 +830,22 @@ export interface ModelSettingsHydratedEvent {
   modelWriteFence: number;
 }
 
+/** Emitted when `hydrateModelState`'s durable session catalog read fails after
+ *  the backend became ready. Terminal: the failure is fenced like a hydration
+ *  result, never clears a renderable catalog, and never claims an authoritative
+ *  empty catalog — the reducer only records an `error` catalog status so the
+ *  toolbar can offer a retry. */
+export interface AvailableModelsHydrationFailedEvent {
+  kind: 'AvailableModelsHydrationFailed';
+  sessionPath: string;
+  /** Diagnostic-only message; the visible label is derived from the status. */
+  error: string;
+  /** Required ownership metadata captured when the failed hydration started. */
+  backendGeneration: number;
+  hydrationRevision: number;
+  modelWriteFence: number;
+}
+
 /** Emitted when available models for a session change. */
 export interface AvailableModelsChangedEvent {
   kind: 'AvailableModelsChanged';
@@ -1233,6 +1249,7 @@ export type HostEvent =
   | ActiveRunSummaryChangedEvent
   | SessionMetadataChangedEvent
   | AvailableModelsChangedEvent
+  | AvailableModelsHydrationFailedEvent
   | ModelSettingsHydratedEvent
   | PendingExtensionUIRequestsClearedEvent
   | AvailableExtensionsChangedEvent

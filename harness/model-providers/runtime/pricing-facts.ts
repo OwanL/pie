@@ -3,16 +3,21 @@ import { parseModelPricing } from '../pricing/pricing-core';
 import type { CapturedPricingFacts, ModelPricingRecord } from '../../../analytics/contracts/model-pricing-facts';
 import type { RuntimeSnapshot } from './contracts';
 import { immutable, validNativeModel } from './projection';
+import { rejectedLegacyOverridePricing } from './recovery';
 
 /** Existing analytics pricing contract, with rates from this capture only. No catalog I/O,
  * rate defaults, accounting capture, or analytics-authority selection occurs here. */
-export function buildProviderRuntimePricingFacts(snapshot: RuntimeSnapshot): CapturedPricingFacts {
+export function buildProviderRuntimePricingFacts(snapshot: RuntimeSnapshot,
+  recoverRejectedLegacyOverrides = false): CapturedPricingFacts {
   const records = new Map<string, ModelPricingRecord[]>();
+  const recovered: ModelPricingRecord[] = [];
   for (const row of snapshot.models) {
-    if (!row.model || row.rejection || !validNativeModel(row.model)) continue;
-    const cost = row.model.cost;
+    const overridePricing = recoverRejectedLegacyOverrides ? rejectedLegacyOverridePricing(row) : undefined;
+    const cost = row.model && !row.rejection && validNativeModel(row.model) ? row.model.cost : undefined;
+    if (!cost && !overridePricing) continue;
     const record = immutable({ id: row.id, provider: row.providerId,
-      pricing: parseModelPricing(row.pricingFacts) ?? { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } });
+      pricing: overridePricing ?? parseModelPricing(row.pricingFacts) ?? { input: cost!.input, output: cost!.output, cacheRead: cost!.cacheRead, cacheWrite: cost!.cacheWrite } });
+    if (overridePricing) recovered.push(record);
     for (const key of new Set([row.id, `${row.providerId}/${row.id}`])) {
       const list = records.get(key) ?? [];
       list.push(record);
@@ -35,6 +40,6 @@ export function buildProviderRuntimePricingFacts(snapshot: RuntimeSnapshot): Cap
   });
   // Discovery or compiled SDK prices can change without a YAML revision. The
   // pricing identity must name the immutable capture, not just that YAML file.
-  const catalogVersion = `sha256:${createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')}`;
+  const catalogVersion = `sha256:${createHash('sha256').update(JSON.stringify(recovered.length ? { snapshot, recovered } : snapshot)).digest('hex')}`;
   return Object.freeze({ catalogVersion, map });
 }

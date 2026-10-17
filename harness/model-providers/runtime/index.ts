@@ -10,6 +10,7 @@ export * from './contracts';
 export { captureProviderRuntimeProjection, runtimeProtocols } from './projection';
 export { saveProviderRuntimeProjection, readProviderRuntimeProjection,
   appendProviderRuntimeReference, readProviderRuntimeReference } from './store';
+export { repairRejectedLegacyRuntimeRows } from './recovery';
 export { createProviderRuntimeServices, assertProviderRuntimeModel } from './services';
 export type { ProviderRuntimeServices, ProviderRuntimeAuthStorage, ProviderRuntimeModelRegistry,
   RuntimeRequestAuth, RuntimeAuthStatus } from './services';

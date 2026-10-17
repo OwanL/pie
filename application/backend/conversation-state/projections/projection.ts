@@ -676,7 +676,7 @@ function projectViewState(state: ArchState): ViewState {
 
   const activeOwnAvailableModels: ModelInfo[] =
     activePath ? settings.availableModelsBySession[activePath] ?? EMPTY_AVAILABLE_MODELS : EMPTY_AVAILABLE_MODELS;
-  const activeAvailableModelsStatus: 'provisional' | 'loading' | 'authoritative' = activePath
+  const activeAvailableModelsStatus: 'provisional' | 'loading' | 'authoritative' | 'error' = activePath
     ? settings.availableModelsStatusBySession[activePath]
       ?? (activeOwnAvailableModels.length > 0 ? 'authoritative' : 'loading')
     : 'authoritative';

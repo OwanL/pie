@@ -4,11 +4,51 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveCapturedInvocationPricing } from '../../pricing/captured-invocation-pricing';
-import type { RuntimeSnapshot } from '../contracts';
+import type { NativeRuntimeModel, RuntimeSnapshot } from '../contracts';
+import { OPENAI_CODEX_MODELS } from '../../../pi/packages/ai/src/providers/openai-codex.models';
+import { buildProviderRuntimePricingFacts } from '../pricing-facts';
+import { readProviderRuntimeProjectionSync } from '../store';
+import { readFileSync, readdirSync } from 'node:fs';
 import { readSessionPricingFacts } from '../session-pricing-facts';
 import { saveProviderRuntimeProjection } from '../store';
 
 const marker = 'pie-provider-runtime-v1';
+
+test('rejected legacy gpt-5.6-sol has runtime-equivalent tier facts without admission or writes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pie-session-rejected-pricing-'));
+  const artifactDir = join(root, 'runtime');
+  const session = join(root, 'session.jsonl');
+  const row = { providerId: 'openai-codex', id: 'gpt-5.6-sol', enabled: true, visible: true,
+    subagentEligible: true, credential: { source: 'legacy' as const }, rejection: 'unsupported-or-incomplete-runtime-model' as const };
+  const snapshot: RuntimeSnapshot = { version: 1, configRevision: `sha256:${'a'.repeat(64)}`,
+    models: [row, { ...row, id: 'unknown-model' }, { ...row, providerId: 'openai', credential: { source: 'saved' } }] };
+  try {
+    const reference = await saveProviderRuntimeProjection(artifactDir, snapshot);
+    const artifact = join(artifactDir, `${reference.sha256}.json`);
+    const before = readFileSync(artifact, 'utf8');
+    writeFileSync(session, `${JSON.stringify({ type: 'session', version: 3 })}\n${JSON.stringify({ type: 'custom', customType: marker, data: reference })}\n`);
+    const capture = readSessionPricingFacts(session, artifactDir);
+    if (capture.kind !== 'managed' || !capture.facts) assert.fail('expected recovered pricing');
+    const builtins = OPENAI_CODEX_MODELS as unknown as Record<string, NativeRuntimeModel>;
+    const runtime = readProviderRuntimeProjectionSync(artifactDir, reference,
+      (provider, id) => provider === 'openai-codex' ? builtins[id] : undefined);
+    const expected = buildProviderRuntimePricingFacts(runtime);
+    assert.ok(runtime.models[0].model);
+    assert.ok(capture.facts.map.get(row.id)?.[0].pricing.tiers?.length);
+    assert.deepEqual(capture.facts.map.get(row.id), expected.map.get(row.id));
+    for (const inputTokens of [100_000, 300_000]) {
+      const invocation = { provider: row.providerId, modelId: row.id,
+        usage: { inputTokens, outputTokens: 1000, cacheReadTokens: 1000, cacheWriteTokens: 0 } };
+      assert.deepEqual(resolveCapturedInvocationPricing({ ...invocation, facts: capture.facts })?.rateSnapshot,
+        resolveCapturedInvocationPricing({ ...invocation, facts: expected })?.rateSnapshot);
+    }
+    assert.equal(capture.facts.map.has('unknown-model'), false);
+    assert.equal(capture.facts.map.has(`openai/${row.id}`), false);
+    assert.deepEqual(readProviderRuntimeProjectionSync(artifactDir, reference).models, snapshot.models);
+    assert.equal(readFileSync(artifact, 'utf8'), before);
+    assert.deepEqual(readdirSync(artifactDir), [`${reference.sha256}.json`]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const capturedSnapshot: RuntimeSnapshot = {
   version: 1,
   configRevision: `sha256:${'c'.repeat(64)}`,

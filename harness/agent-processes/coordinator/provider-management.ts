@@ -110,7 +110,8 @@ export async function createCoordinatorProviderManagement(
           const credential = native.get?.(id);
           return native.drainErrors?.().length ? undefined : credential;
         },
-        legacyHasAuth: id => legacyAuth?.hasAuth?.(id) ?? false,
+        // Native configured-auth checks inspect references only: no shell execution or OAuth refresh.
+        legacyHasAuth: (id, model) => legacy?.().models.hasConfiguredAuth?.(model) ?? legacyAuth?.hasAuth?.(id) ?? false,
         defaultHasAuth: id => environment?.hasAuth?.(id) ?? false,
       });
       return projectProviderRuntimeModels(snapshot, available);
@@ -121,7 +122,8 @@ export async function createCoordinatorProviderManagement(
       return snapshot ? await saveProviderRuntimeProjection(artifactDir, snapshot) : undefined;
     },
     async readRuntimeProjection(reference: ProviderRuntimeReference) {
-      return await readProviderRuntimeProjection(artifactDir, reference);
+      return await readProviderRuntimeProjection(artifactDir, reference,
+        (provider, id) => sdk.getProviderRuntimeBuiltinModel?.(provider, id));
     },
     runtimeLocation(reference: ProviderRuntimeReference) { return { artifactDir, reference, credentialFile }; },
   };

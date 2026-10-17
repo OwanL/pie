@@ -8,7 +8,7 @@ import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { useMemo, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
-import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip } from '../lib/components/panel-chip';
+import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, PanelChip } from '../lib/components/panel-chip';
 import { ChoicePicker } from '../lib/components/choice-picker';
 import { ModelPicker } from '../settings/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
@@ -103,7 +103,10 @@ interface ComposerToolbarProps {
   onSetSessionTitlesSettings: (settings: Partial<SessionTitlesSettings>) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
-  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
+  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative' | 'error';
+  /** Invoked when the user clicks the models-unavailable retry chip (a terminal
+   *  catalog hydration failure). Absent keeps the chip non-interactive. */
+  onRetryModelCatalog?: () => void;
   systemPrompts: SystemPromptEntry[];
   selectedModel: string;
   selectedProvider?: string;
@@ -162,6 +165,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   availableExtensions,
   availableModels,
   availableModelsStatus,
+  onRetryModelCatalog,
   systemPrompts,
   selectedModel,
   selectedProvider,
@@ -267,6 +271,17 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             const nextLevel = supported.includes(selectedLevel) ? selectedLevel : (supported[0] ?? 'off');
             onModelChange(id, provider, nextLevel);
           }}
+        />
+      ) : availableModelsStatus === 'error' ? (
+        <PanelChip
+          as="button"
+          variant="toolbar"
+          tone="warning"
+          className="panel-chip-interactive"
+          label={selectedModelLabel || 'Models unavailable — Retry'}
+          ariaLabel="Retry loading the model catalog"
+          title="Loading the model catalog failed. Keep the last loaded choices visible; click to retry."
+          onClick={onRetryModelCatalog}
         />
       ) : (
         <ToolbarChip

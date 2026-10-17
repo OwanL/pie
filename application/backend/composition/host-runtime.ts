@@ -1009,6 +1009,12 @@ export class HostRuntime {
     }
     const result = dispatch(this.archState, event);
     this.archState = result.state;
+    if (!stateBefore.settings.backendReady && this.archState.settings.backendReady) {
+      // Startup selections that queued model hydration before backend.ready
+      // ("Backend is not running" seam) must hydrate on the ready transition
+      // instead of being swallowed.
+      this.service.flushDeferredModelHydrations();
+    }
     if (!stateBefore.settings.backendReady && this.archState.settings.backendReady
       && !this.dictationPrewarmRequested && this.archState.dictation.available && !this.shutdownRequested) {
       this.dictationPrewarmRequested = true;

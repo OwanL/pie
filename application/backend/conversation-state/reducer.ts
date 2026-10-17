@@ -109,7 +109,7 @@ import {
   handleBackendRestartOldGenerationDied,
   handleBackendRestartResult,
 } from './reducers/misc-handlers.js';
-import { handleAvailableModelsChanged, handleModelSettingsHydrated } from './reducers/set-model-handlers.js';
+import { handleAvailableModelsChanged, handleAvailableModelsHydrationFailed, handleModelSettingsHydrated } from './reducers/set-model-handlers.js';
 import { handleFileChangesUpdated } from './reducers/file-handlers.js';
 import {
   handleTurnSemanticEvent,
@@ -497,6 +497,10 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
 
     case 'AvailableModelsChanged': {
       return handleAvailableModelsChanged(state, event);
+    }
+
+    case 'AvailableModelsHydrationFailed': {
+      return handleAvailableModelsHydrationFailed(state, event);
     }
 
     case 'ModelSettingsHydrated': {

@@ -4,7 +4,7 @@ import type { CapturedPricingFacts } from '../../../analytics/contracts/model-pr
 import { resolveProviderConfigPaths } from '../catalog/provider-config-paths';
 import { buildProviderRuntimePricingFacts } from './pricing-facts';
 import { readProviderRuntimeProjectionSync } from './store';
-import type { ProviderRuntimeReference } from './contracts';
+import { type BuiltinRuntimeModelResolver, type ProviderRuntimeReference } from './contracts';
 
 const marker = 'pie-provider-runtime-v1';
 const prefixLimit = 64 * 1024;
@@ -19,6 +19,7 @@ export type SessionPricingCapture =
 export function readSessionPricingFacts(
   sessionPath: string,
   artifactDir?: string,
+  resolveBuiltinModels?: BuiltinRuntimeModelResolver,
 ): SessionPricingCapture {
   let descriptor: number | undefined;
   try {
@@ -62,7 +63,7 @@ export function readSessionPricingFacts(
     const directory = artifactDir ?? join(resolveProviderConfigPaths({
       configDir: process.env.PIE_PROVIDER_CONFIG_DIR,
     }).configDir, 'provider-runtime');
-    return { kind: 'managed', facts: buildProviderRuntimePricingFacts(readProviderRuntimeProjectionSync(directory, reference)) };
+    return { kind: 'managed', facts: buildProviderRuntimePricingFacts(readProviderRuntimeProjectionSync(directory, reference, resolveBuiltinModels), true) };
   } catch {
     return { kind: 'managed', facts: undefined };
   } finally {

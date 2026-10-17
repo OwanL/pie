@@ -398,3 +398,37 @@ export function handleModelSettingsHydrated(
     effects: [],
   };
 }
+
+/** Terminal catalog hydration failure. Fenced like a hydration result: a stale
+ *  generation/revision/write-fence cannot mark a current session failed. The
+ *  last good catalog stays visible — an error never becomes an authoritative
+ *  empty catalog (STATE_CONTRACT § Global Settings, Model, and Provider
+ *  Discovery); only a session that genuinely has no choices moves to `error`. */
+export function handleAvailableModelsHydrationFailed(
+  state: ArchState,
+  event: Extract<Event, { kind: 'AvailableModelsHydrationFailed' }>,
+): ReducerResult {
+  if (!state.sessions.openTabPaths.includes(event.sessionPath)
+    || isStaleHydrationResult(state, event, 'session-catalog')) {
+    return { state, effects: [] };
+  }
+  const currentStatus = state.settings.availableModelsStatusBySession[event.sessionPath];
+  const hasRenderableCatalog
+    = (state.settings.availableModelsBySession[event.sessionPath]?.length ?? 0) > 0
+    || currentStatus === 'provisional'
+    || currentStatus === 'authoritative';
+  if (hasRenderableCatalog) return { state, effects: [] };
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        availableModelsStatusBySession: {
+          ...state.settings.availableModelsStatusBySession,
+          [event.sessionPath]: 'error',
+        },
+      },
+    },
+    effects: [],
+  };
+}

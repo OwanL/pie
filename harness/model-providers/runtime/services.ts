@@ -63,12 +63,12 @@ function cloneRuntimeModel(model: NonNullable<RuntimeSnapshot['models'][number][
 export function availableProviderRuntimeModels(snapshot: RuntimeSnapshot, options: {
   credentialFile: string;
   savedCredential: (provider: string) => unknown;
-  legacyHasAuth: (provider: string) => boolean;
+  legacyHasAuth: (provider: string, model: NativeRuntimeModel) => boolean;
   defaultHasAuth: (provider: string) => boolean;
 }): NativeRuntimeModel[] {
   const hasAuth = (row: RuntimeSnapshot['models'][number]) => {
     const source = row.credential;
-    if (source.source === 'legacy') return options.legacyHasAuth(row.providerId);
+    if (source.source === 'legacy') return options.legacyHasAuth(row.providerId, cloneRuntimeModel(row.model!));
     if (source.source === 'environment') return !!process.env[source.name];
     if (source.source === 'default') return options.defaultHasAuth(row.providerId);
     if (source.source === 'none') {
@@ -242,12 +242,17 @@ export function createProviderRuntimeServices(
   modelRegistry.getAvailable = () => availableProviderRuntimeModels(currentProviderSelectorSnapshot(captured), {
     credentialFile: options.credentialFile,
     savedCredential: id => currentSaved(id, policy(id) as Extract<CredentialSource, { source: 'saved' }>)?.credential,
-    legacyHasAuth: id => legacy?.hasAuth?.(id) ?? false,
+    legacyHasAuth: (id, value) => legacyRequestRegistry?.hasConfiguredAuth(value) ?? legacy?.hasAuth?.(id) ?? false,
     defaultHasAuth: id => environment.hasAuth(id),
   }).map(value => model(value.provider, value.id)!);
   modelRegistry.refresh = () => { /* Frozen identities/policies; auth is resolved afresh per request. */ };
   modelRegistry.getError = () => undefined;
-  modelRegistry.hasConfiguredAuth = value => !!model(value.provider, value.id) && authStorage.hasAuth(value.provider);
+  modelRegistry.hasConfiguredAuth = value => {
+    const selected = model(value.provider, value.id);
+    return !!selected && (policy(value.provider)?.source === 'legacy'
+      ? legacyRequestRegistry?.hasConfiguredAuth(selected) ?? legacy?.hasAuth?.(value.provider) ?? false
+      : authStorage.hasAuth(value.provider));
+  };
   modelRegistry.getApiKeyAndHeaders = async value => {
     const selected = model(value.provider, value.id);
     if (!selected) return { ok: false, error: modelUnavailable().message };

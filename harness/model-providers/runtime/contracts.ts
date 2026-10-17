@@ -27,6 +27,11 @@ export interface ProviderRuntimeProjection {
   version: 1; configRevision: string; models: RuntimeModelProjection[];
 }
 export type RuntimeSnapshot = DeepReadonly<ProviderRuntimeProjection>;
+/** Read-only approved SDK builtin baseline resolver used by read-time recovery.
+ *  Returns the public DTO definition for an exact provider/id only, resolved
+ *  from the loaded verified SDK's own generated catalog (never user models,
+ *  registry/auth objects or live state). */
+export type BuiltinRuntimeModelResolver = (provider: string, id: string) => NativeRuntimeModel | undefined;
 export interface CaptureProviderRuntimeInput {
   /** undefined means missing configuration / legacy mode. Invalid configuration must not be passed. */
   config?: ProviderConfig; configRevision?: string;

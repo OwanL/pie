@@ -76,7 +76,7 @@ interface ComposerProps {
   browserServer?: BrowserServerViewState;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
-  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
+  availableModelsStatus?: 'provisional' | 'loading' | 'authoritative' | 'error';
   availableExtensions: ExtensionInfo[];
   contextUsage: ContextWindowUsage | null;
   initialContextEstimate: InitialContextEstimate | null;
@@ -491,6 +491,11 @@ function ComposerView({
             availableExtensions={availableExtensions}
             availableModels={availableModels}
             availableModelsStatus={availableModelsStatus}
+            onRetryModelCatalog={
+              availableModelsStatus === 'error' && postMessage
+                ? () => void postMessage({ type: 'refreshState' })
+                : undefined
+            }
             selectedModel={selectedModel}
             selectedProvider={selectedProvider}
             selectedLevel={selectedLevel}

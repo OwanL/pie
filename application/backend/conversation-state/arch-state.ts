@@ -211,7 +211,7 @@ export interface SettingsState {
   /** Whether a per-session model catalog is provisional while a durable path is
    *  being resolved or metadata is loading. This is host-only state; the picker
    *  continues to render the retained catalog rather than flashing empty. */
-  availableModelsStatusBySession: Record<string, 'provisional' | 'loading' | 'authoritative'>;
+  availableModelsStatusBySession: Record<string, 'provisional' | 'loading' | 'authoritative' | 'error'>;
   /** Backend generation associated with the newest accepted model hydration. */
   modelBackendGeneration: number;
   /** Monotonic hydration command revision, used to fence out-of-order results. */

@@ -56,6 +56,12 @@ export class SessionMessageActions {
   private readonly dispatchArch: (event: Event) => void;
   private readonly inFlightHydrations = new Map<string, InFlightHydration>();
   private hydrationRevision = 0;
+  /** Sessions whose hydration must wait for backend readiness. Recorded when
+   *  neither early requests nor a catalog read can reach a running backend
+   *  (`settings.get`/`models.list` would fail with "Backend is not running").
+   *  Newest requested metadata wins; {@link flushDeferredModelHydrations}
+   *  re-runs them on the next backend ready transition. */
+  private readonly deferredHydrations = new Map<string, { sessionPath: string; metadata: HydrateModelMetadata }>();
 
   constructor(options: SessionMessageActionsOptions) {
     this.backend = options.backend;
@@ -143,6 +149,10 @@ export class SessionMessageActions {
         });
         this.scheduleRender();
       } catch (error) {
+        if (this.isBackendUnavailableError(error)) {
+          this.deferHydration(sessionPath, metadata);
+          return;
+        }
         auditLog('session-service', 'creationModelPreview.failed', { error: toErrorMessage(error) });
       }
       return;
@@ -152,6 +162,7 @@ export class SessionMessageActions {
     const hydrationRevision = metadata.hydrationRevision ?? this.hydrationRevision + 1;
     this.hydrationRevision = Math.max(this.hydrationRevision, hydrationRevision);
     const modelWriteFence = metadata.modelWriteFence ?? this.getArchState().settings.modelWriteFence;
+    const resolvedMetadata: HydrateModelMetadata = { hydrationRevision, modelWriteFence };
     const key = `${backendGeneration}:${sessionPath}`;
     const existing = this.inFlightHydrations.get(key);
     if (existing) {
@@ -210,6 +221,10 @@ export class SessionMessageActions {
         }
         this.scheduleRender();
       }).catch((err) => {
+        if (this.isBackendUnavailableError(err)) {
+          this.deferHydration(sessionPath, resolvedMetadata);
+          return;
+        }
         auditLog('session-service', 'hydrateModelState.settingsFailed', {
           error: toErrorMessage(err),
           backendGeneration,
@@ -229,6 +244,24 @@ export class SessionMessageActions {
         });
         this.scheduleRender();
       }).catch((err) => {
+        if (this.isBackendUnavailableError(err)) {
+          this.deferHydration(sessionPath, resolvedMetadata);
+          return;
+        }
+        if (isCurrentGeneration()) {
+          // Terminal, generation/revision-fenced failure: surfaces the error
+          // status and retry affordance without clearing a renderable catalog
+          // or claiming an authoritative empty one.
+          this.dispatchArch({
+            kind: 'AvailableModelsHydrationFailed',
+            sessionPath,
+            error: toErrorMessage(err),
+            backendGeneration,
+            hydrationRevision: record.hydrationRevision,
+            modelWriteFence: record.modelWriteFence,
+          });
+          this.scheduleRender();
+        }
         auditLog('session-service', 'hydrateModelState.modelsFailed', {
           error: toErrorMessage(err),
           backendGeneration,
@@ -248,6 +281,37 @@ export class SessionMessageActions {
       if (this.inFlightHydrations.get(key) === record) {
         this.inFlightHydrations.delete(key);
       }
+    }
+  }
+
+  /** Matches the literal pre-ready seam failure of `BackendClient.request`
+   *  ("Backend is not running" when no backend stdin exists yet). Such failures
+   *  never terminalize a catalog: they defer the hydration until the next
+   *  backend ready transition instead. */
+  private isBackendUnavailableError(error: unknown): boolean {
+    return error instanceof Error && error.message === 'Backend is not running';
+  }
+
+  /** Keep only the newest requested hydration per session; the reducer's
+   *  revision fences reject anything older. */
+  private deferHydration(sessionPath: string, metadata: HydrateModelMetadata): void {
+    this.deferredHydrations.set(sessionPath, { sessionPath, metadata: { ...metadata } });
+  }
+
+  /** Re-run every hydration deferred while the backend was unavailable. Called
+   *  by the host on a backend ready transition so startup requests that
+   *  pre-date backend.ready hydrate instead of being swallowed. */
+  flushDeferredModelHydrations(): void {
+    if (this.deferredHydrations.size === 0) return;
+    const entries = [...this.deferredHydrations.values()];
+    this.deferredHydrations.clear();
+    for (const entry of entries) {
+      void this.hydrateModelState(entry.sessionPath, entry.metadata).catch((error) => {
+        auditLog('session-service', 'deferredModelHydration.retryFailed', {
+          sessionPath: entry.sessionPath,
+          error: toErrorMessage(error),
+        });
+      });
     }
   }
 

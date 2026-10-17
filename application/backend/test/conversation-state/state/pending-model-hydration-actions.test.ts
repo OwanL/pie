@@ -47,7 +47,7 @@ function createActions(
   backend: any,
   initialState: ArchState,
   events: Event[] = [],
-): { actions: SessionMessageActions; getState: () => ArchState; events: Event[]; serviceState: SessionServiceState } {
+): { actions: SessionMessageActions; getState: () => ArchState; events: Event[]; serviceState: SessionServiceState; dispatch: (event: Event) => void } {
   let archState = initialState;
   const dispatchArch = (event: Event) => {
     events.push(event);
@@ -62,7 +62,7 @@ function createActions(
     getArchState: () => archState,
     dispatchArch,
   });
-  return { actions, getState: () => archState, events, serviceState };
+  return { actions, getState: () => archState, events, serviceState, dispatch: dispatchArch };
 }
 
 test('hydrateModelState never requests settings or models for any pending-path variant', async () => {
@@ -236,4 +236,128 @@ test('concurrent hydration deduplicates by backend generation and stable session
 
   assert.equal(getState().settings.availableModelsBySession[SESSION]?.[0]?.id, MODEL.id);
   assert.equal(getState().settings.modelBackendGeneration, 1);
+});
+
+/** Regression (startup model hydration lifecycle): a hydration issued before
+ *  backend.ready fails at the real host transport seam ("Backend is not
+ *  running", produced by the real BackendClient) and used to be swallowed,
+ *  leaving the session loading forever. The failure is deferred and retried on
+ *  the next backend ready transition instead. */
+test('pre-ready hydration failure at the actual seam defers and succeeds on ready', async () => {
+  const { BackendClient } = await import('../../../agent-connection/client');
+  // A real client that was never started reproduces the exact pre-ready seam
+  // failure; request() throws while no backend stdin exists.
+  const unstarted = new BackendClient();
+  await assert.rejects((unstarted.request('models.list') as Promise<unknown>), /Backend is not running/);
+
+  let ready = false;
+  const backend = {
+    request: (method: string, params?: unknown) => ready
+      ? (method === 'settings.get'
+        ? Promise.resolve(SETTINGS)
+        : Promise.resolve([MODEL]))
+      // Delegate the pre-ready failure to the real seam: the host sees the
+      // literal BackendClient error identity, never a test stub sentinel.
+      : (unstarted.request(method as 'models.list', params) as Promise<unknown>),
+  };
+  const initial = reducer(stateWithPath(), { kind: 'Command', cmd: {
+    kind: 'HydrateModel', corrId: 'hydrate', sessionPath: SESSION,
+  } }).state;
+  const { actions, getState, events, dispatch } = createActions(backend as any, initial);
+
+  await actions.hydrateModelState(SESSION);
+  assert.equal(getState().settings.availableModelsStatusBySession[SESSION], 'loading');
+  assert.equal(events.length, 0, 'a pre-ready failure must stay silent until ready');
+
+  // Backend publishes readiness (startup/restart path) and the host flushes.
+  dispatch({ kind: 'BackendReadyChanged', ready: true });
+  assert.equal(getState().settings.backendReady, true);
+  ready = true;
+  actions.flushDeferredModelHydrations();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().settings.availableModelsStatusBySession[SESSION], 'authoritative');
+  assert.deepEqual(getState().settings.availableModelsBySession[SESSION], [MODEL]);
+  const changed = events.find((event) => event.kind === 'AvailableModelsChanged') as any;
+  assert.ok(changed, 'the retry must publish the catalog');
+  assert.equal(changed.hydrationRevision, 1);
+  assert.equal(events.some((event) => event.kind === 'AvailableModelsHydrationFailed'), false);
+});
+
+/** Regression: a post-ready catalog exception must terminate visibly. It
+ *  records an `error` status only when nothing renderable exists, keeps any
+ *  last good catalog visible, and never claims an authoritative empty catalog. */
+test('post-ready catalog failure is terminal, keeps the last good catalog, and never claims empty', async () => {
+  const failingBackend = () => ({
+    request: async (method: string) => {
+      if (method === 'settings.get') return SETTINGS;
+      throw new Error('catalog discovery exploded');
+    },
+  });
+
+  for (const prior of [undefined, [MODEL]] as const) {
+    let initial = reducer(stateWithPath(), { kind: 'Command', cmd: {
+      kind: 'HydrateModel', corrId: 'hydrate', sessionPath: SESSION,
+    } }).state;
+    if (prior) {
+      initial = reducer(initial, { kind: 'AvailableModelsChanged', sessionPath: SESSION,
+        models: [...prior], backendGeneration: 0, hydrationRevision: 1, modelWriteFence: 0 } as Event).state;
+      // A fresh refresh command reissues hydration without relabeling the
+      // usable catalog (revision 2, catalog stays authoritative).
+      initial = reducer(initial, { kind: 'Command', cmd: {
+        kind: 'HydrateModel', corrId: 'hydrate-2', sessionPath: SESSION,
+      } }).state;
+    }
+    const events: Event[] = [];
+    // The host carries the effect's request-start fences; use the state's
+    // current revision so the terminal failure is never stale.
+    const requestMetadata = { hydrationRevision: initial.settings.modelHydrationRevision, modelWriteFence: initial.settings.modelWriteFence };
+    const backend = failingBackend();
+    const dispatchArch = (event: Event) => { events.push(event); initial = reducer(initial, event).state; };
+    const serviceState = new SessionServiceState(backend as any, () => undefined, () => initial, dispatchArch, 0);
+    const actions = new SessionMessageActions({
+      backend: backend as any, scheduleRender: () => undefined,
+      state: serviceState, createNewSession: () => '', getArchState: () => initial, dispatchArch,
+    });
+
+    await actions.hydrateModelState(SESSION, requestMetadata);
+
+    assert.equal(events.some((event) => event.kind === 'AvailableModelsHydrationFailed'), true,
+      'the failure must be terminal and observed');
+    assert.equal(events.some((event) => event.kind === 'AvailableModelsChanged'), false,
+      'must not claim authoritative empty');
+    if (prior) {
+      assert.deepEqual(initial.settings.availableModelsBySession[SESSION], prior,
+        'the last good catalog must stay visible');
+      assert.equal(initial.settings.availableModelsStatusBySession[SESSION], 'authoritative');
+    } else {
+      assert.equal(initial.settings.availableModelsStatusBySession[SESSION], 'error',
+        'a catalog-less session must surface the retry affordance');
+    }
+  }
+});
+
+/** A post-ready "Backend is not running" (backend loss between ready and the
+ *  read) is transport unavailability, not a catalog error: defer and retry on
+ *  the next ready transition rather than marking the catalog failed. */
+test('post-ready backend-unavailable failure defers instead of terminalizing the catalog', async () => {
+  let ready = false;
+  const backend = {
+    request: async (method: string) => {
+      if (!ready) throw new Error('Backend is not running');
+      return method === 'settings.get' ? SETTINGS : [MODEL];
+    },
+  };
+  const { actions, getState, events, dispatch } = createActions(backend as any, stateWithPath());
+
+  await actions.hydrateModelState(SESSION);
+  assert.equal(events.some((event) => event.kind === 'AvailableModelsHydrationFailed'), false,
+    'unavailability must not terminalize the catalog');
+
+  dispatch({ kind: 'BackendReadyChanged', ready: true });
+  ready = true;
+  actions.flushDeferredModelHydrations();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().settings.availableModelsStatusBySession[SESSION], 'authoritative');
 });
