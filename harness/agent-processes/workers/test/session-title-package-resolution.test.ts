@@ -20,7 +20,7 @@ for (const layout of ['sibling', 'nested'] as const) {
       await writeFile(path.join(aiPath, 'package.json'), JSON.stringify({
         name: '@earendil-works/pi-ai',
         type: 'module',
-        exports: { '.': { import: './entry/completion.js' } },
+        exports: { './compat': { import: './entry/completion.js' } },
       }));
       // A non-dist export and ESM-only entry exercise actual resolution and dynamic import.
       await writeFile(path.join(aiPath, 'entry', 'completion.js'), `

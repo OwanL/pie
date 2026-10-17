@@ -220,14 +220,14 @@ export async function loadCompleteSimple(sdkPath: string): Promise<CompleteSimpl
   const aiMetadata = JSON.parse(await readFile(aiPackageJson, 'utf8')) as {
     exports?: Record<string, unknown>;
   };
-  const rootExport = (aiMetadata.exports as Record<string, unknown> | undefined)?.['.'];
+  const rootExport = (aiMetadata.exports as Record<string, unknown> | undefined)?.['./compat'];
   const importTarget = typeof rootExport === 'string'
     ? rootExport
     : rootExport && typeof rootExport === 'object'
       ? (rootExport as { import?: unknown }).import
       : undefined;
   if (typeof importTarget !== 'string' || !importTarget.startsWith('./')) {
-    throw new Error('The pinned Pi AI runtime must declare a relative root import export.');
+    throw new Error('The pinned Pi AI runtime must declare a relative ./compat import export.');
   }
   const moduleUrl = new URL(importTarget, pathToFileURL(aiPackageJson));
   const loaded = await dynamicImport(moduleUrl.href) as { completeSimple?: CompleteSimpleFn };
