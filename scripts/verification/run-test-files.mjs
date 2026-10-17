@@ -355,16 +355,21 @@ function printHelp() {
  * @param {AbortSignal} [signal]
  * @returns {Promise<number>} exit code
  */
-export function runGroup(group, args, signal) {
+export function runGroup(group, args, signal, watchdogOptions = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [group.tsxBin, ...args], withProcessTreeIsolation({
+    const waitForOwnership = process.platform === 'win32';
+    const entryArgs = waitForOwnership
+      ? [fileURLToPath(new URL('./focused-test-startup.mjs', import.meta.url)), group.tsxBin, ...args]
+      : [group.tsxBin, ...args];
+    const child = spawn(process.execPath, entryArgs, withProcessTreeIsolation({
       cwd: group.cwd,
       env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))),
-      stdio: 'inherit',
+      stdio: waitForOwnership ? ['pipe', 'inherit', 'inherit'] : 'inherit',
       windowsHide: true,
     }));
     const timeoutMs = resolveChildProcessTimeoutMs();
     const watchdog = watchChildProcess(child, {
+      ...watchdogOptions,
       timeoutMs,
       signal,
       label: `${group.id} focused tests`,
@@ -379,9 +384,19 @@ export function runGroup(group, args, signal) {
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (!cleanup.gone) { reject(new Error('Focused test tree teardown is unconfirmed')); return; }
+      if (!cleanup.gone) {
+        const error = new Error('Focused test tree teardown is unconfirmed');
+        error.cleanup = cleanup;
+        reject(error);
+        return;
+      }
       resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
     });
+    if (waitForOwnership) {
+      child.stdin.on('error', () => {});
+      if (watchdog.ownershipReady && !watchdog.terminationStarted) child.stdin.end('pie-focused-ownership-ready\n');
+      else void watchdog.settle().catch(() => {});
+    }
   });
 }
 

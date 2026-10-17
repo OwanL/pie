@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   inferRepoRoot,
@@ -19,6 +20,7 @@ import {
   parseArgs,
   DEFAULT_GROUP_CONCURRENCY,
   runGroupQueue,
+  runGroup,
   readFilesFromStdin,
 } from '../run-test-files.mjs';
 
@@ -82,6 +84,56 @@ test('focused group queue stops dispatching queued groups after cancellation', a
   assert.deepEqual(started, groups.slice(0, DEFAULT_GROUP_CONCURRENCY).map(({ id }) => id));
   assert.deepEqual(results.slice(0, DEFAULT_GROUP_CONCURRENCY), started);
   assert.ok(results.slice(DEFAULT_GROUP_CONCURRENCY).every((result) => result === undefined));
+});
+
+test('focused group holds its root across a delayed Windows ownership bracket', { skip: process.platform !== 'win32' }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-focused-ownership-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const entry = path.join(dir, 'short.mjs');
+  fs.writeFileSync(entry, 'setTimeout(() => {}, 1000);\n');
+  let brackets = 0;
+  const spawnSyncImpl = (command, args, options) => {
+    if (command === 'powershell.exe' && args.at(-1).includes("'PIE_ROOT_CHECK'")) {
+      brackets += 1;
+      args = [...args];
+      // Force the live root to finish between census and verification unless
+      // the runner holds it. This is the real WMI/ChildProcess lifetime seam.
+      args[args.length - 1] = args.at(-1).replace("'PIE_ROOT_CHECK'", "Start-Sleep -Milliseconds 1500; 'PIE_ROOT_CHECK'");
+    }
+    return spawnSync(command, args, options);
+  };
+  assert.equal(await runGroup({ id: 'short', cwd: dir, tsxBin: entry }, [], undefined, { spawnSyncImpl }), 0);
+  assert.equal(brackets, 1);
+});
+
+test('failed Windows ownership capture never executes the focused entry and retains uncertainty diagnostics', { skip: process.platform !== 'win32' }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-focused-unproven-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const entry = path.join(dir, 'entry.mjs');
+  const marker = path.join(dir, 'executed');
+  fs.writeFileSync(entry, `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'ran');`);
+  let failed = false;
+  const spawnSyncImpl = (command, args, options) => {
+    if (!failed && command === 'powershell.exe') {
+      failed = true;
+      return { status: 1, stdout: '' };
+    }
+    return spawnSync(command, args, options);
+  };
+  await assert.rejects(runGroup({ id: 'unproven', cwd: dir, tsxBin: entry }, [], undefined, { spawnSyncImpl }), error => {
+    assert.match(error.message, /teardown is unconfirmed/);
+    assert.equal(error.cleanup.gone, false);
+    assert.ok(error.cleanup.diagnostics.some(detail => /ownership remains unknown/.test(detail)));
+    return true;
+  });
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test('focused startup rejects EOF without explicit ownership authorization', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../focused-test-startup.mjs', import.meta.url)), 'missing-entry.mjs'], { input: '', encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /startup was not authorized/);
+  assert.doesNotMatch(result.stderr, /ERR_MODULE_NOT_FOUND/);
 });
 
 test('inferRepoRoot resolves to the pie repo root', () => {
