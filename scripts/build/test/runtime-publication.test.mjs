@@ -50,6 +50,14 @@ test('concurrent same-process loader installs own their staging paths', async t 
   const generations = await Promise.all(Array.from({ length: 16 }, () =>
     installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg })));
   assert.equal(new Set(generations).size, 1);
+  const neutral = await readFile(new URL('../../../lib/windows-runtime-lock/windows-runtime-lock.cjs', import.meta.url));
+  assert.equal(createHash('sha256').update(neutral).digest('hex'), '4e3c96d123612a22bd61c71d077608a08997f5be564e5cd4035a4030e58baebd', 'extraction preserves reviewed standalone bytes and protocol');
+  assert.deepEqual(await readFile(path.join(root, 'pie-bootstrap', generations[0], 'windows-runtime-lock.cjs')), neutral);
+  const hash = createHash('sha256');
+  for (const name of ['bootstrap.cjs', 'runtime-generations.cjs', 'windows-runtime-lock.cjs']) {
+    hash.update(name).update('\0').update(await readFile(path.join(root, 'pie-bootstrap', generations[0], name))).update('\0');
+  }
+  assert.equal(hash.digest('hex'), generations[0], 'immutable identity binds all three packaged files');
   await check(root, 2);
   assert.deepEqual(await readdir(path.join(root, 'pie-bootstrap')), [generations[0]]);
   assert.deepEqual((await readdir(root)).sort(), ['package.json', 'pie-bootstrap', 'pie-runtime-v2']);

@@ -89,6 +89,7 @@ test('delivery build preflight resolves moved extension source through the owner
   for (const file of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs']) {
     write(fixture, `scripts/lib/${file}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', file)));
   }
+  write(fixture, 'lib/windows-runtime-lock/windows-runtime-lock.cjs', readFileSync(path.join(repositoryRoot, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')));
   write(fixture, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
   for (const file of ['runtime-generations.cjs', 'windows-runtime-lock.cjs']) {
     write(fixture, `application/hosts/vscode/runtime/${file}`, readFileSync(path.join(repositoryRoot, 'application/hosts/vscode/runtime', file)));

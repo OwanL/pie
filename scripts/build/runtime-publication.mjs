@@ -142,7 +142,9 @@ export async function hasRuntimeBootstrap(extensionDir) {
  * replace out/ or a loaded bootstrap. Only a complete immutable loader is
  * selected by the manifest that VS Code will read at its next startup. */
 export async function installRuntimeBootstrap({ extensionDir, pkg, beforeSwitch }) {
-  const contents = await Promise.all(bootstrapFiles.map(name => readFile(path.join(bootstrapSource, name))));
+  const contents = await Promise.all(bootstrapFiles.map(name => readFile(name === 'windows-runtime-lock.cjs'
+    ? fileURLToPath(new URL('../../lib/windows-runtime-lock/windows-runtime-lock.cjs', import.meta.url))
+    : path.join(bootstrapSource, name))));
   const hash = createHash('sha256');
   bootstrapFiles.forEach((name, index) => hash.update(name).update('\0').update(contents[index]).update('\0'));
   const generation = hash.digest('hex');

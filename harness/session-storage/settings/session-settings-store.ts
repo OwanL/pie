@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { acquireWindowsRuntimeLock } from '../../../lib/windows-runtime-lock/windows-runtime-lock.cjs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -11,8 +12,8 @@ export const SESSION_SETTINGS_DIR_ENV = 'PIE_SESSION_SETTINGS_DIR';
 export const LEGACY_SESSION_SETTINGS_DIR_ENV = 'PIE_LEGACY_SESSION_SETTINGS_DIR';
 export const SESSION_SETTINGS_FILE = 'system-prompt-toggles.json';
 
-/** Serialize shared-sidecar mutations within this process. Reads wait for
- * mutations already in progress; this is not a cross-process lock. */
+/** Preserve process-local admission order. Directory kernel locks provide
+ * cross-process exclusion; the two-file migration is not crash atomic. */
 let pendingWrite: Promise<void> = Promise.resolve();
 
 function getSessionSettingsFilePath(): string | undefined {
@@ -76,13 +77,15 @@ async function readSystemPromptTogglesFromFile(file: string, forMutation = false
   }
 }
 
-async function readStoredSystemPromptToggles(forMutation = false): Promise<Record<string, string[]>> {
-  const currentFile = getSessionSettingsFilePath();
+async function readStoredSystemPromptToggles(
+  forMutation: boolean,
+  currentFile: string | undefined,
+  legacyFile: string | undefined,
+): Promise<Record<string, string[]>> {
   if (currentFile) {
     const current = await readSystemPromptTogglesFromFile(currentFile, forMutation);
     if (current !== undefined) return current;
   }
-  const legacyFile = getLegacySessionSettingsFilePath();
   return legacyFile ? (await readSystemPromptTogglesFromFile(legacyFile, forMutation) ?? {}) : {};
 }
 
@@ -92,8 +95,10 @@ async function readStoredSystemPromptToggles(forMutation = false): Promise<Recor
  * (a corrupt file never breaks session open).
  */
 export async function readSystemPromptToggles(): Promise<Record<string, string[]>> {
+  const currentFile = getSessionSettingsFilePath();
+  const legacyFile = getLegacySessionSettingsFilePath();
   await pendingWrite;
-  return await readStoredSystemPromptToggles();
+  return await readStoredSystemPromptToggles(false, currentFile, legacyFile);
 }
 
 /** Read the disabled-entry list for a single session (empty when none). */
@@ -104,9 +109,9 @@ export async function readSystemPromptTogglesForSession(sessionPath: string): Pr
 async function scrubLegacySessionEntry(
   sessionPath: string,
   existing: Record<string, string[]> | undefined,
+  currentFile: string | undefined,
+  legacyFile: string | undefined,
 ): Promise<void> {
-  const legacyFile = getLegacySessionSettingsFilePath();
-  const currentFile = getSessionSettingsFilePath();
   if (!legacyFile || !currentFile || legacyFile === currentFile) return;
 
   if (existing === undefined || !(sessionPath in existing)) return;
@@ -129,19 +134,49 @@ async function persistSystemPromptTogglesForSession(
   file: string,
   sessionPath: string,
   disabledEntries: readonly string[],
-  strict = false,
+  strict: boolean,
+  currentFile: string | undefined,
+  legacyFile: string | undefined,
 ): Promise<void> {
   let tempFile: string | undefined;
+  const releases: Array<() => Promise<void>> = [];
   try {
-    await fs.mkdir(path.dirname(file), { recursive: true });
+    const directories = [...new Set([currentFile, legacyFile].filter((entry): entry is string => !!entry)
+      .map(entry => path.resolve(path.dirname(entry))))];
+    // Qualify existing ancestors before creating any directory: unsupported
+    // platforms/storage must fail without changing durable state.
+    for (const directory of directories) {
+      let ancestor = directory;
+      for (;;) {
+        try { await fs.stat(ancestor); break; } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) throw error;
+          ancestor = parent;
+        }
+      }
+      const release = await acquireWindowsRuntimeLock(ancestor);
+      await release();
+    }
+    for (const directory of directories) await fs.mkdir(directory, { recursive: true });
+    // Canonical directory ordering makes reversed current/legacy layouts share
+    // the same lock order; aliases deduplicate before acquisition.
+    const identities = await Promise.all(directories.map(async directory => {
+      const physical = await fs.realpath(directory);
+      const stat = await fs.stat(physical, { bigint: true });
+      return { directory, physical, key: `${stat.dev}:${stat.ino}` };
+    }));
+    const canonical = [...new Map(identities.map(entry => [entry.key, entry])).values()]
+      .sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    for (const entry of canonical) releases.push(await acquireWindowsRuntimeLock(entry.physical));
+    const identityFor = (entry: string) => identities.find(directory => directory.directory === path.resolve(path.dirname(entry)))!.key;
+    if (currentFile && legacyFile && identityFor(currentFile) === identityFor(legacyFile)) legacyFile = currentFile;
     // Validate every sidecar we may replace before publishing either one.
     // ENOENT alone permits creating new state; all other read failures abort.
-    const legacyFile = getLegacySessionSettingsFilePath();
-    const currentFile = getSessionSettingsFilePath();
     const legacy = legacyFile && currentFile && legacyFile !== currentFile
       ? await readSystemPromptTogglesFromFile(legacyFile, true)
       : undefined;
-    const all = await readStoredSystemPromptToggles(true);
+    const all = await readStoredSystemPromptToggles(true, currentFile, legacyFile);
     if (disabledEntries.length === 0) {
       delete all[sessionPath];
     } else {
@@ -153,7 +188,7 @@ async function persistSystemPromptTogglesForSession(
     tempFile = `${file}.${process.pid}.${randomUUID()}.tmp`;
     await fs.writeFile(tempFile, JSON.stringify(all, null, 2) + '\n', 'utf8');
     await fs.rename(tempFile, file);
-    await scrubLegacySessionEntry(sessionPath, legacy);
+    await scrubLegacySessionEntry(sessionPath, legacy, currentFile, legacyFile);
   } catch (error) {
     backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(error), file });
     if (strict) throw error;
@@ -161,6 +196,14 @@ async function persistSystemPromptTogglesForSession(
   } finally {
     if (tempFile) {
       await fs.unlink(tempFile).catch(() => undefined);
+    }
+    let releaseError: unknown;
+    for (const release of releases.reverse()) {
+      try { await release(); } catch (error) { releaseError ??= error; }
+    }
+    if (releaseError) {
+      backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(releaseError), file });
+      if (strict) throw releaseError;
     }
   }
 }
@@ -176,11 +219,13 @@ export async function writeSystemPromptTogglesForSession(
   disabledEntries: readonly string[],
   strict = false,
 ): Promise<void> {
-  const file = getSessionSettingsFilePath() ?? getLegacySessionSettingsFilePath();
+  const currentFile = getSessionSettingsFilePath();
+  const legacyFile = getLegacySessionSettingsFilePath();
+  const file = currentFile ?? legacyFile;
   if (!file) return;
 
   const write = pendingWrite.then(() => (
-    persistSystemPromptTogglesForSession(file, sessionPath, disabledEntries, strict)
+    persistSystemPromptTogglesForSession(file, sessionPath, disabledEntries, strict, currentFile, legacyFile)
   ));
   // A best-effort persistence failure must not block a later update.
   pendingWrite = write.catch(() => undefined);

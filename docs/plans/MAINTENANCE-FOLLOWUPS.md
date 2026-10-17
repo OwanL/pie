@@ -12,9 +12,11 @@ The separate `pie-runtime-v2` store isolates older helpers. Every loader switch 
 
 ### Cross-process session-settings updates
 
-[`session-settings-store.ts`](../../harness/session-storage/settings/session-settings-store.ts) now refuses destructive replacement after unreadable or malformed input, but its write queue remains process-local. Independent pre-cutoff writers can still overwrite each other's changes to the shared map.
+**Implemented and reviewed in source (2026-10-18); not staged or loaded.** [`session-settings-store.ts`](../../harness/session-storage/settings/session-settings-store.ts) now holds kernel-owned directory locks across the current/legacy read–modify–publish–scrub operation. Canonical directory identities are deduplicated and globally ordered; existing outer lifecycle barriers remain unchanged. Malformed or unreadable sidecars still prevent replacement.
 
-Define one cross-process transaction owner and lock order for current and legacy sidecars. Review stale-lock takeover in candidate helpers rather than assuming atomic replacement also provides transaction isolation. Test competing processes updating different sessions. This finding does not establish storage-cutoff activation.
+The user approved Windows fixed-local-NTFS persistence with automatic kernel release on process death. Unsupported storage/platforms fail strict writes; live best-effort persistence retains its existing error boundary. The shared primitive lives in `lib/windows-runtime-lock`; published loader bytes and protocol identity remain unchanged. Focused Windows tests and independent review cover competing processes, shared legacy layouts and owner-death recovery.
+
+Only cooperating updated writers are protected; older binaries do not acquire these locks. Two-file publication is not crash-atomic. This change does not activate storage cutoff.
 
 ### Ambiguous session-open recovery
 
