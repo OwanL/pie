@@ -41,6 +41,7 @@ class FakeChild extends EventEmitter {
   exitCleanly() {
     if (this.killed) return false;
     this.killed = true;
+    this.stdout.emit('data', Buffer.from(`${JSON.stringify({ v: 1, kind: 'terminal_cleanup', confirmed: true })}\n`));
     this.exitCode = 0;
     this.signalCode = null;
     this.emit('exit', 0, null);
@@ -286,6 +287,81 @@ test('graceful shutdown rejects a sidecar exit that does not confirm cleanup', a
     (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
   );
 });
+
+test('shutdown refuses cleanup when a malformed chunk follows a terminal cleanup acknowledgement', async () => {
+  class MalformedAfterAck extends FakeChild {
+    override receive(record: any) {
+      if (record.kind !== 'shutdown') { super.receive(record); return; }
+      this.stdout.emit('data', Buffer.from(`${JSON.stringify({ v: 1, kind: 'terminal_cleanup', confirmed: true })}\n`));
+      this.exitCode = 0;
+      this.signalCode = null;
+      this.emit('exit', 0, null);
+      this.stdout.emit('data', Buffer.from('{malformed-jsonl}\n'));
+      setTimeout(() => this.emit('close', 0, null), 10);
+    }
+  }
+  const child = new MalformedAfterAck(7142, []);
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-malformed-after-ack.jsonl'), () => child, 25, 50);
+  await client.request('ping', {});
+  await assert.rejects(
+    () => client.shutdown(),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+  );
+  assert.equal(child.killed, false, 'an exited sidecar is never force-killed after refusing its cleanup evidence');
+});
+
+test('terminal run_code cancellation waits for drained cleanup and preserves the crash reason', async () => {
+  class TerminalChild extends FakeChild {
+    override receive(record: any) {
+      if (record.method === 'run_code') {
+        this.respond({ v: 1, kind: 'response', id: record.id, ok: false, error: { code: 'CANCELLED', message: 'cancelled' } });
+        return;
+      }
+      if (record.kind === 'shutdown') {
+        this.stdout.emit('data', Buffer.from(`${JSON.stringify({ v: 1, kind: 'terminal_cleanup', confirmed: true, reason: 'original navigation failure' })}\n`));
+        this.exitCode = 1;
+        this.emit('exit', 1, null);
+        setTimeout(() => this.emit('close', 1, null), 20);
+        return;
+      }
+      super.receive(record);
+    }
+  }
+  const child = new TerminalChild(7140, []);
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-terminal-wait.jsonl'), () => child, 25, 100);
+  await assert.rejects(client.request('run_code', {}), (error: unknown) =>
+    error instanceof PlaywrightRuntimeError && error.code === 'BROWSER_CRASHED' && /original navigation failure/.test(error.message));
+  assert.equal(child.killed, false, 'verified terminal shutdown does not race a force kill');
+  await client.shutdown();
+});
+
+for (const trailing of ['duplicate', 'invalid', 'none'] as const) {
+  test(`shutdown does not accept undrained cleanup evidence with delayed ${trailing} output`, async () => {
+    class DelayedClose extends FakeChild {
+      override receive(record: any) {
+        if (record.kind !== 'shutdown') { super.receive(record); return; }
+        const ack = { v: 1, kind: 'terminal_cleanup', confirmed: true };
+        this.stdout.emit('data', Buffer.from(`${JSON.stringify(ack)}\n`));
+        this.exitCode = 0;
+        this.emit('exit', 0, null);
+        setTimeout(() => {
+          if (trailing !== 'none') this.stdout.emit('data', Buffer.from(`${JSON.stringify(trailing === 'duplicate' ? ack : { ...ack, confirmed: 'yes' })}\n`));
+          this.emit('close', 0, null);
+        }, 60);
+      }
+    }
+    const child = new DelayedClose(7141, []);
+    const client = new RuntimeClient(path.join(tmpdir(), `pw-delayed-${trailing}.jsonl`), () => child, 25, 10);
+    await client.request('ping', {});
+    await assert.rejects(client.shutdown(), (error: unknown) =>
+      error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED');
+    assert.equal(child.killed, false, 'never target an exited PID while stdout is still draining');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    if (trailing === 'none') await client.shutdown();
+    else await assert.rejects(client.shutdown(), (error: unknown) =>
+      error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED');
+  });
+}
 
 test('Windows tree-kill failure remains unresolved even when the sidecar fallback exits', async (t) => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');

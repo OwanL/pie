@@ -23,7 +23,10 @@ class MockSidecar {
     write: (line: string): boolean => {
       const record = JSON.parse(line) as Record<string, any>;
       if (record.kind === 'shutdown') {
-        queueMicrotask(() => this.events.emit('close', 0, null));
+        queueMicrotask(() => {
+          this.stdout.emit('data', Buffer.from(`${JSON.stringify({ v: 1, kind: 'terminal_cleanup', confirmed: true })}\n`));
+          this.events.emit('close', 0, null);
+        });
       } else if (record.kind === 'request') {
         this.requests.push({ method: record.method, params: record.params ?? {} });
         queueMicrotask(() => this.stdout.emit('data', Buffer.from(`${JSON.stringify({

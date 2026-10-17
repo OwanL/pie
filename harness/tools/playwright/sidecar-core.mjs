@@ -148,3 +148,22 @@ export class SidecarCore {
     await this.queue.catch(() => {}); await this.backend.shutdown();
   }
 }
+
+// Keep aligned with lib/sensitive-data/sensitive-redaction.ts (plain Node sidecar).
+export function redactSensitiveText(value) {
+  return value
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi, '[private key redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/([?&](?:x-api-key|api[_-]?key|token|session[_-]?token|access[_-]?token|auth[_-]?token|refresh[_-]?token|secret)=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/(\b[A-Z][A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|CLIENT_SECRET|PRIVATE_KEY|PASSWORD)=)[^\s,;}]+/g, '$1[redacted]')
+    .replace(/(["']?\b(?:x-api-key|api[_-]?key|authorization|proxy[_-]?authorization|password|passwd|passphrase|secret|token|session[_-]?token|access[_-]?token|auth[_-]?token|refresh[_-]?token|credential|cookie|set-cookie)\b["']?\s*[:=]\s*)(["']?)([^"'&\s,;}]+)/gi, '$1$2[redacted]')
+    .replace(/\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|AIza[A-Za-z0-9_-]{20,})\b/g, '[credential redacted]')
+    .replace(/\[redacted\](?:\s+\[redacted\])+/g, '[redacted]');
+}
+
+// Never acknowledge an attempted or uncertain descendant cleanup.
+export async function acknowledgeTerminalCleanup(backend, writeRecord, reason) {
+  await backend.forceKillAll();
+  const message = reason === undefined ? undefined : redactSensitiveText(reason instanceof Error ? reason.message : String(reason)).slice(0, 2000);
+  await writeRecord({ v: 1, kind: 'terminal_cleanup', confirmed: true, ...(message ? { reason: message } : {}) });
+}

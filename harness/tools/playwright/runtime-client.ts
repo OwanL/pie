@@ -8,7 +8,8 @@ import {
   registerChildToolRuntimeCleanup,
   type ChildToolRuntimeOwner,
 } from '../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
-import { encodeJsonl, JsonlDecoder } from './protocol.js';
+import { encodeJsonl, JsonlDecoder, validateTerminalCleanup } from './protocol.js';
+import { redactSensitiveText } from '../../../lib/sensitive-data/sensitive-redaction.js';
 import { confirmTaskkillTree } from './sidecar-core.mjs';
 import type { RuntimeResponse } from './types.js';
 
@@ -40,8 +41,10 @@ export class PlaywrightRuntimeError extends Error {
   ) { super(message); this.name = 'PlaywrightRuntimeError'; }
 }
 
+const closedChildren = new WeakSet<ChildLike>();
 const exitedChildren = new WeakSet<ChildLike>();
 const childExitResults = new WeakMap<ChildLike, { code: number | null; signal: NodeJS.Signals | null }>();
+const terminalCleanup = new WeakMap<ChildLike, { confirmed: boolean; reason?: string }>();
 const confirmedTreeKills = new WeakSet<ChildLike>();
 const unresolvedTreeKills = new WeakMap<ChildLike, string>();
 
@@ -71,9 +74,9 @@ interface ChildExitOutcome {
   clean: boolean;
 }
 
-function waitForChildExit(child: ChildLike, timeoutMs: number): Promise<ChildExitOutcome> {
+function waitForChildExit(child: ChildLike, timeoutMs: number, drainOutput = false): Promise<ChildExitOutcome> {
   const priorExit = childExitResult(child);
-  if (hasExited(child)) return Promise.resolve({
+  if (drainOutput ? closedChildren.has(child) : hasExited(child)) return Promise.resolve({
     exited: true,
     clean: priorExit?.code === 0 && priorExit.signal === null,
   });
@@ -93,14 +96,14 @@ function waitForChildExit(child: ChildLike, timeoutMs: number): Promise<ChildExi
       markChildExited(child, code, normalizedSignal);
       finish({ exited: true, clean: code === 0 && normalizedSignal === null });
     };
-    child.on('exit', onExit);
+    if (!drainOutput) child.on('exit', onExit);
     child.on('close', onExit);
     timer = setTimeout(() => {
       const result = childExitResult(child);
-      finish({ exited: hasExited(child), clean: result?.code === 0 && result.signal === null });
+      finish({ exited: drainOutput ? closedChildren.has(child) : hasExited(child), clean: result?.code === 0 && result.signal === null });
     }, Math.max(0, timeoutMs));
     const result = childExitResult(child);
-    if (hasExited(child)) finish({ exited: true, clean: result?.code === 0 && result.signal === null });
+    if (drainOutput ? closedChildren.has(child) : hasExited(child)) finish({ exited: true, clean: result?.code === 0 && result.signal === null });
   });
 }
 
@@ -152,7 +155,7 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
   const priorTreeFailure = unresolvedTreeKills.get(child);
   if (hasExited(child)) {
     if (priorTreeFailure) throw unresolvedCleanupError(`Process-tree termination failed (${priorTreeFailure}); Chromium descendants may remain.`);
-    if (confirmedTreeKills.has(child)) return;
+    if (confirmedTreeKills.has(child) || (closedChildren.has(child) && terminalCleanup.get(child)?.confirmed === true)) return;
     // Once the sidecar exits, its PID may be reused. Do not retry taskkill
     // against that PID; an exited sidecar alone says nothing about descendants.
     throw unresolvedCleanupError(`Playwright sidecar process ${child.pid ?? '(unknown PID)'} exited before descendant cleanup was confirmed.`);
@@ -299,10 +302,21 @@ export class RuntimeClient {
     if (this.child) return;
     this.decoder = new JsonlDecoder();
     const child = this.spawnSidecar(); this.child = child;
+    const decoder = this.decoder;
     child.stdout.on('data', (chunk) => {
-      if (child !== this.child) return;
-      try { for (const record of this.decoder.push(chunk)) this.handleRecord(record); }
-      catch (error) { void this.failAndRecover(error instanceof Error ? error : new Error(String(error))).catch(() => {}); }
+      try { for (const raw of decoder.push(chunk)) {
+        if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).kind === 'terminal_cleanup') {
+          const ack = validateTerminalCleanup(raw);
+          terminalCleanup.set(child, terminalCleanup.has(child) ? { confirmed: false } : ack ?? { confirmed: false });
+        } else if (child === this.child) this.handleRecord(raw);
+      } }
+      catch (error) {
+        // A decoding failure makes the whole stream untrustworthy, including an
+        // earlier terminal acknowledgement. Invalidate the evidence even while
+        // shutdown is already draining, where recovery deliberately stands down.
+        terminalCleanup.set(child, { confirmed: false });
+        void this.failAndRecover(error instanceof Error ? error : new Error(String(error))).catch(() => {});
+      }
     });
     child.stderr?.on('data', (chunk) => {
       const output = `${this.stderrOutput.get(child) ?? ''}${chunk.toString('utf8')}`;
@@ -311,9 +325,10 @@ export class RuntimeClient {
     child.on('error', (error) => { if (child === this.child) void this.failAndRecover(error).catch(() => {}); });
     child.on('exit', (code, signal) => { markChildExited(child, code, signal ?? null); });
     child.on('close', (code, signal) => {
+      closedChildren.add(child);
       markChildExited(child, code, signal ?? null);
       if (child === this.child && !this.stopping) {
-        void this.failAndRecover(new PlaywrightRuntimeError('BROWSER_CRASHED', 'Playwright sidecar exited unexpectedly. All browser sessions are gone.', false)).catch(() => {});
+        void this.failAndRecover(new PlaywrightRuntimeError('BROWSER_CRASHED', `Playwright sidecar exited unexpectedly. All browser sessions are gone.${terminalCleanup.get(child)?.reason ? ` Cause: ${redactSensitiveText(terminalCleanup.get(child)!.reason!)}` : ''}`, false)).catch(() => {});
       }
     });
   }
@@ -321,7 +336,9 @@ export class RuntimeClient {
   private cleanupDiagnostic(child: ChildLike): string | undefined {
     const lines = (this.stderrOutput.get(child) ?? '').split(/\r?\n/);
     const diagnostic = lines.filter((line) => line.startsWith('[pie:playwright-cleanup] ')).slice(-3).join(' ');
-    return diagnostic ? diagnostic.slice(0, 2000) : undefined;
+    const reason = terminalCleanup.get(child)?.reason;
+    const combined = [reason, diagnostic].filter(Boolean).join(' ');
+    return combined ? redactSensitiveText(combined).slice(0, 2000) : undefined;
   }
 
   private includeCleanupDiagnostic(child: ChildLike, error: Error): Error {
@@ -361,16 +378,13 @@ export class RuntimeClient {
         `${typeof shape.message === 'string' ? shape.message : 'Playwright sidecar request failed.'}${mustTerminateRunCode ? ` The browser runtime was terminated. ${REOPEN_MESSAGE}` : ''}`,
         mustTerminateRunCode ? false : shape.retryable === true,
       );
-      this.settle(pending);
       if (mustTerminateRunCode) {
         // The rejected async body or function can continue executing inside the
         // sidecar. Confirm process exit before exposing the timeout/cancel
         // result so delayed mutations cannot escape the request boundary.
-        void this.failAndRecover(new PlaywrightRuntimeError('RUNTIME_REOPEN_REQUIRED', REOPEN_MESSAGE, false)).then(
-          () => pending.reject(error),
-          (cleanupError: unknown) => pending.reject(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError))),
-        );
+        void this.failAndRecover(error, true).catch(() => {});
       } else {
+        this.settle(pending);
         pending.reject(error);
       }
       return;
@@ -442,7 +456,7 @@ export class RuntimeClient {
     });
   }
 
-  private async failAndRecover(cause: Error): Promise<void> {
+  private async failAndRecover(cause: Error, terminalShutdown = false): Promise<void> {
     if (this.recovering) return this.recovering;
     if (this.stopping) return;
     const child = this.child; this.child = undefined;
@@ -450,7 +464,18 @@ export class RuntimeClient {
     const recovery = (async () => {
       let rejection = cause;
       if (child) {
-        try { await killProcessTree(child, this.shutdownTimeoutMs); }
+        try {
+          let acknowledged = false;
+          if (terminalShutdown) {
+            try { child.stdin.write(encodeJsonl({ v: 1, kind: 'shutdown' })); } catch { /* terminal sidecar may already be exiting */ }
+            const exit = await waitForChildExit(child, this.shutdownTimeoutMs, true);
+            acknowledged = exit.exited && terminalCleanup.get(child)?.confirmed === true && !unresolvedTreeKills.has(child);
+            if (acknowledged && terminalCleanup.get(child)?.reason) {
+              rejection = new PlaywrightRuntimeError('BROWSER_CRASHED', `Playwright sidecar exited unexpectedly. All browser sessions are gone. Cause: ${redactSensitiveText(terminalCleanup.get(child)!.reason!)}`, false);
+            }
+          }
+          if (!acknowledged) await killProcessTree(child, this.shutdownTimeoutMs);
+        }
         catch (error) {
           rejection = this.includeCleanupDiagnostic(child, error instanceof Error ? error : new Error(String(error)));
           this.unresolvedCleanup = { child, error: rejection };
@@ -458,7 +483,7 @@ export class RuntimeClient {
       }
       this.needsReopen = true;
       for (const item of pendingValues) this.rejectPending(item, rejection);
-      if (rejection !== cause) throw rejection;
+      if (this.unresolvedCleanup) throw rejection;
     })();
     this.recovering = recovery.finally(() => { this.recovering = undefined; });
     await this.recovering;
@@ -490,8 +515,8 @@ export class RuntimeClient {
         let graceful = true;
         try { child.stdin.write(encodeJsonl({ v: 1, kind: 'shutdown' })); } catch { graceful = false; }
         if (graceful) {
-          const exit = await waitForChildExit(child, this.shutdownTimeoutMs);
-          graceful = exit.exited && exit.clean;
+          const exit = await waitForChildExit(child, this.shutdownTimeoutMs, true);
+          graceful = exit.exited && terminalCleanup.get(child)?.confirmed === true && !unresolvedTreeKills.has(child);
         }
         if (!graceful) {
           try { await killProcessTree(child, this.shutdownTimeoutMs); }

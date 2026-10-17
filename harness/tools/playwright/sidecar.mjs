@@ -5,7 +5,7 @@ import { Console } from 'node:console';
 // keep diagnostics on stderr for the entire sidecar lifetime.
 globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
 
-const [{ PlaywrightBackend }, { SidecarCore, SidecarJsonlDecoder, encodeSidecarRecord }] = await Promise.all([
+const [{ PlaywrightBackend }, { SidecarCore, SidecarJsonlDecoder, encodeSidecarRecord, acknowledgeTerminalCleanup, redactSensitiveText }] = await Promise.all([
   import('./backend.mjs'), import('./sidecar-core.mjs'),
 ]);
 
@@ -29,10 +29,9 @@ process.stdin.on('data', (chunk) => {
 // Chromium descendants before exiting.
 process.stdin.on('end', () => { void stop(0); });
 
-async function stop(code) {
+async function stop(code, reason) {
   if (exiting) return; exiting = true;
-  // A zero exit is the parent's existing cleanup acknowledgement: backend and
-  // browser-server teardown must have completed, not merely been attempted.
+  // Exit status reports failure; terminal_cleanup independently proves teardown.
   let cleanupConfirmed = false;
   let shutdownError;
   let shutdownTimer;
@@ -48,19 +47,21 @@ async function stop(code) {
   // Parent death has no surviving RuntimeClient watchdog, so force every live
   // or in-flight-closing dedicated browser tree before exit and retain failure.
   try {
-    await backend.forceKillAll();
+    await acknowledgeTerminalCleanup(backend, (record) => new Promise((resolve, reject) => {
+      process.stdout.write(encodeSidecarRecord(record), (error) => error ? reject(error) : resolve());
+    }), reason);
     cleanupConfirmed = true;
   } catch (error) {
     cleanupConfirmed = false;
-    const detail = [shutdownError, error].filter(Boolean).map((failure) => failure?.message ?? String(failure)).join(' ');
-    console.error(`[pie:playwright-cleanup] ${detail || 'Runtime cleanup could not be confirmed.'}`);
+    const detail = [reason, shutdownError, error].filter(Boolean).map((failure) => failure?.message ?? String(failure)).join(' ');
+    console.error(`[pie:playwright-cleanup] ${redactSensitiveText(detail || 'Runtime cleanup could not be confirmed.').slice(0, 2000)}`);
   }
   process.stdin.pause();
   process.exit(code === 0 && cleanupConfirmed ? 0 : 1);
 }
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => { void stop(0); });
-process.once('uncaughtException', () => { void stop(1); });
-process.once('unhandledRejection', () => { void stop(1); });
+process.once('uncaughtException', (error) => { void stop(1, error); });
+process.once('unhandledRejection', (reason) => { void stop(1, reason); });
 
 // Backstop for a parent that died without closing the pipe: if the owner
 // process is gone, shut down so no Chromium outlives the owning pie session.

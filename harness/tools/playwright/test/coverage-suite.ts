@@ -21,5 +21,6 @@ await import('./protocol.test.js');
 await import('./result.test.js');
 await import('./runtime-client.test.js');
 await import('./schema.test.js');
+await import('./terminal-cleanup.test.js');
 await import('./tool-dogfood.test.js');
 await import('./validation.test.js');

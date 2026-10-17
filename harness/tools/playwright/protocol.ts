@@ -28,6 +28,16 @@ export class JsonlDecoder {
   }
 }
 
+// Terminal evidence belongs to the pipe's child, not a request or exit code.
+export function validateTerminalCleanup(raw: unknown): { confirmed: boolean; reason?: string } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  if (record.v !== 1 || record.kind !== 'terminal_cleanup' || record.confirmed !== true
+    || Object.keys(record).some((key) => !['v', 'kind', 'confirmed', 'reason'].includes(key))
+    || (record.reason !== undefined && (typeof record.reason !== 'string' || record.reason.length > 2000))) return undefined;
+  return { confirmed: true, ...(typeof record.reason === 'string' ? { reason: record.reason } : {}) };
+}
+
 export function encodeJsonl(record: unknown): string {
   const line = JSON.stringify(record);
   if (Buffer.byteLength(line) > MAX_JSONL_BYTES) throw new JsonlProtocolError('OVERSIZED_JSONL', `JSONL record exceeds ${MAX_JSONL_BYTES} bytes.`);

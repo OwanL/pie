@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -132,6 +133,107 @@ test('run_code timeout and cancellation terminate the sidecar tree before delaye
     await Promise.all(cancelPids.browserPids.map((pid) => waitForExit(pid)));
   } finally {
     await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('late async route rejection confirms cleanup before crash recovery and reopening', { skip: !HAS_BROWSER, timeout: 60_000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pw-route-crash-recovery-'));
+  let evaluationStarted = false;
+  const server = createServer((request, response) => {
+    if (request.url === '/ready') evaluationStarted = true;
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end('<!doctype html><title>local fixture</title><button>Local button</button>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}`;
+  let testFailure: unknown;
+  const children: ReturnType<typeof spawn>[] = [];
+  const records: Record<string, unknown>[][] = [];
+  const client = new RuntimeClient(path.join(root, 'session.jsonl'), () => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../sidecar.mjs', import.meta.url))], {
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    });
+    const output: Record<string, unknown>[] = [];
+    children.push(child); records.push(output);
+    let buffered = '';
+    child.stdout.on('data', (chunk) => {
+      buffered += chunk.toString();
+      let newline: number;
+      while ((newline = buffered.indexOf('\n')) !== -1) {
+        output.push(JSON.parse(buffered.slice(0, newline)));
+        buffered = buffered.slice(newline + 1);
+      }
+    });
+    return child;
+  });
+  try {
+    const opened = await client.request('open', { sessionId: 'crashed', artifactDir: path.join(root, 'first'), url: base }, { timeoutMs: 30_000 });
+    client.markReopened();
+    const pids = await client.request('debug_pids', {}) as unknown as { sidecarPid: number; browserPids: number[] };
+    assert.equal(pids.browserPids.length, 1);
+    // The HTTP handshake proves evaluate is executing in the old document. Its
+    // never-settling promise removes timing dependence without catching the
+    // handler rejection: navigation must destroy this evaluation context.
+    await client.request('run_code', {
+      sessionId: 'crashed', observation: { mode: 'none' },
+      code: `await page.route('**/data', async route => route.fulfill({ json: await page.evaluate(() => {
+        fetch('/ready').catch(() => {});
+        return new Promise(() => {});
+      }) }));
+      await page.evaluate(() => { fetch('/data').catch(() => {}); });
+      return 'installed';`,
+    });
+    await waitForState(() => evaluationStarted);
+    await assert.rejects(() => client.request('run_code', {
+      sessionId: 'crashed', observation: { mode: 'none' },
+      code: `await page.goto(${JSON.stringify(`${base}/next`)}); await new Promise(() => {});`,
+    }, { timeoutMs: 15_000 }), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'BROWSER_CRASHED', JSON.stringify({
+        error: String(error), records: records[0].filter((record) => record.kind !== 'response'),
+        sidecarAlive: alive(pids.sidecarPid), browserAlive: pids.browserPids.map(alive),
+      }));
+      assert.match((error as Error).message, /Execution context was destroyed.*navigation/);
+      return true;
+    });
+    await waitForState(() => client.state === 'needs_reopen');
+    await waitForExit(pids.sidecarPid);
+    await Promise.all(pids.browserPids.map((pid) => waitForExit(pid)));
+    assert.equal(children[0].exitCode, 1);
+    const acknowledgements = records[0].filter((record) => record.kind === 'terminal_cleanup');
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0].confirmed, true);
+    assert.match(String(acknowledgements[0].reason), /Execution context was destroyed/);
+    await assert.rejects(() => client.request('observe', { sessionId: 'crashed', pageId: opened.observation!.pageId }),
+      (error: unknown) => (error as { code?: string }).code === 'RUNTIME_REOPEN_REQUIRED');
+
+    await client.request('open', { sessionId: 'reopened', artifactDir: path.join(root, 'second'), url: base }, { timeoutMs: 30_000 });
+    client.markReopened();
+    assert.equal(children.length, 2);
+    await assert.rejects(() => client.request('observe', { sessionId: 'crashed', pageId: opened.observation!.pageId }),
+      (error: unknown) => (error as { code?: string }).code === 'SESSION_NOT_FOUND');
+    const reopenedPids = await client.request('debug_pids', {}) as unknown as { sidecarPid: number; browserPids: number[] };
+    assert.equal(reopenedPids.browserPids.length, 1);
+    await client.shutdown();
+    await waitForExit(reopenedPids.sidecarPid);
+    await Promise.all(reopenedPids.browserPids.map((pid) => waitForExit(pid)));
+    assert.equal(records[1].filter((record) => record.kind === 'terminal_cleanup' && record.confirmed === true).length, 1);
+    assert.equal(children[1].exitCode, 0);
+    assert.equal(client.state, 'stopped');
+  } catch (error) {
+    testFailure = error;
+    throw error;
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    // Keep fixture evidence if descendant cleanup cannot be confirmed, without
+    // hiding the original regression failure behind a teardown error.
+    try { await client.shutdown(); } catch (error) {
+      if (testFailure) throw new AggregateError([testFailure, error], `Regression failed: ${String(testFailure)}; cleanup failed: ${String(error)}`);
+      throw error;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
