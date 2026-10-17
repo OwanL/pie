@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { boundToolFinishedPayload } from '../session-event-content-tool';
 import test from 'node:test';
 
 import type { SubagentResult, SubagentSingleResult } from '../subagent-result';
@@ -187,6 +188,19 @@ test('terminal force-settle with empty child results renders failed cards from t
       errorMessage: 'Subagent did not settle within 1800s and was force-settled.',
     },
   ]);
+});
+
+test('pre-dispatch validation failure survives terminal transport into the child card', () => {
+  const text = 'Validation failed for tool "subagent":\n- root: must not have additional properties';
+  const payload = boundToolFinishedPayload({
+    toolCallId: 'validation-failure', name: 'subagent',
+    input: { agent: 'worker', task: 'inspect', parameters: {} },
+    status: 'failed',
+    result: { content: [{ type: 'text', text }], details: {}, isError: true },
+  });
+  const out = getRenderableSubagentResultFromToolCall(payload);
+  assert.equal(out?.results[0]?.errorMessage, text);
+  assert.equal(out?.results[0]?.exitCode, 1);
 });
 
 // --- getRenderableSubagentResultFromToolCall: synthesize placeholder (running) ---

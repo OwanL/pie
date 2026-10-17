@@ -432,12 +432,21 @@ export function boundToolFinishedPayload(
   // lifecycle transport carries only its compact card projection regardless
   // of size; exact recursive detail switches to the durable authority stream.
   if (payload.name?.trim().toLowerCase() === 'subagent') {
+    const compact = compactSubagentResultPreview(payload.result);
+    const failureText = !compact && payload.status === 'failed' ? toolFailureText(payload.result) : undefined;
     payload = {
       ...payload,
-      result: compactSubagentResultPreview(payload.result) ?? {
-        $toolResult: 'detail-available',
-        transportNotice: 'Recursive subagent detail is available only through the durable detail authority.',
-      },
+      result: compact ?? (
+        failureText?.trim()
+          // Schema validation can fail before any child exists. Preserve its
+          // bounded diagnostic instead of replacing it with a detail marker
+          // that the child-card fallback cannot explain.
+          ? { content: [{ type: 'text', text: failureText.slice(0, 8_192) }] }
+          : {
+            $toolResult: 'detail-available',
+            transportNotice: 'Recursive subagent detail is available only through the durable detail authority.',
+          }
+      ),
     };
   }
   const serialized = serializeToolProgress(payload);

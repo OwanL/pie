@@ -915,6 +915,32 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.match(fallbackHtml, /status-chip-failed/);
   assert.match(fallbackHtml, /Subagent failed before reporting child results/);
 
+  const { boundToolFinishedPayload } = await import('../../../../harness/agent-processes/workers/session-event-content-tool');
+  const validationHtml = renderToString(h(ToolCallItem, {
+    toolCall: toolCall({
+      id: 'sub-validation',
+      ...boundToolFinishedPayload({
+        requestId: 'request-1', sessionPath: '/session.jsonl', messageId: 'assistant-1',
+        toolCallId: 'sub-validation', name: 'subagent', status: 'failed',
+        input: { agent: 'worker', task: 'Inspect regression', parameters: {} },
+        result: {
+          content: [{ type: 'text', text: 'Validation failed for tool "subagent":\n- root: must not have additional properties' }],
+          details: {}, isError: true,
+        },
+      }),
+    }),
+    prefs: DEFAULT_CHAT_PREFS,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.match(validationHtml, /tool-call-subagent/);
+  assert.match(validationHtml, /status-chip-failed has-error-detail/);
+  assert.match(validationHtml, /Validation failed for tool/);
+  assert.match(validationHtml, /root: must not have additional properties/);
+  assert.doesNotMatch(validationHtml, /Subagent failed before reporting child results/);
+
   const parallelHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
       id: 'sub-parallel',
