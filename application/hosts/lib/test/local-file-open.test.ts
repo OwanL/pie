@@ -59,7 +59,7 @@ function createFakeClock(): { clock: LocalFileOpenClock; fireIdleTimers(): void 
   return {
     clock: {
       setTimeout: (callback, _delayMs) => {
-        const handle = {};
+        const handle: object = {};
         timers.set(handle, callback);
         return handle;
       },

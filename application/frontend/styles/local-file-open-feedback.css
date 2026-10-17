@@ -1,0 +1,24 @@
+/* Transient renderer-local feedback for local file opens (popup errors,
+ * timeouts, unavailable origins, external-open confirmation). */
+.local-file-open-feedback {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(32rem, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-raised-surface, #1f1f1f);
+  color: var(--vscode-foreground, inherit);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}
+
+.local-file-open-feedback-error {
+  border-color: var(--panel-error-border, #b91c1c);
+}

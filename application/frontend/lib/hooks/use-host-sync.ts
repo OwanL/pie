@@ -20,6 +20,7 @@ import {
 } from '../../transcript/detail-subscription-store';
 import { clearImageViewer } from '../../transcript/image-viewer-store';
 import { clearImagePreviewRequests, receiveImagePreviewResult } from '../../transcript/image-preview-store';
+import { clearLocalFileOpenRequests, receiveLocalFileOpenResult } from '../../shell/local-file-open';
 
 import type {
   ChatMessage,
@@ -663,6 +664,7 @@ export function useHostSync(
   const clearTransientUi = useCallback(() => {
     clearImageViewer();
     clearImagePreviewRequests();
+    clearLocalFileOpenRequests();
     setDraftRestore(null);
     setInputsRestore(null);
     setOptimisticMessages([]);
@@ -759,6 +761,11 @@ export function useHostSync(
         receiveImagePreviewResult(message);
         return;
       }
+      // Renderer-local local file opens answer the initiating renderer only;
+      // unknown results are stale/cleared owners and are dropped.
+      if (message.type === 'localFileOpenResult' && receiveLocalFileOpenResult(message)) {
+        return;
+      }
       if (message.type === 'detailResult' && message.result) {
         receiveLazyDetailResult(message.result);
         return;
@@ -815,6 +822,7 @@ export function useHostSync(
     setLazyDetailPostMessage(postMessage);
     if (effectiveConnectionState !== 'connected') {
       clearImagePreviewRequests();
+      clearLocalFileOpenRequests();
       // Browser confirmations are canceled host-side when their renderer
       // disconnects; never leave the old imperative dialog actionable.
       setInlineConfirm(null);

@@ -17,6 +17,7 @@ import { captureSelectionForCopy } from '../lib/components/selection-copy';
 import { getContextMenuTrigger } from '../lib/components/useMenuTriggerAria';
 import type { TranscriptFilePathMenuInfo, TranscriptMessageMenuInfo } from '../transcript/types';
 import type { SessionTabRunAction } from '../session-tabs/run-state';
+import { beginLocalFileOpen, isLocalHtmlFilePath } from './local-file-open';
 
 export interface AppHandlers {
   handleSend: (text: string) => boolean;
@@ -153,12 +154,25 @@ export function useAppHandlers(
     return true;
   }, [postMessage, activeSessionPathRef, setInterrupting, commandsAvailable]);
 
-  const handleOpenFile = useCallback((path: string, reference?: string, workingDirectory?: string) => postMessage({
-    type: 'openFile',
-    path,
-    ...(reference !== undefined ? { reference } : {}),
-    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
-  }), [postMessage]);
+  // HTML files open in the browser (the host prepares + verifies an isolated
+  // loopback origin; popups/external open is surface policy), never the editor.
+  // Every other path keeps the unchanged generic open flow.
+  const handleOpenFile = useCallback((path: string, reference?: string, workingDirectory?: string) => {
+    if (isLocalHtmlFilePath(path)) {
+      beginLocalFileOpen(postMessage, {
+        path,
+        ...(reference !== undefined ? { reference } : {}),
+        ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+      });
+      return;
+    }
+    postMessage({
+      type: 'openFile',
+      path,
+      ...(reference !== undefined ? { reference } : {}),
+      ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+    });
+  }, [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
   const handleCloseTab = useCallback((path: string) => postMessage({
     type: 'closeSession', sessionPath: path, interactionId: createUuidV4(),

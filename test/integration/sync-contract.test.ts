@@ -1295,6 +1295,20 @@ test('image viewer actions are targeted platform effects with actual host capabi
   assert.match(contract, /browser transport does not invent native clipboard or file-shell support/u);
 });
 
+test('local file open prepares one isolated verified loopback listener per request', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /type:'prepareLocalFileOpen', requestId, path, reference\?, workingDirectory\?/u);
+  assert.match(contract, /type:'localFileOpenResult', requestId, status:'ready'\|'unavailable'/u);
+  assert.match(contract, /Results answer the initiating renderer only/u);
+  assert.match(contract, /isolation goal is per host listener, not per report/u);
+  assert.match(contract, /canonical entry file at `\/` and files canonically contained in its parent directory/u);
+  assert.match(contract, /exact verified `Host` header/u);
+  assert.match(contract, /The listener self-verifies a successful entry response on its own loopback/u);
+  assert.match(contract, /Only a trusted loopback-local browser renderer may receive a `popup` URL; a remote\/LAN renderer is answered `unavailable`/u);
+  assert.match(contract, /Ephemeral listeners dispose on idle expiry and at host shutdown/u);
+  assert.match(contract, /image chips keep the image viewer and image actions, non-HTML files keep the normal editor open/u);
+});
+
 test('renderer-local image previews extend only to bounded inline Markdown raster presentation', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /same narrow allowance covers inline presentation of local Markdown raster images/u);

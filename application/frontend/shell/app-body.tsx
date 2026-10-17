@@ -26,6 +26,7 @@ import { useWarmupAudio } from '../notifications/use-warmup-audio';
 import { TranscriptCommitProvider } from '../transcript/commit-registry';
 import { InlineConfirmDialog } from '../notifications/inline-confirm-dialog';
 import { ConnectionBanner } from './connection-banner';
+import { LocalFileOpenFeedbackView, useLocalFileOpenFeedback } from './local-file-open-feedback';
 import type { ClientTransport } from '../transport/client-transport';
 import { useSnoozeCommands } from '../session-tabs/use-snooze-commands';
 
@@ -51,6 +52,7 @@ export function AppBody({ adapter }: AppBodyProps) {
     inlineConfirm,
     respondToInlineConfirm,
   } = useHostSync(transport, adapter.initialState);
+  const localFileOpenFeedback = useLocalFileOpenFeedback();
   const postApplicationCommand = useCallback(
     (message: WebviewToHostMessage) => connectionState === 'connected' && transport.postMessage(message),
     [connectionState, transport],
@@ -228,6 +230,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           onRespond={(confirmed) => respondToInlineConfirm(inlineConfirm.confirmId, confirmed)}
         />
       )}
+      <LocalFileOpenFeedbackView feedback={localFileOpenFeedback} />
       {contextMenu && (
         <ContextMenu
           menu={contextMenu}

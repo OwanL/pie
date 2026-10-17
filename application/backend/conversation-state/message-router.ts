@@ -936,7 +936,7 @@ export class MessageRouter {
     const current = () => !!context?.rendererId && viewGeneration !== undefined
       && this.sidebarProvider.isRendererOwnerCurrent?.(context.rendererId, viewGeneration, context.rendererGeneration) === true;
     if (!current()) return;
-    const openIn = context.kind === 'browser' ? 'popup' as const : 'external' as const;
+    const openIn = context!.kind === 'browser' ? 'popup' as const : 'external' as const;
     const postResult = (result: {
       type: 'localFileOpenResult'; requestId: string; status: 'ready' | 'unavailable';
       url?: string; openIn?: 'popup' | 'external'; error?: string;
@@ -945,7 +945,7 @@ export class MessageRouter {
     };
     // A remote/LAN browser can never reach a loopback-only origin: fail
     // closed before starting any listener.
-    if (openIn === 'popup' && context.hostLoopbackBrowser !== true) {
+    if (openIn === 'popup' && context!.hostLoopbackBrowser !== true) {
       postResult({
         type: 'localFileOpenResult', requestId: msg.requestId, status: 'unavailable',
         error: 'Local files can be prepared only for a browser connected to this machine.',
