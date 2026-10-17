@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +14,14 @@ import {
   readSystemPromptTogglesForSession,
   writeSystemPromptTogglesForSession,
 } from '../session-settings-store';
+
+/** Success persistence is approved only for Windows fixed-local-NTFS
+ * directories, so lock-based write expectations run on win32 only. This is a
+ * platform gate, not a storage probe: on Windows a broken storage qualification
+ * fails the test instead of silently skipping it. */
+const successPersistenceSkip = process.platform !== 'win32'
+  ? 'success persistence requires Windows fixed-local-NTFS storage'
+  : false;
 
 async function withSidecarDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-system-prompt-toggles-'));
@@ -33,7 +43,7 @@ async function withSidecarDir(run: (dir: string) => Promise<void>): Promise<void
   }
 }
 
-test('system-prompt toggle store persists, deduplicates, and removes per-session entries', async () => {
+test('system-prompt toggle store persists, deduplicates, and removes per-session entries', { skip: successPersistenceSkip }, async () => {
   await withSidecarDir(async (dir) => {
     await writeSystemPromptTogglesForSession('/sessions/one.jsonl', ['harness', 'harness', 'skills']);
     await writeSystemPromptTogglesForSession('/sessions/two.jsonl', ['tools']);
@@ -55,7 +65,7 @@ test('system-prompt toggle store persists, deduplicates, and removes per-session
   });
 });
 
-test('system-prompt toggle store serializes concurrent read-modify-write updates', async () => {
+test('system-prompt toggle store serializes concurrent read-modify-write updates', { skip: successPersistenceSkip }, async () => {
   await withSidecarDir(async (dir) => {
     await Promise.all([
       writeSystemPromptTogglesForSession('/sessions/one.jsonl', ['harness']),
@@ -85,7 +95,7 @@ test('system-prompt toggle store treats missing and malformed sidecars as empty'
   });
 });
 
-test('mutations preserve a multi-session sidecar on read I/O failure', async (t) => {
+test('mutations preserve a multi-session sidecar on read I/O failure', { skip: successPersistenceSkip }, async (t) => {
   await withSidecarDir(async (dir) => {
     const file = path.join(dir, 'system-prompt-toggles.json');
     const bytes = JSON.stringify({ '/sessions/one.jsonl': ['harness'], '/sessions/two.jsonl': ['tools'] });
@@ -112,7 +122,7 @@ test('mutations preserve a multi-session sidecar on read I/O failure', async (t)
   });
 });
 
-test('mutations reject malformed existing state without replacing its bytes', async () => {
+test('mutations reject malformed existing state without replacing its bytes', { skip: successPersistenceSkip }, async () => {
   await withSidecarDir(async (dir) => {
     const file = path.join(dir, 'system-prompt-toggles.json');
     for (const bytes of [
@@ -129,7 +139,7 @@ test('mutations reject malformed existing state without replacing its bytes', as
   });
 });
 
-test('system-prompt toggles read the legacy review sidecar and scrub it after migration', async () => {
+test('system-prompt toggles read the legacy review sidecar and scrub it after migration', { skip: successPersistenceSkip }, async () => {
   const currentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-settings-'));
   const legacyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-legacy-session-settings-'));
   const previousCurrent = process.env[SESSION_SETTINGS_DIR_ENV];
@@ -179,6 +189,115 @@ test('system-prompt toggles read the legacy review sidecar and scrub it after mi
     await fs.rm(currentDir, { recursive: true, force: true });
     await fs.rm(legacyDir, { recursive: true, force: true });
   }
+});
+
+async function waitForChildExit(child: ReturnType<typeof fork>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      once(child, 'exit').then(() => true),
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function stopUnsupportedChild(child: ReturnType<typeof fork>): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, 2000)) return true;
+  child.kill('SIGKILL');
+  return waitForChildExit(child, 2000);
+}
+
+test('unsupported platform strictly rejects persistence without creating directories or files', async () => {
+  type UnsupportedReport = { kind: string; name?: string; value?: unknown; message?: string; error?: string };
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-toggles-unsupported-'));
+  const existing = path.join(root, 'existing');
+  const missingCurrent = path.join(root, 'missing-current');
+  const missingLegacy = path.join(root, 'missing-legacy');
+  await fs.mkdir(existing, { recursive: true });
+  const env = { ...process.env };
+  delete env.PIE_SESSION_SETTINGS_DIR;
+  delete env.PIE_LEGACY_SESSION_SETTINGS_DIR;
+  const child = fork(path.join(__dirname, 'system-prompt-toggle-unsupported-child.cjs'), [], {
+    env, execArgv: [], stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  });
+  const messages: UnsupportedReport[] = [];
+  child.on('message', message => messages.push(message as UnsupportedReport));
+  let primaryError: unknown;
+  let childExited = false;
+  try {
+    child.send({ kind: 'run', existing, missingCurrent, missingLegacy });
+    const deadline = Date.now() + 30000;
+    for (;;) {
+      if (messages.some(message => message.kind === 'done')) break;
+      const failed = messages.find(message => message.kind === 'failed');
+      if (failed) throw new Error(String(failed.error));
+      if (Date.now() > deadline) throw new Error('unsupported-platform child timed out');
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error('child exited before done');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    for (const name of ['missing', 'existing']) {
+      assert.equal(
+        messages.find(message => message.kind === 'available' && message.name === name)?.value, true,
+        'the rejection is platform-driven, not caused by a missing sidecar directory',
+      );
+      assert.deepEqual(
+        messages.find(message => message.kind === 'read' && message.name === name)?.value, {},
+        'portable reads stay available on unsupported platforms',
+      );
+      assert.equal(
+        messages.find(message => message.kind === 'strict-rejected' && message.name === name)?.message,
+        'Runtime lock requires Windows',
+      );
+      assert.ok(
+        messages.some(message => message.kind === 'best-effort-completed' && message.name === name),
+        'best-effort persistence completes so live in-memory state is not blocked',
+      );
+    }
+    // The open IPC channel keeps the child alive past its work.
+    childExited = await stopUnsupportedChild(child);
+    if (!childExited) throw new Error('unsupported-platform child did not exit within the bounded teardown');
+
+    assert.deepEqual(
+      await fs.readdir(existing), [],
+      'no sidecar file or temporary is created in an existing sidecar directory',
+    );
+    await assert.rejects(
+      fs.stat(missingCurrent), { code: 'ENOENT' },
+      'no sidecar directory is created when it was missing',
+    );
+    await assert.rejects(
+      fs.stat(missingLegacy), { code: 'ENOENT' },
+      'no legacy sidecar directory is created when it was missing',
+    );
+    assert.deepEqual(
+      (await fs.readdir(root)).filter(name => name !== 'existing'), [],
+      'the unsupported platform must not create any durable state',
+    );
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    try {
+      if (!childExited) childExited = await stopUnsupportedChild(child);
+      if (childExited) {
+        await fs.rm(root, { recursive: true, force: true });
+      } else {
+        const diagnostic = `unsupported-platform child exit could not be confirmed; fixture retained at ${root}`;
+        console.error(diagnostic);
+        if (primaryError === undefined) primaryError = new Error(diagnostic);
+      }
+    } catch (cleanupError) {
+      const diagnostic = `unsupported-platform child cleanup failed; fixture retained at ${root}: ${String(cleanupError)}`;
+      console.error(diagnostic);
+      if (primaryError === undefined) primaryError = new Error(diagnostic);
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
 });
 
 test('system-prompt toggle store exposes when no durable sidecar directory is configured', async () => {

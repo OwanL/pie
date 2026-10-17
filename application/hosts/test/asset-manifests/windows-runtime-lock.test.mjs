@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const helper = fileURLToPath(new URL('../../vscode/runtime/windows-runtime-lock.cjs', import.meta.url));
+const neutralHelper = fileURLToPath(new URL('../../../../lib/windows-runtime-lock/windows-runtime-lock.cjs', import.meta.url));
 const { acquireWindowsRuntimeLock: acquire } = require(helper);
 const windows = { skip: process.platform !== 'win32', timeout: 60000 };
 
@@ -69,7 +70,7 @@ if (process.env.PIE_LOCK_TEST_CHILD === '1') {
     let stats = 0;
     let inode = 2n;
     const module = { exports: {} };
-    runInNewContext(await readFile(helper, 'utf8'), {
+    runInNewContext(await readFile(neutralHelper, 'utf8'), {
       module, Buffer,
       process: { platform: 'win32', env: {} },
       require(name) {
