@@ -9,7 +9,7 @@ tasks:
       # hydration hook is qualified, compilation is incremental, not cached.
       cache: false
   test:
-    command: 'proto run node -- -e "console.log(\"Pi-owned suites complete\")"'
+    command: noop
     deps: ['testTui', 'testAi', 'testAgent', 'testCodingAgent']
     inputs: ['/harness/pi/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}
