@@ -35,6 +35,27 @@ test('open shares pending work and retains committed snapshot before publication
   assert.throws(() => ledger.status('open', '/other'), /another session path/);
 });
 
+test('snapshot serialization failure retains committed outcome without replaying the open', async () => {
+  const ledger = new OpenOperationLedger();
+  const circular = { session: { path: '/session' }, runtimeReady: false } as SessionOpenedPayload & { self?: unknown };
+  circular.self = circular;
+  let calls = 0;
+  const execute = async (commit: (value: SessionOpenedPayload) => void) => {
+    calls++;
+    commit(circular);
+    throw new Error('publication lost after viewed-path commit');
+  };
+
+  assert.deepEqual(await ledger.run({ operationId: 'circular', sessionPath: '/session', execute }), {
+    ok: true, sessionPath: '/session',
+  });
+  const status = ledger.status('circular', '/session');
+  assert.equal(status.state, 'committed');
+  assert.equal(status.snapshot, undefined);
+  await ledger.run({ operationId: 'circular', sessionPath: '/session', execute });
+  assert.equal(calls, 1);
+});
+
 test('payload eviction retains outcomes and permits replay without reexecution', async () => {
   const bytes = Buffer.byteLength(JSON.stringify(snapshot));
   const ledger = new OpenOperationLedger({ maxBytes: bytes });

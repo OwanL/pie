@@ -179,8 +179,13 @@ export interface OpenSessionResultEvent {
   operationAttempt?: number;
   backendGeneration?: number;
   ok: boolean;
-  /** A local waiter expired, but the repeat-safe read/event may still complete. */
+  /** A local waiter expired, but the original mutation/event may still complete. */
   ambiguous?: boolean;
+  /** Success is only terminal after the retained snapshot was projected. An
+   * ordinary RPC acknowledgement proves commit, not host snapshot delivery. */
+  successEvidence?: 'snapshot-applied';
+  /** Read-only status observation, not a new mutation attempt. */
+  reconciliation?: boolean;
   error?: string;
 }
 

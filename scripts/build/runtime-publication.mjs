@@ -9,7 +9,7 @@ export const { publishRuntimeGeneration, resolveRuntimeGeneration } = runtime;
 // The runtime bootstrap assets moved with the host package owner (planned
 // distribution root application/hosts/vscode).
 const bootstrapSource = fileURLToPath(new URL('../../application/hosts/vscode/runtime/', import.meta.url));
-const bootstrapFiles = ['bootstrap.cjs', 'runtime-generations.cjs'];
+const bootstrapFiles = ['bootstrap.cjs', 'runtime-generations.cjs', 'windows-runtime-lock.cjs'];
 const require = createRequire(import.meta.url);
 
 /** Read capabilities only from the selected, content-bound installed helper.

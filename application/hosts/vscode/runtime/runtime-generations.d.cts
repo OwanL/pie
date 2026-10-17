@@ -32,6 +32,9 @@ export function resolveRuntimeGeneration(options: {
   identity: RuntimeIdentity;
 }): Promise<RuntimeGeneration>;
 
+export const RUNTIME_DIRECTORY: 'pie-runtime-v2';
+export const RUNTIME_LOCK_PROTOCOL: 'pie-windows-runtime-lock-v1';
+
 export function acquireRuntimeGeneration(options: {
   extensionDir: string;
   identity: RuntimeIdentity;

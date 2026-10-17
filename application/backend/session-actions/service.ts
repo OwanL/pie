@@ -489,6 +489,30 @@ export class SessionService implements HostDisposable {
     );
   }
 
+  /** Called only from the lifecycle queue: retained snapshots share the ordinary
+   * opened-event projection and never acquire new selection ownership. */
+  applyRetainedOpenSnapshot(
+    payload: import('../../lib/protocol/sessions.js').SessionOpenedPayload,
+    operationId: string,
+    backendGeneration: number,
+  ): boolean {
+    const arch = this.getArchState();
+    const operation = arch.operations[operationId];
+    const request = this.state.getSelectionRequest(payload.selectionToken);
+    if (!request || request.operationId !== operationId
+      || request.requestEpoch !== this.state.getSessionDataEpoch(payload.session.path)
+      || this.backend.getGeneration() !== backendGeneration
+      || !operation || operation.kind !== 'session.open' || operation.terminal
+      || operation.backendGeneration !== backendGeneration
+      || payload.operationId !== operationId
+      || payload.session.path !== operation.session.pendingPath
+      || !arch.sessions.openTabPaths.includes(payload.session.path)
+      || Object.values(arch.operations).some(candidate => candidate.kind === 'session.close'
+        && candidate.session.pendingPath === payload.session.path && !candidate.terminal)) return false;
+    this.events.applySessionOpened(payload);
+    return true;
+  }
+
   captureSelectionRequestStart(selectionToken: string, operationAttempt?: number): void {
     this.state.captureSelectionRequestStart(selectionToken, operationAttempt);
   }

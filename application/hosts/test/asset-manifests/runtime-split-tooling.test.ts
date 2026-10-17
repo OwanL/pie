@@ -61,7 +61,7 @@ test('v2 partitions records but keeps the full payload generation hash and schem
   assert(metadata.files.some((record: RecordEntry) => record.path === referencePath));
   assert(metadata.files.every((record: RecordEntry) => !record.path.startsWith('pi-tooling/')));
   assert.equal(hashRecords([...metadata.files, ...metadata.tooling.files]), published.generation);
-  const selections = path.join(extensionDir, 'pie-runtime', 'selections');
+  const selections = path.join(extensionDir, 'pie-runtime-v2', 'selections');
   const marker = JSON.parse(await fs.readFile(path.join(selections, (await fs.readdir(selections))[0]), 'utf8'));
   assert.equal(marker.schema, 1);
 }));

@@ -5,12 +5,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
 
-const RUNTIME_DIRECTORY = 'pie-runtime';
+const { acquireWindowsRuntimeLock } = require('./windows-runtime-lock.cjs');
+
+const RUNTIME_DIRECTORY = 'pie-runtime-v2';
+const RUNTIME_LOCK_PROTOCOL = 'pie-windows-runtime-lock-v1';
 const GENERATIONS_DIRECTORY = 'generations';
 const SELECTIONS_DIRECTORY = 'selections';
 const LEASES_DIRECTORY = 'leases';
-const LOCK_DIRECTORY = '.lock';
-const LOCK_OWNER_FILE = 'owner.json';
 const RUNTIME_MANIFEST_FILE = 'runtime-manifest.json';
 const RUNTIME_SCHEMA = 1;
 const TOOLING_DIRECTORY = 'pi-tooling';
@@ -22,7 +23,6 @@ const RENDERER_MANIFEST_FILE = path.join(RENDERER_DIRECTORY, '.vite', 'manifest.
 const GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const LOCK_RETRY_MS = 25;
-const LOCK_METADATA_GRACE_MS = 2_000;
 const LOCK_TIMEOUT_MS = 60_000;
 const FILE_SCAN_CONCURRENCY = 8;
 const HASH_FILE_READ_CHUNK_BYTES = 64 * 1024;
@@ -394,120 +394,20 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, 'utf8'));
 }
 
-async function sleep(milliseconds) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 function nextSequence() {
   sequence = (sequence + 1) % 1_000_000_000;
   return sequence;
 }
 
-function ownerIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return errorCode(error) !== 'ESRCH';
-  }
-}
-
-async function readLockOwner(lockDir) {
-  try {
-    const owner = await readJson(path.join(lockDir, LOCK_OWNER_FILE));
-    if (!isPlainObject(owner) || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.token !== 'string' || !/^[0-9a-f]{32}$/u.test(owner.token)) {
-      return null;
-    }
-    return owner;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return undefined;
-    return null;
-  }
-}
-
-/**
- * Publication, acquisition, and retention use one directory lock. The owner
- * record includes the PID so a crashed publisher can be distinguished from a
- * live one without ever replacing a live owner's lock.
- */
+/** Publication, acquisition, and retention share kernel-owned exclusion. */
 async function acquireDirectoryLock(extensionDir, timing) {
   const root = runtimeRoot(extensionDir);
   await fs.mkdir(root, { recursive: true });
-  const lockDir = path.join(root, LOCK_DIRECTORY);
-  const token = crypto.randomBytes(16).toString('hex');
-  const startedAt = Date.now();
-  const deadline = startedAt + LOCK_TIMEOUT_MS;
-  let contentionStartedAt;
-
-  function recordLockWait() {
-    if (!timing || contentionStartedAt === undefined) return;
-    timing.lockWaitMs += elapsedMs(contentionStartedAt);
-    contentionStartedAt = undefined;
-  }
-
-  for (;;) {
-    try {
-      await fs.mkdir(lockDir);
-      try {
-        await fs.writeFile(
-          path.join(lockDir, LOCK_OWNER_FILE),
-          `${JSON.stringify({ pid: process.pid, token, startedAt })}\n`,
-          { flag: 'wx' },
-        );
-      } catch (error) {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
-        throw error;
-      }
-
-      recordLockWait();
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        try {
-          const owner = await readJson(path.join(lockDir, LOCK_OWNER_FILE));
-          if (owner && owner.pid === process.pid && owner.token === token) {
-            await fs.rm(lockDir, { recursive: true, force: true });
-          }
-        } catch (error) {
-          if (errorCode(error) !== 'ENOENT') throw error;
-        }
-      };
-    } catch (error) {
-      if (errorCode(error) !== 'EEXIST') {
-        recordLockWait();
-        throw error;
-      }
-      if (timing && contentionStartedAt === undefined) contentionStartedAt = monotonicNow();
-      const owner = await readLockOwner(lockDir);
-      if (owner && !ownerIsAlive(owner.pid)) {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch((removeError) => {
-          if (errorCode(removeError) !== 'ENOENT') throw removeError;
-        });
-        continue;
-      }
-
-      if (owner === null || owner === undefined) {
-        // mkdir and the owner write are separate operations. Give a winning
-        // process a short grace period, then recover a lock abandoned between
-        // those operations (including a missing owner record).
-        try {
-          const lockStat = await fs.stat(lockDir);
-          if (Date.now() - lockStat.mtimeMs > LOCK_METADATA_GRACE_MS) {
-            await fs.rm(lockDir, { recursive: true, force: true });
-            continue;
-          }
-        } catch (statError) {
-          if (errorCode(statError) !== 'ENOENT') throw statError;
-        }
-      }
-
-      if (Date.now() >= deadline) {
-        recordLockWait();
-        throw new Error(`Timed out waiting for the Pie runtime lock at ${lockDir}.`);
-      }
-      await sleep(LOCK_RETRY_MS);
-    }
+  const startedAt = timing ? monotonicNow() : null;
+  try {
+    return await acquireWindowsRuntimeLock(root, { timeoutMs: LOCK_TIMEOUT_MS, retryMs: LOCK_RETRY_MS });
+  } finally {
+    if (timing) timing.lockWaitMs += elapsedMs(startedAt);
   }
 }
 
@@ -1482,6 +1382,8 @@ async function acquireRuntimeGeneration({ extensionDir, identity }) {
 }
 
 module.exports = {
+  RUNTIME_DIRECTORY,
+  RUNTIME_LOCK_PROTOCOL,
   SUPPORTED_MANIFEST_SCHEMAS: Object.freeze([1, 2]),
   publishRuntimeGeneration,
   resolveRuntimeGeneration,

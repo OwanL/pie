@@ -412,7 +412,7 @@ test('acquires before requiring runtime code, reports updates, and releases afte
   assert.ok(events.indexOf('delegate-deactivate') < events.indexOf('release'));
   assert.equal(watcherClosed, true);
   assert.ok(events.includes('status-dispose'));
-  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime', 'leases')), []);
+  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases')), []);
 }));
 
 test('does not activate a fallback after a selected candidate fails during activation', async () => withTempRoot(async (root) => {
@@ -438,9 +438,9 @@ test('does not activate a fallback after a selected candidate fails during activ
     /selected candidate failed/u,
   );
   assert.equal(events.length, 1);
-  assert.equal(events[0], path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out', 'extension.js'));
-  assert.notEqual(events[0], path.join(extensionDir, 'pie-runtime', 'generations', first.generation, 'out', 'extension.js'));
-  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime', 'leases'))).length, 1, 'a failed activation without cleanup retains its lease');
+  assert.equal(events[0], path.join(extensionDir, 'pie-runtime-v2', 'generations', second.generation, 'out', 'extension.js'));
+  assert.notEqual(events[0], path.join(extensionDir, 'pie-runtime-v2', 'generations', first.generation, 'out', 'extension.js'));
+  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases'))).length, 1, 'a failed activation without cleanup retains its lease');
 }));
 
 test('uses the loaded module deactivate hook when activation fails', async () => withTempRoot(async (root) => {
@@ -463,7 +463,7 @@ test('uses the loaded module deactivate hook when activation fails', async () =>
 
   await assert.rejects(bootstrap.activate(makeContext(extensionDir, new Map())), /activation failed after startup/u);
   assert.deepEqual(events, ['activate', 'module-deactivate']);
-  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime', 'leases')), []);
+  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases')), []);
 }));
 
 test('retains a lease when activation cleanup fails', async () => withTempRoot(async (root) => {
@@ -478,7 +478,7 @@ test('retains a lease when activation cleanup fails', async () => withTempRoot(a
   const bootstrap = bootstrapModule.createBootstrap({ vscode: { window: {} }, runtimeGenerations: runtime, watch: noOpWatch });
 
   await assert.rejects(bootstrap.activate(makeContext(extensionDir, new Map())), /activation cleanup failed/u);
-  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime', 'leases'))).length, 1);
+  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases'))).length, 1);
 }));
 
 test('does not release a lease when normal delegated deactivation fails', async () => withTempRoot(async (root) => {
@@ -494,7 +494,7 @@ test('does not release a lease when normal delegated deactivation fails', async 
   await bootstrap.activate(makeContext(extensionDir, new Map()));
 
   await assert.rejects(bootstrap.deactivate(), /shutdown failed/u);
-  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime', 'leases'))).length, 1);
+  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases'))).length, 1);
 }));
 
 test('treats the global-state loaded marker as best effort after successful activation', async () => withTempRoot(async (root) => {
@@ -520,10 +520,10 @@ test('treats the global-state loaded marker as best effort after successful acti
 
   await bootstrap.activate(context);
   assert.deepEqual(events, ['activate']);
-  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime', 'leases'))).length, 1);
+  assert.equal((await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases'))).length, 1);
   await bootstrap.deactivate();
   assert.deepEqual(events, ['activate', 'deactivate']);
-  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime', 'leases')), []);
+  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases')), []);
 }));
 
 test('keeps an active generation and its worker usable through multiple publications and a fresh bootstrap', async () => withTempRoot(async (root) => {
@@ -598,5 +598,5 @@ module.exports = {
   await freshBootstrap.activate(makeContext(extensionDir, stateValues));
   assert.equal(workerGenerations.at(-1), publications.at(-1)?.generation, 'a fresh bootstrap loads the newest selected runtime');
   await freshBootstrap.deactivate();
-  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime', 'leases')), []);
+  assert.deepEqual(await readdir(path.join(extensionDir, 'pie-runtime-v2', 'leases')), []);
 }));

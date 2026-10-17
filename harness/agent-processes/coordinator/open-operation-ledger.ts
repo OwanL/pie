@@ -75,10 +75,19 @@ export class OpenOperationLedger {
       const result = { ok: true as const, sessionPath: options.sessionPath };
       try {
         await options.execute(snapshot => {
-          // Serialize before committing: retain an immutable transport snapshot,
-          // not the object that deferred inventory/event consumers can mutate.
-          const json = JSON.stringify(snapshot);
+          // Viewed-path commit is already durable when this callback runs. Record
+          // that outcome before serialization, which can fail for malformed
+          // payloads; status must still distinguish it from a failed open.
           entry.status = { operationId: options.operationId, state: 'committed', committed: true };
+          let json: string | undefined;
+          try {
+            // Retain an immutable transport snapshot, not the object that
+            // deferred inventory/event consumers can mutate.
+            json = JSON.stringify(snapshot);
+          } catch {
+            return;
+          }
+          if (json === undefined) return;
           const bytes = Buffer.byteLength(json, 'utf8');
           if (bytes <= this.limits.maxBytes) {
             entry.snapshotJson = json;

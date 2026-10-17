@@ -270,6 +270,48 @@ test('session.open timeout stays ambiguous and a late correlated response settle
     && event.operationId === 'open-operation' && event.ok && !event.ambiguous), true);
 });
 
+test('lost open snapshot uses retained status whether acknowledgement arrives or is lost, never another open', async () => {
+  for (const acknowledgementArrives of [false, true]) {
+  for (const state of ['unknown', 'pending', 'committed', 'snapshot'] as const) {
+    const requests: string[] = [];
+    let applied = 0;
+    const backend: EffectRunnerDeps['backend'] = {
+      async request<T>(method: string, params?: unknown) {
+        requests.push(method);
+        if (method === 'session.open') {
+          if (!acknowledgementArrives) throw new RequestTimeoutError('lost');
+          return { ok: true, sessionPath: '/a' } as T;
+        }
+        assert.deepEqual(params, { operationKind: 'session.open', operationId: 'open-operation',
+          sessionPath: '/a', backendGeneration: 1 });
+        return { state: state === 'snapshot' ? 'committed' : state,
+          ...(state === 'snapshot' ? { snapshot: { operationId: 'open-operation', session: { path: '/a' } } } : {}),
+        } as T;
+      },
+    };
+    const { deps, events, calls } = makeEffectRunnerDeps({ backend, serviceOverrides: {
+      getBackendGeneration: () => 1,
+      applyRetainedOpenSnapshot: () => { applied += 1; return true; },
+    } });
+    const runner = new EffectRunner(deps);
+    runner.run({ kind: 'OpenSession', corrId: 'open', sessionPath: '/a', selectionToken: 'selection-1',
+      operationId: 'open-operation', operationAttempt: 1, backendGeneration: 1 });
+    await settle();
+    for (let poll = 0; poll < 3; poll += 1) {
+      runner.run({ kind: 'ReconcileOpenSession', corrId: 'status', sessionPath: '/a', selectionToken: 'selection-1',
+        operationId: 'open-operation', operationAttempt: 1, backendGeneration: 1 });
+      await settle();
+    }
+    assert.deepEqual(requests, ['session.open', 'operation.status', 'operation.status', 'operation.status']);
+    assert.equal(applied, state === 'snapshot' ? 3 : 0);
+    assert.equal(calls.some(call => call.kind === 'handleSelectionFailure'), false);
+    const result = events.filter(event => event.kind === 'OpenSessionResult').at(-1);
+    assert.equal(result?.kind === 'OpenSessionResult' && result.ok, state === 'snapshot');
+    if (state === 'snapshot') assert.equal(result?.kind === 'OpenSessionResult' && result.successEvidence, 'snapshot-applied');
+  }
+  }
+});
+
 test('EffectRunner keeps session.open reconciliation timers opaque and dispatches the reducer fence', async () => {
   const timers = new FakeTimerSink();
   const hostEvents: Event[] = [];

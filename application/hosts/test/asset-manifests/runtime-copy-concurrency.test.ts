@@ -116,7 +116,7 @@ function expectedGeneration(contents: Map<string, Buffer>): string {
 }
 
 async function assertNoStagingDirectories(extensionDir: string): Promise<void> {
-  const generationsDir = path.join(extensionDir, 'pie-runtime', 'generations');
+  const generationsDir = path.join(extensionDir, 'pie-runtime-v2', 'generations');
   const entries = await readdir(generationsDir);
   assert.deepEqual(entries.filter((entry) => entry.startsWith('.staging-')), []);
 }

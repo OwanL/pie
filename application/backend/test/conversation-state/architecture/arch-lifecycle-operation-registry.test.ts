@@ -134,6 +134,20 @@ test('session.open response/event order converges and cannot produce a second te
   }
 });
 
+test('session.open successful acknowledgement without snapshot stays recoverable until retained projection', () => {
+  const acknowledged = reducer(startOpen().state, openResponse);
+  assert.equal(acknowledged.state.operations['open-operation']?.terminal, undefined);
+  assert.equal(acknowledged.effects[0]?.kind, 'ScheduleOpenSessionReconciliation');
+  const due = reducer(acknowledged.state, {
+    kind: 'OpenSessionReconciliationDue', operationId: 'open-operation',
+    sessionPath: SESSION, operationAttempt: 1, backendGeneration: 7,
+  });
+  assert.deepEqual(due.effects.map(effect => effect.kind), ['ReconcileOpenSession']);
+  const settled = reducer(due.state, openedEvent('open-operation'));
+  assert.equal(settled.state.operations['open-operation']?.terminal?.outcome, 'settled');
+  assert.equal(settled.state.sessions.openTabPaths.includes(SESSION), true);
+});
+
 test('session.open ignores stale backend-generation settlements', () => {
   const started = startOpen().state;
   for (const stale of [
@@ -187,47 +201,30 @@ test('session.open dropped acknowledgement is ambiguous without rollback and lat
   assert.equal(settled?.commit, 'committed');
 });
 
-test('session.open lost acknowledgement and event retries repeat-safe reads with one identity then reaches bounded recovery', () => {
-  let state = startOpen().state;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const ambiguous = reducer(state, {
-      ...openResponse,
-      operationAttempt: attempt,
-      ok: false,
-      ambiguous: true,
-      error: `request timeout ${attempt}`,
-    });
-    state = ambiguous.state;
-    assert.equal(state.operations['open-operation']?.phase, 'ambiguous');
-    assert.equal(state.operations['open-operation']?.operationId, 'open-operation');
-    assert.equal(ambiguous.effects[0]?.kind, 'ScheduleOpenSessionReconciliation');
-
+test('session.open lost acknowledgement polls status without changing the original attempt or inventing failure', () => {
+  let state = reducer(startOpen().state, { ...openResponse, ok: false, ambiguous: true }).state;
+  for (let poll = 1; poll <= 3; poll += 1) {
     const due = reducer(state, {
-      kind: 'OpenSessionReconciliationDue',
-      operationId: 'open-operation',
-      sessionPath: SESSION,
-      operationAttempt: attempt,
-      backendGeneration: 7,
+      kind: 'OpenSessionReconciliationDue', operationId: 'open-operation',
+      sessionPath: SESSION, operationAttempt: 1, backendGeneration: 7,
     });
-    state = due.state;
-    if (attempt < 3) {
-      const retry = due.effects[0];
-      assert.equal(retry?.kind, 'OpenSession');
-      if (retry?.kind === 'OpenSession') {
-        assert.equal(retry.operationId, 'open-operation');
-        assert.equal(retry.operationAttempt, attempt + 1);
-        assert.equal(retry.selectionToken, 'selection-1');
-      }
-      assert.equal(state.operations['open-operation']?.attempt, attempt + 1);
-      assert.equal(state.operations['open-operation']?.terminal, undefined);
-    } else {
-      const exhausted = state.operations['open-operation'];
-      assert.equal(exhausted?.terminal?.outcome, 'failed');
-      assert.equal(exhausted?.commit, 'unknown');
-      assert.equal(exhausted?.terminal?.recovery, 'retry');
-      assert.equal(due.effects[0]?.kind, 'RecoverOpenSession');
-    }
+    assert.equal(due.effects[0]?.kind, 'ReconcileOpenSession');
+    assert.equal(due.state.operations['open-operation']?.attempt, 1);
+    assert.equal(due.state.operations['open-operation']?.reconciliation?.attempts, poll);
+    const result = reducer(due.state, {
+      ...openResponse, ok: false, ambiguous: true, reconciliation: true,
+    });
+    state = result.state;
+    assert.equal(state.operations['open-operation']?.terminal, undefined);
+    assert.equal(result.effects.length, poll < 3 ? 1 : 0);
   }
+  assert.equal(state.operations['open-operation']?.recovery, 'restart-backend');
+  assert.equal(state.operations['open-operation']?.commit, 'unknown');
+  assert.equal(state.sessions.openTabPaths.includes(SESSION), true);
+  const late = reducer(state, openResponse).state.operations['open-operation'];
+  assert.equal(late?.terminal, undefined, 'late acknowledgement still cannot prove snapshot delivery');
+  const lateEvent = reducer(state, openedEvent('open-operation')).state.operations['open-operation'];
+  assert.equal(lateEvent?.terminal?.outcome, 'settled');
 });
 
 function closeCommand(operationId: string): Event {

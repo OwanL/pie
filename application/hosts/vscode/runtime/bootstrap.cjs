@@ -242,7 +242,7 @@ function createBootstrap(overrides = {}) {
   }
 
   function startWatcher(state, vscode) {
-    const selectionsDir = path.join(state.extensionDir, 'pie-runtime', 'selections');
+    const selectionsDir = path.join(state.extensionDir, runtimeGenerations.RUNTIME_DIRECTORY, 'selections');
     try {
       const watcher = watch(selectionsDir, () => schedulePendingCheck(state, vscode));
       state.watcher = watcher;

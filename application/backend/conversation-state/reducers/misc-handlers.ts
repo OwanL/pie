@@ -3,7 +3,6 @@ import type { Event } from '../events.js';
 import { observeCloseOperationAcknowledgement, type ReducerResult } from './helpers.js';
 import {
   markSessionOperationAmbiguous,
-  retrySessionOperation,
   settleSessionOperationFailed,
   settleSessionOperationSucceeded,
 } from '../operation-registry.js';
@@ -54,7 +53,8 @@ export function handleOpenSessionResult(state: ArchState, event: Extract<Event, 
     attempt: event.operationAttempt,
     backendGeneration: event.backendGeneration,
   };
-  const updated = event.ambiguous
+  const needsSnapshot = event.ambiguous || (event.ok && event.successEvidence !== 'snapshot-applied');
+  const observed = needsSnapshot
     ? markSessionOperationAmbiguous(operation, observation, 'reconcile')
     : event.ok
       ? settleSessionOperationSucceeded(operation, { ...observation, resolvedPath: event.sessionPath })
@@ -63,17 +63,25 @@ export function handleOpenSessionResult(state: ArchState, event: Extract<Event, 
           reason: 'definitive-rejection',
           detail: event.error,
         });
-  if (!updated) return { state, effects: [] };
+  if (!observed) return { state, effects: [] };
+  const attempts = operation.reconciliation?.attempts ?? 0;
+  const exhausted = attempts >= OPEN_SESSION_RECONCILIATION_MAX_ATTEMPTS;
+  const updated = needsSnapshot ? {
+    ...observed,
+    recovery: exhausted ? 'restart-backend' as const : 'reconcile' as const,
+    reconciliation: { attempts, maxAttempts: OPEN_SESSION_RECONCILIATION_MAX_ATTEMPTS,
+      ...(event.error ? { lastError: event.error } : {}) },
+  } : observed;
   return {
     state: { ...state, operations: { ...state.operations, [event.operationId]: updated } },
-    effects: event.ambiguous ? [{
+    effects: needsSnapshot && !exhausted ? [{
       kind: 'ScheduleOpenSessionReconciliation',
       corrId: `open-reconcile-timer:${event.operationId}:${updated.attempt}`,
       operationId: event.operationId,
       sessionPath: event.sessionPath,
       operationAttempt: updated.attempt,
       backendGeneration: updated.backendGeneration,
-      delayMs: OPEN_SESSION_RECONCILIATION_BASE_DELAY_MS * (2 ** (updated.attempt - 1)),
+      delayMs: OPEN_SESSION_RECONCILIATION_BASE_DELAY_MS * (2 ** attempts),
     }] : [],
   };
 }
@@ -91,54 +99,21 @@ export function handleOpenSessionReconciliationDue(
     return { state, effects: [] };
   }
 
-  if (operation.attempt < OPEN_SESSION_RECONCILIATION_MAX_ATTEMPTS) {
-    const retried = retrySessionOperation(operation, {
-      kind: 'session.open',
-      pendingPath: operation.session.pendingPath,
-      selectionToken: operation.causal.selectionToken,
-      backendGeneration: operation.backendGeneration,
-      attempt: operation.attempt + 1,
-    });
-    if (!retried) return { state, effects: [] };
-    return {
-      state: {
-        ...state,
-        operations: { ...state.operations, [event.operationId]: retried },
-      },
-      effects: [{
-        kind: 'OpenSession',
-        corrId: `open-reconcile:${event.operationId}:${retried.attempt}`,
-        sessionPath: retried.session.pendingPath,
-        selectionToken: retried.causal.selectionToken,
-        operationId: retried.operationId,
-        operationAttempt: retried.attempt,
-        backendGeneration: retried.backendGeneration,
-      }],
-    };
-  }
-
-  const detail = `Session open acknowledgement remained ambiguous after ${operation.attempt} attempts.`;
-  const failed = settleSessionOperationFailed(operation, {
-    pendingPath: operation.session.pendingPath,
-    attempt: operation.attempt,
-    backendGeneration: operation.backendGeneration,
-    reason: 'execution-failed',
-    detail,
-    preserveCommit: true,
-    recovery: 'retry',
-  });
-  if (!failed) return { state, effects: [] };
+  const attempts = operation.reconciliation?.attempts ?? 0;
+  if (attempts >= OPEN_SESSION_RECONCILIATION_MAX_ATTEMPTS) return { state, effects: [] };
   return {
-    state: {
-      ...state,
-      operations: { ...state.operations, [event.operationId]: failed },
-    },
+    state: { ...state, operations: { ...state.operations, [event.operationId]: {
+      ...operation,
+      reconciliation: { attempts: attempts + 1, maxAttempts: OPEN_SESSION_RECONCILIATION_MAX_ATTEMPTS },
+    } } },
     effects: [{
-      kind: 'RecoverOpenSession',
-      corrId: `open-recover:${event.operationId}:${operation.attempt}`,
+      kind: 'ReconcileOpenSession',
       selectionToken: operation.causal.selectionToken,
+      corrId: 'open-status:' + event.operationId + ':' + (attempts + 1),
+      operationId: operation.operationId,
+      sessionPath: operation.session.pendingPath,
       operationAttempt: operation.attempt,
-      notice: 'The session could not be confirmed after repeated read-only retries. Please open it again.',
+      backendGeneration: operation.backendGeneration,
     }],
   };
 }

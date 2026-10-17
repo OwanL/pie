@@ -171,6 +171,15 @@ export interface ScheduleOpenSessionReconciliationEffect extends EffectBase {
   delayMs: number;
 }
 
+export interface ReconcileOpenSessionEffect extends EffectBase {
+  kind: 'ReconcileOpenSession';
+  selectionToken: string;
+  operationId: string;
+  sessionPath: string;
+  operationAttempt: number;
+  backendGeneration: number;
+}
+
 /** Apply reducer-decided selection recovery after bounded repeat-safe open
  * reconciliation is exhausted. */
 export interface RecoverOpenSessionEffect extends EffectBase {
@@ -528,6 +537,7 @@ export type Effect =
   | TruncateRpcEffect
   | OpenSessionEffect
   | ScheduleOpenSessionReconciliationEffect
+  | ReconcileOpenSessionEffect
   | RecoverOpenSessionEffect
   | CreateSessionEffect
   | NotifySessionViewedEffect

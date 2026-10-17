@@ -25,6 +25,16 @@ import {
   EMPTY_AGGREGATE_STATS,
 } from '../../application/lib/protocol/index.js';
 
+test('open acknowledgement without snapshot retains bounded read-only recovery in the contract', async () => {
+  const contract = await readFile('docs/contracts/STATE_CONTRACT.md', 'utf8');
+  assert.match(contract, /successful acknowledgement alone cannot prove snapshot delivery/);
+  assert.match(contract, /exhausted reconciliation retains bounded non-terminal uncertainty without replay/);
+  const reducer = await readFile('application/backend/conversation-state/reducers/misc-handlers.ts', 'utf8');
+  assert.match(reducer, /event\.ok && event\.successEvidence !== 'snapshot-applied'/);
+  const runner = await readFile('application/backend/conversation-state/effects/effect-runner.ts', 'utf8');
+  assert.match(runner, /successEvidence: 'snapshot-applied'/);
+});
+
 test('pending new-session preview uses creation authority without borrowing session catalogs', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /existing runtime-free creation-model authority through `models.creationPreview`/u);

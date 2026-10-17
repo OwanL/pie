@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -239,7 +239,7 @@ test('acquisition resolves before reading a valid unused prior payload and defer
   const sourceB = await createRuntimeSource(root, 'startup-selected');
   const prior = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
   const selected = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
-  const selectionsDir = path.join(extensionDir, 'pie-runtime', 'selections');
+  const selectionsDir = path.join(extensionDir, 'pie-runtime-v2', 'selections');
   const invalidMarker = await addSelectionMarker(extensionDir, selected.generation, selected.publishedAt + 1, 'a');
   await writeFile(path.join(selectionsDir, invalidMarker), '{torn');
 
@@ -355,7 +355,7 @@ test('explicitly re-selects an earlier immutable generation while a later lease 
     const third = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceC, extensionDir, identity: IDENTITY });
     assert.notEqual(third.generation, first.generation);
     assert.notEqual(third.generation, second.generation);
-    const generationsDir = path.join(extensionDir, 'pie-runtime', 'generations');
+    const generationsDir = path.join(extensionDir, 'pie-runtime-v2', 'generations');
     assert.equal(
       await exists(path.join(generationsDir, second.generation, 'out')),
       true,
@@ -366,7 +366,7 @@ test('explicitly re-selects an earlier immutable generation while a later lease 
   }
 
   assert.equal(
-    await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')),
+    await exists(path.join(extensionDir, 'pie-runtime-v2', 'generations', second.generation, 'out')),
     false,
     'releasing the lease makes now-unselected B reclaimable',
   );
@@ -384,7 +384,7 @@ test('skips torn or damaged newest markers and rejects manifest traversal', asyn
   const afterDamage = await runtime.resolveRuntimeGeneration({ extensionDir, identity: IDENTITY });
   assert.equal(afterDamage.generation, first.generation);
 
-  const selectionsDir = path.join(extensionDir, 'pie-runtime', 'selections');
+  const selectionsDir = path.join(extensionDir, 'pie-runtime-v2', 'selections');
   let markerName: string | undefined;
   for (const name of await readdir(selectionsDir)) {
     if (!name.endsWith('.json')) continue;
@@ -439,12 +439,12 @@ test('reuses verified selection results while failed generations fall back and l
       assert.equal(fallback?.failures, 0);
     });
 
-    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')), true, 'the lease protects a damaged generation');
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime-v2', 'generations', second.generation, 'out')), true, 'the lease protects a damaged generation');
     assert.ok(fallbackLease, 'the fallback lease was acquired');
     await fallbackLease.release();
     fallbackLease = undefined;
     await leaseB.release();
-    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')), false, 'releasing the last lease makes the failed generation reclaimable');
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime-v2', 'generations', second.generation, 'out')), false, 'releasing the last lease makes the failed generation reclaimable');
   } finally {
     if (fallbackLease) await fallbackLease.release();
     await leaseB.release();
@@ -491,15 +491,15 @@ test('bounds marker verification to distinct valid generations while honoring le
     assert.equal(summaries.has(older.generation), false, 'verification stops after one valid fallback');
     assert.equal(summaries.has(oldest.generation), false, 'older candidates are not scanned after one valid generation');
     assert.equal(acquisition.cleanupMs, 0);
-    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'selections', duplicateNewest)), true, 'acquisition leaves damaged markers for maintenance');
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime-v2', 'selections', duplicateNewest)), true, 'acquisition leaves damaged markers for maintenance');
 
     await selectedLease.release();
     selectedLease = undefined;
-    const selectionNames = (await readdir(path.join(extensionDir, 'pie-runtime', 'selections'))).filter((name) => name.endsWith('.json'));
+    const selectionNames = (await readdir(path.join(extensionDir, 'pie-runtime-v2', 'selections'))).filter((name) => name.endsWith('.json'));
     const priorMarkers = [];
     const retainedMarkerGenerations = new Set<string>();
     for (const name of selectionNames) {
-      const marker = JSON.parse(await readFile(path.join(extensionDir, 'pie-runtime', 'selections', name), 'utf8')) as { generation?: string };
+      const marker = JSON.parse(await readFile(path.join(extensionDir, 'pie-runtime-v2', 'selections', name), 'utf8')) as { generation?: string };
       if (marker.generation) retainedMarkerGenerations.add(marker.generation);
       if (marker.generation === prior.generation) priorMarkers.push(name);
     }
@@ -509,7 +509,7 @@ test('bounds marker verification to distinct valid generations while honoring le
 
     for (const generation of [oldest, older, prior, newest]) {
       assert.equal(
-        await exists(path.join(extensionDir, 'pie-runtime', 'generations', generation.generation, 'out')),
+        await exists(path.join(extensionDir, 'pie-runtime-v2', 'generations', generation.generation, 'out')),
         true,
         'leases preserve generations outside the two selected records',
       );
@@ -533,7 +533,7 @@ test('serializes concurrent publication and retains leased generations until rel
     identity: IDENTITY,
   })));
   const current = publications.at(-1)!;
-  const generationsDir = path.join(extensionDir, 'pie-runtime', 'generations');
+  const generationsDir = path.join(extensionDir, 'pie-runtime-v2', 'generations');
   const afterConcurrent = (await readdir(generationsDir)).filter((name) => /^[0-9a-f]{64}$/u.test(name));
   assert.ok(afterConcurrent.length <= 2, 'ordinary retention keeps only current and prior generations');
 
@@ -552,16 +552,20 @@ test('serializes concurrent publication and retains leased generations until rel
   assert.equal(await exists(path.join(generationsDir, current.generation, 'out')), false, 'the oldest unleased generation is reclaimed');
 }));
 
-test('recovers a stale lock directory whose owner marker is missing', async () => withTempRoot(async (root) => {
+test('v2 publication and acquisition leave legacy store and locks untouched', async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
-  const lockDir = path.join(extensionDir, 'pie-runtime', '.lock');
+  const legacyRoot = path.join(extensionDir, 'pie-runtime');
+  const lockDir = path.join(legacyRoot, '.lock');
   await mkdir(lockDir, { recursive: true });
-  await utimes(lockDir, new Date(0), new Date(0));
-
+  await writeFile(path.join(lockDir, 'owner.json'), 'legacy owner');
+  const source = await createRuntimeSource(root, 'v2');
+  const published = await runtime.publishRuntimeGeneration({ sourceOutDir: source, extensionDir, identity: IDENTITY });
+  assert.ok(published.outDir.startsWith(path.join(extensionDir, 'pie-runtime-v2')));
   const lease = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
-  assert.equal(lease.generation, null);
+  assert.equal(lease.generation, published.generation);
   await lease.release();
-  assert.equal(await exists(lockDir), false, 'the abandoned lock was recovered');
+  assert.deepEqual(await readdir(legacyRoot), ['.lock']);
+  assert.equal(await readFile(path.join(lockDir, 'owner.json'), 'utf8'), 'legacy owner');
 }));
 
 test('verifies Vite worker URL literal assets that are absent from manifest.json', async () => withTempRoot(async (root) => {
@@ -590,7 +594,7 @@ test('fails closed when selection or lease metadata directories cannot be read',
   assert.equal(lease.generation, first.generation);
   const second = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
 
-  const leasesDir = path.join(extensionDir, 'pie-runtime', 'leases');
+  const leasesDir = path.join(extensionDir, 'pie-runtime-v2', 'leases');
   const third = await runtime.publishRuntimeGeneration({
     sourceOutDir: sourceC,
     extensionDir,
@@ -602,13 +606,13 @@ test('fails closed when selection or lease metadata directories cannot be read',
   });
   for (const published of [first, second, third]) {
     assert.equal(
-      await exists(path.join(extensionDir, 'pie-runtime', 'generations', published.generation, 'out')),
+      await exists(path.join(extensionDir, 'pie-runtime-v2', 'generations', published.generation, 'out')),
       true,
       'unreadable lease metadata leaves every generation untouched',
     );
   }
 
-  const selectionsDir = path.join(extensionDir, 'pie-runtime', 'selections');
+  const selectionsDir = path.join(extensionDir, 'pie-runtime-v2', 'selections');
   await rm(selectionsDir, { recursive: true, force: true });
   await writeFile(selectionsDir, 'not a directory');
   await assert.rejects(

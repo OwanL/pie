@@ -14,13 +14,14 @@ async function fixture(t, helper, { legacy = false } = {}) {
   // The activation entry must never be required by a capability check.
   const bootstrap = 'throw new Error("activation entry executed");';
   const hash = createHash('sha256');
-  for (const [name, bytes] of [['bootstrap.cjs', bootstrap], ['runtime-generations.cjs', helper]]) {
+  for (const [name, bytes] of [['bootstrap.cjs', bootstrap], ['runtime-generations.cjs', helper], ['windows-runtime-lock.cjs', '// lock fixture']]) {
     hash.update(name).update('\0').update(bytes).update('\0');
   }
   const directory = legacy ? 'runtime' : `pie-bootstrap/${hash.digest('hex')}`;
   await mkdir(path.join(root, directory), { recursive: true });
   await writeFile(path.join(root, directory, 'bootstrap.cjs'), bootstrap);
   await writeFile(path.join(root, directory, 'runtime-generations.cjs'), helper);
+  await writeFile(path.join(root, directory, 'windows-runtime-lock.cjs'), '// lock fixture');
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ ...sourcePkg, pieRuntimeBootstrap: 1, main: `./${directory}/bootstrap.cjs` }));
   return { root, directory };
 }
@@ -91,8 +92,8 @@ test('flat legacy loader is schema 1 only and is not evaluated', async t => {
   await assert.rejects(check(root, 2), /schema 2.*--activate/u);
 });
 
-test('both loader files are hash bound before helper execution', async t => {
-  for (const name of ['bootstrap.cjs', 'runtime-generations.cjs']) {
+test('all loader files are hash bound before helper execution', async t => {
+  for (const name of ['bootstrap.cjs', 'runtime-generations.cjs', 'windows-runtime-lock.cjs']) {
     const { root, directory } = await fixture(t, 'throw new Error("helper executed");');
     await writeFile(path.join(root, directory, name), 'throw new Error("tampered helper executed");');
     await assert.rejects(check(root, 2), /hash mismatch.*--activate/u);

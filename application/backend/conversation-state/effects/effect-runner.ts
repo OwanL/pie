@@ -228,6 +228,11 @@ export interface SessionServiceLike {
   captureSelectionRequestStart?(selectionToken: string, operationAttempt?: number): void;
   /** Current backend process generation for queued lifecycle ownership fences. */
   getBackendGeneration?(): number;
+  applyRetainedOpenSnapshot?(
+    payload: import('../../../lib/protocol/sessions.js').SessionOpenedPayload,
+    operationId: string,
+    backendGeneration: number,
+  ): boolean;
   /** Reconcile an authoritative durable acknowledgement when session.opened is
    * delayed or publication failed after creation committed. */
   handleCreateOperationAcknowledged?(selectionToken: string, operationId: string, sessionPath: string): void;
@@ -442,6 +447,7 @@ export class EffectRunner {
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
       // ── Lifecycle kinds: `enqueueLifecycle`-only. ──
       OpenSession: (e) => this.runLifecycle(e),
+      ReconcileOpenSession: (e) => this.reconcileOpenSession(e),
       ScheduleOpenSessionReconciliation: (e) => this.handleScheduleOpenSessionReconciliation(e),
       RecoverOpenSession: (e) => this.handleRecoverOpenSession(e),
       CreateSession: (e) => this.runLifecycle(e),
@@ -1727,6 +1733,46 @@ export class EffectRunner {
       });
     }, effect.delayMs);
     this.openReconciliationTimers.set(key, handle);
+  }
+
+  private reconcileOpenSession(effect: Extract<Effect, { kind: 'ReconcileOpenSession' }>): void {
+    const { service, backend, queues, dispatch } = this.deps;
+    void queues.enqueueLifecycle(async () => {
+      if (service.getBackendGeneration?.() !== effect.backendGeneration) return;
+      const result = {
+        kind: 'OpenSessionResult' as const, corrId: effect.corrId,
+        operationId: effect.operationId, sessionPath: effect.sessionPath,
+        operationAttempt: effect.operationAttempt, backendGeneration: effect.backendGeneration,
+        reconciliation: true,
+      };
+      try {
+        const status = await backend.request('operation.status', {
+          operationKind: 'session.open', operationId: effect.operationId,
+          sessionPath: effect.sessionPath, backendGeneration: effect.backendGeneration,
+        }) as {
+          state: string;
+          snapshot?: import('../../../lib/protocol/sessions.js').SessionOpenedPayload;
+          error?: { message: string };
+        };
+        if (service.getBackendGeneration?.() !== effect.backendGeneration) return;
+        if (status.state === 'committed' && status.snapshot) {
+          if (service.applyRetainedOpenSnapshot?.(status.snapshot, effect.operationId, effect.backendGeneration)) {
+            dispatch({ ...result, ok: true, successEvidence: 'snapshot-applied' });
+            return;
+          }
+        }
+        if (status.state === 'failed') {
+          dispatch({ ...result, ok: false, error: status.error?.message });
+          service.handleSelectionFailure(effect.selectionToken, status.error?.message ?? 'Session open failed.',
+            effect.operationAttempt, 'definitive-rejection');
+          return;
+        }
+        dispatch({ ...result, ok: false, ambiguous: true });
+      } catch (error) {
+        if (service.getBackendGeneration?.() !== effect.backendGeneration) return;
+        dispatch({ ...result, ok: false, ambiguous: true, error: String(error) });
+      }
+    });
   }
 
   private handleRecoverOpenSession(effect: Extract<Effect, { kind: 'RecoverOpenSession' }>): void {

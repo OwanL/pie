@@ -17,6 +17,7 @@ import { resolvePieDataPaths, type PieDataRootPaths } from '../../../lib/data-ro
 import { resolvePieDevelopmentProfilePaths, type PieDevelopmentProfilePaths } from '../lib/host-coordinator';
 import type { RuntimeGenerationIdentity } from '../../../analytics/authority/analytics-handoff-discovery';
 import {
+  RUNTIME_DIRECTORY,
   acquireRuntimeGeneration,
   resolveRuntimeGeneration,
   type RuntimeLease,
@@ -276,7 +277,7 @@ function normalizedPathIdentity(value: string): string {
 }
 
 function hasManagedRuntimeSelections(extensionPath: string): boolean {
-  const directory = path.join(extensionPath, 'pie-runtime', 'selections');
+  const directory = path.join(extensionPath, RUNTIME_DIRECTORY, 'selections');
   try {
     if (!statSync(directory).isDirectory()) {
       throw new StandaloneStartupError(`Managed runtime selections are unavailable: ${directory} (not a directory)`);
