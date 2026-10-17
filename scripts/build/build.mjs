@@ -357,18 +357,23 @@ async function publishToInstalledExtension() {
   // Source-default generations carry their verified runtime, not a machine's
   // legacy packaged SDK path.
   await assertFreshSelection();
-  if (activate) {
-    // Upgrade first: the backwards-compatible loader can still select the old
-    // generation if staging fails. No running host is interrupted.
-    await withBuildTiming('startup loader publication', () => installRuntimeBootstrap({ extensionDir: extDir, pkg }));
-  }
   const roles = await verifyRuntimeRoles(selectedPiRuntime.artifactDir);
-  if (roles.tooling) {
-    await assertRuntimeBootstrapSupportsSchema({ extensionDir: extDir, schema: 2 });
+  if (!activate) {
+    await assertRuntimeBootstrapSupportsSchema({ extensionDir: extDir, schema: roles.tooling ? 2 : 1 });
   }
-  await assertFreshSelection();
-  const staged = await withBuildTiming('full runtime publication', () =>
-    publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg }));
+  let staged;
+  const publish = async () => {
+    await assertFreshSelection();
+    staged = await withBuildTiming('full runtime publication', () =>
+      publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg }));
+  };
+  if (activate) {
+    await withBuildTiming('startup loader publication', () => installRuntimeBootstrap({
+      extensionDir: extDir, pkg, beforeSwitch: publish,
+    }));
+  } else {
+    await publish();
+  }
   console.log(`[build] Staged complete runtime ${staged.generation} → ${extDir}`);
   if (activate) {
     console.log('[build] Startup loader installed. Restart VS Code when convenient to load the staged runtime; active sessions were not interrupted.');

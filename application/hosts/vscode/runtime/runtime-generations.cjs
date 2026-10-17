@@ -1390,7 +1390,6 @@ module.exports = {
   acquireRuntimeGeneration,
   // These constants are intentionally small test/integration seams; callers
   // should use the three functions above rather than depending on storage names.
-  RUNTIME_DIRECTORY,
   GENERATIONS_DIRECTORY,
   SELECTIONS_DIRECTORY,
   LEASES_DIRECTORY,
