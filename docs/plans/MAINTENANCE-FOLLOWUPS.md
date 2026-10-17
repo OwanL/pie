@@ -6,9 +6,9 @@ Open findings from the October 2026 maintenance pass. These are not completed fi
 
 ### Runtime lock takeover
 
-[`withRuntimeLock`](../../application/hosts/vscode/runtime/runtime-generations.cjs) can have two contenders observe the same abandoned lock. One can remove the other's newly acquired lock because inspection and removal are not an atomic ownership check. Re-reading metadata or renaming the canonical pathname does not close that race.
+[`acquireDirectoryLock`](../../application/hosts/vscode/runtime/runtime-generations.cjs) can have two contenders observe the same abandoned lock. One can remove the other's newly acquired lock because inspection and removal are not an atomic ownership check. Re-reading metadata or renaming the canonical pathname does not close that race.
 
-A non-reclaimed transition guard could serialize creation, reclamation, and release, but introduces manual crash recovery and does not protect against older participants that ignore the guard. Decide the recovery policy and mixed-version upgrade boundary before implementation. Do not reclaim development-workspace gate records as a workaround.
+**Approved direction (2026-10-17):** retain automatic crash recovery, with Windows-first support; unsupported platforms must fail explicitly. Implement kernel-owned named-pipe exclusion and a separate versioned runtime store so older helpers cannot interfere. No native dependency or minimum VS Code version increase is intended. Stage a complete new-store generation before switching the loader; preserve the legacy store and its leases. Implementation and qualification are pending. Do not reclaim development-workspace gate records as a workaround.
 
 ### Cross-process session-settings updates
 
