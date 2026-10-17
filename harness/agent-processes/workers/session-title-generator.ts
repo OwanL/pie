@@ -1,3 +1,5 @@
+import * as nodeModule from 'node:module';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -201,9 +203,34 @@ async function completeOllamaNative(
   };
 }
 
-async function loadCompleteSimple(sdkPath: string): Promise<CompleteSimpleFn> {
-  const modulePath = path.join(sdkPath, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'index.js');
-  const loaded = await dynamicImport(pathToFileURL(modulePath).href) as { completeSimple?: CompleteSimpleFn };
+type NativeFindPackageJSON = (specifier: string, parentURL?: string | URL) => string | undefined;
+const nativeFindPackageJSON = (nodeModule as typeof nodeModule & {
+  findPackageJSON?: NativeFindPackageJSON;
+}).findPackageJSON;
+
+export async function loadCompleteSimple(sdkPath: string): Promise<CompleteSimpleFn> {
+  if (typeof nativeFindPackageJSON !== 'function') {
+    throw new Error('The running Node.js does not provide native module.findPackageJSON (requires Node.js >=22.19).');
+  }
+  const aiPackageJson = nativeFindPackageJSON(
+    '@earendil-works/pi-ai',
+    pathToFileURL(path.join(sdkPath, 'package.json')),
+  );
+  if (!aiPackageJson) throw new Error('The pinned Pi runtime dependency graph is missing @earendil-works/pi-ai package metadata.');
+  const aiMetadata = JSON.parse(await readFile(aiPackageJson, 'utf8')) as {
+    exports?: Record<string, unknown>;
+  };
+  const rootExport = (aiMetadata.exports as Record<string, unknown> | undefined)?.['.'];
+  const importTarget = typeof rootExport === 'string'
+    ? rootExport
+    : rootExport && typeof rootExport === 'object'
+      ? (rootExport as { import?: unknown }).import
+      : undefined;
+  if (typeof importTarget !== 'string' || !importTarget.startsWith('./')) {
+    throw new Error('The pinned Pi AI runtime must declare a relative root import export.');
+  }
+  const moduleUrl = new URL(importTarget, pathToFileURL(aiPackageJson));
+  const loaded = await dynamicImport(moduleUrl.href) as { completeSimple?: CompleteSimpleFn };
   if (typeof loaded.completeSimple !== 'function') throw new Error('The pinned Pi AI runtime does not export completeSimple.');
   return loaded.completeSimple;
 }
