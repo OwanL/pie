@@ -17,7 +17,6 @@ export const SESSION_TITLE_MAX_INPUT_CHARS = 4_000;
 /** Base-title budget shared with the coordinator title authority. Automatic
  * collision suffixes are outside this candidate allowance. */
 export const SESSION_TITLE_MAX_CHARS = 25;
-export const SESSION_TITLE_MAX_WORDS = 6;
 export const SESSION_TITLE_MAX_OUTPUT_TOKENS = 48;
 
 export const SESSION_TITLE_SYSTEM_PROMPT = `Write a short title for a coding-agent session from its first user request.
