@@ -62,8 +62,8 @@ export default (pi: ExtensionAPI) => pi.registerCommand('unbundled-alias-proof',
   const compat = await import(pathToFileURL(compatEntry).href);
 
   // Owner/compiler/tsx helpers preserve package export semantics: the root is
-  // the core API and /compat is the wider legacy API. The SDK's actual Jiti
-  // loader deliberately maps both extension spellings to compat instead.
+  // the core API and /compat is the wider legacy API. The SDK Jiti loader maps
+  // both extension spellings to compat for legacy extension compatibility.
   assert.equal(coreEntry, path.join(sdkPackages.piAi.root, 'dist', 'index.js'));
   assert.equal(compatEntry, path.join(sdkPackages.piAi.root, 'dist', 'compat.js'));
   assert.equal(typeof core.completeSimple, 'undefined');

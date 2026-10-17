@@ -17,11 +17,13 @@ import {
 } from '../package-resolution.mjs';
 import { runProject, runWithConcurrency } from '../../verification/run-typechecks.mjs';
 import { buildTsxArgs, runGroup } from '../../verification/run-test-files.mjs';
+import { verifyPiRuntimeToolingArtifact } from '../../../lib/pi-runtime/artifact.mjs';
 import {
   currentRoots,
   makeFixture,
   ownerRoot,
   repoRoot,
+  resolveNativeOwnerControls,
   runNode,
   tscCli,
   tsxCli,
@@ -107,19 +109,26 @@ const types: [ExtensionAPI, LegacyExtensionAPI, Model<any>, LegacyModel<any>, Pi
 void [schema, element, component, types];
 `);
   const { sourceDescriptor } = await import('../../../harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
-  const typeResolution = createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot, sdkPath: sourceDescriptor.sdkPath });
-  const piTuiRoot = path.join(sourceDescriptor.artifactDir, 'node_modules', '@earendil-works', 'pi-tui');
+  // The compiler proof needs the independently verified full tooling role;
+  // executable runtime packing deliberately omits declarations and TS libs.
+  const tooling = await verifyPiRuntimeToolingArtifact(sourceDescriptor.artifactDir);
+  const typeResolution = createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot, sdkPath: tooling.sdkPath });
+  const piTuiRoot = path.join(tooling.artifactDir, 'node_modules', '@earendil-works', 'pi-tui');
   assert.equal(typeResolution.paths['@earendil-works/pi-tui'][0], path.join(piTuiRoot, 'dist', 'index.d.ts'));
   const configPath = writeTsConfig(sourceRoot, typeResolution);
   // The future-root proof exercises the integrated typecheck caller (the same
   // runWithConcurrency/runProject surface scripts/verification/run-typechecks.mjs uses for
   // registry projects), including its helper-resolved compiler selection and
   // absolute-config seam — not a hand-rolled tsc spawn.
+  // Runtime artifacts carry the SDK's TypeScript API, not the development
+  // compiler's full standard-library payload. Resolve the tooling owner in a
+  // native child so the outer SDK alias overlay cannot redirect this compiler.
+  const [compiler] = resolveNativeOwnerControls({ dependencyOwnerRoot: ownerRoot }, ['typescript/bin/tsc']);
   const [result] = await runWithConcurrency([{
     id: 'package-resolution-compiler-proof',
     config: configPath,
-    compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc',
-  }], 1, (project, signal) => runProject(project, signal, sourceDescriptor));
+    compiler,
+  }], 1, (project, signal) => runProject(project, signal, tooling));
   assert.equal(result.code, 0, result.output);
 });
 

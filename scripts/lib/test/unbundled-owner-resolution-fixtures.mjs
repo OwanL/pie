@@ -39,6 +39,9 @@ export function makeFutureRoot(t) {
     copyFileSync(path.join(repositoryRoot, 'scripts', 'lib', name), path.join(futureScripts, name));
   }
 
+  // Playwright's runtime client imports the shared redaction owner. Preserve
+  // that transitive source in the moved fixture rather than reaching checkout.
+  copySourceOwner(path.join(repositoryRoot, 'lib', 'sensitive-data'), path.join(root, 'lib', 'sensitive-data'));
   mkdirSync(path.join(root, 'harness', 'tools'), { recursive: true });
   const lifecycleSource = path.join(repositoryRoot, 'harness', 'agent-processes', 'lib', 'process-lifecycle');
   copySourceOwner(lifecycleSource, path.join(root, 'harness', 'agent-processes', 'lib', 'process-lifecycle'));
