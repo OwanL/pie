@@ -8,7 +8,7 @@ import renderToString from 'preact-render-to-string';
 import { ComposerToolbar } from '../../composer/toolbar';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_SESSION_TITLES_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
 
-function catalog(status: 'loading' | 'provisional' | 'authoritative', selectedModel = '', overrides: Partial<Parameters<typeof ComposerToolbar>[0]> = {}) {
+function catalog(status: 'loading' | 'provisional' | 'authoritative' | 'error', selectedModel = '', overrides: Partial<Parameters<typeof ComposerToolbar>[0]> = {}) {
   return h(ComposerToolbar, {
     sessionPath: '__pending__:1', canCompact: false, prefs: DEFAULT_CHAT_PREFS,
     pruningSettings: DEFAULT_PRUNING_SETTINGS, pruningCatalog: { skills: [], tools: [] }, pruningResult: null,
@@ -43,6 +43,33 @@ test('authoritative empty catalog shows no models rather than loading or choices
   const html = renderCatalog('authoritative');
   assert.match(html, /No models available/);
   assert.doesNotMatch(html, /Loading models|aria-label="Model"/);
+});
+
+test('failed catalog discovery renders an interactive retry affordance, not loading or choices', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    let retries = 0;
+    act(() => render(catalog('error', '', {
+      onRetryModelCatalog: () => { retries += 1; },
+    }), container));
+    const retry = container.querySelector<HTMLButtonElement>('[aria-label="Retry loading the model catalog"]');
+    assert.ok(retry, 'the failed catalog must offer a retry affordance');
+    assert.match(retry.textContent ?? '', /Models unavailable — Retry/u);
+    assert.equal(container.querySelector('[aria-label="Model"]'), null);
+    act(() => retry!.click());
+    assert.equal(retries, 1);
+
+    // A last good catalog keeps the working picker; failure never clears it.
+    act(() => render(catalog('error', 'astra', {
+      availableModels: models, onRetryModelCatalog: () => { retries += 1; },
+    }), container));
+    assert.ok(container.querySelector('[aria-label="Model"]'));
+    assert.equal(container.querySelector('[aria-label="Retry loading the model catalog"]'), null);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
 });
 
 const models = [
