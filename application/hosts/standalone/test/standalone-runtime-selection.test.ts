@@ -13,6 +13,7 @@ import {
 } from '../../../../scripts/lib/pi-runtime-artifact.mjs';
 import {
   publishRuntimeGeneration,
+  RUNTIME_DIRECTORY,
   type RuntimeIdentity,
 } from '../../vscode/runtime/runtime-generations.cjs';
 import type { BackendClient } from '../../../backend/agent-connection/client';
@@ -153,7 +154,7 @@ async function freePort(): Promise<number> {
 
 async function leaseEntries(extensionPath: string): Promise<string[]> {
   try {
-    return await fs.readdir(path.join(extensionPath, 'pie-runtime', 'leases'));
+    return await fs.readdir(path.join(extensionPath, RUNTIME_DIRECTORY, 'leases'));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
@@ -459,7 +460,7 @@ test('selected generation lease is retained when owned backend teardown is ambig
 
 test('packaged flat runtime keeps package-install lifetime without GC or a lease', async (t) => {
   const prepared = await fixture(t);
-  const staleGeneration = path.join(prepared.extensionPath, 'pie-runtime', 'generations', 'd'.repeat(64), 'preserve.txt');
+  const staleGeneration = path.join(prepared.extensionPath, RUNTIME_DIRECTORY, 'generations', 'd'.repeat(64), 'preserve.txt');
   await fs.mkdir(path.dirname(staleGeneration), { recursive: true });
   await fs.writeFile(staleGeneration, 'must not be collected');
 
@@ -474,9 +475,9 @@ test('packaged flat runtime keeps package-install lifetime without GC or a lease
   assert.equal((await fs.readFile(staleGeneration, 'utf8')), 'must not be collected',
     'resolving the flat package does not trigger runtime-generation GC');
   assert.deepEqual(await leaseEntries(prepared.extensionPath), []);
-  await assert.rejects(fs.stat(path.join(prepared.extensionPath, 'pie-runtime', '.lock')),
+  await assert.rejects(fs.stat(path.join(prepared.extensionPath, RUNTIME_DIRECTORY, 'leases')),
     (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
-    'flat package selection does not create manager lock state');
+    'flat package selection does not create manager lease state');
 });
 
 test('explicit standalone output is caller-owned, not leased or deleted', async (t) => {
