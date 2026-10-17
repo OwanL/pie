@@ -67,9 +67,6 @@ const INTENTIONAL_UNREGISTERED_FAST_FILES = [
   'application/lib/test/renderer-delivery/renderer-view-state.test.ts',
   'application/lib/test/source-boundaries.test.ts',
   'lib/development-runtime/test/lifetime.test.mjs',
-  'scripts/development/test/launch.test.mjs',
-  'scripts/development/test/vscode-development.test.mjs',
-  'scripts/development/test/standalone-development.test.mjs',
 ];
 
 function relativeFiles(files) {
@@ -177,6 +174,9 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   const scriptFiles = resolveMoonTestFiles('scripts/moon.yml');
   assert.ok(scriptFiles.has('scripts/development/test/launch.test.mjs'));
   assert.ok(scriptFiles.has('scripts/development/test/vscode-development.test.mjs'));
+  assert.ok(scriptFiles.has('scripts/development/test/inspect-workspace.test.mjs'));
+  const hostCommonFiles = resolveMoonTestFiles('application/hosts/lib/moon.yml');
+  assert.ok(hostCommonFiles.has('application/hosts/test/image-actions.test.ts'));
   assert.ok(scriptFiles.has(SELECTOR_REGRESSION_TEST), 'the scripts project directly selects this regression test');
 
   const applicationLibFiles = resolveMoonTestFiles('application/lib/moon.yml');
@@ -227,21 +227,21 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   assert.ok(registryFiles.has(autonomousModeTest), 'autonomous mode stays in the registered selector test root');
   assert.ok(fastFiles.has(autonomousModeTest), 'Moon native selectors retain autonomous mode coverage');
   assert.ok(registryFiles.has(SELECTOR_REGRESSION_TEST), 'new scripts tests remain in the dynamic registry inventory');
+  assert.ok(registryFiles.has('scripts/development/test/inspect-workspace.test.mjs'));
   for (const file of INTENTIONAL_UNREGISTERED_FAST_FILES) {
     assert.ok(fastFiles.has(file), `${file} is an intentional Moon-only fast suite`);
   }
   assert.deepEqual([...registryFiles].filter((file) => path.matchesGlob(file, ARTIFACT_TEST_GLOB)).sort(),
-    [...artifactFiles].filter((file) => file !== 'scripts/development/test/refresh.artifact.test.mjs').sort(),
+    [...artifactFiles].sort(),
     'every registered artifact suite is selected only by the artifact lane');
-  const expectedFiles = new Set([...registryFiles, ...INTENTIONAL_UNREGISTERED_FAST_FILES,
-    'scripts/development/test/refresh.artifact.test.mjs']);
+  const expectedFiles = new Set([...registryFiles, ...INTENTIONAL_UNREGISTERED_FAST_FILES]);
   const actualFiles = new Set([...fastFiles, ...artifactFiles]);
   assert.deepEqual({
     unregistered: [...actualFiles].filter((file) => !expectedFiles.has(file)).sort(),
     unselected: [...expectedFiles].filter((file) => !actualFiles.has(file)).sort(),
   }, { unregistered: [], unselected: [] }, 'inventory partition has no unregistered or unselected files');
   assert.deepEqual([...actualFiles].sort(), [...expectedFiles].sort(),
-    'fast and artifact selectors partition the registered inventory, six ordinary extras and private refresh acceptance');
+    'fast and artifact selectors partition the registered inventory and three ordinary extras');
 });
 
 function workspaceProjects() {

@@ -93,6 +93,7 @@ const PACKAGE_TEST_METADATA = {
       'scripts/test/*.test.mjs',
       'scripts/build/test/**/*.test.mjs',
       'scripts/build/test/**/*.test.ts',
+      'scripts/development/test/**/*.test.mjs',
       'scripts/diagnostics/test/**/*.test.mjs',
       'scripts/install/test/**/*.test.mjs',
       'scripts/lib/test/**/*.test.mjs',

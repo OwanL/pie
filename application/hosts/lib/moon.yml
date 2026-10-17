@@ -8,7 +8,7 @@ fileGroups:
     - '/application/hosts/vscode/runtime/runtime-generations.d.cts'
 tasks:
   test:
-    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/hosts/lib/test application/hosts/test/lib application/hosts/test/renderer-delivery'
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/hosts/lib/test application/hosts/test/lib application/hosts/test/renderer-delivery application/hosts/test/image-actions.test.ts'
     deps: ['pi:build']
-    inputs: ['/application/hosts/vscode/tsconfig.json', '/application/hosts/lib/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/application/hosts/test/lib/**/*', '/application/hosts/test/renderer-delivery/**/*', '@files(generations)', '@globs(lifecycle)', '@globs(protected)']
+    inputs: ['/application/hosts/vscode/tsconfig.json', '/application/hosts/lib/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/application/hosts/test/lib/**/*', '/application/hosts/test/renderer-delivery/**/*', '/application/hosts/test/image-actions.test.ts', '@files(generations)', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}

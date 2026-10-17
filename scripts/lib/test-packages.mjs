@@ -153,6 +153,7 @@ export const PACKAGE_REGISTRY = [
     testDir: 'scripts/test',
     testRoots: [
       'scripts/build/test',
+      'scripts/development/test',
       'scripts/diagnostics/test',
       'scripts/install/test',
       'scripts/lib/test',
