@@ -43,6 +43,7 @@ import {
   type RequestHandler,
   assertCurrentSessionMutationOwner,
   formatInterruptWatchdogDuration,
+  getOpenOperationLedger,
   markRequestValidated,
   requireSessionTransition,
 } from './request-handler-shared.js';
@@ -582,6 +583,13 @@ async function handleOperationStatus(
 ): Promise<unknown> {
   const params = validateOperationStatus(request.params);
   markRequestValidated(deps);
+  const opens = getOpenOperationLedger(deps);
+  if (params.operationKind === 'session.open' || opens.has(params.operationId)) {
+    if (params.backendGeneration !== undefined && params.backendGeneration !== (deps.backendGeneration ?? 1)) {
+      throw new BackendError('SESSION_GENERATION_ENDED', 'The session open generation is no longer available.');
+    }
+    return opens.status(params.operationId, params.sessionPath);
+  }
   const context = deps.getSessionContext(params.sessionPath);
   if (!context || context.retired) {
     throw new BackendError('SESSION_GENERATION_ENDED', 'The session mutation generation is no longer available.');

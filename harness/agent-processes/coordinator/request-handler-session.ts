@@ -34,6 +34,7 @@ import {
   type RequestHandler,
   type TranscriptPageLoadOptions,
   getCreateOperationLedger,
+  getOpenOperationLedger,
   markRequestValidated,
   requireSessionTransition,
 } from './request-handler-shared.js';
@@ -290,6 +291,21 @@ async function handleSessionOpen(
 ): Promise<unknown> {
   const params = validateSessionOpen(request.params);
   markRequestValidated(deps);
+  if (params.operationId !== undefined) {
+    return await getOpenOperationLedger(deps).run({
+      ...params,
+      operationId: params.operationId,
+      execute: commit => executeSessionOpen(deps, params, commit),
+    });
+  }
+  return await executeSessionOpen(deps, params);
+}
+
+async function executeSessionOpen(
+  deps: BackendRequestHandlerDeps,
+  params: ReturnType<typeof validateSessionOpen>,
+  commit?: (snapshot: SessionOpenedPayload) => void,
+): Promise<unknown> {
   const timingStartedAt = performance.now();
   let snapshotBuildDurationMs: number | undefined;
   let sessionOpenedEmitDurationMs: number | undefined;
@@ -329,6 +345,9 @@ async function handleSessionOpen(
     } else {
       deps.setViewedSessionPath(params.sessionPath);
     }
+    // Viewed-path commit precedes publication. Lost publication is not a
+    // rejected open: operation.status can recover this exact retained snapshot.
+    commit?.(openPayload);
     const emitStartedAt = performance.now();
     try {
       if (openPayload.runtimeReady === false && !openPayload.snapshotUnavailable) {

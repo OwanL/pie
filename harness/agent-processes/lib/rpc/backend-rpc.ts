@@ -662,6 +662,8 @@ export function validateMessageOperation(
 }
 
 export interface OperationStatusParams extends SessionPathParams {
+  /** Explicit coordinator-owned open lookup, including unknown identities. */
+  operationKind?: 'session.open';
   operationId: string;
   backendGeneration?: number;
 }
@@ -671,6 +673,10 @@ export function validateOperationStatus(params: unknown): OperationStatusParams 
   const { sessionPath } = validateSessionPath('operation.status', params);
   const operationId = readOperationId('operation.status', params as Record<string, unknown>);
   if (!operationId) fail('operation.status', 'requires operationId');
+  const operationKind = params.operationKind;
+  if (operationKind !== undefined && operationKind !== 'session.open') {
+    fail('operation.status', 'operationKind must be session.open when provided');
+  }
   const backendGeneration = params.backendGeneration;
   if (backendGeneration !== undefined
     && (!Number.isSafeInteger(backendGeneration) || (backendGeneration as number) < 1)) {
@@ -680,6 +686,7 @@ export function validateOperationStatus(params: unknown): OperationStatusParams 
     sessionPath,
     operationId,
     ...(backendGeneration !== undefined ? { backendGeneration: backendGeneration as number } : {}),
+    ...(operationKind !== undefined ? { operationKind: operationKind as 'session.open' } : {}),
   };
 }
 

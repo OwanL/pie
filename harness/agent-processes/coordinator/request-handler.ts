@@ -31,6 +31,7 @@ import {
   type BackendRequestHandlerDeps,
   type RequestHandler,
   getCreateOperationLedger,
+  getOpenOperationLedger,
   markRequestValidated,
 } from './request-handler-shared.js';
 import { SESSION_REQUEST_HANDLERS } from './request-handler-session.js';
@@ -960,6 +961,7 @@ export async function handleBackendRequest(
     // original-deps ledger through the spread keeps one ledger per deps
     // configuration while the handler still sees a wired ledger.
     createOperationLedger: getCreateOperationLedger(deps),
+    openOperationLedger: getOpenOperationLedger(deps),
   };
   // Exactly one finish/error completion per request: the success record is
   // emitted only after the handler settles, and a failure record is never

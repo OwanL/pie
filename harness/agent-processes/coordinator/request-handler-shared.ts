@@ -1,3 +1,4 @@
+import { OpenOperationLedger } from './open-operation-ledger.js';
 import type { ModelInfo, ModelSettings } from '../../model-providers/catalog/model-contract.js';
 import type { LazyDetailRef, DetailResult } from '../lib/rpc/message-contract.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
@@ -169,6 +170,7 @@ export interface BackendRequestHandlerDeps {
    *  scoped to this deps object (two deps configurations never share an
    *  operation ledger). */
   createOperationLedger?: CreateOperationLedger;
+  openOperationLedger?: OpenOperationLedger;
   /** Reserve, durably persist on the owning owner, and confirm one unique
    * assigned title for the agent-create path through the coordinator title
    * authority. The created session must already exist durably; persistence is
@@ -313,6 +315,18 @@ export interface BackendRequestHandlerDeps {
 /** Per-dependency fallback ledger. The façade installs this on each spread
  * handler dependency object so retries retain one process-local idempotency
  * authority instead of accidentally receiving a fresh ledger per request. */
+const fallbackOpenOperationLedgers = new WeakMap<BackendRequestHandlerDeps, OpenOperationLedger>();
+
+export function getOpenOperationLedger(deps: BackendRequestHandlerDeps): OpenOperationLedger {
+  if (deps.openOperationLedger) return deps.openOperationLedger;
+  let ledger = fallbackOpenOperationLedgers.get(deps);
+  if (!ledger) {
+    ledger = new OpenOperationLedger();
+    fallbackOpenOperationLedgers.set(deps, ledger);
+  }
+  return ledger;
+}
+
 const fallbackCreateOperationLedgers = new WeakMap<BackendRequestHandlerDeps, CreateOperationLedger>();
 
 export function getCreateOperationLedger(deps: BackendRequestHandlerDeps): CreateOperationLedger {

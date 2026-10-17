@@ -133,6 +133,7 @@ import { ProviderGate, type ProviderConcurrencyConfig } from '../../model-provid
 import { resolveProviderMaxConcurrentRequests } from '../../model-providers/concurrency/provider-concurrency.js';
 import { markDisabledEntries } from '../../agent-instructions/prompt-assembly/system-prompts.js';
 import { CreateOperationLedger } from './create-operation-ledger.js';
+import { OpenOperationLedger } from './open-operation-ledger.js';
 import {
   canonicalEditIntentFingerprint,
   SendOperationLedger,
@@ -615,6 +616,7 @@ export class BackendServer {
    *  results for this backend generation. A backend restart (generation
    *  death) naturally drops the ledger with the process. */
   private readonly createOperationLedger = new CreateOperationLedger();
+  private readonly openOperationLedger = new OpenOperationLedger();
   /** Coordinator-generation authority for compound edit operations. Unlike a
    * worker send ledger, this survives the edit's deliberate worker replacement
    * and therefore owns both commit evidence and retry replay. */
@@ -5110,6 +5112,13 @@ export class BackendServer {
     }
     if (request.method === 'operation.status') {
       const params = validateOperationStatus(request.params);
+      if (params.operationKind === 'session.open' || this.openOperationLedger.has(params.operationId)) {
+        onRequestValidated?.();
+        if (params.backendGeneration !== undefined && params.backendGeneration !== this.backendGeneration) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The session open generation is no longer available.');
+        }
+        return this.openOperationLedger.status(params.operationId, params.sessionPath);
+      }
       const interruptStatus = this.interruptOperationStatus(params.sessionPath, params.operationId);
       if (interruptStatus) {
         onRequestValidated?.();
@@ -5475,6 +5484,7 @@ export class BackendServer {
       ),
       deferSessionPromptInventory: (payload) => this.deferSessionPromptInventory(payload),
       createOperationLedger: this.createOperationLedger,
+      openOperationLedger: this.openOperationLedger,
       buildTransitionSessionOpenedPayload: () => {
         throw new BackendError('ISOLATED_RUNTIME_ROUTING_UNAVAILABLE', 'The coordinator does not build in-process transition snapshots.');
       },
