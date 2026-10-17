@@ -43,6 +43,13 @@ export async function packingBuild(modulePath, options, dependencies = {}) {
   try { teardown = await watchdog.settle(); }
   catch (error) { teardown = { gone: false, diagnostics: [error.message] }; }
   if (!teardown.gone) {
+    // The child is deliberately held over IPC until its owner settles. An
+    // uncertain census must retain uncertainty, not keep the failed runner
+    // alive forever. Disconnect requests the child's existing bounded shutdown;
+    // releasing local handles is NOT evidence that its service tree is gone.
+    try { if (child.connected) child.disconnect(); } catch {}
+    child.stderr?.destroy?.();
+    child.unref?.();
     const error = primary ?? new Error('Packing compiler teardown unconfirmed');
     error.teardownUnconfirmed = true;
     error.teardownDiagnostics = teardown;

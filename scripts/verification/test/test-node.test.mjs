@@ -415,6 +415,31 @@ test('the node-test CLI reserves exit 125 for uncertain teardown and normalizes 
   }
 });
 
+test('the node-test CLI includes retained teardown diagnostic paths in its error', async () => {
+  const previousExitCode = process.exitCode;
+  const previousError = console.error;
+  const messages = [];
+  const diagnosticPath = path.join(os.tmpdir(), 'pie-retained-teardown.json');
+  console.error = (...args) => messages.push(args.join(' '));
+  try {
+    await main(['scripts/verification/test/test-node.test.mjs'], {
+      createTestEnvironment: () => ({ env: {}, dispose() {} }),
+      abortOnProcessSignals: () => ({ signal: undefined, dispose() {} }),
+      runNodeTestsWithOverlay: async () => {
+        throw Object.assign(new Error('Node test process tree teardown is unconfirmed'), {
+          teardownUnconfirmed: true,
+          diagnosticPath,
+        });
+      },
+    });
+    assert.equal(process.exitCode, TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE);
+    assert.deepEqual(messages, [`Node test process tree teardown is unconfirmed\nDiagnostic: ${diagnosticPath}`]);
+  } finally {
+    process.exitCode = previousExitCode;
+    console.error = previousError;
+  }
+});
+
 test('a product test exiting 125 remains ordinary aggregate failure code 1', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-node-product-exit-125-'));
   const fixture = createTestEnvironment();

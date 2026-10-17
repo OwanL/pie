@@ -6,7 +6,11 @@ import { packingBuild } from '../pi-packing-compiler.mjs';
 function held(value, teardown, flags = {}) {
   const child = new EventEmitter();
   child.stderr = new EventEmitter();
-  let captured = false, settled = false;
+  let captured = false, settled = false, disconnected = false, unreferenced = false, streamDestroyed = false;
+  child.connected = true;
+  child.disconnect = () => { disconnected = true; child.connected = false; };
+  child.unref = () => { unreferenced = true; };
+  child.stderr.destroy = () => { streamDestroyed = true; };
   child.send = () => {
     assert.equal(captured, true, 'capture must precede work');
     queueMicrotask(() => child.emit('message', value));
@@ -20,6 +24,7 @@ function held(value, teardown, flags = {}) {
       },
     },
     settled: () => settled,
+    released: () => disconnected && unreferenced && streamDestroyed,
   };
 }
 const value = { type: 'result', value: { version: 'fixture', warnings: [], metafile: {}, outputFiles: [{ contents: Buffer.from('bundle').toString('base64') }] } };
@@ -28,14 +33,17 @@ test('held result returns only after verified tree extinction', async () => {
   const result = await packingBuild('/private/compiler', {}, fixture.dependencies);
   assert.equal(fixture.settled(), true);
   assert.equal(result.outputFiles[0].contents.toString(), 'bundle');
+  assert.equal(fixture.released(), false, 'confirmed cleanup needs no uncertain-tree detachment');
 });
 test('primary compiler error survives unconfirmed teardown with diagnostics', async () => {
   const fixture = held({ type: 'result', error: { message: 'primary build failure', errors: ['fixture'] } }, { gone: false, survivors: [42], diagnostics: ['unknown identity'] });
   await assert.rejects(packingBuild('/private/compiler', {}, fixture.dependencies), error => error.message === 'primary build failure' && error.teardownUnconfirmed && error.teardownDiagnostics.survivors[0] === 42);
+  assert.equal(fixture.released(), true, 'uncertain cleanup cannot leave failed runner handles held');
 });
 test('successful build fails closed on survivors and on timeout', async () => {
   const leak = held(value, { gone: false, survivors: [42] });
   await assert.rejects(packingBuild('/private/compiler', {}, leak.dependencies), error => error.teardownUnconfirmed);
+  assert.equal(leak.released(), true);
   const timeout = held(value, { gone: true }, { timedOut: true });
   await assert.rejects(packingBuild('/private/compiler', {}, timeout.dependencies), /timed out/);
 });

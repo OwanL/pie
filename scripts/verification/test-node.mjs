@@ -570,7 +570,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     if (result.code !== 0) process.exitCode = 1;
   } catch (error) {
     teardownConfirmed = error?.teardownUnconfirmed !== true;
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(formatCliError(error));
     process.exitCode = error?.teardownUnconfirmed === true ? TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE : 1;
   } finally {
     if (teardownConfirmed) {
@@ -578,6 +578,11 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       fixture.dispose();
     }
   }
+}
+
+function formatCliError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return error?.diagnosticPath ? `${message}\nDiagnostic: ${error.diagnosticPath}` : message;
 }
 
 const invokedDirectly = process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
