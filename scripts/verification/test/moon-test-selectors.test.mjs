@@ -32,12 +32,13 @@ const CHECKPOINT_ARTIFACT_FILES = [
   'harness/agent-processes/workers/test/worker-public-address.artifact.test.ts',
 ];
 const ARTIFACT_FAMILY_COUNTS = new Map([
-  ['harness/agent-processes/', 18],
+  ['harness/agent-processes/', 20],
   ['harness/session-storage/', 3],
   ['harness/tool-and-skill-selection/', 4],
   ['harness/tools/playwright/', 1],
   ['harness/model-providers/model-discovery/', 2],
   ['harness/model-providers/runtime/', 5],
+  ['harness/model-providers/management/', 1],
   ['harness/tools/package-integrations/web-access/', 1],
   ['harness/tools/subagent/', 2],
   ['harness/tools/warm-bash/', 1],
@@ -48,6 +49,7 @@ const ARTIFACT_FAMILY_COUNTS = new Map([
   ['test/integration/', 5],
 ]);
 const ARTIFACT_FILES = [
+  'harness/model-providers/management/test/management-overlay.artifact.test.ts',
   'harness/tools/playwright/test/host-runtime-integration.artifact.test.ts',
   'scripts/install/test/source-pi-cli.artifact.test.mjs',
   'scripts/lib/test/package-resolution.artifact.test.mjs',
@@ -192,7 +194,7 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   const artifactFiles = relativeFiles(resolveTestFiles(repoRoot, DEFAULT_ARTIFACT_SELECTORS, {
     includeGlobs: [ARTIFACT_TEST_GLOB],
   }));
-  assert.equal(artifactFiles.size, 47, 'the artifact selector resolves the retained artifact suites, five checkpoint suites and private refresh acceptance');
+  assert.equal(artifactFiles.size, 50, 'the artifact selector resolves the retained artifact suites, five checkpoint suites and private refresh acceptance');
   assert.ok([...artifactFiles].every((file) => path.matchesGlob(file, ARTIFACT_TEST_GLOB)));
   for (const [family, count] of ARTIFACT_FAMILY_COUNTS) {
     assert.equal([...artifactFiles].filter((file) => file.startsWith(family)).length, count,
