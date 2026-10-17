@@ -31,7 +31,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 219, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  assert.equal(PACKAGE_DIRECTIVES.length, 220, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
   for (const file of [
     'application/lib/composer/local-message-id.ts',
     'application/lib/session-tabs/tab-behavior.ts',

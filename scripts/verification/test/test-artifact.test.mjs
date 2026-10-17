@@ -47,18 +47,19 @@ function fixture(t, { code = 0, gone = true, spawnFailure } = {}) {
   return { state, dependencies };
 }
 
-test('default domains resolve the 47 intended artifact suites without ordinary source tests', () => {
+test('default domains resolve the intended artifact suites without ordinary source tests', () => {
   const files = resolveTestFiles(repoRoot, DEFAULT_ARTIFACT_SELECTORS, { includeGlobs: [ARTIFACT_TEST_GLOB] });
-  assert.equal(files.length, 47);
+  assert.equal(files.length, 50);
   const relative = files.map(file => path.relative(repoRoot, file).split(path.sep).join('/'));
   assert.ok(relative.every(file => path.matchesGlob(file, ARTIFACT_TEST_GLOB)));
   const expectedFamilies = new Map([
-    ['harness/agent-processes/', 18],
+    ['harness/agent-processes/', 20],
     ['harness/session-storage/', 3],
     ['harness/tool-and-skill-selection/', 4],
     ['harness/tools/playwright/', 1],
     ['harness/model-providers/model-discovery/', 2],
     ['harness/model-providers/runtime/', 5],
+    ['harness/model-providers/management/', 1],
     ['harness/tools/package-integrations/web-access/', 1],
     ['harness/tools/subagent/', 2],
     ['harness/tools/warm-bash/', 1],
@@ -144,6 +145,7 @@ test('default domains are discovered before acquisition and an empty artifact se
     'harness/agent-processes', 'harness/session-storage',
     'harness/tool-and-skill-selection', 'harness/tools/playwright',
     'harness/model-providers/model-discovery', 'harness/model-providers/runtime',
+    'harness/model-providers/management',
     'harness/tools/package-integrations/web-access', 'harness/tools/subagent',
     'harness/tools/warm-bash', 'application/backend',
     'scripts/install/test', 'scripts/lib/test', 'scripts/development/test', 'test/integration',
