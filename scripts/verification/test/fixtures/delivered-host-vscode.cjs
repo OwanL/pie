@@ -129,11 +129,12 @@ if (require.main === module) {
         }
         return loaded;
       };
+      const { RUNTIME_DIRECTORY } = require(path.join(path.dirname(bootstrapEntry), 'runtime-generations.cjs'));
       const originalWatch = fs.watch;
       const selectionWatchers = new Set();
       fs.watch = function (directory, ...args) {
         const watcher = originalWatch.call(this, directory, ...args);
-        if (path.resolve(String(directory)) === path.join(releaseRoot, 'pie-runtime', 'selections')) {
+        if (path.resolve(String(directory)) === path.join(releaseRoot, RUNTIME_DIRECTORY, 'selections')) {
           selectionWatchers.add(watcher);
           watcher.once('close', () => selectionWatchers.delete(watcher));
         }
