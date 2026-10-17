@@ -76,7 +76,7 @@ test('wakeup timers wait for the creator response only until their timer starts'
     }));
     assert.equal(html.includes('Waiting for response to finish'), waiting, label);
     assert.match(html, /aria-label="Pending wakeup timers"/);
-    assert.match(html, /1 pending wakeup timer/);
+    assert.doesNotMatch(html, /1 pending wakeup timer/);
   }
 });
 

@@ -12,8 +12,10 @@ test('action rows omit placeholder checks while preference toggles retain state'
   assert.doesNotMatch(source('file-changes/file-changes-context-menu.tsx'), /context-menu-check/);
 });
 
-test('management menus omit redundant headers but preserve trigger context', () => {
-  assert.doesNotMatch(source('session-tabs/snoozed-sessions-menu.tsx'), /session-tab-context-title|snoozed-session-restore/);
+test('management menus omit redundant actions but preserve headers and trigger context', () => {
+  const snoozed = source('session-tabs/snoozed-sessions-menu.tsx');
+  assert.match(snoozed, /session-tab-context-title/);
+  assert.doesNotMatch(snoozed, /snoozed-session-restore/);
   const triggers = source('analytics/aggregate-stats-strip/deferred-triggers-menu.tsx');
   assert.doesNotMatch(triggers, /deferred-triggers-menu-title/);
   for (const detail of ['formatTriggerSpecs', 'formatDeliveryState', 'creatorName', 'formatElapsed', 'title={message}']) {

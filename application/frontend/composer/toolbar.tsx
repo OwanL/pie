@@ -8,7 +8,7 @@ import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { useMemo, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
-import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, PanelChip } from '../lib/components/panel-chip';
+import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarActionChip } from '../lib/components/panel-chip';
 import { ChoicePicker } from '../lib/components/choice-picker';
 import { ModelPicker } from '../settings/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
@@ -273,11 +273,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           }}
         />
       ) : availableModelsStatus === 'error' ? (
-        <PanelChip
-          as="button"
-          variant="toolbar"
+        <ToolbarActionChip
           tone="warning"
-          className="panel-chip-interactive"
           label={selectedModelLabel || 'Models unavailable — Retry'}
           ariaLabel="Retry loading the model catalog"
           title="Loading the model catalog failed. Keep the last loaded choices visible; click to retry."

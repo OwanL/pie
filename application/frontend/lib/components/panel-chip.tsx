@@ -174,6 +174,14 @@ export function ToolbarChip({ label, title, tooltip, tooltipNode, richRole, aria
   return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} richRole={richRole} ariaLabel={ariaLabel} placement={placement} role={role} ariaLive={ariaLive} />;
 }
 
+interface ToolbarActionChipProps extends Omit<ToolbarChipProps, 'role' | 'ariaLive'> {
+  onClick?: JSX.MouseEventHandler<HTMLButtonElement>;
+}
+
+export function ToolbarActionChip({ placement = 'top', tone = 'muted', ...props }: ToolbarActionChipProps) {
+  return <PanelChip {...props} as="button" variant="toolbar" tone={tone} placement={placement} className="panel-chip-interactive" />;
+}
+
 export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed' | 'time';
 
 interface ToolbarIndicatorChipProps extends ToolbarChipProps {
