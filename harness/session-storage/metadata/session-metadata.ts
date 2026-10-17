@@ -22,7 +22,9 @@ export function textFromSessionMessageContent(content: unknown): string {
   }
 
   if (Array.isArray(content)) {
-    return (content as Array<{ type?: string; text?: string }>)
+    return (content as unknown[])
+      .filter((part): part is { type?: string; text?: string } =>
+        part !== null && typeof part === 'object' && !Array.isArray(part))
       .filter((part) => part.type === 'text')
       .map((part) => part.text ?? '')
       .join(' ');

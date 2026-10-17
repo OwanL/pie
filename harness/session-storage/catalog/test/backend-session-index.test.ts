@@ -273,6 +273,7 @@ test('indexed metadata joins Pi text blocks with spaces when deriving a session 
     await writeJsonl(filePath, [
       header(root, 'session-text-blocks'),
       message('user', 'user', [
+        null,
         { type: 'text', text: 'First metadata block' },
         { type: 'image', data: 'ignored' },
         { type: 'text', text: 'Second metadata block' },
@@ -281,6 +282,25 @@ test('indexed metadata joins Pi text blocks with spaces when deriving a session 
 
     const metadata = await readMetadata(filePath);
     assert.equal(metadata.summary.name, deriveSessionNameFromText(joinedText).name);
+    assert.equal(metadata.summary.sessionId, 'session-text-blocks');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('indexed metadata falls back to New Session when content has no valid text blocks', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-index-no-text-'));
+  try {
+    const filePath = path.join(root, 'session.jsonl');
+    await writeJsonl(filePath, [
+      header(root, 'session-no-text'),
+      message('user', 'user', [null, { type: 'image', data: 'ignored' }], '2026-01-01T00:00:01.000Z'),
+    ]);
+
+    const metadata = await readMetadata(filePath);
+    assert.equal(metadata.summary.name, 'New Session');
+    assert.equal(metadata.summary.isPlaceholder, true);
+    assert.equal(metadata.summary.sessionId, 'session-no-text');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
