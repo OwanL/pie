@@ -98,7 +98,7 @@ test('deriveFileChangesFromToolCall: bash rm skips flags and globs', () => {
 
 test('deriveFileChangesFromToolCall: bash rm with quotes and separators', () => {
   const result = deriveFileChangesFromToolCall(
-    { id: 'tc1', name: 'bash', input: { command: 'cd src && rm "my file.txt" \'other.txt\'; rm third.ts' } },
+    { id: 'tc1', name: 'bash', input: { command: 'echo src && rm "my file.txt" \'other.txt\'; rm third.ts' } },
     'msg1',
     '2024-01-01T00:00:00Z',
   );
@@ -539,6 +539,24 @@ test('deriveFileChangesFromSubagentResult: skips non-file tools inside subagent'
   ]);
   const changes = deriveFileChangesFromSubagentResult(subagentResult, 'msg1', '2024-01-01T00:00:00Z', 'tc1');
   assert.equal(changes.length, 0);
+});
+
+test('deriveFileChangesFromTranscript: shell deletions use parent and child cwd', () => {
+  const transcript: ChatMessage[] = [makeChatMessage({ toolCalls: [
+    { id: 'parent', name: 'bash', input: { command: 'cd /c/dev/repos/pie && git rm harness/old.ts' }, status: 'completed' },
+    {
+      id: 'child', name: 'subagent', input: { cwd: 'C:/other' }, status: 'completed',
+      result: { details: { results: [{ cwd: 'C:/other', messages: [
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'rm', name: 'bash', arguments: { command: 'cd child && git -C nested rm old.ts' } }] },
+        { role: 'toolResult', toolCallId: 'rm', toolName: 'bash', isError: false },
+      ] }] } },
+    },
+  ] })];
+  const changes = deriveFileChangesFromTranscript(transcript, 'C:/dev');
+  assert.deepEqual(changes.map((c) => c.path), [
+    path.win32.resolve('C:/dev/repos/pie/harness/old.ts'),
+    path.win32.resolve('C:/other/child/nested/old.ts'),
+  ]);
 });
 
 test('deriveFileChangesFromTranscript: modern child cwd keeps same-cwd relative paths', () => {

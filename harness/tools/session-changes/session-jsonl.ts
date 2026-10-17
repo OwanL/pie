@@ -159,6 +159,7 @@ export function deriveFileChangesFromSessionEntries(
         { id: joined.id, name: joined.name, input: joined.input },
         messageId,
         timestamp,
+        cwd,
       );
       for (const e of changes) accumulateFileChange(seen, e, cwd);
     }

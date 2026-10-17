@@ -17,8 +17,8 @@ function looksLikeGlob(p: string): boolean {
 }
 
 /** Split command separators outside quotes and comments, preserving nested shell text. */
-function splitShellSegments(command: string): string[] {
-  const segments: string[] = [];
+function splitShellSegments(command: string): Array<{ text: string; next?: string }> {
+  const segments: Array<{ text: string; next?: string }> = [];
   let start = 0;
   let quote: string | undefined;
   let escaped = false;
@@ -47,7 +47,7 @@ function splitShellSegments(command: string): string[] {
       continue;
     }
     if (ch === '#' && atWordStart) {
-      segments.push(command.slice(start, i));
+      segments.push({ text: command.slice(start, i), next: '\n' });
       const newline = command.indexOf('\n', i);
       if (newline === -1) return segments;
       start = newline + 1;
@@ -59,7 +59,7 @@ function splitShellSegments(command: string): string[] {
     const pairedSeparator = (ch === '&' && command[i + 1] === '&')
       || (ch === '|' && command[i + 1] === '|');
     if (ch === ';' || ch === '\n' || pairedSeparator) {
-      segments.push(command.slice(start, i));
+      segments.push({ text: command.slice(start, i), next: pairedSeparator ? command.slice(i, i + 2) : ch });
       if (pairedSeparator) i++;
       start = i + 1;
       atWordStart = true;
@@ -70,13 +70,13 @@ function splitShellSegments(command: string): string[] {
     }
   }
 
-  segments.push(command.slice(start));
+  segments.push({ text: command.slice(start) });
   return segments;
 }
 
 /** Tokenize a single shell segment, honoring single/double quotes and
  *  backslash escapes. Stops at the first redirect/pipe operator — anything
- *  after `|`, `>`, or `<` is not a target of the preceding command. */
+ *  after `&`, `|`, `>`, or `<` is not a target of the preceding command. */
 function tokenizeShellSegment(segment: string): string[] {
   const tokens: string[] = [];
   const s = segment.trim();
@@ -84,7 +84,7 @@ function tokenizeShellSegment(segment: string): string[] {
   while (i < s.length) {
     while (i < s.length && /\s/.test(s[i])) i++;
     if (i >= s.length) break;
-    if (/[|<>]/.test(s[i])) break;
+    if (/[&|<>]/.test(s[i])) break;
     let tok = '';
     while (i < s.length && !/\s/.test(s[i])) {
       const ch = s[i];
@@ -102,7 +102,7 @@ function tokenizeShellSegment(segment: string): string[] {
           tok += s[i];
           i++;
         }
-      } else if (/[|<>]/.test(ch)) {
+      } else if (/[&|<>]/.test(ch)) {
         // Shell redirections can be attached to the preceding token (`a>out`)
         // or to a file descriptor (`2>/dev/null`). Keep a real argument before
         // the operator, but never report the descriptor/redirection as a path.
@@ -233,8 +233,11 @@ function collectDeletionTargets(cmd: string, args: string[]): string[] {
  *  `trash`). Globs are excluded (the actual deleted paths can't be known
  *  without a filesystem listing), `git rm --cached` is ignored (index-only),
  *  and nested shells (`bash -c "rm file"`) are recursively parsed.
- *  Tilde (`~`) and brace (`{a,b}`) expansion is applied to each path. */
-export function parseDeletedPathsFromCommand(command: string): string[] {
+ *  Tilde (`~`) and brace (`{a,b}`) expansion is applied to each path.
+ *  Optional cwd enables literal `cd dir && ...` and per-command `git -C`
+ *  attribution. Uncertain cwd changes suppress relative targets; this is not a
+ *  shell interpreter. Unchanged-cwd targets retain their relative spelling. */
+export function parseDeletedPathsFromCommand(command: string, baseCwd?: string): string[] {
   if (typeof command !== 'string') return [];
   const trimmed = command.trim();
   if (!trimmed) return [];
@@ -244,8 +247,33 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
   // shell commands may contain the same punctuation as literal content.
   const segments = splitShellSegments(trimmed);
 
+  let cwd = baseCwd;
+  let uncertain = false;
+  const windows = !!baseCwd && /^[a-z]:[\\/]/i.test(baseCwd);
+  const pathsApi = windows ? path.win32 : path.posix;
+  const literal = (value: string): boolean => !/[$`*?\[\]{}~]/.test(value);
+  const native = (value: string): string => windows
+    ? value.replace(/^\/([a-z])(?:\/|$)/i, (_, drive: string) => `${drive.toUpperCase()}:/`) : value;
+  const resolve = (value: string, from: string | undefined): string | undefined => {
+    value = native(value);
+    if (!literal(value)) return undefined;
+    if (pathsApi.isAbsolute(value)) return pathsApi.normalize(value);
+    return from ? pathsApi.resolve(from, value) : undefined;
+  };
+  const add = (targets: string[], from: string | undefined, preserveRelative = !uncertain): void => {
+    for (const target of targets) {
+      const value = native(target);
+      if (pathsApi.isAbsolute(value)) paths.push(value);
+      else if (preserveRelative && from === baseCwd) paths.push(value);
+      else if (from && literal(value)) paths.push(pathsApi.resolve(from, value));
+    }
+  };
+
+  let previous: string | undefined;
   for (const seg of segments) {
-    const tokens = tokenizeShellSegment(seg);
+    if (uncertain && previous !== '&&') cwd = undefined;
+    previous = seg.next;
+    const tokens = tokenizeShellSegment(seg.text);
     if (tokens.length === 0) continue;
 
     // Skip leading `sudo` / env-var assignments (`FOO=bar`).
@@ -255,6 +283,21 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
     }
     if (idx >= tokens.length) continue;
     const cmd = tokens[idx].toLowerCase();
+
+    // Only literal cd in a success chain establishes a usable subsequent cwd.
+    if (cmd === 'cd') {
+      const args = tokens.slice(idx + 1).filter((t) => t !== '--');
+      cwd = args.length === 1 && seg.next === '&&' && !/[|&<>]/.test(seg.text)
+        ? resolve(args[0], cwd) : undefined;
+      uncertain = true;
+      continue;
+    }
+    // Do not pretend to interpret compound shell control flow.
+    if (/^(if|then|else|elif|fi|for|while|until|do|done|case|esac|pushd|popd|eval|source|\.|command|builtin|!|\{|\})$/.test(cmd)
+      || /[()&]/.test(seg.text.replace(/(['"]).*?\1/g, ''))) {
+      cwd = undefined;
+      uncertain = true;
+    }
 
     // Nested shell: `bash -c "rm file"` / `sh -c "..."` / `zsh -c "..."`.
     // Recursively parse the string argument after `-c`.
@@ -267,7 +310,7 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
       }
       if (cIdx < tokens.length && tokens[cIdx] === '-c' && cIdx + 1 < tokens.length) {
         const innerCommand = tokens[cIdx + 1];
-        paths.push(...parseDeletedPathsFromCommand(innerCommand));
+        add(parseDeletedPathsFromCommand(innerCommand, cwd), cwd);
         continue;
       }
     }
@@ -275,10 +318,19 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
     if (cmd === 'git') {
       // Locate the `rm` subcommand, tolerating global git flags that take a
       // value (`-C <path>`, `--git-dir <path>`, `--work-tree <path>`).
+      let gitCwd = cwd;
+      let changedGitCwd = false;
       let j = idx + 1;
       while (j < tokens.length) {
         const t = tokens[j].toLowerCase();
         if (t === 'rm') break;
+        if (tokens[j].startsWith('-C')) {
+          changedGitCwd = true;
+          const directory = tokens[j] === '-C' ? tokens[++j] : tokens[j].slice(2);
+          gitCwd = directory === '' ? gitCwd : directory ? resolve(directory, gitCwd) : undefined;
+          j++;
+          continue;
+        }
         if (t === '-c' || t === '--git-dir' || t === '--work-tree') {
           j += 2;
           continue;
@@ -292,9 +344,9 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
       const rmArgs = tokens.slice(j + 1);
       // `--cached` removes from the index only, not the working tree.
       if (rmArgs.some((a) => a === '--cached')) continue;
-      paths.push(...collectDeletionTargets('rm', rmArgs));
+      add(collectDeletionTargets('rm', rmArgs), gitCwd, !uncertain && !changedGitCwd);
     } else {
-      paths.push(...collectDeletionTargets(cmd, tokens.slice(idx + 1)));
+      add(collectDeletionTargets(cmd, tokens.slice(idx + 1)), cwd);
     }
   }
 

@@ -43,6 +43,35 @@ function derive(entries: Record<string, unknown>[]): FileChange[] {
   return deriveFileChangesFromSessionEntries(entries as never);
 }
 
+test('derive: Windows Git Bash cwd is passed to shell deletion derivation', () => {
+  const changes = derive([
+    header('C:/dev'),
+    assistantMsg('m1', 't1', [tc('c1', 'bash', { command: 'cd /c/dev/repos/pie && git rm harness/old.ts' })]),
+    toolResult('tr1', 't1', 'c1', 'bash'),
+  ]);
+  assert.equal(changes[0].path, path.win32.resolve('C:/dev/repos/pie/harness/old.ts'));
+});
+
+test('parse runtime entries: deletion verification checks the changed cwd, not the parent', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-shell-cwd-'));
+  try {
+    await fs.mkdir(path.join(root, 'child'));
+    await fs.writeFile(path.join(root, 'gone.ts'), 'parent exists');
+    await fs.writeFile(path.join(root, 'child', 'present.ts'), 'child exists');
+    const entries = [
+      assistantMsg('m1', 't1', [tc('c1', 'bash', { command: 'cd child && rm gone.ts present.ts' })]),
+      toolResult('tr1', 't1', 'c1', 'bash'),
+    ];
+    const parsed = parseSessionEntriesChanges(entries as never, undefined, root);
+    assert.deepEqual(parsed.changes.map((c) => [c.path, c.kind]), [
+      [path.join(root, 'child', 'gone.ts'), 'deleted'],
+      [path.join(root, 'child', 'present.ts'), 'modified'],
+    ]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 // ─── readSessionCwd ─────────────────────────────────────────────────────────
 
 test('readSessionCwd: returns the header cwd', () => {

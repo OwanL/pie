@@ -229,6 +229,7 @@ export function deriveFileChangesFromToolCall(
   tool: ToolCallLikeInput,
   messageId: string,
   timestamp: string,
+  cwd?: string,
 ): FileChangeEntry[] {
   const name = (tool.name || '').toLowerCase().trim();
 
@@ -237,7 +238,7 @@ export function deriveFileChangesFromToolCall(
       ? (tool.input.command ?? tool.input.cmd ?? tool.input.command_str)
       : null;
     if (typeof command === 'string') {
-      const paths = parseDeletedPathsFromCommand(command);
+      const paths = parseDeletedPathsFromCommand(command, cwd);
       return paths.map((p) => ({
         path: p,
         kind: 'deleted' as const,
@@ -460,6 +461,7 @@ export function deriveFileChangesFromSubagentResult(
           { id: syntheticId, name: part.name ?? '', input: part.arguments },
           messageId,
           timestamp,
+          resultCwd,
         );
         for (const entry of entries) changes.push(normalize(entry));
       }

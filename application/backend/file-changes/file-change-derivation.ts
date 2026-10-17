@@ -80,6 +80,7 @@ export function deriveFileChangesFromTranscript(
         { id: tool.id, name: tool.name, input: tool.input },
         message.id,
         message.createdAt,
+        cwd,
       );
       for (const entry of entries) {
         accumulateFileChange(seen, entry, cwd);

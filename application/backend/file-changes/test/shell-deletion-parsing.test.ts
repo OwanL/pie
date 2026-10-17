@@ -11,6 +11,40 @@ import { parseDeletedPathsFromCommand } from '../../../../lib/file-changes/shell
 // `git rm --cached` is ignored, and nested `bash -c "..."` shells are parsed
 // recursively. Tilde and brace expansion are applied to each recovered path.
 
+test('cwd attribution: Windows Git Bash cd and per-command git -C', () => {
+  const cwd = 'C:/dev';
+  assert.deepEqual(parseDeletedPathsFromCommand('cd /c/dev/repos/pie && git rm harness/old.ts', cwd),
+    [path.win32.resolve('C:/dev/repos/pie/harness/old.ts')]);
+  assert.deepEqual(parseDeletedPathsFromCommand('git -C repos -C pie rm old.ts; rm parent.ts', cwd),
+    [path.win32.resolve('C:/dev/repos/pie/old.ts'), 'parent.ts']);
+  assert.deepEqual(parseDeletedPathsFromCommand('git -C /c/repo rm old.ts', cwd),
+    [path.win32.resolve('C:/repo/old.ts')]);
+});
+
+test('cwd attribution: nested shells isolate cd from the outer shell', () => {
+  assert.deepEqual(parseDeletedPathsFromCommand('bash -c "cd child && rm a"; rm b', '/repo'),
+    ['/repo/child/a', 'b']);
+  assert.deepEqual(parseDeletedPathsFromCommand('cd child && sh -c "cd nested && rm a" && rm b', '/repo'),
+    ['/repo/child/nested/a', '/repo/child/b']);
+});
+
+test('cwd attribution: unknown cd and ambiguous control flow omit relative targets', () => {
+  for (const command of [
+    'cd "$DEST" && rm relative /known',
+    'cd child; rm relative /known',
+    'cd child || rm relative /known',
+    'cd child && false || rm relative /known',
+    'if test x; then cd child; fi; rm relative /known',
+    'git -C "$DEST" rm relative /known',
+    'cd child | cat && rm relative /known',
+    '! cd child && rm relative /known',
+    'builtin cd child && rm relative /known',
+    'eval "cd child" && rm relative /known',
+  ]) assert.deepEqual(parseDeletedPathsFromCommand(command, '/repo'), ['/known'], command);
+  assert.deepEqual(parseDeletedPathsFromCommand('cd "$DEST" && bash -c "rm relative /known"', '/repo'), ['/known']);
+  assert.deepEqual(parseDeletedPathsFromCommand('rm /known & cd /not-a-deletion', '/repo'), ['/known']);
+});
+
 // ─── empty / invalid input ──────────────────────────────────────────────────
 
 test('empty string yields no paths', () => {
@@ -129,8 +163,8 @@ test('git rm --cached is index-only → ignored', () => {
   assert.deepEqual(parseDeletedPathsFromCommand('git rm -r --cached dir'), []);
 });
 
-test('git global flags (-C / --git-dir / --work-tree) and their values are skipped', () => {
-  assert.deepEqual(parseDeletedPathsFromCommand('git -C subdir rm x'), ['x']);
+test('git cwd needs a base; other global flags and their values are skipped', () => {
+  assert.deepEqual(parseDeletedPathsFromCommand('git -C subdir rm x'), []);
   assert.deepEqual(parseDeletedPathsFromCommand('git --git-dir /d/.git rm x'), ['x']);
   assert.deepEqual(parseDeletedPathsFromCommand('git --work-tree /wt rm x'), ['x']);
 });
@@ -159,7 +193,8 @@ test('nested shell with no deletion yields nothing', () => {
 // ─── command separators & prefixes ───────────────────────────────────────────
 
 test('&& / ; / newline split into independent segments', () => {
-  assert.deepEqual(parseDeletedPathsFromCommand('cd d && rm f'), ['f']);
+  assert.deepEqual(parseDeletedPathsFromCommand('cd d && rm f'), []);
+  assert.deepEqual(parseDeletedPathsFromCommand('cd d && rm f', '/repo'), ['/repo/d/f']);
   assert.deepEqual(parseDeletedPathsFromCommand('echo hi; rm b'), ['b']);
   assert.deepEqual(parseDeletedPathsFromCommand('rm a\nrm b'), ['a', 'b']);
 });
