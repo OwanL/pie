@@ -120,7 +120,11 @@ async function makeFixture(t) {
     }
   `);
   write(repo, 'scripts/build/runtime-publication.mjs', `
-    export async function assertRuntimeBootstrapSupportsSchema() { throw new Error('unexpected capability check'); }
+    export async function assertRuntimeBootstrapSupportsSchema({ extensionDir, schema }) {
+      if (extensionDir !== process.env.PIE_TEST_INSTALLED_EXTENSION || schema !== 1) {
+        throw new Error('unexpected capability check');
+      }
+    }
     export async function hasRuntimeBootstrap() {
       if (process.env.PIE_TEST_INSTALLED_EXTENSION) return process.env.PIE_TEST_RUNTIME_BOOTSTRAP === '1';
       throw new Error('unexpected runtime publication');

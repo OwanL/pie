@@ -88,6 +88,8 @@ test('watch reuses app-only selection, rotates after drain, and suppresses stale
   const rendererPublications = records.filter(item => item.event === 'renderer-publication');
   assert.equal(acquired.length, 3);
   assert.equal(runtimePublications.length, rendererPublications.length);
+  assert.equal(records.filter(item => item.event === 'capability-check').length, runtimePublications.length,
+    'every runtime publication checks installed bootstrap capabilities');
   assert.ok(runtimePublications.every(item => item.files === 4), 'each staged artifact passed the fake complete-payload verifier');
   assert.ok(runtimePublications.slice(0, publishedBeforeInvalid + 2).every(item => item.identity === acquired[0].identity),
     'app-only publications reuse the selected runtime identity');

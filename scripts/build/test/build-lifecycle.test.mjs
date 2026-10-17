@@ -85,7 +85,7 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   write(repo, 'scripts/lib/package-resolution.mjs', packageResolver());
   write(repo, 'scripts/build/pi-runtime.mjs', fakeRuntimeModule({ trace, fingerprintFile, controls }));
   write(repo, 'scripts/build/publication.mjs', fakePublicationModule(trace, installed));
-  write(repo, 'scripts/build/runtime-publication.mjs', fakeRuntimePublicationModule(trace));
+  write(repo, 'scripts/build/runtime-publication.mjs', fakeRuntimePublicationModule(trace, installed));
   write(owner, 'node_modules/vite/bin/vite.js', fakeVite(trace, owner, webviewFails));
   write(owner, 'node_modules/typescript/bin/tsc', fakeTsc(trace));
   write(owner, 'node_modules/vite/package.json', '{"name":"vite"}\n');
@@ -333,12 +333,15 @@ function fakePublicationModule(trace, installed) {
   `;
 }
 
-function fakeRuntimePublicationModule(trace) {
+function fakeRuntimePublicationModule(trace, installed) {
   return `
     import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
     import path from 'node:path';
     import { appendFile } from 'node:fs/promises';
-    export async function assertRuntimeBootstrapSupportsSchema() { throw new Error('unexpected capability check'); }
+    export async function assertRuntimeBootstrapSupportsSchema({ extensionDir, schema }) {
+      if (extensionDir !== ${JSON.stringify(installed)} || schema !== 1) throw new Error('unexpected capability check');
+      await appendFile(${JSON.stringify(trace)}, JSON.stringify({ event: 'capability-check', extensionDir, schema }) + '\\n');
+    }
     export async function hasRuntimeBootstrap() { return false; }
     export async function installRuntimeBootstrap() {}
     export async function resolveRuntimeGeneration() { return null; }

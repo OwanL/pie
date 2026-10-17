@@ -90,8 +90,12 @@ test('delivery build preflight resolves moved extension source through the owner
     write(fixture, `scripts/lib/${file}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', file)));
   }
   write(fixture, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
-  write(fixture, 'application/hosts/vscode/runtime/runtime-generations.cjs', readFileSync(path.join(repositoryRoot, 'application/hosts/vscode/runtime/runtime-generations.cjs')));
+  for (const file of ['runtime-generations.cjs', 'windows-runtime-lock.cjs']) {
+    write(fixture, `application/hosts/vscode/runtime/${file}`, readFileSync(path.join(repositoryRoot, 'application/hosts/vscode/runtime', file)));
+  }
   write(fixture, 'package.json', '{"type":"module"}\n');
+  mkdirSync(path.join(fixture, 'node_modules'), { recursive: true });
+  symlinkSync(path.join(installedModules, 'typescript'), path.join(fixture, 'node_modules/typescript'), 'junction');
   write(fixture, 'extension/src/entry.ts', "import { owned } from 'owner-only';\nimport { candidateOnly } from '@earendil-works/pi-coding-agent';\nexport const result: string = owned() + candidateOnly();\n");
   write(fixture, 'application/hosts/vscode/tsconfig.json', JSON.stringify({
     compilerOptions: {
