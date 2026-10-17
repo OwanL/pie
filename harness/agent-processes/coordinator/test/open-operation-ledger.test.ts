@@ -128,6 +128,62 @@ test('coordinator handler status is read-only and generation addressed without a
   assert.equal(unknown.state, 'unknown');
 });
 
+test('handler retains deferred inventory ownership before a lost publication', async () => {
+  const ledger = new OpenOperationLedger();
+  const order: string[] = [];
+  const payload = structuredClone(snapshot);
+  const deps = {
+    backendGeneration: 7,
+    openOperationLedger: ledger,
+    prepareViewedSessionPath: () => 'rollback',
+    buildSessionOpenedPayload: async () => payload,
+    deferSessionPromptInventory: (value: SessionOpenedPayload) => {
+      order.push('inventory');
+      value.promptInventoryToken = 'inventory-owner';
+    },
+    commitPreparedViewedSessionPath: () => { order.push('viewed'); },
+    emit: () => {
+      order.push('emit');
+      // Publication must not be able to rewrite the retained snapshot.
+      payload.promptInventoryToken = 'publication-mutation';
+      throw new Error('publication lost');
+    },
+  } as unknown as BackendRequestHandlerDeps;
+  const open = { id: 'open', method: 'session.open', params: { sessionPath: '/session', operationId: 'inventory-open' } };
+  assert.deepEqual(await handleBackendRequest(deps, open), { ok: true, sessionPath: '/session' });
+  const status = await handleBackendRequest(deps, { id: 'status', method: 'operation.status', params: {
+    sessionPath: '/session', operationId: 'inventory-open', operationKind: 'session.open', backendGeneration: 7,
+  } }) as { state: string; snapshot: SessionOpenedPayload };
+  assert.equal(status.state, 'committed');
+  assert.equal(status.snapshot.promptInventoryToken, 'inventory-owner');
+  await handleBackendRequest(deps, open);
+  assert.deepEqual(order, ['inventory', 'viewed', 'emit']);
+});
+
+test('deferred inventory setup failure discards preparation without committing viewed state', async () => {
+  const ledger = new OpenOperationLedger();
+  const order: string[] = [];
+  const deps = {
+    openOperationLedger: ledger,
+    prepareViewedSessionPath: () => 'rollback',
+    buildSessionOpenedPayload: async () => structuredClone(snapshot),
+    deferSessionPromptInventory: () => { throw new Error('inventory setup failed'); },
+    discardPreparedViewedSessionPath: (sessionPath: string, rollback: unknown) => {
+      assert.equal(sessionPath, '/session');
+      assert.equal(rollback, 'rollback');
+      order.push('discard');
+    },
+    commitPreparedViewedSessionPath: () => { order.push('viewed'); },
+    emit: () => { order.push('emit'); },
+  } as unknown as BackendRequestHandlerDeps;
+  await assert.rejects(handleBackendRequest(deps, { id: 'open', method: 'session.open', params: {
+    sessionPath: '/session', operationId: 'failed-inventory',
+  } }), /inventory setup failed/);
+  assert.deepEqual(order, ['discard']);
+  assert.equal(ledger.status('failed-inventory', '/session').state, 'failed');
+  assert.equal(ledger.status('failed-inventory', '/session').snapshot, undefined);
+});
+
 test('legacy opens without operationId execute normally on every request', async () => {
   let builds = 0;
   const deps = {

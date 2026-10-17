@@ -479,12 +479,21 @@ export class SessionServiceState {
     }
   }
 
-  /** Generation death is the one non-RPC path allowed to definitively clean up
-   * delayed creates. Each operation is routed through the same idempotent
-   * failure path so unrelated sessions cannot be torn down. */
+  /** Confirmed generation death also ends outstanding opens, not just delayed
+   * creates. Preserve selection rollback ownership until each owned lifecycle
+   * has passed through the idempotent failure path, before runtime reset. */
   failPendingCreateOperations(notice: string): void {
     const tokens = [...this.selectionRequests.values()]
-      .filter((request) => request.operationId && request.pendingPath)
+      .filter((request) => {
+        const operation = request.operationId
+          ? this.getArchState().operations[request.operationId]
+          : undefined;
+        return operation && !operation.terminal
+          && operation.causal.selectionToken === request.token
+          && operation.backendGeneration === this.backendGeneration
+          && request.backendGeneration === this.backendGeneration
+          && (request.pendingPath || operation.kind === 'session.open');
+      })
       .map((request) => request.token);
     for (const token of tokens) {
       this.handleSelectionFailure(token, notice, undefined, 'backend-generation-ended');

@@ -523,8 +523,8 @@ export function attach(
       }
     }
     const exitNotice = `PI backend stopped${code !== null ? ` (code ${code})` : ''}`;
-    // A dead generation is definitive for delayed creates: unlike a local RPC
-    // timeout, no future event from this process can complete them. Fail only
+    // A dead generation is definitive for delayed creates and opens: unlike a
+    // local RPC timeout, no future event from this process can complete them. Fail only
     // those operation-ledger entries before clearing generation-scoped host
     // waiters; resolved operations remain tombstoned and stale opened events
     // cannot replace them.

@@ -27,6 +27,7 @@ import type { ArchState } from '../../../conversation-state/arch-state';
 import { reducer } from '../../../conversation-state/reducer';
 import { SessionServiceState } from '../../../session-actions/state';
 import { SessionTabActions } from '../../../session-actions/tab-actions';
+import { attach } from '../../../session-actions/handlers/attach';
 import type { SessionSummary } from '../../../../lib/protocol/index.js';
 import { EffectRunner, type BackendLike, type CommitAwareRequestOptions } from '../../../conversation-state/effects/effect-runner';
 import type { Event, EffectResultEvent } from '../../../conversation-state/events';
@@ -93,6 +94,66 @@ test('openSession mints the selection token before the reducer activates the ope
   assert.equal(request?.previousActivePath, OLD);
   assert.notEqual(request?.previousActivePath, NEW);
 });
+
+for (const wasOpenTab of [false, true]) {
+  for (const superseded of [false, true]) {
+    test(`confirmed backend exit settles ambiguous open before reset (restored=${wasOpenTab}, superseded=${superseded})`, () => {
+      const oldPath = '/workspace/old.jsonl';
+      const openedPath = '/workspace/loading.jsonl';
+      let arch = createInitialArchState();
+      arch = { ...arch, sessions: { ...arch.sessions,
+        openTabPaths: wasOpenTab ? [oldPath, openedPath] : [oldPath],
+        activeSessionPath: oldPath,
+      } };
+      let token = '';
+      let operationId = '';
+      const dispatchArch = (event: Event) => {
+        if (event.kind === 'Command' && event.cmd.kind === 'OpenSession') {
+          token = event.cmd.selectionToken!;
+          operationId = event.cmd.operationId!;
+        }
+        arch = reducer(arch, event).state;
+      };
+      const state = new SessionServiceState({} as any, () => undefined, () => arch, dispatchArch, 0);
+      const tabs = new SessionTabActions({ state, getArchState: () => arch, dispatchArch,
+        scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER });
+      state.adoptBackendGeneration(1);
+      tabs.openSession(openedPath);
+      dispatchArch({ kind: 'OpenSessionResult', corrId: 'lost-ack', sessionPath: openedPath,
+        operationId, operationAttempt: 1, backendGeneration: 1,
+        ok: false, ambiguous: true, error: 'deadline' });
+      assert.equal(arch.operations[operationId].phase, 'ambiguous');
+      assert.ok(state.getSelectionRequest(token));
+      assert.ok(arch.sessions.openTabPaths.includes(openedPath));
+      state.adoptBackendGeneration(2);
+      state.failPendingCreateOperations('another generation ended');
+      assert.equal(arch.operations[operationId].terminal, undefined);
+      assert.ok(state.getSelectionRequest(token));
+      assert.ok(arch.sessions.openTabPaths.includes(openedPath));
+      // Restore the owning generation for its actual confirmed-exit callback.
+      state.adoptBackendGeneration(1);
+      if (superseded) {
+        state.supersedeSelectionOwnership();
+        dispatchArch({ kind: 'Command', cmd: { kind: 'SelectSession', corrId: 'select-old', sessionPath: oldPath } });
+      }
+      let exit!: (info: { code: number | null; stderr: string }) => void;
+      attach({ getGeneration: () => 1, onEvent: () => ({ dispose() {} }),
+        onExit: (handler) => { exit = handler; return { dispose() {} }; } },
+      { state, getArchState: () => arch, dispatchArch, scheduleRender: () => undefined,
+        runObserver: NOOP_RUN_OBSERVER }, { handleBackendEvent: () => undefined });
+      exit({ code: 1, stderr: '' });
+      assert.equal(arch.operations[operationId].terminal?.reason, 'backend-generation-ended');
+      assert.equal(arch.operations[operationId].terminal?.outcome, 'failed');
+      assert.equal(state.getSelectionRequest(token), null);
+      assert.equal(arch.sessions.openTabPaths.includes(openedPath), wasOpenTab);
+      assert.equal(arch.sessions.activeSessionPath, oldPath);
+      const terminal = arch.operations[operationId].terminal;
+      dispatchArch({ kind: 'OpenSessionResult', corrId: 'late', sessionPath: openedPath,
+        operationId, operationAttempt: 1, backendGeneration: 1, ok: true });
+      assert.deepEqual(arch.operations[operationId].terminal, terminal);
+    });
+  }
+}
 
 test('openSession selects an existing pending tab without opening its sentinel path in the backend', () => {
   const backend = { request: async () => ({}) } as any;
@@ -317,7 +378,7 @@ async function restoredOpen(t: TestContext, options: {
   if (options.fence === 'generation') state.adoptBackendGeneration(1);
   if (options.fence === 'settled') dispatchArch({ kind: 'OpenSessionResult', corrId: 'settled',
     sessionPath: missing, operationId: open.operationId, operationAttempt: open.attempt,
-    backendGeneration: open.backendGeneration, ok: true });
+    backendGeneration: open.backendGeneration, ok: true, successEvidence: 'snapshot-applied' });
   if (options.fence === 'superseded') {
     state.supersedeSelectionOwnership();
     dispatchArch({ kind: 'Command', cmd: { kind: 'SelectSession', corrId: 'healthy', sessionPath: healthy } });

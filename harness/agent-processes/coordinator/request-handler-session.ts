@@ -333,6 +333,12 @@ async function executeSessionOpen(
         deps.deferSessionPromptInventory ? false : undefined,
       );
       runtimeReady = openPayload.runtimeReady;
+      // Deferred inventory setup is fallible and adds the ownership token to
+      // the payload. Finish it before committing either viewed state or the
+      // retained recovery snapshot.
+      if (openPayload.runtimeReady === false && !openPayload.snapshotUnavailable) {
+        deps.deferSessionPromptInventory?.(openPayload);
+      }
     } catch (error) {
       failureStage = 'snapshot_build';
       deps.discardPreparedViewedSessionPath?.(params.sessionPath, viewedPathRollback);
@@ -350,9 +356,6 @@ async function executeSessionOpen(
     commit?.(openPayload);
     const emitStartedAt = performance.now();
     try {
-      if (openPayload.runtimeReady === false && !openPayload.snapshotUnavailable) {
-        deps.deferSessionPromptInventory?.(openPayload);
-      }
       deps.emit('session.opened', openPayload);
     } catch (error) {
       failureStage = 'session_opened_emit';
