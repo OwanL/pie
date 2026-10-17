@@ -542,7 +542,8 @@ export class DeferredTriggerRegistry {
     if (this.commandChecks.has(key) || this.commandTimers.has(key) || this.disposed) return;
     const generation = this.commandGenerations.get(key) ?? 0;
     this.commandGenerations.set(key, generation);
-    const handle = this.clock.setTimeout(() => {
+    const deadline = this.clock.now() + delayMs;
+    const checkDeadline = (): void => {
       this.commandTimers.delete(key);
       if (this.disposed || (this.commandGenerations.get(key) ?? 0) !== generation) return;
       const trigger = this.triggers.get(id);
@@ -553,8 +554,16 @@ export class DeferredTriggerRegistry {
         || current?.kind !== 'command'
         || commandSpecIdentity(current) !== commandSpecIdentity(spec)
       ) return;
+      const remaining = deadline - this.clock.now();
+      if (remaining > 0) {
+        this.commandTimers.set(key, this.clock.setTimeout(checkDeadline, boundedTimerSlice(remaining)));
+        return;
+      }
       this.beginCommandCheck(id, index, current);
-    }, Math.max(0, delayMs));
+    };
+    // Preserve the queued initial probe, but slice long retry intervals so Node
+    // cannot clamp them to 1ms or execute the next probe before its deadline.
+    const handle = this.clock.setTimeout(checkDeadline, delayMs <= 0 ? 0 : boundedTimerSlice(delayMs));
     this.commandTimers.set(key, handle);
   }
 

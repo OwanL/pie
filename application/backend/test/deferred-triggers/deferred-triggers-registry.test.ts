@@ -363,6 +363,49 @@ test('OR semantics: once one spec fires, the whole trigger is consumed', async (
   assert.equal(dispatched.length, 1);
 });
 
+for (const intervalMs of [1_000, MAX_TIMER_SLICE_MS * 2 + 1_000]) {
+  test(`command retry waits for the full ${intervalMs}ms interval and cancellation clears it`, async () => {
+    const clock = timerClock();
+    register('command-interval', WATCHER, [{
+      kind: 'command', command: 'unused fake predicate', cwd: dir,
+      intervalMs, timeoutMs: 1_000,
+    }]);
+    let calls = 0;
+    const r = newRegistry({ clock, commandRunner: async () => {
+      calls += 1;
+      return { exitCode: 1 };
+    } });
+    assert.equal(calls, 0, 'initial probe is queued');
+    clock.advance(0);
+    await flushMicrotasks();
+    assert.equal(calls, 1);
+
+    let remaining = intervalMs;
+    while (remaining > MAX_TIMER_SLICE_MS) {
+      const task = [...clock.scheduled.values()][0];
+      assert.equal(task.at - clock.now(), MAX_TIMER_SLICE_MS);
+      clock.advance(MAX_TIMER_SLICE_MS);
+      await flushMicrotasks();
+      assert.equal(calls, 1, 'slice boundary must not probe early');
+      remaining -= MAX_TIMER_SLICE_MS;
+    }
+    clock.advance(remaining - 1);
+    await flushMicrotasks();
+    assert.equal(calls, 1);
+    clock.advance(1);
+    await flushMicrotasks();
+    assert.equal(calls, 2);
+    assert.equal(dispatched.length, 0);
+    assert.equal(clock.scheduled.size, 1);
+
+    r.cancel(WATCHER, 'command-interval');
+    assert.equal(clock.scheduled.size, 0);
+    clock.advance(intervalMs);
+    await flushMicrotasks();
+    assert.equal(calls, 2, 'cancelled retry must not probe');
+  });
+}
+
 test('command exit 0 uses the host runner and synthetic wake path', async () => {
   register('command-true', WATCHER, [{
     kind: 'command',
