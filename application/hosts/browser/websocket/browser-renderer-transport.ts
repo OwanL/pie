@@ -72,11 +72,7 @@ export class BrowserRendererTransport implements RendererTransport {
   private session: RendererRegistration | null = null;
   private messageHandler?: (message: unknown) => void;
   private visibilityHandler?: (visible: boolean) => void;
-  private readonly violations = new ViolationRateTracker(
-    BROWSER_SERVER_POLICY.maxMalformedMessages,
-    BROWSER_SERVER_POLICY.malformedWindowMs,
-    this.options.now ?? Date.now,
-  );
+  private readonly violations: ViolationRateTracker;
   private handshakeTimer: unknown = undefined;
   private handshakeComplete = false;
   private disposed = false;
@@ -95,6 +91,11 @@ export class BrowserRendererTransport implements RendererTransport {
     private readonly options: BrowserRendererTransportOptions,
   ) {
     this.now = options.now ?? Date.now;
+    this.violations = new ViolationRateTracker(
+      BROWSER_SERVER_POLICY.maxMalformedMessages,
+      BROWSER_SERVER_POLICY.malformedWindowMs,
+      this.now,
+    );
     this.setTimer = options.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = options.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 

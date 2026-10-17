@@ -259,7 +259,7 @@ test('revoking the final capability closes the accept loop; an in-flight open is
 
 test('a local IPv6 loopback report host is normalized to 127.0.0.1', async () => {
   const root = await tempDirectory();
-  const service = createLocalFileOpenService();
+  const service = createLocalFileOpenService({ selfCheck: async () => undefined });
   try {
     await fs.writeFile(path.join(root, 'entry.html'), '<p>entry</p>');
     const resolver = { exists: async () => true, findFiles: async () => [] };
