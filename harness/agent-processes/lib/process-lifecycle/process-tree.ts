@@ -107,6 +107,18 @@ public static class PieWorkerJob {
 }
 `;
 
+/** The guardian only hosts Win32 interop. Do not forward worker/provider or
+ * VS Code variables: Windows PowerShell's Add-Type compiler has a 64 KiB
+ * environment limit even when Node successfully inherited a larger block. */
+export function windowsGuardianEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const allowed = new Set(['systemroot', 'windir', 'systemdrive', 'comspec', 'temp', 'tmp', 'userprofile', 'localappdata', 'appdata']);
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (allowed.has(key.toLowerCase()) && value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function windowsGuardianScript(rootPid: number): string {
   const source = WINDOWS_JOB_GUARDIAN_SOURCE.replaceAll("'", "''");
   return [
@@ -158,6 +170,7 @@ export async function establishWindowsProcessTreeGuardian(
   const guardian = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    env: windowsGuardianEnvironment(process.env),
   });
   let stderr = '';
   guardian.stderr.setEncoding('utf8');
