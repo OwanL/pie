@@ -288,6 +288,27 @@ test('openFile accepts the renderer-captured basename and cwd context', () => {
   });
 });
 
+test('prepareLocalFileOpen carries only bounded open context', () => {
+  expectOk({
+    type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html',
+    reference: 'page.html', workingDirectory: '/workspace', clientCommandId: UUID,
+  });
+  expectRejected({ type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html', openIn: 'popup', clientCommandId: UUID });
+  expectRejected({
+    type: 'prepareLocalFileOpen', requestId: 'local-file-open:1',
+    path: 'x'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1), clientCommandId: UUID,
+  });
+  expectRejected({ type: 'prepareLocalFileOpen', requestId: '', path: '/workspace/page.html', clientCommandId: UUID });
+  expectRejected({
+    type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html',
+    reference: 'p'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1), clientCommandId: UUID,
+  });
+  expectRejected({
+    type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html',
+    workingDirectory: 'p'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1), clientCommandId: UUID,
+  });
+});
+
 // ─── Oversized strings and arrays ───────────────────────────────────────────
 
 test('oversized strings are rejected', () => {

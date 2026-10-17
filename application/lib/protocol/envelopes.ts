@@ -41,5 +41,10 @@
  *
  * v13: transcript image previews use a renderer-targeted bounded request/result
  * pair; image data remains ephemeral and outside ViewState snapshots.
+ *
+ * v14: `prepareLocalFileOpen`/targeted `localFileOpenResult` pair: browsers
+ * and desktop hosts can open a verified, isolated loopback origin that serves
+ * one local HTML file plus its sibling directory. An older webview build must
+ * not send the new command, so the version bumps fail closed.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 13;
+export const WEBVIEW_PROTOCOL_VERSION = 14;

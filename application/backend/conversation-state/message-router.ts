@@ -59,7 +59,9 @@ export interface MessageRouterPlatform {
    *  reject rather than stop the sole UI. */
   setBrowserServerEnabled(enabled: boolean): Promise<void>;
   performImageAction?(request: import('../../lib/platform-contracts/image-actions.js').ImageActionRequest): Promise<void>;
-  /** Read a bounded display-safe image preview through the host file adapter. */
+  /** Prepare + verify an isolated loopback origin opening a local file
+   *  (external opening is the adapter's own decision via `openIn`). */
+  prepareLocalFileOpen?(request: import('../../lib/platform-contracts/local-file-open.js').LocalFileOpenCommand): Promise<{ url: string }>; /** Read a bounded display-safe image preview through the host file adapter. */
   previewImageFile?(request: {
     path: string;
     reference?: string;
@@ -268,6 +270,9 @@ export class MessageRouter {
 
       case 'performImageAction':
         return await this.onPerformImageAction(msg, context);
+
+      case 'prepareLocalFileOpen':
+        return await this.onPrepareLocalFileOpen(msg as Extract<WebviewToHostMessage, { type: 'prepareLocalFileOpen' }>, context);
 
       case 'openFile':
         return await this.onOpenFile(msg as Extract<WebviewToHostMessage, { type: 'openFile' }>, context);
@@ -914,6 +919,58 @@ export class MessageRouter {
     if (!current()) return;
     this.sidebarProvider.postImperativeToRenderer?.(context!.rendererId, {
       type: 'imageActionResult', requestId: msg.requestId, success: error === undefined,
+      ...(error !== undefined ? { error } : {}),
+    });
+  }
+
+  /** `prepareLocalFileOpen` — side-effect-only, exactly like image actions:
+   *  prepare + verify an isolated loopback origin, then answer the INITIATING
+   *  renderer only. Surface policy: a browser renderer opens the verified URL
+   *  itself as a popup, and only a trusted loopback-local browser may do so;
+   *  a `vscode` renderer lets the host adapter open the URL externally. */
+  private async onPrepareLocalFileOpen(
+    msg: Extract<WebviewToHostMessage, { type: 'prepareLocalFileOpen' }>,
+    context?: RendererCommandContext,
+  ): Promise<void> {
+    const viewGeneration = this.sidebarProvider.getViewGeneration?.();
+    const current = () => !!context?.rendererId && viewGeneration !== undefined
+      && this.sidebarProvider.isRendererOwnerCurrent?.(context.rendererId, viewGeneration, context.rendererGeneration) === true;
+    if (!current()) return;
+    const openIn = context.kind === 'browser' ? 'popup' as const : 'external' as const;
+    const postResult = (result: {
+      type: 'localFileOpenResult'; requestId: string; status: 'ready' | 'unavailable';
+      url?: string; openIn?: 'popup' | 'external'; error?: string;
+    }): void => {
+      this.sidebarProvider.postImperativeToRenderer?.(context!.rendererId, result);
+    };
+    // A remote/LAN browser can never reach a loopback-only origin: fail
+    // closed before starting any listener.
+    if (openIn === 'popup' && context.hostLoopbackBrowser !== true) {
+      postResult({
+        type: 'localFileOpenResult', requestId: msg.requestId, status: 'unavailable',
+        error: 'Local files can be prepared only for a browser connected to this machine.',
+      });
+      return;
+    }
+    let url: string | undefined;
+    let error: string | undefined;
+    try {
+      if (!this.platform.prepareLocalFileOpen) throw new Error('Local file open is unavailable on this host.');
+      ({ url } = await this.platform.prepareLocalFileOpen({
+        path: msg.path,
+        ...(msg.reference !== undefined ? { reference: msg.reference } : {}),
+        ...(msg.workingDirectory !== undefined ? { workingDirectory: msg.workingDirectory } : {}),
+        openIn,
+      }));
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Local file open failed.';
+    }
+    if (!current()) return;
+    postResult({
+      type: 'localFileOpenResult',
+      requestId: msg.requestId,
+      status: error === undefined ? 'ready' as const : 'unavailable' as const,
+      ...(error === undefined ? { url: url as string, openIn } : {}),
       ...(error !== undefined ? { error } : {}),
     });
   }

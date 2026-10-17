@@ -102,6 +102,7 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   requestSnapshot: ['type', 'assetVersion', 'buildId', 'sessionPath'],
   openFilePicker: ['type'],
   openFile: ['type', 'path', 'reference', 'workingDirectory'],
+  prepareLocalFileOpen: ['type', 'requestId', 'path', 'reference', 'workingDirectory'],
   performImageAction: ['type', 'requestId', 'action', 'source'],
   addComposerInput: ['type', 'sessionPath', 'input'],
   removeComposerInput: ['type', 'sessionPath', 'inputId'],
@@ -612,6 +613,21 @@ export function validateBrowserToHostMessage(
       if (value.workingDirectory !== undefined
         && !boundedString(value.workingDirectory, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
         return fail('requestImagePreview: invalid or oversized workingDirectory');
+      }
+      return { ok: true, value: value as unknown as WebviewToHostMessage };
+    case 'prepareLocalFileOpen':
+      if (!boundedString(value.requestId, 256) || value.requestId.length === 0) {
+        return fail('prepareLocalFileOpen: invalid requestId');
+      }
+      if (!boundedString(value.path, MAX_IMAGE_PREVIEW_PATH_BYTES) || value.path.length === 0) {
+        return fail('prepareLocalFileOpen: invalid path');
+      }
+      if (value.reference !== undefined && !boundedString(value.reference, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('prepareLocalFileOpen: invalid reference');
+      }
+      if (value.workingDirectory !== undefined
+        && !boundedString(value.workingDirectory, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('prepareLocalFileOpen: invalid workingDirectory');
       }
       return { ok: true, value: value as unknown as WebviewToHostMessage };
     case 'log':

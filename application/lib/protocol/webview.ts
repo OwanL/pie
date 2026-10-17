@@ -206,6 +206,10 @@ export interface RendererCommandContext {
    *  that this browser is loopback-local and the host permits microphone use.
    *  Never populated from renderer JSON. */
   hostMicrophoneAllowed?: boolean;
+  /** True only when the trusted browser-server transport has established
+   *  that this browser renderer is loopback-local, so the renderer can reach
+   *  a loopback-only prepared origin URL. Never populated from renderer JSON. */
+  hostLoopbackBrowser?: boolean;
 }
 
 export interface RenderEvidenceBase {
@@ -626,6 +630,20 @@ export type HostToWebviewMessage =
       error?: string;
     }
   | {
+      /** One-shot targeted local file open: the host prepared + verified an
+       *  ephemeral isolated loopback origin for the initiating renderer.
+       *  `openIn:'popup'` means the initiating BROWSER renderer opens the URL
+       *  itself as a popup; `openIn:'external'` means a desktop host adapter
+       *  already opened it in the OS default browser. Never enters snapshots
+       *  or broadcast. */
+      type: 'localFileOpenResult';
+      requestId: string;
+      status: 'ready' | 'unavailable';
+      url?: string;
+      openIn?: 'popup' | 'external';
+      error?: string;
+    }
+  | {
       /** Bounded, renderer-targeted ephemeral image preview response. */
       type: 'imagePreviewResult';
       requestId: string;
@@ -786,6 +804,10 @@ type WebviewToHostMessagePayload =
       sessionPath?: string;
     }
   | ({ type: 'performImageAction'; requestId: string } & import('../platform-contracts/image-actions.js').ImageActionRequest)
+  /** Request an ephemeral loopback origin serving one local HTML file and its
+   *  sibling directory, verified-reachable, for renderer-side popup/external
+   *  open. Side-effect-only correlated command; never enters snapshots. */
+  | { type: 'prepareLocalFileOpen'; requestId: string; path: string; reference?: string; workingDirectory?: string }
   | { type: 'openFilePicker' }
   | { type: 'openFile'; path: string; reference?: string; workingDirectory?: string }
   | { type: 'addComposerInput'; sessionPath: string; input: ComposerInputDraft }

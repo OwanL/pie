@@ -106,6 +106,19 @@ test('validateWebviewToHostMessage validates openFile', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'openFile' }).ok, false);
 });
 
+test('validateWebviewToHostMessage validates prepareLocalFileOpen', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen', requestId: 'lfo:1', path: '/x' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'prepareLocalFileOpen', requestId: 'lfo:1',
+    path: '/workspace/page.html', reference: 'page.html', workingDirectory: '/workspace',
+  }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen', requestId: '', path: '/x' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen', requestId: 'lfo:1', path: '' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen', requestId: 'lfo:1', path: '/x', reference: 3 }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen', requestId: 'lfo:1', path: 42 }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'prepareLocalFileOpen' }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates openFileDiff, openFileInEditor, and revertFile', () => {
   for (const type of ['openFileDiff', 'openFileInEditor', 'revertFile']) {
     assert.equal(

@@ -90,7 +90,9 @@ export class BrowserServer implements BrowserServerService {
   /** Per-renderer transports, for shutdown close + client-count accounting. */
   private readonly transports: Record<string, BrowserRendererTransport> = {};
   /** Attested by the accepted socket, never by renderer JSON. */
-  private readonly hostMicrophoneRenderers: Record<string, boolean> = {};
+  /** Attested by the accepted socket, never by renderer JSON: this browser
+   *  renderer is loopback-local (the sole microphone-permission basis). */
+  private readonly hostLoopbackRenderers: Record<string, boolean> = {};
   private state: BrowserServerState = {
     running: false,
     url: null,
@@ -128,11 +130,14 @@ export class BrowserServer implements BrowserServerService {
       hostInstanceId: options.hostInstanceId,
       getViewState: options.getViewState,
       overlayViewState: (view, rendererId) => {
-        const dictation = dictationForRenderer(view.dictation, rendererId, this.hostMicrophoneRenderers[rendererId] === true);
+        const dictation = dictationForRenderer(view.dictation, rendererId, this.hostLoopbackRenderers[rendererId] === true);
         return dictation === view.dictation ? view : { ...view, dictation };
       },
       getRunningSessionCount: options.getRunningSessionCount,
-      onMessage: (msg, context) => void this.gate.route(msg, { ...context, hostMicrophoneAllowed: this.hostMicrophoneRenderers[context.rendererId] === true }),
+      onMessage: (msg, context) => {
+        const loopback = this.hostLoopbackRenderers[context.rendererId] === true;
+        void this.gate.route(msg, { ...context, hostMicrophoneAllowed: loopback, hostLoopbackBrowser: loopback });
+      },
       onRendererInvalidated: options.onRendererInvalidated,
     });
     this.confirmations = new InlineConfirmationService({
@@ -511,7 +516,7 @@ export class BrowserServer implements BrowserServerService {
     const registration = this.hub.registerRenderer(transport);
     this.registrations[registration.rendererId] = registration;
     this.transports[registration.rendererId] = transport;
-    this.hostMicrophoneRenderers[registration.rendererId] = microphoneAllowed;
+    this.hostLoopbackRenderers[registration.rendererId] = microphoneAllowed;
     transport.start(registration);
     this.emit({ kind: 'client-connected', rendererId: registration.rendererId });
   }
@@ -524,7 +529,7 @@ export class BrowserServer implements BrowserServerService {
       delete this.registrations[rendererId];
     }
     delete this.transports[rendererId];
-    delete this.hostMicrophoneRenderers[rendererId];
+    delete this.hostLoopbackRenderers[rendererId];
     // Disconnect cancels every pending inline confirmation for this renderer.
     this.confirmations.cancelForRenderer(rendererId);
     this.emit({ kind: 'client-closed', rendererId, code, reason });

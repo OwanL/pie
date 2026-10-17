@@ -765,6 +765,15 @@ export function validateWebviewToHostMessage(
       if (!isOptionalString(value.workingDirectory)) return fail('openFile: invalid `workingDirectory`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'prepareLocalFileOpen':
+      if (!isString(value.requestId) || value.requestId.length === 0 || value.requestId.length > 256) return fail('prepareLocalFileOpen: invalid requestId');
+      if (!isString(value.path) || value.path.length === 0 || value.path.length > MAX_IMAGE_PREVIEW_PATH_BYTES) return fail('prepareLocalFileOpen: invalid `path`');
+      if (!isOptionalString(value.reference)
+        || (typeof value.reference === 'string' && value.reference.length > MAX_IMAGE_PREVIEW_PATH_BYTES)) return fail('prepareLocalFileOpen: invalid `reference`');
+      if (!isOptionalString(value.workingDirectory)
+        || (typeof value.workingDirectory === 'string' && value.workingDirectory.length > MAX_IMAGE_PREVIEW_PATH_BYTES)) return fail('prepareLocalFileOpen: invalid `workingDirectory`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'addComposerInput':
       if (!isString(value.sessionPath)) return fail('addComposerInput: missing `sessionPath`');
       if (!validateComposerInputDraft(value.input)) return fail('addComposerInput: invalid `input`');
