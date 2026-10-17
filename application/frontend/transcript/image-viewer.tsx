@@ -51,6 +51,7 @@ export function ImageViewer({
   const actionElements = useRef<Record<'copy' | 'openInBrowser' | 'reveal', HTMLElement | null>>({ copy: null, openInBrowser: null, reveal: null });
   const statusElement = useRef<HTMLElement | null>(null);
   const focusRestore = useRef<HTMLElement | null>(null);
+  const openingTrigger = useRef<HTMLElement | null>(null);
   const performActionRef = useRef<(action: 'copy' | 'openInBrowser' | 'reveal') => void>(() => undefined);
 
   const restoreFocus = () => {
@@ -63,6 +64,7 @@ export function ImageViewer({
   const registerViewerActions = (instance: PhotoSwipe) => {
     const actionButton = (action: 'copy' | 'openInBrowser' | 'reveal', label: string, order: number): UIElementData => ({
       name: `pie-image-${action}`,
+      className: 'image-viewer-action',
       html: label,
       ariaLabel: label,
       title: label,
@@ -89,11 +91,15 @@ export function ImageViewer({
     const current = image;
     if (!current) return;
     const superseded = pswp.current;
-    if (superseded) { superseded.destroy(); pswp.current = null; viewerClosing.current = false; }
+    if (superseded) { pswp.current = null; superseded.destroy(); viewerClosing.current = false; }
     let instance: PhotoSwipe;
     try {
       instance = pswpFactory({
         dataSource: [{ src: current.src, alt: current.alt, width: dimensions.width, height: dimensions.height }],
+        // No opening race: destroy() can only close an already-open opener.
+        showHideAnimationType: 'none',
+        // Own the original trigger; library destroy listeners run before DOM removal.
+        returnFocus: false,
         bgOpacity: 0.88,
         wheelToZoom: true,
         arrowPrev: false,
@@ -110,11 +116,22 @@ export function ImageViewer({
     pswp.current = instance;
     // PhotoSwipe owns the backdrop, stage, gestures, keyboard and focus trap.
     instance.on('uiRegister', () => registerViewerActions(instance));
-    instance.on('loadComplete', event => { if (!event.isError && event.slide === instance.currSlide) setError(''); });
-    instance.on('loadError', () => setError(LOAD_ERROR));
-    instance.on('close', () => { viewerClosing.current = true; clearImageViewer(); });
+    instance.on('loadComplete', event => { if (pswp.current === instance && !event.isError && event.slide === instance.currSlide) setError(''); });
+    instance.on('loadError', () => { if (pswp.current === instance) setError(LOAD_ERROR); });
+    const trigger = focusRestore.current;
+    instance.on('close', () => {
+      if (pswp.current !== instance) return;
+      viewerClosing.current = true;
+      clearImageViewer();
+    });
     instance.on('destroy', () => {
-      if (pswp.current === instance) { pswp.current = null; setViewerOpen(false); }
+      if (pswp.current === instance) {
+        pswp.current = null; setViewerOpen(false);
+        // Wait until PhotoSwipe has removed its focused dialog from the DOM.
+        queueMicrotask(() => {
+          if (!pswp.current && trigger?.isConnected) trigger.focus();
+        });
+      }
     });
     // Loading failures surface through the status row, not the default box.
     instance.addFilter('contentErrorElement', element => { element.textContent = ''; return element; });
@@ -140,6 +157,7 @@ export function ImageViewer({
       // Reuse supported inline embeds without granting native raster actions.
       if (!source && !/^data:image\/svg\+xml[;,]/i.test(target.src)) return;
       event.preventDefault(); event.stopImmediatePropagation();
+      openingTrigger.current = target;
       target.focus();
       openImageViewer({ src: target.src, alt: target.alt || 'Image', source });
     };
@@ -165,37 +183,38 @@ export function ImageViewer({
       clearImageViewer();
       // Viewer markup lives outside the webview mount (document.body); destroy
       // it explicitly so ephemeral image bytes and listeners cannot outlive it.
+      ++openGeneration.current;
+      clearTimeout(timer.current); actionRequest.current = null;
       const instance = pswp.current;
-      pswp.current = null;
+      if (instance?.element) { instance.element.hidden = true; instance.element.inert = true; }
       instance?.destroy();
       restoreFocus();
     };
   }, [adapter]);
 
   useEffect(() => {
+    const generation = ++openGeneration.current;
     actionRequest.current = null; clearTimeout(timer.current); setPending(false);
     const superseded = pswp.current;
     if (!image) {
+      if (superseded?.element) { superseded.element.hidden = true; superseded.element.inert = true; }
       if (superseded && !viewerClosing.current) superseded.destroy();
-      pswp.current = null; viewerClosing.current = false; setViewerOpen(false);
+      viewerClosing.current = false; setViewerOpen(false);
       restoreFocus();
       return;
     }
     viewerClosing.current = false;
-    focusRestore.current = (document.activeElement as HTMLElement | null)?.isConnected
-      ? document.activeElement as HTMLElement
-      : null;
+    focusRestore.current = openingTrigger.current ?? document.activeElement as HTMLElement | null;
+    openingTrigger.current = null;
     if (superseded) setViewerOpen(false);
-    if (!viewerOpen) {
-      const firstButton = document.querySelector<HTMLElement>('.image-viewer-toolbar button');
-      if (firstButton) firstButton.focus();
-    }
-    const generation = ++openGeneration.current;
+    setError('');
     measure(image.src).then(
       dimensions => { if (generation === openGeneration.current) openPhotoSwipe(dimensions); },
       () => {
         if (generation !== openGeneration.current) return;
-        pswp.current = null; setViewerOpen(false);
+        // Let PhotoSwipe own even decoder-error slides, including Escape,
+        // backdrop dismissal and its keyboard focus trap.
+        openPhotoSwipe({ width: 320, height: 320 });
         setError(LOAD_ERROR);
       },
     );
@@ -224,14 +243,5 @@ export function ImageViewer({
     try { adapter.postMessage({ type: 'performImageAction', requestId, action, source: image.source }); }
     catch { clearTimeout(timer.current); actionRequest.current = null; setPending(false); setError('Image action unavailable.'); }
   };
-  if (!image || viewerOpen) return null;
-  return <div class="image-viewer" role="dialog" aria-modal="true" aria-label={image.alt}>
-    <div class="image-viewer-toolbar">
-      {image.source && capabilities?.copy && <button disabled={pending} onClick={() => performActionRef.current('copy')}>Copy image</button>}
-      {image.source && capabilities?.openInBrowser && <button disabled={pending} onClick={() => performActionRef.current('openInBrowser')}>Open in browser</button>}
-      {image.source && capabilities?.reveal && <button disabled={pending} onClick={() => performActionRef.current('reveal')}>Show in file system</button>}
-      <button aria-label="Close image viewer" onClick={() => { restoreFocus(); clearImageViewer(); }}>×</button>
-    </div>
-    <div class="image-viewer-status" role="status">{error || (pending ? 'Working…' : image.alt)}</div>
-  </div>;
+  return null;
 }

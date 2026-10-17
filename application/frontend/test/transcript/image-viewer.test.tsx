@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import type PhotoSwipe from 'photoswipe';
+import PhotoSwipe from 'photoswipe';
 import { ImageViewer } from '../../transcript/image-viewer';
 import { clearImageViewer, inlineViewerSource, openImageViewer } from '../../transcript/image-viewer-store';
 
@@ -23,6 +23,8 @@ class FakePswp {
   options: any;
   inited = false;
   destroyed = false;
+  isOpen = false;
+  isDestroying = false;
   currSlide: object | undefined = undefined;
   elements: Record<string, HTMLElement> = {};
   handlers = new Map<string, Array<(event: any) => void>>();
@@ -39,6 +41,8 @@ class FakePswp {
     document.body.appendChild(this.focusTarget);
     this.focusTarget.focus();
     this.emit('uiRegister');
+    if (this.options.showHideAnimationType === 'none') this.isOpen = true;
+    else setTimeout(() => { this.isOpen = true; this.emit('openingAnimationEnd'); }, 333);
     return true;
   }
 
@@ -56,11 +60,20 @@ class FakePswp {
   }
 
   close(): void {
+    if (!this.isOpen || this.isDestroying) return;
+    this.isDestroying = true;
     this.emit('close');
+    this.destroy();
   }
 
   destroy(): void {
+    if (!this.isDestroying) {
+      this.options.showHideAnimationType = 'none';
+      this.close();
+      return;
+    }
     this.destroyed = true;
+    this.emit('destroy');
     this.focusTarget?.remove();
   }
 
@@ -69,6 +82,7 @@ class FakePswp {
     registerElement: (data: any) => {
       const element = document.createElement(data.isButton ? 'button' : data.tagName ?? 'div');
       if (data.isButton) element.type = 'button';
+      if (data.className) element.className = data.className;
       if (typeof data.html === 'string') element.textContent = data.html;
       if (data.ariaLabel) element.setAttribute('aria-label', data.ariaLabel);
       else if (data.title) element.setAttribute('title', data.title);
@@ -119,6 +133,37 @@ function unmount(mount: HTMLElement) {
 /** Promise continuations schedule rerenders that only flush on a following act. */
 async function flush(): Promise<void> { await act(async () => {}); }
 
+test('real PhotoSwipe opener survives immediate lifecycle clearing without a ghost', async () => {
+  const { dom, mount } = viewerHarness();
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  dom.window.matchMedia = (() => ({ matches: false })) as any;
+  const requestFrame = (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0) as any;
+  Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, value: requestFrame });
+  Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, value: clearTimeout });
+  const instance = new PhotoSwipe({
+    dataSource: [{ src: 'data:image/png;base64,YQ==', width: 2, height: 2 }],
+    showHideAnimationType: 'none', returnFocus: false,
+  });
+  instance.init();
+  assert.equal(instance.opener.isOpen, true, 'no 333ms opening window remains');
+  instance.destroy();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(document.querySelector('.pswp'), null, 'real destroy removes modal after its scheduled close');
+  const { adapter } = adapterHarness();
+  await act(async () => { render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} />, mount); });
+  await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Race', source: null }); });
+  await flush();
+  assert.ok(document.querySelector('.pswp'));
+  await act(async () => { clearImageViewer(); });
+  const retiring = document.querySelector<HTMLElement>('.pswp');
+  if (retiring) assert.equal(retiring.hidden, true, 'clearing hides immediately, before asynchronous destroy');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await flush();
+  assert.equal(document.querySelector('.pswp'), null, 'clearing within the former 333ms opening window removes the real viewer');
+  await unmount(mount);
+  dom.window.close();
+});
+
 test('viewer opens PhotoSwipe with measured dimensions and library-owned surface', async () => {
   const { dom, mount } = viewerHarness();
   FakePswp.reset();
@@ -146,6 +191,9 @@ test('viewer opens PhotoSwipe with measured dimensions and library-owned surface
   const reveal = instance.elements['pie-image-reveal'] as HTMLButtonElement | undefined;
   const status = instance.elements['pie-image-status'];
   assert.equal(copy?.getAttribute('aria-label'), 'Copy image');
+  assert.ok(copy?.classList.contains('image-viewer-action'));
+  assert.equal(instance.options.showHideAnimationType, 'none');
+  assert.equal(instance.options.returnFocus, false);
   assert.ok(!copy?.classList.contains('image-viewer-action-hidden'));
   assert.equal(reveal?.getAttribute('aria-label'), 'Show in file system');
   assert.ok(!reveal?.classList.contains('image-viewer-action-hidden'));
@@ -218,14 +266,14 @@ test('session switch tears the PhotoSwipe instance down instantly and restores f
   assert.notEqual(second, instance);
   assert.equal(second.destroyed, false);
   await act(async () => { second.close(); });
-  assert.equal(second.destroyed, false, 'animated close keeps the instance until destroy');
+  assert.equal(second.destroyed, true, 'non-animated library close destroys synchronously');
   await act(async () => { second.emit('destroy'); });
   assert.ok(true, 'destroy after animated close retires the instance');
   await unmount(mount);
   await act(async () => { dom.window.close(); });
 });
 
-test('inline clicks open the viewer, SVG stays view-only, and probe failures stay in the shell', async () => {
+test('inline clicks open the viewer, SVG stays view-only, and probe failures use PhotoSwipe', async () => {
   const { dom, mount } = viewerHarness();
   FakePswp.reset();
   const { adapter, sent } = adapterHarness();
@@ -243,11 +291,12 @@ test('inline clicks open the viewer, SVG stays view-only, and probe failures sta
   assert.equal(bubbled, false, 'delegated clicks never fall through to link handlers');
   const opened = FakePswp.instances.at(-1)!;
   assert.deepEqual(opened.options.dataSource[0].src, thumbnail.src);
-  await act(async () => { opened.emit('close'); });
+  await act(async () => { opened.close(); });
+  assert.equal(document.activeElement, thumbnail, 'click trigger regains focus after library removal');
   await act(async () => { clearImageViewer(); });
   await act(async () => { opened.emit('destroy'); });
   thumbnail.src = 'data:image/svg+xml;base64,PHN2Zy8+';
-  await act(async () => { thumbnail.click(); });
+  await act(async () => { thumbnail.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
   await flush();
   const svgInstance = FakePswp.instances.at(-1)!;
   assert.notEqual(svgInstance, opened, 'rendered SVG opens the viewer');
@@ -256,20 +305,17 @@ test('inline clicks open the viewer, SVG stays view-only, and probe failures sta
   assert.ok(svgInstance.elements['pie-image-reveal']?.classList.contains('image-viewer-action-hidden'));
   await act(async () => { (svgInstance.elements['pie-image-copy'] as HTMLButtonElement).click(); });
   assert.equal(sent.length, 0, 'SVG never requests native actions');
-  await act(async () => { clearImageViewer(); });
-  await act(async () => { svgInstance.emit('destroy'); });
+  await act(async () => { svgInstance.close(); });
+  assert.equal(document.activeElement, thumbnail, 'keyboard trigger regains focus');
 
   await act(async () => {
     openImageViewer({ src: 'data:image/png;base64,broken', alt: 'Broken cached image', source: null });
   });
   await flush();
-  assert.equal(FakePswp.instances.length, 2, 'a failed probe never opens PhotoSwipe');
-  assert.ok(mount.querySelector('[role="dialog"]'), 'the shell keeps showing errors');
-  assert.match(mount.querySelector('[role="status"]')!.textContent!, /could not be loaded/);
-  assert.equal(mount.querySelector('.image-viewer-toolbar')!.nextElementSibling, mount.querySelector('[role="status"]'));
-  await act(async () => {
-    (mount.querySelector('[aria-label="Close image viewer"]') as HTMLButtonElement).click();
-  });
+  assert.equal(FakePswp.instances.length, 3, 'a failed probe opens a library error slide');
+  const broken = FakePswp.instances.at(-1)!;
+  assert.match(broken.elements['pie-image-status'].textContent!, /could not be loaded/);
+  await act(async () => { broken.close(); });
   assert.equal(mount.querySelector('[role="dialog"]'), null, 'closing the shell dismisses it');
   await act(async () => {
     openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Loaded replacement', source: null });
