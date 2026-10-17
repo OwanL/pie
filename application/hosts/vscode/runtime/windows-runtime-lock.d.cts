@@ -1,6 +1,8 @@
 /** Existing, permanent fixed-local-NTFS directory only. No root creation or reclamation.
- * Unexpected owned-server errors are raised as uncaught exceptions; callers must
- * not suppress those and continue protected work. Release also rejects on loss.
+ * Volume qualification is process-cached per device assuming stable mounted volumes;
+ * directory realpath/device/inode identity is checked freshly for every acquisition.
+ * Listener errors do not close the listener or cancel work. Await release to report
+ * the first listener error (or unexpected close); callers must always await release.
  * timeoutMs bounds contention, excluding volume qualification (separate 15s cap).
  */
 export function acquireWindowsRuntimeLock(

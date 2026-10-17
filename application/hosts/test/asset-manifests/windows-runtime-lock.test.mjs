@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, stat } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, rm, symlink, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fork } from 'node:child_process';
-import { once } from 'node:events';
+import { once, EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -59,6 +60,95 @@ if (process.env.PIE_LOCK_TEST_CHILD === '1') {
     child.send({ root, timeoutMs });
     return { child, message, exited };
   }
+
+  // Isolated CommonJS evaluation supplies private dependencies, not a production
+  // test API, and gives each fixture its own process-local qualification cache.
+  async function isolatedLock(probe) {
+    const servers = [];
+    let realpaths = 0;
+    let stats = 0;
+    let inode = 2n;
+    const module = { exports: {} };
+    runInNewContext(await readFile(helper, 'utf8'), {
+      module, Buffer,
+      process: { platform: 'win32', env: {} },
+      require(name) {
+        if (name === 'node:fs/promises') return {
+          realpath: async () => { realpaths++; return 'C:\\root'; },
+          stat: async () => { stats++; return { dev: 1n, ino: inode, isDirectory: () => true }; },
+        };
+        if (name === 'node:child_process') return { execFile: (...args) => {
+          probe().then(stdout => args.at(-1)(null, { stdout }), error => args.at(-1)(error));
+        } };
+        // The real util.promisify special-cases execFile's callback shape; this
+        // fake already supplies the result object.
+        if (name === 'node:net') return { createServer() {
+          const server = new EventEmitter();
+          server.listen = (_options, callback) => { server.listening = true; callback(); };
+          server.close = callback => {
+            server.listening = false;
+            server.emit('close');
+            callback();
+          };
+          servers.push(server);
+          return server;
+        } };
+        return require(name);
+      },
+    });
+    return { acquire: module.exports.acquireWindowsRuntimeLock, servers,
+      counts: () => ({ realpaths, stats }), changeInode: () => { inode++; } };
+  }
+
+  test('qualification shares inflight/success per device and refreshes directory checks', async () => {
+    let probes = 0;
+    let finish;
+    const lock = await isolatedLock(() => { probes++; return new Promise(resolve => { finish = resolve; }); });
+    const a = lock.acquire('C:\\root');
+    const b = lock.acquire('C:\\alias');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(probes, 1);
+    finish('local-fixed-ntfs');
+    await (await a)();
+    await (await b)();
+    lock.changeInode();
+    await (await lock.acquire('C:\\other'))();
+    assert.equal(probes, 1);
+    assert.deepEqual(lock.counts(), { realpaths: 6, stats: 6 });
+  });
+
+  test('failed qualification is evicted for retry', async () => {
+    let probes = 0;
+    const lock = await isolatedLock(async () => {
+      if (++probes === 1) throw new Error('probe failed');
+      return 'local-fixed-ntfs';
+    });
+    await assert.rejects(lock.acquire('C:\\root'), /probe failed/);
+    await (await lock.acquire('C:\\root'))();
+    assert.equal(probes, 2);
+  });
+
+  test('owned listener errors retain ownership and first failure until awaited release', async () => {
+    const lock = await isolatedLock(async () => 'local-fixed-ntfs');
+    const release = await lock.acquire('C:\\root');
+    const server = lock.servers[0];
+    const first = new Error('first listener failure');
+    server.emit('error', first);
+    server.emit('error', new Error('later failure'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(server.listening, true);
+    const released = release();
+    assert.equal(release(), released);
+    await assert.rejects(released, error => error === first);
+    assert.equal(server.listening, false);
+  });
+
+  test('unexpected private listener close is reported by release', async () => {
+    const lock = await isolatedLock(async () => 'local-fixed-ntfs');
+    const release = await lock.acquire('C:\\root');
+    lock.servers[0].emit('close');
+    await assert.rejects(release(), /closed unexpectedly/);
+  });
 
   test('unsupported platform and path forms fail closed without creating roots', async () => {
     await assert.rejects(acquire('relative-path'));
