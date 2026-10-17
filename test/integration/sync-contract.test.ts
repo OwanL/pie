@@ -1322,17 +1322,22 @@ test('image viewer actions are targeted platform effects with actual host capabi
   assert.match(contract, /browser transport does not invent native clipboard or file-shell support/u);
 });
 
-test('local file open prepares one isolated verified loopback listener per request', async () => {
+test('local file open serves capability-scoped folders on one verified host report listener', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /type:'prepareLocalFileOpen', requestId, path, reference\?, workingDirectory\?/u);
   assert.match(contract, /type:'localFileOpenResult', requestId, status:'ready'\|'unavailable'/u);
   assert.match(contract, /Results answer the initiating renderer only/u);
   assert.match(contract, /isolation goal is per host listener, not per report/u);
-  assert.match(contract, /canonical entry file at `\/` and files canonically contained in its parent directory/u);
-  assert.match(contract, /exact verified `Host` header/u);
-  assert.match(contract, /The listener self-verifies a successful entry response on its own loopback/u);
-  assert.match(contract, /Only a trusted loopback-local browser renderer may receive a `popup` URL; a remote\/LAN renderer is answered `unavailable`/u);
-  assert.match(contract, /Ephemeral listeners dispose on idle expiry and at host shutdown/u);
+  assert.match(contract, /exactly one report HTTP listener/u);
+  assert.match(contract, /mints a random capability prefix under that listener/u);
+  assert.match(contract, /files canonically contained in its parent directory/u);
+  assert.match(contract, /exact `Host` header/u);
+  assert.match(contract, /a local `\[::1\]` report host is normalized to `127\.0\.0\.1` so the URL matches the IPv4-only report binding/u);
+  assert.match(contract, /self-verifies a successful entry response/u);
+  assert.match(contract, /answered `unavailable` without preparing anything/u);
+  assert.match(contract, /Capabilities expire after two minutes without an accepted request/u);
+  assert.match(contract, /revoking the final capability closes the report listener/u);
+  assert.match(contract, /never outlives host shutdown, a browser-server stop, or a LAN policy change/u);
   assert.match(contract, /image chips keep the image viewer and image actions, non-HTML files keep the normal editor open/u);
 });
 

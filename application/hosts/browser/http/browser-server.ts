@@ -109,6 +109,7 @@ export class BrowserServer implements BrowserServerService {
   private stopRequested = false;
   private disposed = false;
   private allowedLanAddresses: string[] = [];
+  private readonly reportNetworks: Record<string, { hostname: string; allowLan: boolean }> = {};
   private readonly developmentRendererReloadEnabled: boolean;
   private developmentRendererWatchers: FSWatcher[] = [];
   private developmentRendererReloadTimer: unknown;
@@ -136,7 +137,8 @@ export class BrowserServer implements BrowserServerService {
       getRunningSessionCount: options.getRunningSessionCount,
       onMessage: (msg, context) => {
         const loopback = this.hostLoopbackRenderers[context.rendererId] === true;
-        void this.gate.route(msg, { ...context, hostMicrophoneAllowed: loopback, hostLoopbackBrowser: loopback });
+        void this.gate.route(msg, { ...context, hostMicrophoneAllowed: loopback,
+          hostBrowserNetwork: this.reportNetworks[context.rendererId] });
       },
       onRendererInvalidated: options.onRendererInvalidated,
     });
@@ -502,10 +504,13 @@ export class BrowserServer implements BrowserServerService {
       return;
     }
     const microphoneAllowed = isAllowedBrowserRemoteAddress(req.socket.remoteAddress, false);
-    wss.handleUpgrade(req, socket, head, (ws) => this.onBrowserConnection(ws, microphoneAllowed));
+    // Host has passed the exact interface/port allowlist above. Capture here,
+    // not from command JSON, and replace only its port for the report origin.
+    const network = { hostname: new URL(`http://${req.headers.host}`).hostname, allowLan: this.state.lanEnabled };
+    wss.handleUpgrade(req, socket, head, (ws) => this.onBrowserConnection(ws, microphoneAllowed, network));
   }
 
-  private onBrowserConnection(socket: WebSocket, microphoneAllowed: boolean): void {
+  private onBrowserConnection(socket: WebSocket, microphoneAllowed: boolean, network: { hostname: string; allowLan: boolean }): void {
     const transport = new BrowserRendererTransport(socket, {
       assetVersion: this.staticAssets.getAssetVersion(),
       now: () => this.clock.now(),
@@ -517,6 +522,7 @@ export class BrowserServer implements BrowserServerService {
     this.registrations[registration.rendererId] = registration;
     this.transports[registration.rendererId] = transport;
     this.hostLoopbackRenderers[registration.rendererId] = microphoneAllowed;
+    this.reportNetworks[registration.rendererId] = network;
     transport.start(registration);
     this.emit({ kind: 'client-connected', rendererId: registration.rendererId });
   }
@@ -530,6 +536,7 @@ export class BrowserServer implements BrowserServerService {
     }
     delete this.transports[rendererId];
     delete this.hostLoopbackRenderers[rendererId];
+    delete this.reportNetworks[rendererId];
     // Disconnect cancels every pending inline confirmation for this renderer.
     this.confirmations.cancelForRenderer(rendererId);
     this.emit({ kind: 'client-closed', rendererId, code, reason });

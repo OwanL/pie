@@ -93,7 +93,7 @@ test('serves the entry at / plus contained sibling assets with typed MIME', asyn
     try {
       const session = await service.open(openCommand(path.join(root, 'page.html')), { exists: async () => true, findFiles: async () => [] });
       dispose = session.dispose.bind(session);
-      assert.match(session.url, /^http:\/\/127\.0\.0\.1:\d+\/$/u);
+      assert.match(session.url, /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/u);
 
       const entry = await get(session.url);
       assert.equal(entry.status, 200);
@@ -115,6 +115,7 @@ test('serves the entry at / plus contained sibling assets with typed MIME', asyn
       await dispose?.();
     }
   } finally {
+    await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
@@ -145,6 +146,7 @@ test('canonically fences the parent directory: traversal, escapes, and listing-f
     }
     await fs.rm(outside, { recursive: true, force: true });
   } finally {
+    await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
@@ -158,7 +160,7 @@ test('rejects foreign Host headers and non-GET/HEAD requests', async () => {
     try {
       const port = Number(/:(\d+)\//u.exec(session.url)?.[1]);
       assert.ok(Number.isFinite(port));
-      const foreignHost = await requestRaw(`http://127.0.0.1:${port}/`, { host: 'evil.example:80' });
+      const foreignHost = await requestRaw(session.url, { host: 'evil.example:80' });
       assert.equal(foreignHost.status, 403, 'DNS rebinding via a forged Host must fail closed');
       // Node's http client cannot send an empty Host header; probe with a raw
       // socket so a missing/empty Host is proven to fail closed, too.
@@ -175,7 +177,7 @@ test('rejects foreign Host headers and non-GET/HEAD requests', async () => {
       assert.match(emptyHost, /(?:400|403)\b/u, 'a missing/empty Host header fails closed');
 
       const status = await new Promise<number>((resolve, reject) => {
-        const req = http.request(`http://127.0.0.1:${port}/`, { method: 'POST' }, (res) => {
+        const req = http.request(session.url, { method: 'POST' }, (res) => {
           res.resume();
           res.on('end', () => resolve(res.statusCode ?? 0));
         });
@@ -187,11 +189,12 @@ test('rejects foreign Host headers and non-GET/HEAD requests', async () => {
       await session.dispose();
     }
   } finally {
+    await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('self-check failure disposes the listener and open() throws', async () => {
+test('self-check failure revokes its capability and open() throws', async () => {
   const root = await tempDirectory();
   const service = createLocalFileOpenService({ selfCheck: async () => { throw new Error('unreachable'); } });
   try {
@@ -210,11 +213,12 @@ test('self-check failure disposes the listener and open() throws', async () => {
       await ok.dispose();
     }
   } finally {
+    await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('idle expiry disposes the listener; disposal closes the accept loop', async () => {
+test('idle expiry revokes the capability; the last one also closes the accept loop', async () => {
   const root = await tempDirectory();
   const fake = createFakeClock();
   const service = createLocalFileOpenService({ clock: fake.clock, selfCheck: async () => undefined });
@@ -224,7 +228,56 @@ test('idle expiry disposes the listener; disposal closes the accept loop', async
     const port = Number(/:(\d+)\//u.exec(session.url)?.[1]);
     assert.equal(await isPortClosed(port), false, 'the verified listener accepts connections');
     fake.fireIdleTimers();
-    assert.equal(await isPortClosed(port), true, 'idle expiry closes the listener');
+    assert.equal(await isPortClosed(port), true, 'idle expiry of the final capability closes the grantless listener');
+  } finally {
+    await service.dispose();
+    await service.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('revoking the final capability closes the accept loop; an in-flight open is never closed underneath', async () => {
+  const root = await tempDirectory();
+  const service = createLocalFileOpenService({ selfCheck: async () => undefined });
+  try {
+    await fs.writeFile(path.join(root, 'entry.html'), '<p>entry</p>');
+    const resolver = { exists: async () => true, findFiles: async () => [] };
+    const first = await service.open(openCommand(path.join(root, 'entry.html')), resolver);
+    const port = Number(/:(\d+)\//u.exec(first.url)?.[1]);
+    await first.dispose();
+    assert.equal(await isPortClosed(port), true, 'revoking the final capability closes the listener');
+    // A later open transparently rebinds a fresh report origin.
+    const second = await service.open(openCommand(path.join(root, 'entry.html')), resolver);
+    assert.equal(await get(second.url).then((response) => response.status), 200, 'the fresh origin serves again');
+    await second.dispose();
+  } finally {
+    await service.dispose();
+    await service.dispose();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a local IPv6 loopback report host is normalized to 127.0.0.1', async () => {
+  const root = await tempDirectory();
+  const service = createLocalFileOpenService();
+  try {
+    await fs.writeFile(path.join(root, 'entry.html'), '<p>entry</p>');
+    const resolver = { exists: async () => true, findFiles: async () => [] };
+    for (const raw of ['[::1]', '::1']) {
+      const session = await service.open(
+        { path: path.join(root, 'entry.html'), openIn: 'popup', browserNetwork: { hostname: raw, allowLan: false } },
+        resolver,
+      );
+      try {
+        assert.match(session.url, /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/u,
+          'a [::1] Host never mints a URL the IPv4-only report binding cannot answer');
+        // The real self-check already verified reachability under the
+        // normalized origin and the exact Host gate accepted it.
+        assert.equal((await get(session.url)).status, 200);
+        const foreignHost = await requestRaw(session.url, { host: '[::1]:' + (Number(/:(\d+)\//u.exec(session.url)?.[1]) || 0) });
+        assert.equal(foreignHost.status, 403, 'the bracketed IPv6 form is not a verified Host');
+      } finally { await session.dispose(); }
+    }
   } finally {
     await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
@@ -250,32 +303,33 @@ test('ambiguous or missing requested files fail without starting a listener', as
     );
   } finally {
     await service.dispose();
+    await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('concurrent listeners are bounded and dispose() clears every live one', async () => {
+test('concurrent capabilities are bounded on one report origin and host disposal closes it', async () => {
   const root = await tempDirectory();
   const service = createLocalFileOpenService({ selfCheck: async () => undefined });
   try {
     await fs.writeFile(path.join(root, 'page.html'), 'x');
     const resolver = { exists: async () => true, findFiles: async () => [] };
-    const sessions = [];
-    for (let i = 0; i < LOCAL_FILE_OPEN_POLICY.maxConcurrent; i++) {
-      sessions.push(await service.open(openCommand(path.join(root, 'page.html')), resolver));
-    }
+    const sessions = await Promise.all(Array.from({ length: LOCAL_FILE_OPEN_POLICY.maxConcurrent },
+      () => service.open(openCommand(path.join(root, 'page.html')), resolver)));
     await assert.rejects(
       () => service.open(openCommand(path.join(root, 'page.html')), resolver),
       /Too many prepared files/u,
     );
     const urls = new Set(sessions.map((session) => session.url));
-    assert.equal(urls.size, LOCAL_FILE_OPEN_POLICY.maxConcurrent, 'each listener mints its own distinct origin');
+    assert.equal(urls.size, LOCAL_FILE_OPEN_POLICY.maxConcurrent, 'each open mints its own distinct capability');
+    assert.equal(new Set(sessions.map((session) => new URL(session.url).origin)).size, 1, 'all opens share one report origin');
     await service.dispose();
     for (const session of sessions) {
       const port = Number(/:(\d+)\//u.exec(session.url)?.[1]);
       assert.equal(await isPortClosed(port), true, 'dispose closed every listener');
     }
   } finally {
+    await service.dispose();
     await service.dispose();
     await fs.rm(root, { recursive: true, force: true });
   }

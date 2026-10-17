@@ -80,7 +80,7 @@ const browserContext: RendererCommandContext = {
   rendererId: 'renderer-a',
   rendererGeneration: 7,
   kind: 'browser',
-  hostLoopbackBrowser: true,
+  hostBrowserNetwork: { hostname: '127.0.0.1', allowLan: false },
 };
 
 test('browser renderers receive a verified popup URL targeted to them only', async () => {
@@ -92,12 +92,27 @@ test('browser renderers receive a verified popup URL targeted to them only', asy
     },
   });
   await router.handle(command, browserContext);
-  assert.deepEqual(requested, { path: command.path, reference: 'page.html', workingDirectory: '/workspace', openIn: 'popup' });
+  assert.deepEqual(requested, { path: command.path, reference: 'page.html', workingDirectory: '/workspace', openIn: 'popup', browserNetwork: browserContext.hostBrowserNetwork });
   assert.deepEqual(targeted, [{
     rendererId: browserContext.rendererId,
     message: { type: 'localFileOpenResult', requestId: command.requestId, status: 'ready', url: 'http://127.0.0.1:41575/', openIn: 'popup' },
   }]);
   assert.deepEqual([...broadcast, ...notices], [], 'local file open never broadcasts or notices');
+});
+
+test('LAN browser reports forward the trusted socket hostname instead of refusing remote clients', async () => {
+  let requested: unknown;
+  const network = { hostname: '192.168.1.77', allowLan: true };
+  const { router, targeted } = createRouter({ prepare: async (request) => {
+    requested = request;
+    return { url: 'http://192.168.1.77:41575/capability/' };
+  } });
+  await router.handle(command, { ...browserContext, hostBrowserNetwork: network });
+  assert.deepEqual(requested, { path: command.path, reference: 'page.html', workingDirectory: '/workspace', openIn: 'popup', browserNetwork: network });
+  assert.deepEqual(targeted[0]?.message, {
+    type: 'localFileOpenResult', requestId: command.requestId, status: 'ready',
+    url: 'http://192.168.1.77:41575/capability/', openIn: 'popup',
+  });
 });
 
 test('vscode renderers open externally through the host adapter', async () => {
@@ -108,25 +123,25 @@ test('vscode renderers open externally through the host adapter', async () => {
       return { url: 'http://127.0.0.1:41576/' };
     },
   });
-  await router.handle(command, { ...browserContext, kind: 'vscode', hostLoopbackBrowser: undefined });
+  await router.handle(command, { ...browserContext, kind: 'vscode' });
   assert.equal(requested?.openIn, 'external');
   assert.deepEqual(targeted[0]?.message, {
     type: 'localFileOpenResult', requestId: command.requestId, status: 'ready', url: 'http://127.0.0.1:41576/', openIn: 'external',
   });
 });
 
-test('a non-loopback browser renderer is refused without preparing any listener', async () => {
+test('a browser without verified socket policy is refused without preparing any listener', async () => {
   let calls = 0;
   const { router, targeted } = createRouter({
     prepare: async () => { calls++; return { url: 'http://127.0.0.1:41577/' }; },
   });
-  await router.handle(command, { ...browserContext, hostLoopbackBrowser: false });
+  await router.handle(command, { ...browserContext, hostBrowserNetwork: undefined });
   assert.equal(calls, 0, 'no listener is ever started for a remote browser');
   assert.deepEqual(targeted, [{
     rendererId: browserContext.rendererId,
     message: {
       type: 'localFileOpenResult', requestId: command.requestId, status: 'unavailable',
-      error: 'Local files can be prepared only for a browser connected to this machine.',
+      error: 'The browser connection has no verified report network policy.',
     },
   }]);
 });

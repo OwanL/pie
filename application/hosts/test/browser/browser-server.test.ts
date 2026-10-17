@@ -17,6 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 import { BrowserServer } from '../../browser/http/browser-server';
+import { createLocalFileOpenService } from '../../lib/local-file-open.js';
+import { isLanIPv4Address } from '../../browser/network-access/policy.js';
 import type { BrowserServerLifecycleEvent, BrowserServerOptions } from '../../browser/types';
 import type { RendererCommandContext, ViewState, WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
@@ -262,6 +264,72 @@ test('LAN opt-in binds IPv4 all interfaces and reports/accepts only advertised p
     lanSocket.close();
   } finally {
     await stop();
+  }
+});
+
+test('LAN report click command returns a real nonloopback origin with relative script and image', async (t) => {
+  const address = Object.values(os.networkInterfaces()).flat().find((entry) =>
+    entry?.family === 'IPv4' && !entry.internal && isLanIPv4Address(entry.address))?.address;
+  if (!address) return t.skip('No private IPv4 interface available for genuine LAN socket test');
+  const reports = createLocalFileOpenService();
+  let harness: Harness;
+  harness = await createHarness({
+    getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: true }),
+    getLanIPv4Addresses: () => [address],
+    routeMessage: async (msg, context) => {
+      if (msg.type === 'ready') harness.server.requestState(context.rendererId);
+      if (msg.type !== 'prepareLocalFileOpen') return;
+      assert.deepEqual(context.hostBrowserNetwork, { hostname: address, allowLan: true });
+      const report = await reports.open({ path: msg.path, openIn: 'popup', browserNetwork: context.hostBrowserNetwork }, {
+        exists: async () => true, findFiles: async () => [],
+      });
+      harness.server.postImperative({ type: 'localFileOpenResult', requestId: msg.requestId, status: 'ready', openIn: 'popup', url: report.url }, context.rendererId);
+    },
+  });
+  let ws: WebSocket | undefined;
+  try {
+    await fs.writeFile(path.join(harness.assetDir, 'report.html'), '<script src="report.js"></script><img src="pixel.svg">');
+    await fs.writeFile(path.join(harness.assetDir, 'report.js'), 'document.body.dataset.report = "loaded";');
+    await fs.writeFile(path.join(harness.assetDir, 'pixel.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
+    await harness.server.start();
+    const port = getPort(harness.server);
+    ws = new WebSocket(`ws://${address}:${port}/ws`, { origin: `http://${address}:${port}` });
+    const messages: Record<string, unknown>[] = [];
+    ws.on('message', (data) => messages.push(JSON.parse(String(data))));
+    const wait = async (type: string) => {
+      for (let i = 0; i < 200; i++) {
+        const result = messages.find((message) => message.type === type);
+        if (result) return result;
+        await sleep(10);
+      }
+      throw new Error('Timed out waiting for ' + type);
+    };
+    const hello = await wait('rendererHello');
+    ws.send(JSON.stringify({ type: 'ready', buildId: hello.buildId, viewGeneration: hello.viewGeneration }));
+    await wait('state');
+    ws.send(JSON.stringify({ type: 'prepareLocalFileOpen', path: path.join(harness.assetDir, 'report.html'), requestId: 'lan-click',
+      clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', viewGeneration: hello.viewGeneration }));
+    const result = await wait('localFileOpenResult');
+    const url = new URL(String(result.url));
+    assert.equal(url.hostname, address);
+    assert.notEqual(url.port, String(port), 'report is isolated from Pie HTTP/WS');
+    assert.match(await (await fetch(url)).text(), /report\.js/);
+    const script = await fetch(new URL('report.js', url));
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get('content-type') ?? '', /javascript/);
+    assert.match(await script.text(), /loaded/);
+    const image = await fetch(new URL('pixel.svg', url));
+    assert.equal(image.status, 200);
+    assert.equal(image.headers.get('content-type'), 'image/svg+xml');
+    await assert.rejects(new Promise((resolve, reject) => {
+      const foreign = new WebSocket(`ws://${address}:${port}/ws`, { origin: url.origin });
+      foreign.once('open', () => { foreign.close(); resolve(undefined); });
+      foreign.once('error', reject);
+    }), /403/, 'report origin cannot connect to Pie WebSocket');
+  } finally {
+    ws?.terminate();
+    await reports.dispose();
+    await harness.stop();
   }
 });
 

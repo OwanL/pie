@@ -1,25 +1,7 @@
-/**
- * Shared local-file-open service (host-side).
- *
- * Prepares one ephemeral loopback HTTP listener per requested file. The
- * listener serves that entry file at `/` plus any file inside the canonical
- * parent directory (so sibling scripts and relative assets load), and is
- * otherwise fully isolated from Pie's shared browser server: separate port,
- * separate origin, no webview assets, no state routes.
- *
- * Security invariants:
- *  - binds `127.0.0.1` only, OS-assigned port; one distinct origin per host
- *    listener, never Pie's webview origin;
- *  - exact verified Host header (`127.0.0.1:<port>`); anything else fails
- *    closed (DNS rebinding defense);
- *  - GET/HEAD only, bodies rejected;
- *  - every request path is canonically resolved and must stay inside the
- *    canonical parent directory (`fs.realpath` containment, so symlinks and
- *    `..` cannot escape);
- *  - the listener self-verifies a successful entry response before `open`
- *    resolves, so a reported URL is always a browser-client-reachable Origin;
- *  - idle expiry plus explicit `dispose()` bound listener lifetime, and a
- *    bounded concurrent-listener cap fails closed.
+/** Capability-scoped report folders on one host-owned HTTP listener.
+ * Separate from Pie HTTP/WS. Trusted browser socket policy selects the
+ * advertised hostname and loopback/LAN binding; capabilities expire after
+ * inactivity. Canonical containment fences scripts and relative assets.
  */
 
 import * as http from 'node:http';
@@ -27,11 +9,12 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import { createReadStream, type Stats } from 'node:fs';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { isAllowedBrowserRemoteAddress } from '../browser/network-access/policy.js';
 
 import {
   resolveFilePathWithFallback,
   type FilePathResolverAdapter,
-  type OpenFileRequest,
 } from './image-preview.js';
 import type { LocalFileOpenCommand } from '../../lib/platform-contracts/local-file-open.js';
 
@@ -42,9 +25,9 @@ export type {
 } from '../../lib/platform-contracts/local-file-open.js';
 
 export const LOCAL_FILE_OPEN_POLICY = {
-  /** Idle listeners close themselves; every accepted request resets the timer. */
+  /** Capabilities expire after inactivity; accepted file requests refresh them. */
   idleMs: 2 * 60 * 1000,
-  /** Bounded concurrent listeners; further opens fail closed. */
+  /** Bounded concurrent folder capabilities; further opens fail closed. */
   maxConcurrent: 8,
   /** Self-verification timeout before a URL counts as reachable. */
   selfCheckTimeoutMs: 3_000,
@@ -65,17 +48,16 @@ export interface LocalFileOpenServiceOptions {
 }
 
 export interface LocalFileServeSession {
-  /** Verified loopback origin serving the entry file at `/`. */
+  /** Verified report URL: capability prefix serves the entry and its siblings. */
   url: string;
-  /** Close this listener and its idle timer immediately. Idempotent. */
+  /** Revoke this capability and its idle timer immediately. Idempotent. */
   dispose(): Promise<void>;
 }
 
 export interface LocalFileOpenService {
-  /** Prepare + verify one listener for the requested file. Throws when the
-   *  file is unavailable/ambiguous or no listener can be minted. */
+  /** Prepare and verify a folder capability on the host's report listener. */
   open(request: LocalFileOpenCommand, resolver: FilePathResolverAdapter): Promise<LocalFileServeSession>;
-  /** Close every live listener and cancel its idle timers. Idempotent. */
+  /** Close the host listener and revoke every capability. Idempotent. */
   dispose(): Promise<void>;
 }
 
@@ -131,16 +113,20 @@ function run(command: string, args: string[]): Promise<void> {
   });
 }
 
+/** A local IPv6 loopback Host (`[::1]`) can never reach the IPv4-only report
+ *  binding, so the prepared origin normalizes it to `127.0.0.1`. */
+function normalizeReportHostname(hostname: string): string {
+  return hostname === '[::1]' || hostname === '::1' ? '127.0.0.1' : hostname;
+}
+
 /** One live listener's shared mutable state (the handler must read the port,
  *  which only becomes known after `listen`). */
 interface ListenerState {
   server: http.Server;
-  /** Canonical parent directory served as root (`/` = entry). */
-  root: string;
-  /** Canonical entry file served at `/`. */
-  entry: string;
+  /** Random capability paths, each scoped to one canonical parent folder. */
+  grants: Record<string, { root: string; entry: string; hostname: string; allowLan: boolean; idleTimer?: unknown }>;
+  allowLan: boolean;
   port: number;
-  idleTimer?: unknown;
 }
 
 /** Canonical containment: `candidate` must resolve inside `directory`. */
@@ -150,10 +136,6 @@ function isCanonicalInside(directory: string, candidate: string): boolean {
     || (relative !== '..'
       && !relative.startsWith(`..${path.sep}`)
       && !path.isAbsolute(relative));
-}
-
-function isLoopbackRemoteAddress(remoteAddress: string | undefined): boolean {
-  return remoteAddress !== undefined && remoteAddress.replace(/^::ffff:/u, '') === '127.0.0.1';
 }
 
 function safeRequestPathname(rawUrl: string | undefined): string | null {
@@ -179,15 +161,22 @@ function respondError(res: http.ServerResponse, status: number, extra: Record<st
   res.end();
 }
 
-/** One request cycle: fail-closed Host/loopback gate, contained path
+/** One request cycle: fail-closed Host/network gate, contained path
  *  resolution, streamed file body, and an idle-timer reset per accepted
  *  request. */
-function createRequestHandler(listener: ListenerState, armIdle: (listener: ListenerState) => void): http.RequestListener {
+function createRequestHandler(listener: ListenerState, armIdle: (token: string) => void): http.RequestListener {
   return (req, res) => {
     void (async () => {
       try {
-        if (!isLoopbackRemoteAddress(req.socket.remoteAddress)) return respondError(res, 403);
-        if (req.headers.host !== `127.0.0.1:${listener.port}`) return respondError(res, 403);
+        if (!Object.values(listener.grants).some((grant) => req.headers.host === `${grant.hostname}:${listener.port}`)) return respondError(res, 403);
+        const pathname = safeRequestPathname(req.url);
+        if (pathname === null) return respondError(res, 400);
+        const match = /^\/([a-f0-9]{48})\/(.*)$/u.exec(pathname);
+        const token = match?.[1];
+        const grant = token ? listener.grants[token] : undefined;
+        if (!grant || !match) return respondError(res, 404);
+        if (!isAllowedBrowserRemoteAddress(req.socket.remoteAddress, grant.allowLan)) return respondError(res, 403);
+        if (req.headers.host !== `${grant.hostname}:${listener.port}`) return respondError(res, 403);
 
         const method = req.method ?? 'GET';
         if (method !== 'GET' && method !== 'HEAD') {
@@ -202,26 +191,24 @@ function createRequestHandler(listener: ListenerState, armIdle: (listener: Liste
           res.end();
           return;
         }
-        const pathname = safeRequestPathname(req.url);
-        if (pathname === null) return respondError(res, 400);
-
+        // Capability-prefixed URL preserves relative assets inside this folder.
         // Canonical parent containment: decode, join, realpath, fence.
         let candidate: string | null = null;
         try {
-          const decoded = pathname.replace(/\/+$/u, '');
-          const joined = decoded === '' ? listener.entry : path.join(listener.root, decoded);
+          const decoded = decodeURIComponent(match[2]).replace(/\/+$/u, '');
+          const joined = decoded === '' ? grant.entry : path.join(grant.root, decoded);
           candidate = await fs.realpath(joined);
         } catch {
           candidate = null;
         }
         if (candidate === null) return respondError(res, 404);
-        if (!isCanonicalInside(listener.root, candidate)) return respondError(res, 403);
+        if (!isCanonicalInside(grant.root, candidate)) return respondError(res, 403);
 
         let stat: Stats | null = null;
         try { stat = await fs.stat(candidate); } catch { stat = null; }
         if (!stat?.isFile()) return respondError(res, 404);
 
-        armIdle(listener);
+        armIdle(token!);
         res.writeHead(200, securityHeaders({
           'Content-Type': localFileMimeForExtension(path.extname(candidate)),
           'Content-Length': String(stat.size),
@@ -241,93 +228,104 @@ function createRequestHandler(listener: ListenerState, armIdle: (listener: Liste
 export function createLocalFileOpenService(options: LocalFileOpenServiceOptions = {}): LocalFileOpenService {
   const clock = options.clock ?? DEFAULT_CLOCK;
   const selfCheck = options.selfCheck ?? DEFAULT_SELF_CHECK;
-  /** Live listeners keyed by their exactly-one distinct origin URL. */
-  const live: Record<string, ListenerState> = {};
-
-  const closeListener = (listener: ListenerState): void => {
-    if (listener.idleTimer !== undefined) {
-      clock.clearTimeout(listener.idleTimer);
-      listener.idleTimer = undefined;
-    }
-    if (live[`http://127.0.0.1:${listener.port}/`] === listener) {
-      delete live[`http://127.0.0.1:${listener.port}/`];
-    }
-    listener.server.close();
-    listener.server.closeAllConnections();
+  let listener: ListenerState | undefined;
+  // Serialize opens/disposal so simultaneous clicks share one listener.
+  let pending: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = pending.then(operation);
+    pending = result.catch(() => {});
+    return result;
   };
-
-  const armIdleTimer = (listener: ListenerState): void => {
-    if (listener.idleTimer !== undefined) clock.clearTimeout(listener.idleTimer);
-    listener.idleTimer = clock.setTimeout(() => {
-      listener.idleTimer = undefined;
-      closeListener(listener);
+  /** Opens/disposals in flight; a listener is never closed underneath them. */
+  let activeOpens = 0;
+  const removeGrant = (state: ListenerState, token: string): void => {
+    const grant = state.grants[token];
+    if (grant?.idleTimer !== undefined) clock.clearTimeout(grant.idleTimer);
+    delete state.grants[token];
+  };
+  const close = async (): Promise<void> => {
+    const state = listener;
+    listener = undefined;
+    if (!state) return;
+    for (const token of Object.keys(state.grants)) removeGrant(state, token);
+    await new Promise<void>((resolve) => {
+      state.server.close(() => resolve());
+      state.server.closeAllConnections();
+    });
+  };
+  /** Idle expiry keeps no grantless listener bound: the last revoked or
+   *  expired capability also closes the accept loop. Skipped while an open
+   *  is still preparing (it will mint its grant before returning). */
+  const maybeClose = (state: ListenerState): void => {
+    if (activeOpens > 0 || listener !== state || Object.keys(state.grants).length > 0) return;
+    void close();
+  };
+  const arm = (state: ListenerState, token: string): void => {
+    const grant = state.grants[token];
+    if (!grant) return;
+    if (grant.idleTimer !== undefined) clock.clearTimeout(grant.idleTimer);
+    grant.idleTimer = clock.setTimeout(() => {
+      removeGrant(state, token);
+      maybeClose(state);
     }, LOCAL_FILE_OPEN_POLICY.idleMs);
   };
-
-  /** Resolve exactly as an open-file request does, then require a real file. */
-  async function resolveEntry(request: OpenFileRequest, resolver: FilePathResolverAdapter): Promise<string> {
-    const resolution = await resolveFilePathWithFallback(request, resolver);
-    const name = request.reference?.trim() || request.path;
-    if (resolution.status === 'ambiguous') {
-      throw new Error(`The file reference "${name}" is ambiguous; it cannot be prepared for open.`);
-    }
-    if (resolution.status !== 'found') throw new Error(`Could not find file "${name}".`);
-    const stat = await fs.stat(resolution.path);
-    if (!stat.isFile()) throw new Error('The requested path is not a file.');
-    return resolution.path;
-  }
-
   return {
-    async open(request: LocalFileOpenCommand, resolver: FilePathResolverAdapter): Promise<LocalFileServeSession> {
-      if (Object.keys(live).length >= LOCAL_FILE_OPEN_POLICY.maxConcurrent) {
-        throw new Error('Too many prepared files are still open; retry shortly.');
-      }
-      const entryPath = await resolveEntry(request, resolver);
-      const canonicalRoot = await fs.realpath(path.dirname(path.resolve(entryPath)));
-      const canonicalEntry = await fs.realpath(path.join(canonicalRoot, path.basename(path.resolve(entryPath))));
-      if (!isCanonicalInside(canonicalRoot, canonicalEntry)) {
-        throw new Error('The requested file is outside its canonical parent directory.');
-      }
-
-      const listener: ListenerState = {
-        server: null as unknown as http.Server,
-        root: canonicalRoot,
-        entry: canonicalEntry,
-        port: 0,
-      };
-      const port = await new Promise<number>((resolvePort, rejectPort) => {
-        const server = http.createServer(createRequestHandler(listener, armIdleTimer));
-        listener.server = server;
-        const onError = (error: Error): void => { server.off('listening', onListening); rejectPort(error); };
-        const onListening = (): void => {
-          server.off('error', onError);
-          const address = server.address();
-          resolvePort(typeof address === 'object' && address !== null ? address.port : 0);
-        };
-        server.once('error', onError);
-        server.once('listening', onListening);
-        server.listen(0, '127.0.0.1');
-      });
-      listener.port = port;
-
-      const url = `http://127.0.0.1:${port}/`;
-      live[url] = listener;
+    open: (request, resolver) => serialize(async () => {
+      activeOpens++;
       try {
-        // Only a self-verified URL is ever reported back.
-        await selfCheck(url);
-      } catch (error) {
-        closeListener(listener);
-        throw error;
+        return await prepareGrant(request, resolver);
+      } finally {
+        activeOpens--;
+        if (listener) maybeClose(listener);
       }
-      armIdleTimer(listener);
+    }),
+    dispose: () => serialize(close),
+  };
+
+  async function prepareGrant(
+    request: LocalFileOpenCommand,
+    resolver: FilePathResolverAdapter,
+  ): Promise<LocalFileServeSession> {
+      const resolution = await resolveFilePathWithFallback(request, resolver);
+      const name = request.reference?.trim() || request.path;
+      if (resolution.status === 'ambiguous') throw new Error(`The file reference "${name}" is ambiguous; it cannot be prepared for open.`);
+      if (resolution.status !== 'found') throw new Error(`Could not find file "${name}".`);
+      const entry = await fs.realpath(resolution.path);
+      if (!(await fs.stat(entry)).isFile()) throw new Error('The requested path is not a file.');
+      const root = await fs.realpath(path.dirname(path.resolve(resolution.path)));
+      if (!isCanonicalInside(root, entry)) throw new Error('The requested file is outside its canonical parent directory.');
+      const hostname = normalizeReportHostname(request.browserNetwork?.hostname ?? '127.0.0.1');
+      const allowLan = request.browserNetwork?.allowLan === true;
+      if (listener && request.browserNetwork && listener.allowLan !== allowLan) await close();
+      if (!listener) {
+        const state: ListenerState = { server: null as unknown as http.Server, grants: {}, allowLan, port: 0 };
+        state.server = http.createServer(createRequestHandler(state, (token) => arm(state, token)));
+        state.server.on('upgrade', (_req, socket) => socket.destroy());
+        await new Promise<void>((resolve, reject) => {
+          state.server.once('error', reject);
+          state.server.listen(0, allowLan ? '0.0.0.0' : '127.0.0.1', () => {
+            state.server.off('error', reject);
+            const address = state.server.address();
+            if (typeof address !== 'object' || !address) return reject(new Error('No report listener address.'));
+            state.port = address.port;
+            resolve();
+          });
+        });
+        listener = state;
+      }
+      const state = listener;
+      if (Object.keys(state.grants).length >= LOCAL_FILE_OPEN_POLICY.maxConcurrent) throw new Error('Too many prepared files are still open; retry shortly.');
+      const token = randomBytes(24).toString('hex');
+      state.grants[token] = { root, entry, hostname, allowLan };
+      const url = 'http://' + hostname + ':' + state.port + '/' + token + '/';
+      try { await selfCheck(url); }
+      catch (error) { removeGrant(state, token); throw error; }
+      arm(state, token);
       return {
         url,
-        dispose: async () => { closeListener(listener); },
+        // Revoking the final capability also closes the (now grantless) accept
+        // loop, skipped while another open is preparing on this listener.
+        dispose: async () => { removeGrant(state, token); maybeClose(state); },
       };
-    },
-
-    async dispose(): Promise<void> {
-      for (const listener of Object.values(live)) closeListener(listener);
-    },
-  };
+  }
 }

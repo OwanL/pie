@@ -294,6 +294,10 @@ test('prepareLocalFileOpen carries only bounded open context', () => {
     reference: 'page.html', workingDirectory: '/workspace', clientCommandId: UUID,
   });
   expectRejected({ type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html', openIn: 'popup', clientCommandId: UUID });
+  for (const field of ['browserNetwork', 'hostBrowserNetwork']) {
+    expectRejected({ type: 'prepareLocalFileOpen', requestId: 'local-file-open:1', path: '/workspace/page.html',
+      [field]: { hostname: '192.168.1.77', allowLan: true }, clientCommandId: UUID });
+  }
   expectRejected({
     type: 'prepareLocalFileOpen', requestId: 'local-file-open:1',
     path: 'x'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1), clientCommandId: UUID,

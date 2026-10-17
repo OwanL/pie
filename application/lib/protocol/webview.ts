@@ -206,10 +206,10 @@ export interface RendererCommandContext {
    *  that this browser is loopback-local and the host permits microphone use.
    *  Never populated from renderer JSON. */
   hostMicrophoneAllowed?: boolean;
-  /** True only when the trusted browser-server transport has established
-   *  that this browser renderer is loopback-local, so the renderer can reach
-   *  a loopback-only prepared origin URL. Never populated from renderer JSON. */
-  hostLoopbackBrowser?: boolean;
+  /** The validated WebSocket Host (normalized to `127.0.0.1` for a local
+   *  `[::1]`, which the IPv4-only report origin cannot serve) and the browser
+   *  listener's LAN policy; never renderer JSON. */
+  hostBrowserNetwork?: { hostname: string; allowLan: boolean };
 }
 
 export interface RenderEvidenceBase {

@@ -1,12 +1,9 @@
 /**
- * One-shot local file open for browsers: the host prepares an ephemeral,
- * loopback-only HTTP origin that serves one requested file plus its
- * canonical parent directory (so sibling scripts and relative assets load),
- * verifies the origin is reachable, and then hands the verified URL back.
- *
- * This is deliberately NOT Pie's shared browser-server listener: each
- * prepared file gets its own distinct host listener and therefore its own
- * distinct origin, isolated from the webview origin. Surface policy:
+ * Local file open uses one host-owned report listener, separate from Pie's
+ * HTTP/WS origin. Each open mints an expiring capability for a canonical
+ * folder so sibling scripts and relative assets load. Browser URLs use the
+ * validated socket Host (normalized to `127.0.0.1` for a local `[::1]`) and
+ * browser listener LAN policy; VS Code uses loopback. Surface policy:
  * a desktop host may open the URL in the OS default browser
  * (`openIn:'external'`); browser renderers open the URL as their own popup
  * (`openIn:'popup'`) and the host must never shell out on their behalf.
@@ -27,4 +24,6 @@ export interface LocalFileOpenRequest {
 /** Full adapter request: resolution inputs plus the requested open surface. */
 export type LocalFileOpenCommand = LocalFileOpenRequest & {
   openIn: LocalFileOpenSurface;
+  /** Host-only socket policy, never accepted from renderer JSON. */
+  browserNetwork?: { hostname: string; allowLan: boolean };
 };

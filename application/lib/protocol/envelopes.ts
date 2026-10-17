@@ -42,9 +42,13 @@
  * v13: transcript image previews use a renderer-targeted bounded request/result
  * pair; image data remains ephemeral and outside ViewState snapshots.
  *
- * v14: `prepareLocalFileOpen`/targeted `localFileOpenResult` pair: browsers
- * and desktop hosts can open a verified, isolated loopback origin that serves
- * one local HTML file plus its sibling directory. An older webview build must
- * not send the new command, so the version bumps fail closed.
+ * v14: `prepareLocalFileOpen`/targeted `localFileOpenResult` pair: the host
+ * serves renderer-requested local files from one isolated report origin per
+ * host integration, where each open mints an expiring capability for a
+ * canonical folder (the HTML entry plus its sibling directory). Browser
+ * origins reuse the validated socket Host (normalized to `127.0.0.1` for a
+ * local `[::1]`) under the browser listener's LAN policy, and VS Code origins
+ * stay loopback. An older webview build must not send the new command, so the
+ * version bumps fail closed.
  */
 export const WEBVIEW_PROTOCOL_VERSION = 14;

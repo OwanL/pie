@@ -44,7 +44,7 @@ test('standalone prepareLocalFileOpen serves html with siblings and disposes at 
     const prepared = await platform.editor.prepareLocalFileOpen!({
       path: path.join(root, 'page.html'), openIn: 'popup',
     });
-    assert.match(prepared.url, /^http:\/\/127\.0\.0\.1:\d+\/$/u, 'a loopback-only verified origin');
+    assert.match(prepared.url, /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/u, 'a loopback-only verified origin');
     const entry = await fetch(prepared.url);
     assert.equal(entry.status, 200);
     assert.equal(entry.headers.get('content-type'), 'text/html; charset=utf-8');

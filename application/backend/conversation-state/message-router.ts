@@ -59,7 +59,7 @@ export interface MessageRouterPlatform {
    *  reject rather than stop the sole UI. */
   setBrowserServerEnabled(enabled: boolean): Promise<void>;
   performImageAction?(request: import('../../lib/platform-contracts/image-actions.js').ImageActionRequest): Promise<void>;
-  /** Prepare + verify an isolated loopback origin opening a local file
+  /** Prepare + verify an isolated report origin opening a local file
    *  (external opening is the adapter's own decision via `openIn`). */
   prepareLocalFileOpen?(request: import('../../lib/platform-contracts/local-file-open.js').LocalFileOpenCommand): Promise<{ url: string }>; /** Read a bounded display-safe image preview through the host file adapter. */
   previewImageFile?(request: {
@@ -924,10 +924,9 @@ export class MessageRouter {
   }
 
   /** `prepareLocalFileOpen` — side-effect-only, exactly like image actions:
-   *  prepare + verify an isolated loopback origin, then answer the INITIATING
-   *  renderer only. Surface policy: a browser renderer opens the verified URL
-   *  itself as a popup, and only a trusted loopback-local browser may do so;
-   *  a `vscode` renderer lets the host adapter open the URL externally. */
+   *  prepare + verify an isolated report origin, then answer the INITIATING
+   *  renderer only. Browser popup URLs use the validated socket's hostname
+   *  and network policy; a `vscode` renderer opens externally via the host. */
   private async onPrepareLocalFileOpen(
     msg: Extract<WebviewToHostMessage, { type: 'prepareLocalFileOpen' }>,
     context?: RendererCommandContext,
@@ -943,12 +942,12 @@ export class MessageRouter {
     }): void => {
       this.sidebarProvider.postImperativeToRenderer?.(context!.rendererId, result);
     };
-    // A remote/LAN browser can never reach a loopback-only origin: fail
-    // closed before starting any listener.
-    if (openIn === 'popup' && context!.hostLoopbackBrowser !== true) {
+    // Network reachability is established by the validated browser socket,
+    // never by renderer-provided command fields.
+    if (openIn === 'popup' && !context!.hostBrowserNetwork) {
       postResult({
         type: 'localFileOpenResult', requestId: msg.requestId, status: 'unavailable',
-        error: 'Local files can be prepared only for a browser connected to this machine.',
+        error: 'The browser connection has no verified report network policy.',
       });
       return;
     }
@@ -961,6 +960,7 @@ export class MessageRouter {
         ...(msg.reference !== undefined ? { reference: msg.reference } : {}),
         ...(msg.workingDirectory !== undefined ? { workingDirectory: msg.workingDirectory } : {}),
         openIn,
+        ...(openIn === 'popup' ? { browserNetwork: context!.hostBrowserNetwork } : {}),
       }));
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Local file open failed.';

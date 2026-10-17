@@ -185,6 +185,7 @@ interface StubRecorder {
   browserEnabledSetting: boolean;
   browserEnabledPersistenceError: boolean;
   browserServerFactoryCalls: number;
+  localFileOpenDisposes: number;
 }
 
 function createPlatformFixture(options: {
@@ -204,6 +205,7 @@ function createPlatformFixture(options: {
     browserEnabledSetting: options.browserServerEnabled ?? false,
     browserEnabledPersistenceError: false,
     browserServerFactoryCalls: 0,
+    localFileOpenDisposes: 0,
   };
   const renderer: HostRendererSurface = {
     postState: () => { recorder.rendererPostState++; },
@@ -258,6 +260,7 @@ function createPlatformFixture(options: {
       openFilePicker: async () => undefined,
       openSettings: async () => { recorder.editorCalls.push('openSettings'); },
       openFileInEditor: async (filePath) => { recorder.editorCalls.push(`open:${filePath}`); },
+      disposeLocalFileOpen: async () => { recorder.localFileOpenDisposes++; },
     },
     getWorkspaceAnalyticsId: () => 'test-workspace',
     getLegacyWorkspaceAnalyticsIds: () => ['test-workspace'],
@@ -482,7 +485,7 @@ test('HostRuntime rebinds the shared server when LAN exposure changes', async ()
   }));
   let runtime: HostRuntime | undefined;
   try {
-    const { platform } = createPlatformFixture({
+    const { platform, recorder } = createPlatformFixture({
       extensionPath,
       browserServerEnabled: true,
       browserServerPort: 0,
@@ -498,6 +501,7 @@ test('HostRuntime rebinds the shared server when LAN exposure changes', async ()
     assert.equal(state?.lanEnabled, true, 'the actual listener is rebound with LAN enabled');
     assert.equal(runtime.browserServer.getState().bindAddress, '0.0.0.0');
     assert.equal(state?.changeError, null);
+    assert.equal(recorder.localFileOpenDisposes, 1, 'prepared report capabilities are revoked when the LAN policy rebinds the server');
 
     await runtime.handleWebviewMessage({ type: 'setBrowserServerLanEnabled', enabled: false } as WebviewToHostMessage);
     state = runtime.buildViewState().browserServer;
@@ -506,6 +510,7 @@ test('HostRuntime rebinds the shared server when LAN exposure changes', async ()
     assert.equal(state?.lanEnabled, false);
     assert.deepEqual(state?.lanUrls, []);
     assert.equal(runtime.browserServer.getState().bindAddress, '127.0.0.1');
+    assert.equal(recorder.localFileOpenDisposes, 2, 'every server stop revokes prepared report capabilities again');
   } finally {
     await runtime?.shutdown();
     delete process.env.PIE_DATA_DIR;

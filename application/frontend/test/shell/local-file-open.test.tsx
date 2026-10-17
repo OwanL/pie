@@ -68,7 +68,8 @@ test('html detection is leaf-based, extension-bound, and case-insensitive', () =
   assert.equal(isLocalHtmlFilePath(''), false);
 });
 
-test('browser surfaces pre-open the popup inside the click activation and navigate it on the verified result', () => {
+for (const reportUrl of ['http://127.0.0.1:41575/capability/', 'http://192.168.1.77:41575/capability/']) {
+test(`browser click pre-opens its popup and navigates to verified report ${reportUrl}`, () => {
   setTransportMeta('browser');
   const opened: Array<FakePopup | null> = [];
   (globalThis as { window: { open: () => Window | null } }).window.open = (): Window | null => {
@@ -95,9 +96,9 @@ test('browser surfaces pre-open the popup inside the click activation and naviga
 
     assert.equal(receiveLocalFileOpenResult({
       type: 'localFileOpenResult', requestId: command.requestId, status: 'ready',
-      url: 'http://127.0.0.1:41575/page.html', openIn: 'popup',
+      url: reportUrl, openIn: 'popup',
     }), true);
-    assert.equal(opened[0]?.href, 'http://127.0.0.1:41575/page.html', 'the placeholder navigates to the verified origin');
+    assert.equal(opened[0]?.href, reportUrl, 'the placeholder navigates to the verified origin');
     assert.equal(opened[0]?.closed, false);
     assert.deepEqual(feedbacks, [], 'a successful popup needs no feedback');
   } finally {
@@ -105,6 +106,8 @@ test('browser surfaces pre-open the popup inside the click activation and naviga
     clearLocalFileOpenRequests();
   }
 });
+
+}
 
 test('a blocked popup fails before any host request', () => {
   setTransportMeta('browser');

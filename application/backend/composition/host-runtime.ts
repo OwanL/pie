@@ -1189,6 +1189,16 @@ export class HostRuntime {
     return operation;
   }
 
+  /** The report origin's address policy is tied to the browser-server
+   *  instance: prepared local-file-open capabilities must never outlive a
+   *  server stop or LAN restart (idle expiry and host shutdown disposes
+   *  separately). A failed dispose never blocks the listener change. */
+  private async closeLocalFileOpenReports(): Promise<void> {
+    try { await this.platform.editor.disposeLocalFileOpen?.(); } catch (error) {
+      appendPieLog('warn', 'local-file-open', 'dispose failed', { error: toErrorMessage(error) });
+    }
+  }
+
   private async applyBrowserServerLanEnabled(enabled: boolean): Promise<void> {
     this.browserServerLanChange = { pending: true, requested: enabled, requestedEnabled: null, error: null };
     this.scheduleRender();
@@ -1200,7 +1210,10 @@ export class HostRuntime {
       // disabled it must never implicitly start the server.
       if (previousSettings.enabled
         && (previousSettings.allowLan !== enabled || !previousState.running)) {
-        if (previousState.running) await this.browserServer.stop();
+        if (previousState.running) {
+          await this.browserServer.stop();
+          await this.closeLocalFileOpenReports();
+        }
         const outcome = await this.browserServer.start();
         if (outcome.kind === 'failed') {
           throw new Error(outcome.reason);
@@ -1240,6 +1253,7 @@ export class HostRuntime {
         }
       } else if (!enabled && previousState.running) {
         await this.browserServer.stop();
+        await this.closeLocalFileOpenReports();
       }
       this.browserServerLanChange = { pending: false, requested: null, requestedEnabled: null, error: null };
     } catch (error) {
@@ -1438,11 +1452,9 @@ export class HostRuntime {
       // Clear any pending timers first so they cannot fire into a torn-down
       // store / renderer after dispose.
       this.effectRunner.dispose();
-      // Ephemeral local-file-open listeners are host-owned: dispose them here
-      // (idle expiry is the normal path) rather than outliving shutdown.
-      try { await this.platform.editor.disposeLocalFileOpen?.(); } catch (error) {
-        appendPieLog('warn', 'local-file-open', 'dispose failed', { error: toErrorMessage(error) });
-      }
+      // Ephemeral local-file-open capabilities are host-owned: dispose them
+      // here (idle expiry is the normal path) rather than outliving shutdown.
+      await this.closeLocalFileOpenReports();
       // Drain local microphone/model ownership before allowing runtime collection.
       // A failed drain must not prevent the other owned services from cleaning up.
       let dictationShutdownError: unknown;
