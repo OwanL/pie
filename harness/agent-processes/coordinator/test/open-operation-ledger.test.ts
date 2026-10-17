@@ -35,9 +35,9 @@ test('open shares pending work and retains committed snapshot before publication
   assert.throws(() => ledger.status('open', '/other'), /another session path/);
 });
 
-test('payload eviction retains outcomes and capacity rejects new identity before execution', async () => {
+test('payload eviction retains outcomes and permits replay without reexecution', async () => {
   const bytes = Buffer.byteLength(JSON.stringify(snapshot));
-  const ledger = new OpenOperationLedger({ maxRecords: 2, maxBytes: bytes });
+  const ledger = new OpenOperationLedger({ maxBytes: bytes });
   let calls = 0;
   const execute = async (commit: (value: SessionOpenedPayload) => void) => { calls++; commit(snapshot); };
   await ledger.run({ operationId: 'one', sessionPath: '/session', execute });
@@ -45,19 +45,33 @@ test('payload eviction retains outcomes and capacity rejects new identity before
   assert.equal(ledger.status('one', '/session').state, 'committed');
   assert.equal(ledger.status('one', '/session').snapshot, undefined);
   await ledger.run({ operationId: 'one', sessionPath: '/session', execute });
-  assert.throws(() => ledger.run({ operationId: 'three', sessionPath: '/session', execute }), /capacity/);
   assert.equal(calls, 2);
-  assert.equal(ledger.status('absent', '/session').state, 'unknown');
+  const unknown = ledger.status('absent', '/session');
+  assert.equal(unknown.state, 'unknown');
+  assert.equal('committed' in unknown, false);
+});
+
+test('more than 512 opens retain old identities with a tiny payload budget', async () => {
+  const ledger = new OpenOperationLedger({ maxBytes: 1 });
+  let calls = 0;
+  const execute = async (commit: (value: SessionOpenedPayload) => void) => { calls++; commit(snapshot); };
+  for (let index = 0; index < 520; index++) {
+    await ledger.run({ operationId: `open-${index}`, sessionPath: '/session', execute });
+  }
+  assert.equal(calls, 520);
+  assert.equal(ledger.status('open-0', '/session').state, 'committed');
+  assert.equal(ledger.status('open-0', '/session').snapshot, undefined);
+  await ledger.run({ operationId: 'open-0', sessionPath: '/session', execute });
+  assert.equal(calls, 520);
 });
 
 test('failure and pending identities cannot be evicted or reexecuted', async () => {
-  const ledger = new OpenOperationLedger({ maxRecords: 1, maxBytes: 0 });
+  const ledger = new OpenOperationLedger({ maxBytes: 0 });
   let calls = 0;
   const options = { operationId: 'bad', sessionPath: '/session', execute: async () => {
     calls++; throw new Error('read rejected');
   } };
   const result = ledger.run(options);
-  assert.throws(() => ledger.run({ ...options, operationId: 'new' }), /capacity/);
   await assert.rejects(result, /read rejected/);
   await assert.rejects(ledger.run(options), /read rejected/);
   assert.equal(calls, 1);

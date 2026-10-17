@@ -2,33 +2,31 @@ import * as path from 'node:path';
 import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
 import { BackendError } from './server-io.js';
 
-export type OpenOperationStatus = {
-  operationId: string;
-  state: 'unknown' | 'pending' | 'committed' | 'failed';
-  committed: boolean;
-  snapshot?: SessionOpenedPayload;
-  error?: { code: string; message: string };
-};
+export type OpenOperationStatus =
+  | { operationId: string; state: 'unknown' }
+  | { operationId: string; state: 'pending'; committed: false }
+  | { operationId: string; state: 'committed'; committed: true; snapshot?: SessionOpenedPayload }
+  | { operationId: string; state: 'failed'; committed: false; error: { code: string; message: string } };
+type KnownOpenOperationStatus = Exclude<OpenOperationStatus, { state: 'unknown' }>;
 type Entry = {
   intent: string;
   sessionPath: string;
-  status: OpenOperationStatus;
+  status: KnownOpenOperationStatus;
   promise: Promise<{ ok: true; sessionPath: string }>;
   snapshotJson?: string;
 };
 
-/** Generation-local exactly-once open authority. Payload eviction never removes
- * identity/outcome tombstones. Once identity capacity is full NEW tracked opens
- * fail before mutation; legacy opens without an operationId remain unaffected. */
+/** Generation-local exactly-once open authority. Snapshot payload eviction never
+ * removes identity/outcome tombstones; legacy opens without an operationId
+ * remain unaffected. */
 export class OpenOperationLedger {
   private readonly entries = new Map<string, Entry>();
   private readonly payloads = new Map<string, number>();
   private payloadBytes = 0;
 
-  constructor(private readonly limits = { maxRecords: 512, maxBytes: 8 * 1024 * 1024 }) {
-    if (!Number.isSafeInteger(limits.maxRecords) || limits.maxRecords < 1
-      || !Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 0) {
-      throw new Error('Open operation limits require positive maxRecords and nonnegative maxBytes.');
+  constructor(private readonly limits = { maxBytes: 8 * 1024 * 1024 }) {
+    if (!Number.isSafeInteger(limits.maxBytes) || limits.maxBytes < 0) {
+      throw new Error('Open operation maxBytes must be a nonnegative safe integer.');
     }
   }
 
@@ -36,15 +34,20 @@ export class OpenOperationLedger {
 
   status(operationId: string, sessionPath: string): OpenOperationStatus {
     const entry = this.entries.get(operationId);
-    if (!entry) return { operationId, state: 'unknown', committed: false };
+    if (!entry) return { operationId, state: 'unknown' };
     if (entry.sessionPath !== path.resolve(sessionPath)) {
       throw new BackendError('OPERATION_INTENT_MISMATCH', 'Open operation belongs to another session path.');
     }
-    return {
-      ...entry.status,
-      ...(entry.status.error ? { error: { ...entry.status.error } } : {}),
-      ...(entry.snapshotJson ? { snapshot: JSON.parse(entry.snapshotJson) as SessionOpenedPayload } : {}),
-    };
+    if (entry.status.state === 'committed') {
+      return {
+        ...entry.status,
+        ...(entry.snapshotJson ? { snapshot: JSON.parse(entry.snapshotJson) as SessionOpenedPayload } : {}),
+      };
+    }
+    if (entry.status.state === 'failed') {
+      return { ...entry.status, error: { ...entry.status.error } };
+    }
+    return { ...entry.status };
   }
 
   run(options: {
@@ -60,9 +63,6 @@ export class OpenOperationLedger {
     if (existing) {
       if (existing.intent !== intent) throw new BackendError('OPERATION_INTENT_MISMATCH', 'Operation was already used for another open intent.');
       return existing.promise;
-    }
-    if (this.entries.size >= this.limits.maxRecords) {
-      throw new BackendError('OPEN_OPERATION_CAPACITY', 'Open operation identity capacity exhausted for this backend generation.');
     }
     const entry: Entry = {
       intent, sessionPath,
