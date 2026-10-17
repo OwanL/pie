@@ -7,6 +7,7 @@
  */
 
 import { readRuntimeContext, type TreeBudget } from "./runtime-context.js";
+import { createSubagentBackendTools } from "./backend-tools-runtime.js";
 import { subagentSystemPrompt } from "./system-prompt.js";
 export { subagentRuntime, readRuntimeContext, type TreeBudget, type ProcessPermitScope, type SubagentRuntimeContext } from "./runtime-context.js";
 import { createHash } from "node:crypto";
@@ -1473,6 +1474,7 @@ export async function runSingleAgent(
 			model: resolvedModel,
 			thinkingLevel,
 			tools: effectiveTools,
+			customTools: createSubagentBackendTools(),
 			excludeTools: [...UNSUPPORTED_SUBAGENT_TOOLS],
 			sessionManager: childSessionManager,
 			resourceLoader,

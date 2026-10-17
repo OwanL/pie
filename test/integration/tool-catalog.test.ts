@@ -148,10 +148,12 @@ test('SDK discovery loads every catalog extension tool once from its stable path
   }
 });
 
-test('inventory mirrors primary eligibility while in-memory children exclude host lifecycle tools', () => {
+test('inventory mirrors primary eligibility while children receive read-only session control', () => {
   assert.deepEqual(pieToolsForContext('inventory'), pieToolsForContext('primary'));
-  assert.deepEqual(unavailablePieToolNames('subagent'), ['wakeup_timer', 'session_control']);
-  assert.deepEqual(createBackendTools({ kind: 'subagent' }), []);
+  assert.deepEqual(unavailablePieToolNames('subagent'), ['wakeup_timer']);
+  const child = createBackendTools({ kind: 'subagent', requestSessionControl: async () => { throw new Error('unused'); } });
+  assert.deepEqual(child.map(tool => tool.name), ['session_control']);
+  assert.deepEqual(child[0].parameters.properties.action.enum, ['list', 'read']);
 });
 
 test('primary and inventory assemble identical backend definitions without giving inventory a transport', async () => {
@@ -175,9 +177,10 @@ test('primary and inventory assemble identical backend definitions without givin
   const surface = (tools: typeof primary) => tools.map(({ execute: _execute, ...definition }) => definition);
   assert.deepEqual(surface(inventory), surface(primary));
   const context = { sessionManager: { getSessionFile: () => 'C:/session.jsonl' } } as never;
-  const denied = await inventory[0].execute('inventory-call', { action: 'list' }, undefined, undefined, context);
-  assert.equal('isError' in denied && denied.isError, true);
-  assert.match(JSON.stringify(denied.content), /Inventory tool definitions cannot execute/);
+  await assert.rejects(
+    inventory[0].execute('inventory-call', { action: 'list' }, undefined, undefined, context),
+    /Inventory tool definitions cannot execute/,
+  );
   assert.equal(requests, 0);
   await primary[0].execute('primary-call', { action: 'list' }, undefined, undefined, context);
   assert.equal(requests, 1);

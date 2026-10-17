@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Model, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
+import { installSubagentBackendTools } from "../backend-tools-runtime.js";
 import type { AgentConfig } from "../../../agent-instructions/agent-discovery/agents.js";
 
 interface CapturingState {
@@ -119,12 +120,29 @@ test("runSingleAgent omits catalog tools unsupported by in-memory children", asy
 			["read", "wakeup_timer", "session_control", "bash"],
 			{ sdk },
 		);
-		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "bash"]);
-		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["wakeup_timer", "session_control"]);
+		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "session_control", "bash"]);
+		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["wakeup_timer"]);
 	} finally {
 		if (previous === undefined) delete process.env[DROP_ENV];
 		else process.env[DROP_ENV] = previous;
 	}
+});
+
+test("runSingleAgent injects worker-owned custom tools and keeps the child allowlist", async () => {
+	const customTool = { name: "session_control" };
+	const uninstall = installSubagentBackendTools(() => [customTool] as never);
+	try {
+		const { sdk, state } = createCapturingSdk();
+		await runSingleAgent(
+			process.cwd(), [makeAgent({ tools: ["read", "session_control"] })], "worker", "do work",
+			undefined, undefined, undefined, undefined,
+			details, makeModelRegistry(), undefined, selection,
+			undefined, undefined, undefined, undefined, undefined, { sdk },
+		);
+		assert.deepEqual(state.createSessionArgs[0].customTools, [customTool]);
+		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "session_control"]);
+		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["wakeup_timer"]);
+	} finally { uninstall(); }
 });
 
 test("runSingleAgent subtracts the drop-tools list from an agent's explicit tools frontmatter", async () => {

@@ -15,8 +15,8 @@ import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/ac
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../lib/rpc/jsonl.js';
 import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-logging/error-message';
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
-import { boundTranscriptSnapshot } from '../../session-storage/transcripts/snapshot-boundary.js';
-import { projectSessionControlTranscript } from './session-control-transcript.js';
+import { readSessionControlTranscript, SessionControlReadError, type SessionControlReadOptions } from './session-control-read.js';
+import { SessionControlOperations, type SessionControlMutation } from './session-control-operations.js';
 import { selectSessionControlModel, parseBucketConfig, type SessionControlModelSelection } from './session-control-model-selection.js';
 import { parseProviderToggles } from '../../tools/subagent/provider-toggles.js';
 import type { BucketTier } from '../../tools/subagent/bucket-config.js';
@@ -698,6 +698,8 @@ export class BackendServer {
    *  §§1–2). Allocation and publication ownership; no coordinator JSONL write
    *  while a worker owns a session's lease. */
   private readonly liveSessionTitles = new LiveSessionTitles();
+  private readonly sessionControlOperations = new SessionControlOperations();
+  private readonly sessionControlCreators = new Map<string, { sessionId: string; creator?: SessionControlSenderIdentity }>();
   /** Initial namespace hydration from the first complete restored host
    *  membership. The namespace stays unavailable (fail closed) until this
    *  settles; transient failures get a finite, backoff-bounded retry budget. */
@@ -3428,6 +3430,7 @@ export class BackendServer {
       if (this.hostMembershipClosing.has(key)) continue;
       this.liveSessionTitles.retireLive(publicPath);
       this.newCreatePublicationPaths.delete(key);
+      this.sessionControlCreators.delete(key);
       this.pendingLiveTitlePaths.delete(key);
       this.liveTitleAdmissionRetries.delete(key);
       this.authoritativeLiveTitlePaths.delete(key);
@@ -3502,18 +3505,26 @@ export class BackendServer {
     prompt: string,
     generation: { generated?: unknown; name?: unknown; reason?: unknown },
     requestId: string,
+    isCurrent: () => boolean = () => !this.disposed,
   ): Promise<unknown> {
     const generated = generation.generated === true && typeof generation.name === 'string' && generation.name.trim();
     // Startup's one-time namespace hydration is required for allocation;
     // this does not wait for any unrelated naming model or archive scan.
     if (!this.liveSessionTitles.ready) await this.titleNamespaceHydration;
+    if (!isCurrent()) return { generated: false, reason: 'cancelled' };
     try {
       const result = generated
         ? await this.finalizeCandidateSessionTitle(sessionPath, generation.name as string, requestId)
         : await this.finalizeFallbackSessionTitle(sessionPath, prompt, requestId);
       const base = generation && typeof generation === 'object' ? { ...generation } : {};
       const assignedTitle = result.assigned && typeof result.title === 'string' ? result.title : undefined;
-      return assignedTitle ? { ...base, generated: true, name: assignedTitle } : base;
+      if (assignedTitle) return { ...base, generated: true, name: assignedTitle };
+      // A model candidate is not an assignment. In particular, an explicit
+      // title may have won the race while the model was running; never expose
+      // the discarded candidate as a successful, addressable title.
+      return generated
+        ? { generated: false, reason: this.liveSessionTitles.assigned(sessionPath) ? 'explicit-name' : 'assignment-failed' }
+        : base;
     } catch (error) {
       // Namespace/owner failures fail closed to the provisional snippet; the
       // attempt is consumed rather than retried implicitly.
@@ -3536,6 +3547,11 @@ export class BackendServer {
     // A durably assigned title always wins and must never be replaced by
     // generation: the candidate is dropped when the session is already named.
     if (this.liveSessionTitles.assigned(sessionPath)) return { assigned: false };
+    const key = this.coldManagerKey(sessionPath);
+    if (this.disposed || (this.hostMembershipSeen
+      && (!this.hostMembershipSessions.sessions.has(key) || this.hostMembershipClosing.has(key)))) {
+      return { assigned: false };
+    }
     const identity = resolveSessionIdentity(sessionPath);
     const reservation = this.liveSessionTitles.reserve(candidate, {
       sessionPath,
@@ -3579,15 +3595,16 @@ export class BackendServer {
   /** Host-owned live list projection, including emitted newly created tabs
    *  during the interval before the next host membership snapshot. Closed
    *  sessions and the durable catalog are never the source. */
-  private listLiveSessions(): WorkerJsonValue {
+  private listLiveSessions(sourceSessionPath?: string): WorkerJsonValue {
     const now = Date.now();
     const assignedTitles = this.liveSessionTitles;
     const projection = (entries: Iterable<LiveSessionMembershipEntry>) => {
       const allEntries = [...entries];
       const rows = allEntries.slice(0, AGENT_SESSION_CONTROL_MAX_LIST_ITEMS).map((entry) => {
         const route = this.workerRuntimeRouter?.getRoute(entry.path);
-        const busy = route !== undefined && route.state !== 'cold'
-          && (route.state !== 'hot' || route.checkpoint.requestId !== undefined);
+        const busy = this.workerRuntimeRouter?.hasPendingRuntimeWork?.(entry.path) === true
+          || (route !== undefined && route.state !== 'cold'
+            && (route.state !== 'hot' || route.checkpoint.requestId !== undefined));
         // Only the coordinator's confirmed authority supplies addressable
         // titles; a host-projected label cannot bypass pending hydration or
         // an in-flight owner persistence acknowledgement.
@@ -3605,6 +3622,7 @@ export class BackendServer {
           runtimeState: route?.state ?? 'cold',
           ...(entry.hidden === true ? { hidden: true } : {}),
           ...(entry.agentCreated === true ? { agentCreated: true } : {}),
+          ...(sourceSessionPath ? this.sessionControlOwnership(entry.path, sourceSessionPath) : {}),
           ...(entry.runningTools !== undefined && entry.runningTools > 0
             ? { runningTools: entry.runningTools } : {}),
           ...(entry.runningSubagents !== undefined && entry.runningSubagents > 0
@@ -4606,6 +4624,110 @@ export class BackendServer {
     return workerJson(settings) as WorkerJsonObject;
   }
 
+  private sessionControlOwnership(sessionPath: string, sourceSessionPath: string): WorkerJsonObject {
+    try {
+      const target = resolveSessionIdentity(sessionPath);
+      const key = backendSessionPathKey(sessionPath);
+      let cached = this.sessionControlCreators.get(key);
+      if (cached && (target.identityFallback || cached.sessionId !== target.sessionId)) {
+        this.sessionControlCreators.delete(key);
+        cached = undefined;
+      }
+      if (!cached) {
+        const source = this.initializeColdSessionStore().readSessionControlSource(sessionPath);
+        cached = { sessionId: source.sessionId, creator: source.creator };
+        // Durable creator identity is immutable. Append-only speech/settings
+        // must not force list to parse large histories again. Recheck cheap
+        // header identity on each hit; confirmed removal retires the cache.
+        if (!target.identityFallback && target.sessionId === source.sessionId) this.sessionControlCreators.set(key, cached);
+      }
+      const creator = cached.creator;
+      const caller = resolveSessionIdentity(sourceSessionPath);
+      return {
+        ownedByCaller: creator !== undefined && creator.sessionId === caller.sessionId
+          && creator.identityFallback === caller.identityFallback,
+        ...(creator ? { creator: workerJson(creator) } : {}),
+      };
+    } catch {
+      // An unreadable durable marker is not permission to infer ownership from
+      // a title, last speaker, parentSession or the agent-created tooltip.
+      return { ownedByCaller: false, ownershipUnavailable: true };
+    }
+  }
+
+  private async cleanupOwnedSessions(
+    frame: WorkerSessionControlFrame,
+    sourceSessionPath: string,
+    onProgress: (result: WorkerJsonValue) => void = () => undefined,
+  ): Promise<WorkerSessionControlOutcome> {
+    const dontCloseRunning = frame.payload.dontCloseRunning ?? true;
+    if (typeof dontCloseRunning !== 'boolean') throw new BackendError('INVALID_PARAMS', 'cleanup.dontCloseRunning must be boolean.');
+    if (!this.hostMembershipSeen) throw new BackendError('LIVE_MEMBERSHIP_UNAVAILABLE', 'Cleanup requires hydrated live membership.');
+    // Never use the bounded list projection as the cleanup candidate set.
+    const candidates = new Map<string, string>();
+    for (const { entry } of this.hostMembershipSessions.sessions.values()) candidates.set(backendSessionPathKey(entry.path), entry.path);
+    for (const key of this.newCreatePublicationPaths) {
+      const handle = this.coldSessionManagerHandles.get(key);
+      if (handle && this.liveSessionTitles.assigned(handle.handle.sessionPath)) candidates.set(key, handle.handle.sessionPath);
+    }
+    const results: WorkerJsonObject[] = [];
+    let ownedCount = 0;
+    let ownershipUnavailableCount = 0;
+    const record = (result: WorkerJsonObject) => {
+      results.push(result);
+      onProgress(workerJson({ scope: 'current-extension-host', status: 'pending', dontCloseRunning, ownedCount, results }));
+    };
+    for (const sessionPath of candidates.values()) {
+      const ownership = this.sessionControlOwnership(sessionPath, sourceSessionPath);
+      if (ownership.ownershipUnavailable === true) {
+        ownershipUnavailableCount += 1;
+        record({ sessionPath, status: 'skipped', reason: 'ownership_unavailable' });
+        continue;
+      }
+      if (ownership.ownedByCaller !== true) continue;
+      ownedCount += 1;
+      let live: ReturnType<BackendServer['resolveLiveSessionPath']>;
+      try {
+        live = this.resolveLiveSessionPath(sessionPath, sourceSessionPath, 'close');
+      } catch {
+        record({ sessionPath, status: 'skipped', reason: 'no_longer_live' });
+        continue;
+      }
+      if (live.status === 'closing') {
+        record({ sessionPath, status: 'skipped', reason: 'already_closing' });
+        continue;
+      }
+      // Both host pending/interactive activity and coordinator runtime request
+      // ownership are authoritative. Recheck immediately before close admission.
+      const route = this.workerRuntimeRouter?.getRoute(sessionPath);
+      const running = this.workerRuntimeRouter?.hasPendingRuntimeWork?.(sessionPath) === true
+        || (live.entry?.activity !== undefined && live.entry.activity !== 'idle')
+        || (live.entry?.runningTools ?? 0) > 0 || (live.entry?.runningSubagents ?? 0) > 0
+        || (route !== undefined && route.state !== 'cold'
+          && (route.state !== 'hot' || route.checkpoint.requestId !== undefined));
+      if (dontCloseRunning && running) {
+        record({ sessionPath, status: 'skipped', reason: 'running' });
+        continue;
+      }
+      try {
+        const closed = await this.requestHostSessionClose(sessionPath, `${frame.requestId}:cleanup:${ownedCount}`, false, false);
+        const result = closed.result as WorkerJsonObject;
+        record({ sessionPath, status: result.closed === true ? 'closed' : 'unknown', result });
+      } catch (error) {
+        record({ sessionPath, status: 'failed', error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS) });
+      }
+    }
+    const closedCount = results.filter(result => result.status === 'closed').length;
+    const skippedCount = results.filter(result => result.status === 'skipped').length;
+    const failedCount = results.filter(result => result.status === 'failed').length;
+    const unknownCount = results.filter(result => result.status === 'unknown').length;
+    const resultCount = results.length;
+    const envelope = () => ({ scope: 'current-extension-host', dontCloseRunning, ownedCount, ownershipUnavailableCount,
+      closedCount, skippedCount, failedCount, unknownCount, results, resultsTruncated: results.length < resultCount });
+    while (results.length > 0 && Buffer.byteLength(JSON.stringify(envelope()), 'utf8') > AGENT_SESSION_CONTROL_MAX_RESULT_BYTES) results.pop();
+    return { result: workerJson(envelope()) };
+  }
+
   /** Durable agent-created create through the ordinary create operation; the
    *  required title is assigned inside that flow (reserve → owning-owner
    *  persistence → confirm) before the created session is published. */
@@ -4613,6 +4735,7 @@ export class BackendServer {
     requestId: string,
     payload: Record<string, unknown>,
     resolvedCwd: string,
+    creatorSessionPath: string,
   ): Promise<WorkerSessionControlOutcome> {
     const result = await this.handleRequest({
       id: `${requestId}:create`,
@@ -4621,6 +4744,7 @@ export class BackendServer {
         cwd: resolvedCwd,
         title: payload['title'] as string,
         agentCreated: true,
+        creator: resolveSessionIdentity(creatorSessionPath),
         operationId: `agent-session:${requestId}`,
         operationAttempt: 1,
       },
@@ -4632,15 +4756,64 @@ export class BackendServer {
     frame: WorkerSessionControlFrame,
     sourceSessionPath: string,
   ): Promise<WorkerSessionControlOutcome> {
+    if (frame.access === 'read-only' && frame.action !== 'list' && frame.action !== 'read') {
+      throw new BackendError('INVALID_PARAMS', 'Read-only session control permits only list and read.');
+    }
+    const requestKey = frame.payload.requestKey;
+    const owner = JSON.stringify(resolveSessionIdentity(sourceSessionPath));
+    if (frame.action === 'operation.status') {
+      if (Object.keys(frame.payload).some(key => key !== 'requestKey') || !boundedAgentString(requestKey, 512)) {
+        throw new BackendError('INVALID_PARAMS', 'operation.status requires only a bounded requestKey.');
+      }
+      return { result: this.sessionControlOperations.status(owner, requestKey) };
+    }
+    const mutation = ['create', 'message', 'settings.set', 'close', 'cleanup'].includes(frame.action);
+    if (!mutation) return await this.executeWorkerSessionControl(frame, sourceSessionPath);
+    // Public clients assign a key before transport. Legacy internal requests
+    // keep their existing semantics rather than inventing a recovery address.
+    if (requestKey === undefined) return await this.executeWorkerSessionControl(frame, sourceSessionPath);
+    const key = requestKey;
+    if (!boundedAgentString(key, 512)) throw new BackendError('INVALID_PARAMS', 'requestKey must be a bounded string.');
+    const payload = { ...frame.payload };
+    delete payload.requestKey;
+    let admitted: boolean;
+    try {
+      admitted = this.sessionControlOperations.begin(owner, key, frame.action as SessionControlMutation, JSON.stringify(payload));
+    } catch (error) {
+      throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
+    }
+    if (!admitted) return { result: this.sessionControlOperations.status(owner, key) };
+    try {
+      const outcome = await this.executeWorkerSessionControl({ ...frame, payload }, sourceSessionPath, owner, key);
+      this.sessionControlOperations.finish(owner, key, outcome.result);
+      return { ...outcome, result: workerJson({ ...(outcome.result as WorkerJsonObject), requestKey: key }) };
+    } catch (error) {
+      const knownRejection = error instanceof BackendError && /INVALID|NOT_FOUND|UNAVAILABLE|NOT_IDLE|CLOSING|CLOSE_FAILED|INTENT_MISMATCH/u.test(error.code);
+      this.sessionControlOperations.finish(owner, key, undefined, toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS), knownRejection ? 'known' : 'unknown');
+      throw error;
+    }
+  }
+
+  private async executeWorkerSessionControl(
+    frame: WorkerSessionControlFrame,
+    sourceSessionPath: string,
+    receiptOwner?: string,
+    requestKey?: string,
+  ): Promise<WorkerSessionControlOutcome> {
+    const phase = (name: string, result?: WorkerJsonValue) => {
+      if (receiptOwner && requestKey) this.sessionControlOperations.phase(receiptOwner, requestKey, name, result);
+    };
     const payload = frame.payload as Record<string, unknown>;
     const allowedPayloadKeys: Readonly<Record<WorkerSessionControlAction, readonly string[]>> = {
       list: [],
       create: ['cwd', 'title', 'bucket', 'prompt', 'settings'],
-      read: ['title', 'self', 'direction', 'cursor', 'limit'],
+      read: ['title', 'self', 'direction', 'cursor', 'maxCharacters', 'includeReasoning', 'includeToolCalls'],
       message: ['title', 'self', 'replyTo', 'prompt', 'settings'],
       'settings.get': ['title', 'self'],
       'settings.set': ['title', 'self', 'settings'],
       close: ['title', 'self', 'delete'],
+      cleanup: ['dontCloseRunning'],
+      'operation.status': ['requestKey'],
     };
     const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys[frame.action].includes(key));
     if (unexpectedPayloadKey) {
@@ -4648,7 +4821,11 @@ export class BackendServer {
     }
     const operationId = `agent-session:${frame.requestId}`;
 
-    if (frame.action === 'list') return { result: this.listLiveSessions() };
+    if (frame.action === 'list') return { result: this.listLiveSessions(sourceSessionPath) };
+    if (frame.action === 'cleanup') {
+      phase('cleanup');
+      return await this.cleanupOwnedSessions(frame, sourceSessionPath, result => phase('cleanup', result));
+    }
 
     if (frame.action === 'create') {
       if (payload.bucket !== 'small' && payload.bucket !== 'medium' && payload.bucket !== 'frontier') {
@@ -4729,10 +4906,12 @@ export class BackendServer {
 
       let rawCreated: unknown;
       try {
+        phase('creation');
         const created = await this.createAgentControlledSession(
           frame.requestId,
           { ...payload, title },
           resolvedCwd,
+          sourceSessionPath,
         );
         rawCreated = created.result;
       } catch (error) {
@@ -4755,6 +4934,10 @@ export class BackendServer {
       }
       const createdRecord = rawCreated as Record<string, unknown>;
       const sessionPath = createdRecord.sessionPath as string;
+      const createdIdentity = resolveSessionIdentity(sessionPath);
+      if (!createdIdentity.identityFallback) this.sessionControlCreators.set(backendSessionPathKey(sessionPath), {
+        sessionId: createdIdentity.sessionId, creator: resolveSessionIdentity(sourceSessionPath),
+      });
       // A create target does not exist until the durable create returns. Capture
       // its path generation now, before any asynchronous configuration can
       // yield to a close and same-path reopen.
@@ -4781,7 +4964,9 @@ export class BackendServer {
       }
       const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(sessionPath);
       try {
+        phase('configuration', { creation, configuration: { status: 'pending' }, message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' } });
         const configuration = await this.configureSessionControlSettings(sessionPath, settings, frame.requestId);
+        phase('message', { creation, configuration, message: { status: payload.prompt === undefined ? 'not_requested' : 'pending' } });
         const configurationSucceeded = configuration.status === 'succeeded';
         const message = payload.prompt === undefined
           ? { status: 'not_requested' }
@@ -4826,6 +5011,7 @@ export class BackendServer {
           const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
           BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
         }
+        phase('configuration');
         const configuration = await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId);
         return { result: workerJson({ sessionPath: resolved.sessionPath, configuration }) };
       } finally {
@@ -4854,9 +5040,11 @@ export class BackendServer {
           const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
           BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
         }
+        phase('configuration');
         const configuration = patch
           ? await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId)
           : { status: 'not_requested' };
+        phase('message', { sessionPath: resolved.sessionPath, configuration, message: { status: 'pending' } });
         const message = configuration.status === 'succeeded' || configuration.status === 'not_requested'
           ? await this.sendSessionControlPrompt(
             frame,
@@ -4873,6 +5061,7 @@ export class BackendServer {
       }
     }
 
+    phase('close');
     const deletePayload = payload.delete;
     if (deletePayload !== undefined && typeof deletePayload !== 'boolean') {
       throw new BackendError('INVALID_PARAMS', 'close.delete must be boolean.');
@@ -4907,104 +5096,35 @@ export class BackendServer {
     );
   }
 
-  /** Bounded transcript read for one addressable live session (shared by
-   *  the pre-bridge legacy path and membership resolution). */
+  /** Agent projection starts at the full immutable durable SDK branch, never
+   * at renderer previews or a count-bounded display transcript window. */
   private async executeSessionControlRead(
     frame: WorkerSessionControlFrame,
     sessionPath: string,
   ): Promise<WorkerSessionControlOutcome> {
-    const payload = frame.payload as Record<string, unknown>;
-    const direction = payload.direction ?? 'latest';
-    if (direction !== 'older' && direction !== 'newer' && direction !== 'latest') {
-      throw new BackendError('INVALID_PARAMS', 'read.direction must be older, newer, or latest.');
-    }
-    const limit = payload.limit === undefined ? 32 : payload.limit;
-    if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 64) {
-      throw new BackendError('INVALID_PARAMS', 'read.limit must be an integer from 1 through 64.');
-    }
-    const cursor = payload.cursor;
-    let loadedStart: number | undefined;
-    let loadedEnd: number | undefined;
-    if (cursor !== undefined) {
-      if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
-        throw new BackendError('INVALID_PARAMS', 'read.cursor must be an object.');
-      }
-      const cursorRecord = cursor as Record<string, unknown>;
-      const unexpectedCursorKey = Object.keys(cursorRecord).find((key) => key !== 'start' && key !== 'end');
-      if (unexpectedCursorKey) {
-        throw new BackendError('INVALID_PARAMS', `Unexpected read.cursor key: ${unexpectedCursorKey}`);
-      }
-      if (!Number.isSafeInteger(cursorRecord.start) || (cursorRecord.start as number) < 0
-          || !Number.isSafeInteger(cursorRecord.end) || (cursorRecord.end as number) < 0
-          || (cursorRecord.start as number) > (cursorRecord.end as number)) {
-        throw new BackendError('INVALID_PARAMS', 'read.cursor must contain a non-inverted non-negative range.');
-      }
-      loadedStart = cursorRecord.start as number;
-      loadedEnd = cursorRecord.end as number;
-    } else if (direction !== 'latest') {
-      throw new BackendError('INVALID_PARAMS', `${direction} read requires a cursor.`);
-    }
-    const page = await this.handleRequest({
-      id: `${frame.requestId}:read`,
-      method: 'session.loadTranscriptPage',
-      params: {
-        sessionPath,
-        direction,
-        ...(loadedStart !== undefined ? { loadedStart } : {}),
-        ...(loadedEnd !== undefined ? { loadedEnd } : {}),
-      },
-    }) as TranscriptPagePayload;
-    const agentPage: TranscriptPagePayload = {
-      sessionPath: page.sessionPath,
-      transcript: projectSessionControlTranscript(page.transcript),
-      transcriptWindow: page.transcriptWindow,
-      busy: page.busy,
+    const source = this.initializeColdSessionStore().readSessionControlSource(sessionPath);
+    const entry = this.hostMembershipSessions.sessions.get(backendSessionPathKey(sessionPath))?.entry;
+    const route = this.workerRuntimeRouter?.getRoute(sessionPath);
+    const busy = this.workerRuntimeRouter?.hasPendingRuntimeWork?.(sessionPath) === true
+      || (route !== undefined && route.state !== 'cold'
+        && (route.state !== 'hot' || route.checkpoint.requestId !== undefined));
+    const activity = {
+      activity: entry?.activity ?? (busy ? 'running' as const : 'idle' as const),
+      busy: busy || entry?.activity === 'running' || entry?.activity === 'waiting-user-input',
+      runtimeState: route?.state === 'hot' ? 'hot' as const : 'cold' as const,
+      ...(entry?.runningTools ? { runningTools: entry.runningTools } : {}),
+      ...(route?.state === 'hot' ? { runningToolNames: route.checkpoint.tools.flatMap(tool => tool.name ? [tool.name] : []) } : {}),
+      ...(entry?.runningSubagents ? { runningSubagents: entry.runningSubagents } : {}),
+      ...(entry?.requestStartedAt !== undefined ? { requestStartedAt: entry.requestStartedAt,
+        elapsedMs: Math.max(0, Date.now() - entry.requestStartedAt) } : {}),
     };
-    const bounded = boundTranscriptSnapshot(agentPage, {
-      transport: { kind: 'response', requestId: `${frame.requestId}:read` },
-      // The control page is the edge adjacent to the caller cursor: newer
-      // rows for an older request, and older rows for a newer request. Keep
-      // that edge when the expanded backend window must be bounded.
-      requestedEdge: direction === 'newer' ? 'older' : 'newer',
-      maxLineBytes: AGENT_SESSION_CONTROL_MAX_RESULT_BYTES,
-    });
-    const sourceStart = bounded.transcriptWindow.loadedStart;
-    const sourceEnd = bounded.transcriptWindow.loadedEnd;
-    const pageEdge = direction === 'older'
-      ? loadedStart ?? sourceEnd
-      : direction === 'newer'
-        ? loadedEnd ?? sourceStart
-        : sourceEnd;
-    const boundedEdge = Math.max(sourceStart, Math.min(sourceEnd, pageEdge));
-    const pageStart = direction === 'older'
-      ? Math.max(sourceStart, boundedEdge - (limit as number))
-      : direction === 'latest'
-        ? Math.max(sourceStart, sourceEnd - (limit as number))
-        : boundedEdge;
-    const pageEnd = direction === 'older'
-      ? boundedEdge
-      : Math.min(sourceEnd, pageStart + (limit as number));
-    const transcriptStart = pageStart - sourceStart;
-    const transcriptEnd = pageEnd - sourceStart;
-    const transcript = bounded.transcript.slice(transcriptStart, transcriptEnd);
-    const nextEnd = pageStart + transcript.length;
-    const nextWindow = {
-      ...bounded.transcriptWindow,
-      loadedStart: pageStart,
-      loadedEnd: nextEnd,
-      hasOlder: pageStart > 0,
-      hasNewer: nextEnd < bounded.transcriptWindow.totalCount,
-      isPartial: pageStart > 0 || nextEnd < bounded.transcriptWindow.totalCount,
-    };
-    return {
-      result: workerJson({
-        sessionPath: bounded.sessionPath,
-        transcript,
-        transcriptWindow: nextWindow,
-        busy: bounded.busy,
-        cursor: { start: pageStart, end: nextEnd },
-      }),
-    };
+    const { title: _title, self: _self, ...options } = frame.payload;
+    try {
+      return { result: workerJson(readSessionControlTranscript({ ...source, activity }, options as SessionControlReadOptions)) };
+    } catch (error) {
+      if (error instanceof SessionControlReadError) throw new BackendError(error.code, error.message);
+      throw error;
+    }
   }
 
   private async handleRequest(
@@ -5266,11 +5386,15 @@ export class BackendServer {
           const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method);
           if (shouldPromote) return await router.route(request, operationCancellationGeneration);
           if (router.hasHotOwner(sessionPath)) {
+            const titleBackendGeneration = this.backendGeneration;
+            const titleIsCurrent = () => !this.disposed
+              && this.backendGeneration === titleBackendGeneration
+              && router.operationCancellationGeneration(sessionPath) === operationCancellationGeneration;
             if (request.method === 'session.title.generate') {
               const titleParams = validateSessionTitleGenerate(request.params);
               if (titleParams.enabled === false) {
                 return await this.finalizeGeneratedLiveSessionTitle(
-                  sessionPath, titleParams.prompt, { generated: false, reason: 'disabled' }, request.id,
+                  sessionPath, titleParams.prompt, { generated: false, reason: 'disabled' }, request.id, titleIsCurrent,
                 );
               }
             }
@@ -5284,7 +5408,7 @@ export class BackendServer {
                 sessionPath, error: toErrorMessage(error),
               });
               return await this.finalizeGeneratedLiveSessionTitle(
-                sessionPath, titleParams.prompt, { generated: false, reason: 'model-failed' }, request.id,
+                sessionPath, titleParams.prompt, { generated: false, reason: 'model-failed' }, request.id, titleIsCurrent,
               );
             }
             if (request.method !== 'session.title.generate') return routed;
@@ -5308,6 +5432,7 @@ export class BackendServer {
               generationPrompt,
               generation,
               request.id,
+              titleIsCurrent,
             );
           }
           if (request.method === 'operation.status') {
@@ -5369,7 +5494,7 @@ export class BackendServer {
         await runtimeRouter.retire(sessionPath, reason);
         return true;
       },
-      createColdSession: async (cwd, pendingCreateOperationId, agentCreated) => {
+      createColdSession: async (cwd, pendingCreateOperationId, agentCreated, creator) => {
         const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
         if (replayPath) return { sessionPath: replayPath };
         let providerRuntimeReference: ProviderRuntimeReference | undefined;
@@ -5380,7 +5505,7 @@ export class BackendServer {
           providerRuntimeReference = await management.captureRuntimeProjection(this.creationProviderRuntimeInputs());
         }
         const store = this.initializeColdSessionStore();
-        const handle = store.create({ cwd, agentCreated, providerRuntimeReference });
+        const handle = store.create({ cwd, agentCreated, creator, providerRuntimeReference });
         if (providerRuntimeReference) {
           const management = await this.getProviderManagement();
           const snapshot = await management.readRuntimeProjection(providerRuntimeReference);

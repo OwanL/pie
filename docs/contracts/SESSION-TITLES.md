@@ -6,8 +6,8 @@ Pie can generate a compact title for a new session with a low-priority asynchron
 
 1. The first user prompt immediately becomes a literal, whitespace-normalized tab snippet, bounded to the same 25-character base-title allowance as newly assigned titles (a trailing ellipsis marks truncation). Existing assigned titles are never bulk-shortened.
 2. A small wheel appears in the tab while title generation is armed or running.
-3. Generation starts at the first assistant-start commit point, outside the per-session mutation queue. It never delays sending, streaming, or other session operations.
-4. A valid generated title replaces the snippet and is persisted as SDK session metadata. Failure or timeout removes the wheel and leaves the snippet in place.
+3. Generation starts at the first assistant-start commit point, not the user append: that append can still be rolled back. Candidate inference runs outside the host mutation queue and worker FIFO, with one in-flight generation per worker, so provider latency does not hold up session mutations.
+4. A valid generated title replaces the snippet after durable assignment. On generation failure or timeout, Pie attempts to assign the bounded prompt snippet through the same title authority. A successfully assigned fallback is stable and addressable, not a provisional label to retry automatically. Assignment failure leaves the provisional snippet; the wheel stops and the attempt is consumed.
 
 An explicit SDK/manual session name always wins. The worker checks for one both before the model request and immediately before writing, so a rename racing an in-flight request is not overwritten.
 
@@ -24,16 +24,15 @@ The default is `ollama/deepseek-v4-flash:0731-cloud`. `models.yaml` seeds missin
 
 ## Worker contract
 
-The host calls the backend `session.title.generate` RPC. It is classified as low-priority `session-title` provider work. The worker
-compacts the first prompt to at most 4,000 characters, removing code fences and retaining bounded beginning/end context; asks for
-only 2–6 words and at most 25 characters; passes the configured thinking budget (disabled by default) and uses deterministic
-temperature; starts the configured model-request timeout after model lookup and authentication; the host RPC timeout is the
-configured duration plus five seconds, not a strict end-to-end deadline at the selected duration; accepts only one short,
-control-character-free line in the output contract; and fails open, returning a reason rather than surfacing a user-blocking error.
+The host calls the backend `session.title.generate` RPC, classified as low-priority `session-title` provider work. The worker compacts the first prompt to at most 4,000 characters, removing code fences and retaining bounded beginning/end context. It requests a complete title of at most 25 characters, preferring 2–3 short words where appropriate for the language, with action and subject first, and passes the configured thinking budget (off by default). The Ollama-native request uses temperature zero.
+
+Validation accepts one nonempty line after wrapper/label and whitespace normalization, at most 25 JavaScript string characters, containing a Unicode letter or number and no disallowed control characters. There is no English-word or word-count requirement. Oversized output is rejected, never salvaged by chopping trailing words or splitting identifiers. Invalid output permits at most one corrective model request for a complete replacement; authentication and both inference attempts share one overall configured deadline. Errors fail open without a user-blocking error.
+
+That deadline bounds the candidate stage, not the full reserve/persist/publish operation. The host RPC timeout is the configured duration plus five seconds; it is not a durable-assignment deadline or a strict end-to-end bound. Assignment can wait on the owning worker's serialized writer after inference finishes.
 
 Generation is candidate-only: model output is never published or written as a final name by the generation seam. The coordinator reserves a unique title, the owning session durably persists that assigned title, and only then may the title authority publish it for display or addressing. Newly assigned base titles (including create input, generated candidates, and snippet fallbacks) are 1–25 characters after trimming; automatic collision suffixes are additional, and oversize input is rejected rather than shortened. Existing assigned titles are preserved verbatim (see below).
 
-No generated-title cache is used. Each new unnamed session has one generation attempt, and results are fenced by session path plus correlation ID.
+No generated-title cache is used. Each new unnamed session has one automatic attempt (including the optional correction), and host results are fenced by session path plus correlation ID. Invalidated results are discarded before assignment. Once a reservation is made and its durable write dispatched, that commit must settle; cancellation or a host timeout is not a remote cancellation fence and cannot promise that metadata remains unchanged.
 
 ## Title authority
 

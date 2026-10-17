@@ -500,12 +500,16 @@ export type WorkerSessionControlAction =
   | 'message'
   | 'settings.get'
   | 'settings.set'
-  | 'close';
+  | 'close'
+  | 'cleanup'
+  | 'operation.status';
 
 export interface WorkerSessionControlFrame extends WorkerFrameBase {
   kind: 'session.control';
   requestId: string;
   action: WorkerSessionControlAction;
+  /** Worker-assigned capability for nested agents, never a tool argument. */
+  access?: 'read-only';
   payload: WorkerJsonObject;
 }
 
@@ -1433,13 +1437,18 @@ function validateSettingsAuthoritative(value: Record<string, unknown>, requireSe
 }
 
 function validateSessionControl(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
-  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'action', 'payload']);
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'action', 'payload'], ['access']);
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
   if (value.action !== 'list' && value.action !== 'create' && value.action !== 'read'
       && value.action !== 'message' && value.action !== 'settings.get'
-      && value.action !== 'settings.set' && value.action !== 'close') {
+      && value.action !== 'settings.set' && value.action !== 'close'
+      && value.action !== 'cleanup' && value.action !== 'operation.status') {
     return 'session.control.action is invalid.';
+  }
+  if (value.access !== undefined && value.access !== 'read-only') return 'session.control.access is invalid.';
+  if (value.access === 'read-only' && value.action !== 'list' && value.action !== 'read') {
+    return 'Read-only session control permits only list and read.';
   }
   return validateJsonObject(value.payload, 'session.control.payload');
 }

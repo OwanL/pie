@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import test, { afterEach } from 'node:test';
 
 import * as fs from 'node:fs/promises';
@@ -9,7 +10,7 @@ import { BackendServer } from '../server.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { BackendError } from '../server-io.js';
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../request-handler.js';
-import type { TranscriptPagePayload } from '../../lib/rpc/session-events.js';
+import type { SessionEntryLike } from '../../../session-storage/transcripts/transcript.js';
 import {
   SESSION_CONTROL_SETTINGS_REQUEST_EVENT,
   type SessionControlSettingsAcknowledgement,
@@ -17,6 +18,7 @@ import {
 } from '../../lib/rpc/session-control-settings.js';
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 import { resolveSessionIdentity } from '../../../session-storage/ownership/session-identity.js';
+import { readAgentCreatedSessionCreator } from '../../../session-storage/metadata/session-provenance.js';
 import { ColdSessionLeaseAuthority, ColdSessionStore } from '../../../session-storage/lifecycle/cold-session-store.js';
 import { parseWorkerToCoordinatorFrame, WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
 import { serializeRuntimeCommandError } from '../../workers/worker-entry.js';
@@ -36,6 +38,7 @@ type FakeServer = {
     getRoute(path: string): { state: string; checkpoint?: { requestId?: string } };
     operationCancellationGeneration?(path: string): number;
     invalidatePendingRuntimeOperations?(path: string): number;
+    hasPendingRuntimeWork?(path: string): boolean;
   };
 };
 
@@ -144,6 +147,17 @@ function installSessionControlSettingsHarness(
       ...(request.action === 'apply' ? { application: 'applied' } : {}),
     });
   };
+}
+
+function installReadSource(server: FakeServer, entries: readonly SessionEntryLike[]): void {
+  (server as unknown as { initializeColdSessionStore(): unknown }).initializeColdSessionStore = () => ({
+    readSessionControlSource: () => ({ sessionId: 'read-session', entries }),
+  });
+}
+
+function textEntry(id: string, text: string, role = 'user'): SessionEntryLike {
+  return { type: 'message', id, timestamp: '2026-01-01T00:00:00.000Z',
+    message: { role, content: [{ type: 'text', text }], timestamp: 0 } } as SessionEntryLike;
 }
 
 const currentSender = createSessionControlSender(
@@ -527,6 +541,113 @@ test('a fallback name is returned as a published assignment even when model gene
   assert.equal(internal.liveSessionTitles.assigned(path), persisted);
 });
 
+test('generated candidates never report success when title assignment was skipped', async () => {
+  for (const alreadyNamed of [false, true]) {
+    const server = serverForTests();
+    const internal = server as unknown as {
+      liveSessionTitles: { reconcile(entries: unknown[], persist: () => Promise<void>): Promise<unknown>; assigned(path: string): string | undefined };
+      persistAssignedSessionTitle(path: string, title: string): Promise<void>;
+      finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string): Promise<unknown>;
+    };
+    const path = '/workspace/skipped-title.jsonl';
+    if (alreadyNamed) {
+      await internal.liveSessionTitles.reconcile([
+        { sessionPath: path, sessionId: 'manual', title: 'Manual authority' },
+      ], async () => undefined);
+    }
+    internal.persistAssignedSessionTitle = async () => { assert.fail('skipped assignment must not persist a candidate'); };
+    const result = await internal.finalizeGeneratedLiveSessionTitle(
+      path, 'Investigate failed login.', { generated: true, name: 'Generated candidate' }, 'title-skipped',
+    );
+    assert.deepEqual(result, {
+      generated: false,
+      reason: alreadyNamed ? 'explicit-name' : 'assignment-failed',
+    });
+    assert.equal(internal.liveSessionTitles.assigned(path), alreadyNamed ? 'Manual authority' : undefined);
+  }
+});
+
+test('title finalization fences cancelled and stale generations before assignment dispatch', async () => {
+  for (const fence of ['cancelled', 'stale'] as const) {
+    const server = serverForTests();
+    const internal = server as unknown as {
+      backendGeneration: number;
+      titleNamespaceHydration?: Promise<void>;
+      liveSessionTitles: { reconcile(entries: unknown[], persist: () => Promise<void>): Promise<unknown>; assigned(path: string): string | undefined };
+      finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string, isCurrent: () => boolean): Promise<unknown>;
+    };
+    let release!: () => void;
+    internal.titleNamespaceHydration = new Promise<void>((resolve) => { release = resolve; });
+    let cancellationGeneration = 0;
+    const backendGeneration = internal.backendGeneration;
+    let assignments = 0;
+    (server as unknown as { workerRuntimeRouter: unknown }).workerRuntimeRouter = {
+      hasHotOwner: () => true,
+      assignSessionTitle: async () => { assignments += 1; return { assigned: true }; },
+    };
+    const sessionPath = '/workspace/fenced-title.jsonl';
+    const pending = internal.finalizeGeneratedLiveSessionTitle(
+      sessionPath, 'First prompt', { generated: true, name: 'Candidate' }, 'fenced-title',
+      () => cancellationGeneration === 0 && internal.backendGeneration === backendGeneration,
+    );
+    if (fence === 'cancelled') cancellationGeneration += 1;
+    else internal.backendGeneration += 1;
+    await internal.liveSessionTitles.reconcile([], async () => undefined);
+    release();
+    assert.deepEqual(await pending, { generated: false, reason: 'cancelled' });
+    assert.equal(assignments, 0);
+    assert.equal(internal.liveSessionTitles.assigned(sessionPath), undefined);
+  }
+});
+
+test('cancellation after title assignment dispatch retains the reservation until the writer settles', async () => {
+  const server = serverForTests();
+  const internal = server as unknown as {
+    liveSessionTitles: {
+      reconcile(entries: unknown[], persist: () => Promise<void>): Promise<unknown>;
+      assigned(path: string): string | undefined;
+      reserve(title: string, identity: { sessionPath: string; sessionId: string }): { title: string };
+    };
+    finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string, isCurrent: () => boolean): Promise<unknown>;
+  };
+  await internal.liveSessionTitles.reconcile([], async () => undefined);
+  let release!: () => void;
+  let dispatched!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { dispatched = resolve; });
+  let current = true;
+  let assignments = 0;
+  (server as unknown as { workerRuntimeRouter: unknown }).workerRuntimeRouter = {
+    hasHotOwner: () => true,
+    assignSessionTitle: async (sessionPath: string, title: string, requestId: string) => {
+      assignments += 1;
+      assert.equal(sessionPath, '/workspace/settling-title.jsonl');
+      assert.equal(title, 'Candidate');
+      assert.equal(requestId, 'settling-title:title');
+      dispatched();
+      await blocked;
+      return { assigned: true };
+    },
+  };
+  let settled = false;
+  const pending = internal.finalizeGeneratedLiveSessionTitle(
+    '/workspace/settling-title.jsonl', 'First prompt', { generated: true, name: 'Candidate' },
+    'settling-title', () => current,
+  ).then((result) => { settled = true; return result; });
+  await started;
+  current = false;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'cancellation must not detach the dispatched writer');
+  assert.equal(internal.liveSessionTitles.assigned('/workspace/settling-title.jsonl'), undefined);
+  assert.equal(internal.liveSessionTitles.reserve('Candidate', {
+    sessionPath: '/workspace/competitor.jsonl', sessionId: 'competitor',
+  }).title, 'Candidate (2)', 'the in-flight title remains reserved');
+  release();
+  assert.deepEqual(await pending, { generated: true, name: 'Candidate' });
+  assert.equal(assignments, 1);
+  assert.equal(internal.liveSessionTitles.assigned('/workspace/settling-title.jsonl'), 'Candidate');
+});
+
 test('session.settingsAcknowledgement routes validated correlated acknowledgements and ignores unknown ids', async () => {
   const server = serverForTests();
   const acknowledgement = await server.handleRequest({
@@ -703,19 +824,9 @@ test('closed membership targets are never addressable and user reopen restores a
   server.listSessionSummaries = async () => summaries;
   server.workerRuntimeRouter = { getRoute: () => ({ state: 'cold' }) };
   const requests: Array<{ method: string; params?: unknown }> = [];
+  installReadSource(server, [textEntry('row-0', 'hi')]);
   server.handleRequest = async (request) => {
     requests.push(request);
-    if (request.method === 'session.loadTranscriptPage') {
-      return {
-        sessionPath: '/workspace/idle.jsonl',
-        transcript: [{ id: 'row-0', role: 'user', createdAt: '2026-01-01T00:00:00.000Z', markdown: 'hi', status: 'completed' }],
-        transcriptWindow: {
-          totalCount: 1, loadedStart: 0, loadedEnd: 1,
-          hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true,
-        },
-        busy: false,
-      } satisfies TranscriptPagePayload;
-    }
     return { accepted: true };
   };
   applyMembership(server, membership([membershipEntry('/workspace/idle.jsonl')]));
@@ -732,8 +843,8 @@ test('closed membership targets are never addressable and user reopen restores a
   // Ordinary user reopen reopens through the host and republishes membership.
   applyMembership(server, membership([membershipEntry('/workspace/idle.jsonl')]));
   const reopened = await server.handleWorkerSessionControl(frame('read', { self: true }), '/workspace/idle.jsonl');
-  assert.equal((requests[0]?.params as { sessionPath: string }).sessionPath, '/workspace/idle.jsonl');
-  assert.ok(reopened.result.transcriptWindow || reopened.result.transcript !== undefined);
+  assert.deepEqual(requests, [], 'reads do not use renderer transcript requests');
+  assert.equal((reopened.result.transcript as Array<{ text: string }>)[0]?.text, 'hi');
 });
 
 
@@ -765,6 +876,7 @@ test('session-control server delegates cold-session creation with an idempotent 
     // of the create operation identity.
     title: 'New plan',
     cwd: '/workspace/project', agentCreated: true,
+    creator: resolveSessionIdentity('/workspace/current.jsonl'),
     operationId: 'agent-session:control-create', operationAttempt: 1,
   });
   assert.deepEqual(requests[1]?.params, {
@@ -871,6 +983,34 @@ test('hot session-control settings and create cwd capture use durable metadata u
 
   leases.releaseCanonicalPaths([hotReservation]);
   assert.ok(events.some((entry) => entry.event === SESSION_CONTROL_SETTINGS_REQUEST_EVENT));
+});
+
+test('full agent read sources retain exact durable branch under cold and hot ownership fences', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-source-fence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const sessionPath = await writeSessionFile(dir, 'source.jsonl');
+  await fs.writeFile(sessionPath, JSON.stringify({ type: 'session', version: 3, id: 'source-id', cwd: dir }) + '\n');
+  const entries = [textEntry('large', 'full durable payload'.repeat(20000)), {
+    type: 'custom', customType: 'pie.agent-created-session',
+    data: { version: 1, sessionId: 'source-id', creator: { sessionId: 'creator-id', identityFallback: false } },
+  } as SessionEntryLike];
+  const leases = new ColdSessionLeaseAuthority(1);
+  let onOpen: () => void = () => undefined;
+  const manager = { getSessionId: () => 'source-id', getHeader: () => ({ id: 'source-id' }),
+    getBranch: () => entries, getEntries: () => entries };
+  const store = new ColdSessionStore({ sdk: { SessionManager: { open: () => { onOpen(); return manager; } } } as never,
+    coordinatorGeneration: 1, startupCwd: dir, agentDir: dir, leaseAuthority: leases });
+  const before = await fs.readFile(sessionPath, 'utf8');
+  const cold = store.readSessionControlSource(sessionPath);
+  assert.equal(cold.entries, entries, 'no preview, folding or windowing precedes agent paging');
+  assert.deepEqual(cold.creator, { sessionId: 'creator-id', identityFallback: false });
+  const [reservation] = leases.reserveCanonicalPaths([sessionPath], 'test:hot-source-read', { hideFromCatalog: false });
+  const hot = store.readSessionControlSource(sessionPath);
+  assert.equal(hot.entries, entries);
+  assert.equal(await fs.readFile(sessionPath, 'utf8'), before, 'both reads are read-only');
+  onOpen = () => { leases.releaseCanonicalPaths([reservation]); };
+  assert.throws(() => store.readSessionControlSource(sessionPath), /ownership|lease|revision|changed/iu,
+    'an ownership change during SDK open cannot publish stale source');
 });
 
 test('create inheritance failure explicitly reports that no session was created', async () => {
@@ -1453,6 +1593,35 @@ test('settings inspection and update use target-session settings authorities', a
   assert.deepEqual(apply?.settings, { autonomousMode: false });
 });
 
+test('replyTo resolves an unnamed pending-title live identity but rejects closing members', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-pending-reply-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const pendingPath = await writeSessionFile(dir, 'unnamed.jsonl');
+  const baseMembers = [membershipEntry(currentPath), membershipEntry(idlePath)];
+  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)]));
+  const internal = server as unknown as {
+    pendingLiveTitlePaths: Set<string>;
+    liveSessionTitles: { assigned(path: string): string | undefined };
+  };
+  const pendingKey = [...internal.pendingLiveTitlePaths].find((key) => key.endsWith('unnamed.jsonl'));
+  assert.ok(pendingKey, 'the live target is awaiting title admission');
+  assert.equal(internal.liveSessionTitles.assigned(pendingPath), undefined);
+
+  const replyReference = createSessionControlSender(resolveSessionIdentity(pendingPath), 'Unnamed plan').replyReference;
+  const resolveReply = (server as unknown as {
+    resolveSessionControlReplyTarget(payload: Record<string, unknown>, sourcePath: string): unknown;
+  }).resolveSessionControlReplyTarget.bind(server);
+  const resolved = resolveReply({ replyTo: replyReference }, currentPath) as { status: string; sessionPath: string };
+  assert.equal(resolved.status, 'live');
+  assert.equal(resolved.sessionPath, pendingPath, 'stable identity resolves despite pending title admission');
+
+  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)], [closeFrameEntry(pendingPath)]));
+  assert.throws(() => resolveReply({ replyTo: replyReference }, currentPath),
+    (error: { code?: string }) => error.code === 'SESSION_NOT_FOUND',
+    'host closing membership remains non-addressable');
+});
+
 test('replyTo resolves the live original identity and rejects stale references', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-reply-'));
   const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
@@ -1690,36 +1859,18 @@ test('session-control server adapts transcript cursors and ordinary message send
   const requests: Array<{ method: string; params?: unknown }> = [];
   const events: Array<{ event: string; payload?: unknown }> = [];
   server.emit = (event, payload) => events.push({ event, payload });
+  installReadSource(server, [textEntry('old', 'old'), textEntry('new', 'new', 'assistant')]);
   server.handleRequest = async (request) => {
     requests.push(request);
-    if (request.method === 'session.loadTranscriptPage') {
-      return {
-        sessionPath: idlePath,
-        transcript: [
-          { id: 'old', role: 'user', createdAt: '2026-01-01T00:00:00.000Z', markdown: 'old', status: 'completed' },
-          { id: 'new', role: 'assistant', createdAt: '2026-01-01T00:00:01.000Z', markdown: 'new', status: 'completed' },
-        ],
-        transcriptWindow: {
-          totalCount: 10, loadedStart: 4, loadedEnd: 6,
-          hasOlder: true, hasNewer: true, isPartial: true, hasUserMessages: true,
-        },
-        busy: false,
-      } satisfies TranscriptPagePayload;
-    }
     return { accepted: true };
   };
 
   const page = await server.handleWorkerSessionControl(
-    frame('read', {
-      title: 'Idle plan', direction: 'newer', cursor: { start: 0, end: 4 }, limit: 1,
-    }),
-    currentPath,
+    frame('read', { title: 'Idle plan', maxCharacters: 4000 }), currentPath,
   );
-  assert.deepEqual(page.result.cursor, { start: 4, end: 5 });
-  assert.equal(requests[0]?.method, 'session.loadTranscriptPage');
-  assert.deepEqual(requests[0]?.params, {
-    sessionPath: idlePath, direction: 'newer', loadedStart: 0, loadedEnd: 4,
-  });
+  assert.equal(typeof page.result.cursor, 'string');
+  assert.deepEqual((page.result.transcript as Array<{ text: string }>).map(row => row.text), ['old', 'new']);
+  assert.deepEqual(requests, []);
 
   // An assigned title addresses another live session even while this caller
   // is itself live; `self` would have targeted the caller instead.
@@ -1727,8 +1878,8 @@ test('session-control server adapts transcript cursors and ordinary message send
     frame('message', { title: 'Idle plan', prompt: 'please continue' }),
     currentPath,
   );
-  assert.equal(requests[1]?.method, 'message.send');
-  assert.deepEqual(requests[1]?.params, {
+  assert.equal(requests[0]?.method, 'message.send');
+  assert.deepEqual(requests[0]?.params, {
     sessionPath: idlePath, text: 'please continue', inputs: [],
     operationId: 'agent-session:control-message', operationAttempt: 1,
     localId: 'local:agent-session:control-message',
@@ -1877,126 +2028,191 @@ test('worker message acknowledgement timeout reports unknown without rejecting a
     .map((entry) => (entry.payload as { status: string }).status), ['queued']);
 });
 
-test('session-control reads omit duplicated renderer data and diagnostics before applying the page budget', async () => {
+test('session-control reads bypass renderer projections and retain model-facing tool content only', async () => {
   const server = serverForTests();
-  server.handleRequest = async () => ({
-    sessionPath: '/workspace/current.jsonl',
-    busy: false,
-    transcriptWindow: {
-      totalCount: 1, loadedStart: 0, loadedEnd: 1,
-      hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true,
-    },
-    transcript: [{
-      id: 'answer', role: 'assistant', status: 'completed', createdAt: '2026-01-01',
-      markdown: 'Answer', customDetails: { debug: 'x'.repeat(600_000) },
-      toolCalls: [{ id: 'tool', name: 'read', input: {}, status: 'completed', result: 'duplicate' }],
-      parts: [
-        { kind: 'text', text: 'Answer' },
-        { kind: 'toolCall', toolCall: {
-          id: 'tool', name: 'read', input: {}, status: 'completed',
-          result: { content: [{ type: 'text', text: 'useful output' }], details: { debug: 'x'.repeat(600_000) } },
-        } },
-      ],
-    }],
-  });
-  const read = await server.handleWorkerSessionControl(frame('read', { self: true, limit: 1 }), '/workspace/current.jsonl');
+  server.workerRuntimeRouter = { getRoute: () => ({ state: 'cold' }) };
+  applyMembership(server, membership([membershipEntry('/workspace/current.jsonl')]));
+  installReadSource(server, [{
+    type: 'message', id: 'answer', timestamp: '2026-01-01', message: { role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'private reasoning' }, { type: 'text', text: 'Answer' }] },
+  } as SessionEntryLike, {
+    type: 'message', id: 'result', timestamp: '2026-01-01',
+    message: { role: 'toolResult', toolCallId: 'tool', toolName: 'read',
+      content: [{ type: 'text', text: 'useful output' }, { type: 'image', data: 'BASE64_IMAGE_PAYLOAD', mimeType: 'image/png' }], details: { debug: 'durable detail' } },
+  } as SessionEntryLike]);
+  server.handleRequest = async () => { throw new Error('reads must bypass renderer requests'); };
+  const read = await server.handleWorkerSessionControl(
+    frame('read', { self: true, maxCharacters: 4000, includeToolCalls: true }), '/workspace/current.jsonl',
+  );
   const rows = read.result.transcript as Array<Record<string, unknown>>;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].markdown, '');
+  assert.equal(rows[0].text, 'Answer');
+  assert.equal(rows[0].markdown, undefined);
   assert.equal(rows[0].toolCalls, undefined);
   assert.equal(rows[0].customDetails, undefined);
   assert.ok(JSON.stringify(rows).includes('useful output'));
-  assert.ok(!JSON.stringify(rows).includes('debug'));
-  assert.deepEqual(read.result.cursor, { start: 0, end: 1 });
+  assert.ok(!JSON.stringify(rows).includes('durable detail'));
+  assert.ok(!JSON.stringify(rows).includes('BASE64_IMAGE_PAYLOAD'));
+  assert.ok(JSON.stringify(rows).includes('omitted'));
+  assert.equal(typeof read.result.cursor, 'string');
+  assert.ok(!JSON.stringify(rows).includes('private reasoning'));
+  const reasoning = await server.handleWorkerSessionControl(
+    frame('read', { self: true, maxCharacters: 4000, includeReasoning: true, includeToolCalls: false }),
+    '/workspace/current.jsonl',
+  );
+  assert.ok(JSON.stringify(reasoning.result.transcript).includes('private reasoning'));
+  assert.ok(!JSON.stringify(reasoning.result.transcript).includes('useful output'));
+  await assert.rejects(server.handleWorkerSessionControl(
+    frame('read', { self: true, direction: 'older', cursor: read.result.cursor, includeReasoning: true }), '/workspace/current.jsonl',
+  ), (error: { code?: string }) => error.code === 'READ_CURSOR_INVALIDATED');
 });
 
-test('session-control read pages older and newer rows relative to the caller cursor', async () => {
+test('session-control read pages full payloads older and append-only payloads newer with opaque cursors', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-pages-'));
   const { server, currentPath } = await readyServerWithMembers(dir);
-  const totalCount = 250;
-  const transcript = Array.from({ length: totalCount }, (_, index) => ({
-    id: `row-${index}`,
-    role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
-    createdAt: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.000Z`,
-    markdown: `row ${index}`,
-    status: 'completed' as const,
-  }));
-  server.handleRequest = async (request) => {
-    if (request.method !== 'session.loadTranscriptPage') return { accepted: true };
-    const params = request.params as {
-      direction: 'older' | 'newer' | 'latest';
-      loadedStart?: number;
-      loadedEnd?: number;
-    };
-    const start = params.direction === 'latest'
-      ? totalCount - 60
-      : params.direction === 'older'
-        ? Math.max(0, (params.loadedStart ?? 0) - 120)
-        : (params.loadedStart ?? 0);
-    const end = params.direction === 'latest'
-      ? totalCount
-      : params.direction === 'older'
-        ? Math.min(totalCount, params.loadedEnd ?? totalCount)
-        : Math.min(totalCount, (params.loadedEnd ?? 0) + 120);
-    return {
-      sessionPath: '/workspace/idle.jsonl',
-      transcript: transcript.slice(start, end),
-      transcriptWindow: {
-        totalCount,
-        loadedStart: start,
-        loadedEnd: end,
-        hasOlder: start > 0,
-        hasNewer: end < totalCount,
-        isPartial: start > 0 || end < totalCount,
-        hasUserMessages: true,
-      },
-      busy: false,
-    } satisfies TranscriptPagePayload;
+  const payload = '0123456789'.repeat(2000);
+  installReadSource(server, [textEntry('full-payload', payload)]);
+  server.handleRequest = async () => { throw new Error('reads must use the full durable branch'); };
+  const read = (options: Record<string, unknown>) => server.handleWorkerSessionControl(
+    frame('read', { title: 'Idle plan', maxCharacters: 2000, ...options }), currentPath,
+  );
+  const latest = await read({ direction: 'latest' });
+  assert.equal(typeof latest.result.cursor, 'string');
+  assert.equal(latest.result.hasOlder, true);
+  assert.equal(latest.result.hasNewer, false);
+  const atEnd = await read({ direction: 'newer', cursor: latest.result.cursor });
+  assert.deepEqual(atEnd.result.transcript, []);
+  const fragments = (result: Record<string, unknown>) => result.transcript as Array<{ text: string; offset: number }>;
+  let cursor = latest.result.cursor;
+  let reconstructed = fragments(latest.result).map(row => row.text).join('');
+  let oldest = latest;
+  for (let page = 0; oldest.result.hasOlder && page < 100; page += 1) {
+    oldest = await read({ direction: 'older', cursor });
+    const rows = fragments(oldest.result);
+    assert.ok(rows.length > 0);
+    reconstructed = rows.map(row => row.text).join('') + reconstructed;
+    cursor = oldest.result.cursor;
+  }
+  assert.equal(oldest.result.hasOlder, false);
+  assert.equal(reconstructed, payload, 'older pages preserve the entire large payload without duplication');
+  // Cursors describe the accumulated window, not just the most recent page.
+  // An append-only branch can continue newer from its existing right edge.
+  installReadSource(server, [textEntry('full-payload', payload), textEntry('append', payload)]);
+  reconstructed = '';
+  let newer = await read({ direction: 'newer', cursor: oldest.result.cursor });
+  for (let page = 0; page < 100; page += 1) {
+    reconstructed += fragments(newer.result).map(row => row.text).join('');
+    if (!newer.result.hasNewer) break;
+    newer = await read({ direction: 'newer', cursor: newer.result.cursor });
+  }
+  assert.equal(newer.result.hasNewer, false);
+  assert.equal(reconstructed, payload, 'newer pages preserve the entire appended payload');
+  await assert.rejects(read({ direction: 'older', cursor: { start: 0, end: 1 } }),
+    (error: { code?: string }) => error.code === 'INVALID_PARAMS');
+});
+
+test('durable creator ownership survives human prompts and cleanup closes only caller-owned sessions', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-ownership-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const runningPath = await writeSessionFile(dir, 'running.jsonl', 'Running plan');
+  const runtimePath = await writeSessionFile(dir, 'runtime.jsonl', 'Runtime plan');
+  const pendingPath = await writeSessionFile(dir, 'pending.jsonl', 'Pending plan');
+  const foreignPath = await writeSessionFile(dir, 'foreign.jsonl', 'Foreign plan');
+  const creator = resolveSessionIdentity(currentPath);
+  const branches = new Map<string, SessionEntryLike[]>();
+  const reads = new Map<string, number>();
+  for (const sessionPath of [idlePath, runningPath, runtimePath, pendingPath, foreignPath]) {
+    branches.set(sessionPath, [{ type: 'custom', customType: 'pie.agent-created-session',
+      data: { version: 1, sessionId: resolveSessionIdentity(sessionPath).sessionId, creator: sessionPath === foreignPath
+        ? { sessionId: 'another-owner', identityFallback: false } : creator } } as SessionEntryLike]);
+  }
+  (server as unknown as { initializeColdSessionStore(): unknown }).initializeColdSessionStore = () => ({
+    readSessionControlSource: (sessionPath: string) => {
+      const entries = branches.get(sessionPath) ?? [];
+      reads.set(sessionPath, (reads.get(sessionPath) ?? 0) + 1);
+      const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+      return { sessionId, entries, creator: readAgentCreatedSessionCreator({
+        getSessionId: () => sessionId, getHeader: () => null, getEntries: () => entries,
+      } as never) };
+    },
+  });
+  server.workerRuntimeRouter = { getRoute: (sessionPath) => sessionPath === runtimePath
+    ? { state: 'hot', checkpoint: { requestId: 'authoritative-request' } } : { state: 'cold' },
+    hasPendingRuntimeWork: (sessionPath) => sessionPath === pendingPath };
+  applyMembership(server, membership([
+    membershipEntry(currentPath), membershipEntry(idlePath, { agentCreated: false }),
+    membershipEntry(runningPath, { activity: 'waiting-user-input' }), membershipEntry(runtimePath), membershipEntry(pendingPath),
+    membershipEntry(foreignPath, { agentCreated: true }),
+  ]));
+  await hydrate(server);
+  const list = async () => (await server.handleWorkerSessionControl(frame('list'), currentPath)).result.sessions as Array<Record<string, unknown>>;
+  assert.equal((await list()).find(row => row.path === idlePath)?.ownedByCaller, true);
+  branches.get(idlePath)!.push(textEntry('human', 'A human now directs this session'));
+  const rows = await list();
+  assert.equal(rows.find(row => row.path === idlePath)?.ownedByCaller, true);
+  assert.deepEqual(rows.find(row => row.path === idlePath)?.creator, creator);
+  assert.equal(rows.find(row => row.path === foreignPath)?.ownedByCaller, false);
+  assert.equal(reads.get(idlePath), 1, 'speech appends do not reread cached immutable ownership');
+  assert.equal(rows.find(row => row.path === pendingPath)?.busy, true);
+  const closed: string[] = [];
+  (server as unknown as { requestHostSessionClose(...args: unknown[]): Promise<unknown> }).requestHostSessionClose = async (sessionPath) => {
+    closed.push(sessionPath as string);
+    return { result: { closed: true } };
   };
+  const safe = await server.handleWorkerSessionControl(frame('cleanup'), currentPath);
+  assert.equal(safe.result.dontCloseRunning, true);
+  assert.equal(safe.result.ownedCount, 4);
+  assert.equal(safe.result.closedCount, 1);
+  assert.equal(safe.result.skippedCount, 3);
+  assert.equal(safe.result.failedCount, 0);
+  assert.equal(safe.result.unknownCount, 0);
+  assert.equal(safe.result.resultsTruncated, false);
+  assert.deepEqual(closed, [idlePath]);
+  assert.deepEqual((safe.result.results as Array<{ status: string; reason?: string }>).filter(row => row.status === 'skipped').map(row => row.reason), ['running', 'running', 'running']);
+  closed.length = 0;
+  const forced = await server.handleWorkerSessionControl(frame('cleanup', { dontCloseRunning: false }), currentPath);
+  assert.equal(forced.result.closedCount, 4);
+  assert.deepEqual(closed, [idlePath, runningPath, runtimePath, pendingPath]);
+  assert.equal(reads.get(idlePath), 1, 'cleanup reuses immutable ownership evidence');
+  await fs.writeFile(idlePath, JSON.stringify({ type: 'session', id: 'replacement-session', cwd: dir }) + '\n');
+  branches.set(idlePath, []);
+  assert.equal((await list()).find(row => row.path === idlePath)?.ownedByCaller, false);
+  assert.equal(reads.get(idlePath), 2, 'a replacement identity invalidates the creator cache');
+});
 
-  const latest = await server.handleWorkerSessionControl(
-    frame('read', { title: 'Idle plan', direction: 'latest', limit: 1 }),
-    currentPath,
-  );
-  assert.deepEqual((latest.result.transcript as Array<{ id: string }>).map((row) => row.id), ['row-249']);
-  assert.deepEqual(latest.result.cursor, { start: 249, end: 250 });
-
-  const newestAtEnd = await server.handleWorkerSessionControl(
-    frame('read', {
-      title: 'Idle plan', direction: 'newer', cursor: latest.result.cursor, limit: 1,
-    }),
-    currentPath,
-  );
-  assert.deepEqual(newestAtEnd.result.transcript, []);
-  assert.deepEqual(newestAtEnd.result.cursor, { start: 250, end: 250 });
-
-  let olderCursor = latest.result.cursor;
-  const olderIds: string[] = [];
-  for (let page = 0; page < 3; page += 1) {
-    const result = await server.handleWorkerSessionControl(
-      frame('read', {
-        title: 'Idle plan', direction: 'older', cursor: olderCursor, limit: 1,
-      }),
-      currentPath,
-    );
-    olderIds.push(...(result.result.transcript as Array<{ id: string }>).map((row) => row.id));
-    olderCursor = result.result.cursor as { start: number; end: number };
+test('operation status reports pending and known evidence without replay and read-only access rejects mutations', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-status-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const admitted = new Promise<void>(resolve => { started = resolve; });
+  let sends = 0;
+  server.handleRequest = async () => { sends += 1; started(); await gate; return { accepted: true }; };
+  const payload = { self: true, prompt: 'one send', requestKey };
+  const send = server.handleWorkerSessionControl(frame('message', payload), currentPath);
+  await admitted;
+  const status = async (source = currentPath, key = requestKey) => (
+    await server.handleWorkerSessionControl(frame('operation.status', { requestKey: key }), source)
+  ).result.operation as Record<string, unknown>;
+  assert.equal((await status()).status, 'pending');
+  assert.equal((await server.handleWorkerSessionControl(frame('message', payload), currentPath)).result.operation !== undefined, true);
+  assert.equal(sends, 1);
+  release();
+  await send;
+  assert.equal((await status()).status, 'known');
+  assert.equal((await status()).outcome, 'known');
+  await server.handleWorkerSessionControl(frame('message', payload), currentPath);
+  assert.equal(sends, 1, 'completed requests are not replayed');
+  assert.equal((await status('/other-owner')).status, 'unavailable');
+  assert.equal((await status(currentPath, `${Date.now()}:${randomUUID()}`)).status, 'unavailable');
+  for (const action of ['create', 'message', 'settings.set', 'close', 'cleanup']) {
+    await assert.rejects(server.handleWorkerSessionControl({ ...(frame(action) as object), access: 'read-only' }, currentPath),
+      (error: { code?: string }) => error.code === 'INVALID_PARAMS');
   }
-  assert.deepEqual(olderIds, ['row-248', 'row-247', 'row-246']);
-
-  let newerCursor = { start: 0, end: 1 };
-  const newerIds: string[] = [];
-  for (let page = 0; page < 3; page += 1) {
-    const result = await server.handleWorkerSessionControl(
-      frame('read', {
-        title: 'Idle plan', direction: 'newer', cursor: newerCursor, limit: 1,
-      }),
-      currentPath,
-    );
-    newerIds.push(...(result.result.transcript as Array<{ id: string }>).map((row) => row.id));
-    newerCursor = result.result.cursor as { start: number; end: number };
-  }
-  assert.deepEqual(newerIds, ['row-1', 'row-2', 'row-3']);
+  assert.equal(sends, 1);
 });
 
 test('agent close emits a typed host bridge request and reports acceptance for the caller session', async () => {
@@ -2219,32 +2435,4 @@ test('list exposes assigned titles from the unique authority and never provision
   assert.equal(currentRow?.title, 'Current plan');
   assert.ok(currentRow?.name, 'the provisional label stays visible');
   assert.ok(idleRow && !('title' in idleRow));
-});
-test('replyTo resolves an unnamed pending-title live identity but rejects closing members', async (t) => {
-  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-pending-reply-'));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
-  const pendingPath = await writeSessionFile(dir, 'unnamed.jsonl');
-  const baseMembers = [membershipEntry(currentPath), membershipEntry(idlePath)];
-  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)]));
-  const internal = server as unknown as {
-    pendingLiveTitlePaths: Set<string>;
-    liveSessionTitles: { assigned(path: string): string | undefined };
-  };
-  const pendingKey = [...internal.pendingLiveTitlePaths].find((key) => key.endsWith('unnamed.jsonl'));
-  assert.ok(pendingKey, 'the live target is awaiting title admission');
-  assert.equal(internal.liveSessionTitles.assigned(pendingPath), undefined);
-
-  const replyReference = createSessionControlSender(resolveSessionIdentity(pendingPath), 'Unnamed plan').replyReference;
-  const resolveReply = (server as unknown as {
-    resolveSessionControlReplyTarget(payload: Record<string, unknown>, sourcePath: string): unknown;
-  }).resolveSessionControlReplyTarget.bind(server);
-  const resolved = resolveReply({ replyTo: replyReference }, currentPath) as { status: string; sessionPath: string };
-  assert.equal(resolved.status, 'live');
-  assert.equal(resolved.sessionPath, pendingPath, 'stable identity resolves despite pending title admission');
-
-  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)], [closeFrameEntry(pendingPath)]));
-  assert.throws(() => resolveReply({ replyTo: replyReference }, currentPath),
-    (error: { code?: string }) => error.code === 'SESSION_NOT_FOUND',
-    'host closing membership remains non-addressable');
 });

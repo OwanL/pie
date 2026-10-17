@@ -5,6 +5,7 @@ import {
   AGENT_CREATED_SESSION_CUSTOM_TYPE,
   appendAgentCreatedSessionProvenance,
   isAgentCreatedSession,
+  readAgentCreatedSessionCreator,
 } from '../session-provenance';
 
 function manager(sessionId: string, dataSessionId = sessionId) {
@@ -78,6 +79,23 @@ test('reports unavailable custom-entry API instead of silently losing provenance
     assert.throws(() => appendAgentCreatedSessionProvenance({ ...current, appendCustomEntry } as any),
       /SDK custom entries are unavailable/);
     assert.equal(current.getEntries().length, 1);
+  }
+});
+
+test('creator identity round-trips in the same marker and cannot authenticate forks', () => {
+  const created = manager('child');
+  created.getEntries().length = 0;
+  const creator = { sessionId: 'parent', identityFallback: true };
+  appendAgentCreatedSessionProvenance(created, creator);
+  assert.deepEqual(created.getEntries()[0]?.data, { version: 1, sessionId: 'child', creator });
+  assert.deepEqual(readAgentCreatedSessionCreator(created), creator);
+  assert.equal(readAgentCreatedSessionCreator({ ...created, getSessionId: () => 'fork' }), undefined);
+  assert.equal(readAgentCreatedSessionCreator(manager('legacy')), undefined);
+  for (const invalid of [null, [], {}, { sessionId: ' ', identityFallback: false },
+    { sessionId: 'parent', identityFallback: 'true' }]) {
+    created.getEntries()[0]!.data = { version: 1, sessionId: 'child', creator: invalid };
+    assert.equal(readAgentCreatedSessionCreator(created), undefined);
+    assert.equal(isAgentCreatedSession(created), true);
   }
 });
 

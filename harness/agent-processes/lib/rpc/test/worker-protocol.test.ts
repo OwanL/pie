@@ -86,10 +86,16 @@ test('session-control frames are typed, bounded, and identity-fenced', () => {
     result: { sessionPath: base.sessionPath, transcript: [], cursor: { start: 0, end: 0 } },
   };
   assert.equal(parseWorkerToCoordinatorFrame(request, expected).status, 'accepted');
-  for (const action of ['settings.get', 'settings.set'] as const) {
+  for (const action of ['settings.get', 'settings.set', 'cleanup', 'operation.status'] as const) {
     assert.equal(parseWorkerToCoordinatorFrame({ ...request, action }, expected).status, 'accepted');
   }
   assert.equal(parseCoordinatorToWorkerFrame(result, expected).status, 'accepted');
+  assert.equal(parseWorkerToCoordinatorFrame({ ...request, access: 'read-only' }, expected).status, 'accepted');
+  assert.equal(parseWorkerToCoordinatorFrame({ ...request, action: 'list', access: 'read-only' }, expected).status, 'accepted');
+  for (const action of ['create', 'message', 'settings.get', 'settings.set', 'close', 'cleanup', 'operation.status']) {
+    assert.equal(parseWorkerToCoordinatorFrame({ ...request, action, access: 'read-only' }, expected).status, 'invalid');
+  }
+  assert.equal(parseWorkerToCoordinatorFrame({ ...request, access: 'full' }, expected).status, 'invalid');
   assert.equal(
     parseWorkerToCoordinatorFrame({ ...result, workerGeneration: result.workerGeneration + 1 }, expected).status,
     'invalid',

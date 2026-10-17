@@ -141,6 +141,7 @@ export interface SessionCreateParams {
   /** Internal provenance marker used only by the agent session_control create
    *  path; persisted in the new session and never inferred from lineage. */
   agentCreated?: boolean;
+  creator?: { sessionId: string; identityFallback: boolean };
   /** Required coordinator-reserved base title for the agent-create path (the
    *  session_control tool always supplies it). Assigned uniquely by the
    *  coordinator title authority before the created session is published.
@@ -293,6 +294,12 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
   if (agentCreated !== undefined && typeof agentCreated !== 'boolean') {
     fail('session.create', 'agentCreated must be a boolean when provided');
   }
+  const creator = params['creator'];
+  if (creator !== undefined && (!isObj(creator) || Array.isArray(creator)
+    || typeof creator.sessionId !== 'string' || !creator.sessionId.trim()
+    || typeof creator.identityFallback !== 'boolean' || agentCreated !== true)) {
+    fail('session.create', 'creator requires agentCreated and a non-empty sessionId and boolean identityFallback');
+  }
   const title = (params as Record<string, unknown>)['title'];
   if (title !== undefined && typeof title !== 'string') {
     fail('session.create', 'title must be a string when provided');
@@ -303,6 +310,10 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
     ...(operationId !== undefined ? { operationId } : {}),
     ...(operationAttempt !== undefined ? { operationAttempt } : {}),
     ...(agentCreated === true ? { agentCreated: true } : {}),
+    ...(creator !== undefined ? { creator: {
+      sessionId: (creator as Record<string, unknown>).sessionId as string,
+      identityFallback: (creator as Record<string, unknown>).identityFallback as boolean,
+    } } : {}),
     ...(title !== undefined ? { title: title as string } : {}),
   };
 }

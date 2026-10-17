@@ -43,7 +43,8 @@ import {
 import { SessionCatalog } from '../catalog/session-catalog';
 import { backendSessionPathKey } from '../catalog/session-directory';
 import { recordWriteOwnership } from '../ownership/write-ownership-trace';
-import { appendAgentCreatedSessionProvenance } from '../metadata/session-provenance';
+import { resolveSessionIdentity } from '../ownership/session-identity';
+import { appendAgentCreatedSessionProvenance, readAgentCreatedSessionCreator, type SessionCreatorIdentity } from '../metadata/session-provenance';
 import { BackendError } from '../../agent-processes/coordinator/server-io.js';
 import type { SessionOwnershipAdmission } from '../ownership/session-ownership-authority';
 import type { SdkModule, SdkSessionManager } from '../../agent-processes/lib/sdk-integration/sdk';
@@ -777,6 +778,37 @@ export class ColdSessionStore {
     };
   }
 
+  /** Full durable branch for agent reads, before renderer/lazy-detail projection.
+   * A synchronous SDK read remains within the owning generation/lease fence. */
+  readSessionControlSource(sessionPath: string): {
+    sessionId: string;
+    entries: readonly SessionEntryLike[];
+    creator?: SessionCreatorIdentity;
+  } {
+    const hotStamp = this.leases.captureHotRead(sessionPath);
+    let manager: SdkSessionManager;
+    let assertCurrent: () => void;
+    if (hotStamp) {
+      if (!isCurrentColdSessionHeader(readColdSessionHeaderSync(sessionPath))) {
+        throw new BackendError('SESSION_READ_UNAVAILABLE', 'Hot session reads require a current durable header.');
+      }
+      this.leases.assertHotReadCurrent(hotStamp);
+      manager = this.sdk.SessionManager.open(sessionPath);
+      assertCurrent = () => this.leases.assertHotReadCurrent(hotStamp);
+    } else {
+      const opened = this.openManagerWithMigrationLease(sessionPath);
+      manager = opened.manager;
+      assertCurrent = () => this.leases.assertCurrent(opened.stamp);
+    }
+    const result = {
+      sessionId: manager.getSessionId?.() ?? resolveSessionIdentity(sessionPath).sessionId,
+      entries: manager.getBranch() as SessionEntryLike[],
+      creator: readAgentCreatedSessionCreator(manager),
+    };
+    assertCurrent();
+    return result;
+  }
+
   async loadPage(
     sessionPath: string,
     direction: TranscriptPageDirection,
@@ -1019,7 +1051,7 @@ export class ColdSessionStore {
   /** The coordinator patch barrier makes SessionManager.create itself the
    * atomic durable-header boundary. Do not fabricate or reopen the file here:
    * the returned manager is the exact one-use handoff manager. */
-  create(options: { cwd?: string; sessionDir?: string; agentCreated?: boolean; providerRuntimeReference?: ProviderRuntimeReference } = {}): ColdSessionManagerHandle {
+  create(options: { cwd?: string; sessionDir?: string; agentCreated?: boolean; creator?: SessionCreatorIdentity; providerRuntimeReference?: ProviderRuntimeReference } = {}): ColdSessionManagerHandle {
     return this.withWriterAdmission(() => {
       const manager = this.sdk.SessionManager.create(
         options.cwd || this.startupCwd,
@@ -1030,7 +1062,7 @@ export class ColdSessionStore {
         // retains it behind the existing coordinator write admission.
         appendProviderRuntimeReference(manager as unknown as RuntimeEntryManager, options.providerRuntimeReference);
       }
-      if (options.agentCreated) appendAgentCreatedSessionProvenance(manager);
+      if (options.agentCreated) appendAgentCreatedSessionProvenance(manager, options.creator);
       this.refreshCatalog();
       return this.createHandle(manager);
     });

@@ -36,6 +36,7 @@ import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
 import { deriveContextUsageEvidenceFromBranch } from '../../session-storage/transcripts/context-usage';
 import { projectRegistryModels, resolveActiveModel } from '../../model-providers/catalog/model-catalog';
 import { ExtensionUIBridge } from './extension-ui-bridge';
+import { installSubagentBackendTools } from '../../tools/subagent/backend-tools-runtime.js';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { handleBackendRequest } from '../coordinator/request-handler.js';
 import type { ModelSettingsUnsetKey } from '../coordinator/request-handler-shared.js';
@@ -257,6 +258,7 @@ export class WorkerRuntimeHost {
   private runtimeReady = false;
   private disposed = false;
   private commandTail = Promise.resolve();
+  private titleGeneration?: Promise<WorkerJsonValue>;
   private pendingCommands = 0;
   private snoozeReservation?: { reservationId: string; wakeAt: number };
   private extensionIncidentSequence = 0;
@@ -271,6 +273,7 @@ export class WorkerRuntimeHost {
   private startupCwd = '';
   private sessionDir = '';
   private uninstallNetworkLease?: () => void;
+  private uninstallSubagentBackendTools?: () => void;
   private stopProviderIncidentObserver?: () => void;
   private stopProviderProgressObserver?: () => void;
   private readonly providerAttemptOwners = new Map<string, {
@@ -425,6 +428,23 @@ export class WorkerRuntimeHost {
         id: publicRequestId, method: operation, params,
       } as RequestEnvelope).then(asWorkerJson);
     }
+    if (operation === 'session.title.generate' && this.runtimeReady && this.context && this.sdk) {
+      // Candidate-only provider work must never hold the session mutation FIFO.
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params : payload;
+      if (typeof params.sessionPath !== 'string' || !sameSessionPath(params.sessionPath, this.context.sessionPath)) {
+        return Promise.reject(new Error('Title generation path does not match the worker lease.'));
+      }
+      if (this.titleGeneration) return this.titleGeneration;
+      const pending = handleBackendRequest(this.requestDeps(), {
+        id: publicRequestId, method: operation, params,
+      } as RequestEnvelope).then(asWorkerJson);
+      const settled = pending.finally(() => {
+        if (this.titleGeneration === settled) this.titleGeneration = undefined;
+      });
+      this.titleGeneration = settled;
+      return settled;
+    }
     this.pendingCommands++;
     const owned = this.commandTail.then(async () => {
       if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
@@ -483,16 +503,10 @@ export class WorkerRuntimeHost {
         if (!recorded) throw new Error('An assigned session title must contain visible characters.');
         if (recorded.length > 16 * 1024) throw new Error('The assigned session title is unbounded.');
         const context = this.context!;
-        const currentName = context.session.sessionManager.getSessionName?.();
         // Reconciliation may replace exactly the durable colliding title
         // observed at hydration, but never an intervening manual rename.
         const expected = typeof params.replaceExpectedTitle === 'string'
           ? params.replaceExpectedTitle : undefined;
-        if (expected !== undefined
-          ? currentName?.trim() !== expected
-          : Boolean(currentName?.trim())) {
-          return asWorkerJson({ assigned: false, changed: false, skipped: 'explicit-name' as const });
-        }
         const sessionId = context.session.sessionManager.getSessionId?.();
         // The pinned SDK's session adapter installs a durable name setter
         // (`pi.setSessionName`), which Pie's `SdkSession` type does not declare;
@@ -501,6 +515,12 @@ export class WorkerRuntimeHost {
           setSessionName?: (name: string) => void;
         };
         const assigned = async () => {
+          // Check inside the serialized lifecycle write, not before waiting for it.
+          const currentName = context.session.sessionManager.getSessionName?.();
+          if (this.disposed || this.context !== context
+            || (expected !== undefined ? currentName?.trim() !== expected : Boolean(currentName?.trim()))) {
+            return asWorkerJson({ assigned: false, changed: false, skipped: 'explicit-name' as const });
+          }
           if (typeof setNameCapable.setSessionName !== 'function') {
             throw new Error('This Pi session runtime does not support durable session titles.');
           }
@@ -751,6 +771,8 @@ export class WorkerRuntimeHost {
   private async disposeOnce(): Promise<AnalyticsTransportDisposalReport | undefined> {
     this.disposed = true;
     this.runtimeReady = false;
+    this.uninstallSubagentBackendTools?.();
+    this.uninstallSubagentBackendTools = undefined;
     // Revoke every manager before any async shutdown work. The SDK lease
     // revocation below remains the cross-process ownership boundary; this
     // registry closes the in-process persistence boundary first.
@@ -946,6 +968,16 @@ export class WorkerRuntimeHost {
     // spellings before it delegates to the adapter (important on Windows 8.3
     // temp paths), so reopening the non-canonical grant alias would fail.
     const { createBackendTools } = await import('../coordinator/backend-tools.js');
+    this.uninstallSubagentBackendTools = installSubagentBackendTools(() => createBackendTools({
+      kind: 'subagent',
+      requestSessionControl: (body, signal) => {
+        if (this.disposed) throw new Error('Worker runtime host is disposed.');
+        return this.options.server.requestFrame(
+          body.kind === 'session.control' ? { ...body, access: 'read-only' } : body,
+          'session.control.result', undefined, 120_000, signal,
+        );
+      },
+    }));
     const manager = this.sdk.SessionManager.open(this.currentLease.canonicalSessionPath);
     const guardedManager = this.fenceSessionManager(manager);
     const runtime = await this.sdk.createAgentSessionRuntime(

@@ -88,6 +88,8 @@ async function makeColdServer(
   let durableBranch: any[] = [entry('user-1', 'user', 'hello')];
   let sessionName: string | undefined;
   let managerOpens = 0;
+  let catalogManagerOpens = 0;
+  let inspectingProviderRuntime = false;
   let nextEntryId = 0;
   const server = new BackendServer({ workerEntryPath: '/worker-entry.js',
     sdkPath: sdkRuntime.descriptor.sdkPath,
@@ -98,6 +100,18 @@ async function makeColdServer(
   server.agentDir = dir;
   server.sessionDir = dir;
   server.sessionDirResolved = true;
+  const sessionProviderRuntime = server.sessionProviderRuntime.bind(server);
+  server.sessionProviderRuntime = (sessionPath: string) => {
+    // Provider-reference inspection opens its manager synchronously, before
+    // awaiting runtime resolution. Count those separately from browse-cache reads
+    // without replacing the real catalog path or masking redundant browse opens.
+    inspectingProviderRuntime = true;
+    try {
+      return sessionProviderRuntime(sessionPath);
+    } finally {
+      inspectingProviderRuntime = false;
+    }
+  };
   server.sdk = {
     VERSION: 'test-sdk',
     SessionManager: {
@@ -113,6 +127,7 @@ async function makeColdServer(
       },
       open(openedPath: string) {
         managerOpens += 1;
+        if (inspectingProviderRuntime) catalogManagerOpens += 1;
         const snapshot = [...durableBranch];
         const appendRows = (rows: ReadonlyArray<Record<string, unknown>>): string[] => {
           let parentId = (snapshot.at(-1) as { id?: string } | undefined)?.id ?? null;
@@ -208,6 +223,7 @@ async function makeColdServer(
     replaceBranch(rows: any[]) { durableBranch = [...rows]; },
     setSessionName(name: string | undefined) { sessionName = name; },
     counts: () => ({ managerOpens }),
+    inspectionCounts: () => ({ catalogManagerOpens, browseManagerOpens: managerOpens - catalogManagerOpens }),
   };
 }
 
@@ -235,12 +251,15 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
   const h = await makeColdServer(t);
   try {
     const opened = await h.server.buildSessionOpenedPayload(h.sessionPath, 'selection-1');
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 1, browseManagerOpens: 1 });
     const preloaded = await h.server.buildSessionOpenedPayload(
       h.sessionPath,
       undefined,
       'tail',
       { kind: 'response', requestId: 'preload-1' },
     );
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 2, browseManagerOpens: 1 },
+      'preload inspects the catalog but reuses the cached browse snapshot');
     assert.equal(opened.runtimeReady, false);
     assert.equal(preloaded.runtimeReady, false);
     assert.equal(opened.busy, false);
@@ -251,6 +270,8 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
     const page = await h.server.loadTranscriptPage(h.sessionPath, 'latest');
     assert.deepEqual(page.transcript.map((message: { id: string }) => message.id), ['user-1', 'assistant-1']);
     assert.equal(page.busy, false);
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 2, browseManagerOpens: 2 },
+      'durable append rebuilds the browse snapshot without another catalog inspection');
 
     const detail = await h.server.loadDetail(h.sessionPath, {
       key: 'missing-detail',
@@ -263,7 +284,8 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
       sizeBytes: 1,
     });
     assert.equal(detail.status, 'unavailable');
-    assert.deepEqual(h.counts(), { managerOpens: 2 });
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 2, browseManagerOpens: 2 });
+    assert.equal(h.server.workerRuntimeRouter, undefined, 'catalog inspection does not promote a runtime');
     assert.deepEqual(h.server.coldSessionStore.getBrowseCacheStats(), {
       hits: 2,
       misses: 2,
@@ -550,11 +572,13 @@ test('cold list and models.list use coordinator metadata without promotion', asy
       id: 'list-cold', method: 'session.list',
     });
     assert.deepEqual(sessions.map((session: { path: string }) => session.path), [h.sessionPath]);
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 0, browseManagerOpens: 0 });
     const models = await h.server.handleRequest({
       id: 'models-cold', method: 'models.list', params: { sessionPath: h.sessionPath },
     });
     assert.deepEqual(models.map((model: { id: string }) => model.id), ['model-a', 'model-b']);
-    assert.deepEqual(h.counts(), { managerOpens: 0 });
+    assert.deepEqual(h.inspectionCounts(), { catalogManagerOpens: 1, browseManagerOpens: 0 });
+    assert.equal(h.server.workerRuntimeRouter, undefined, 'models.list does not promote a runtime');
   } finally {
     t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
@@ -704,14 +728,17 @@ test('an externally rewritten retained session evicts its stale manager and reop
     h.server.emit = () => undefined;
     h.server.emitSessionListChanged = async () => undefined;
     await h.server.handleRequest({ id: 'create-rewritten', method: 'session.create', params: { cwd: h.dir } });
-    const opensBeforeRewrite = h.counts().managerOpens;
+    const opensBeforeRewrite = h.inspectionCounts();
 
     const externalEntry = entry('assistant-after-rewrite', 'assistant', 'external');
     await h.append(externalEntry, createdPath);
     const payload = await h.server.buildSessionOpenedPayload(createdPath);
 
     assert.equal(payload.runtimeReady, false);
-    assert.equal(h.counts().managerOpens, opensBeforeRewrite + 1);
+    assert.deepEqual(h.inspectionCounts(), {
+      catalogManagerOpens: opensBeforeRewrite.catalogManagerOpens + 1,
+      browseManagerOpens: opensBeforeRewrite.browseManagerOpens + 1,
+    });
     assert.equal(h.server.coldSessionManagerHandles.size, 0, 'the stale handle is not selected again');
   } finally {
     t.after(() => fs.rm(h.dir, { recursive: true, force: true }));

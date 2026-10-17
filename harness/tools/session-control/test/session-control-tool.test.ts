@@ -4,286 +4,253 @@ import test from 'node:test';
 import {
   createSessionControlTool,
   SessionControlParameters,
+  SessionControlReadOnlyParameters,
   type SessionControlToolRequest,
 } from '../index.js';
+import { createBackendTools } from '../../../agent-processes/coordinator/backend-tools.js';
 import type { CoordinatorToWorkerResponseFrame, WorkerToCoordinatorRequestBody } from '../../../agent-processes/lib/rpc/worker-protocol.js';
 
 type SessionControlResult = Extract<CoordinatorToWorkerResponseFrame, { kind: 'session.control.result' }>;
-
+type Request = Extract<WorkerToCoordinatorRequestBody, { kind: 'session.control' }>;
 function response(result: unknown): SessionControlResult {
-  return {
-    kind: 'session.control.result',
-    requestId: 'response',
-    ok: true,
-    result,
-  } as SessionControlResult;
+  return { kind: 'session.control.result', requestId: 'response', ok: true, result } as SessionControlResult;
 }
+function harness(result: unknown = { ok: true }) {
+  const calls: Request[] = [];
+  const tool = createSessionControlTool(async (body) => { calls.push(body as Request); return response(result); });
+  return { calls, tool };
+}
+function withoutKey(call: Request) {
+  const { requestKey, ...payload } = call.payload;
+  if (['create', 'message', 'settings.set', 'close', 'cleanup'].includes(call.action)) assert.match(String(requestKey), /^\d+:[0-9a-f-]{36}$/u);
+  return { ...call, payload };
+}
+// Model the SDK contract: only throws set isError; returned flags are ignored.
+const run = async (tool: ReturnType<typeof createSessionControlTool>, params: unknown) => {
+  try {
+    return { ...await tool.execute('call', params as never, undefined, undefined), isError: false };
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    assert.ok(error.message.startsWith('session_control error: '));
+    return { content: [{ type: 'text' as const, text: error.message }], details: JSON.parse(error.message.slice('session_control error: '.length)), isError: true };
+  }
+};
 
-test('session_control maps title/self targeting and the prompt payload onto the typed bridge', async () => {
-  const calls: Array<{ body: WorkerToCoordinatorRequestBody; signal?: AbortSignal }> = [];
-  const request: SessionControlToolRequest = async (body, signal) => {
-    calls.push({ body, signal });
-    return response({ ok: true });
-  };
-  const tool = createSessionControlTool(request);
-
-  const message = await tool.execute(
-    'message-call',
-    { action: 'message', title: 'Refactor auth', prompt: 'wake the other session' },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in message && message.isError, false);
-  assert.deepEqual(calls[0]?.body, {
-    kind: 'session.control',
-    action: 'message',
-    payload: { title: 'Refactor auth', prompt: 'wake the other session' },
-  });
-
-  const read = await tool.execute(
-    'read-call',
-    { action: 'read', self: true, direction: 'older', cursor: { start: 16, end: 32 }, limit: 4 },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in read && read.isError, false);
-  assert.deepEqual(calls[1]?.body, {
-    kind: 'session.control',
-    action: 'read',
-    payload: {
-      self: true,
-      direction: 'older',
-      cursor: { start: 16, end: 32 },
-      limit: 4,
-    },
-  });
-
-  const close = await tool.execute(
-    'close-call',
-    { action: 'close', title: 'Refactor auth (2)', delete: true },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in close && close.isError, false);
-  assert.deepEqual(calls[2]?.body, {
-    kind: 'session.control',
-    action: 'close',
-    payload: { title: 'Refactor auth (2)', delete: true },
-  });
+test('title requests map onto the bridge and mutations get distinct generated keys', async () => {
+  const { calls, tool } = harness();
+  await run(tool, { action: 'message', title: 'Refactor auth', prompt: 'wake the other session' });
+  await run(tool, { action: 'read', title: 'Refactor auth', direction: 'older', cursor: 'opaque', maxCharacters: 8000 });
+  await run(tool, { action: 'close', title: 'Refactor auth (2)', delete: true });
+  assert.deepEqual(calls.map(withoutKey), [
+    { kind: 'session.control', action: 'message', payload: { title: 'Refactor auth', prompt: 'wake the other session' } },
+    { kind: 'session.control', action: 'read', payload: { title: 'Refactor auth', direction: 'older', cursor: 'opaque', maxCharacters: 8000, includeToolCalls: false, includeReasoning: false } },
+    { kind: 'session.control', action: 'close', payload: { title: 'Refactor auth (2)', delete: true } },
+  ]);
+  assert.notEqual(calls[0].payload.requestKey, calls[2].payload.requestKey);
 });
 
-test('session_control forwards settings inspection/update, identity-bound replies, and combined create patches', async () => {
-  const calls: WorkerToCoordinatorRequestBody[] = [];
-  const tool = createSessionControlTool(async (body) => {
-    calls.push(body);
-    return response({ ok: true });
-  });
-  const settings = {
-    model: { provider: 'openai', id: 'gpt-test' },
-    reasoning: 'high' as const,
-    autonomousMode: true,
-    subagentProviderChoices: { anthropic: false },
-    disabledSystemPromptEntries: ['prompt-a'],
-  };
-
-  await tool.execute('settings-get', { action: 'settings.get', title: 'Research' }, undefined, undefined);
-  await tool.execute('settings-set', { action: 'settings.set', self: true, settings }, undefined, undefined);
-  await tool.execute('reply', {
-    action: 'message',
-    replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9',
-    prompt: 'answer',
-  }, undefined, undefined);
+test('settings, replies, and create patches preserve payloads', async () => {
+  const { calls, tool } = harness();
+  const settings = { model: { provider: 'openai', id: 'gpt-test' }, reasoning: 'high', autonomousMode: true, subagentProviderChoices: { anthropic: false }, disabledSystemPromptEntries: ['prompt-a'] };
+  await run(tool, { action: 'settings.get', title: 'Research' });
+  await run(tool, { action: 'settings.set', title: 'Research', settings });
+  await run(tool, { action: 'message', replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer' });
   const { model: _model, ...createSettings } = settings;
-  await tool.execute('create-combined', {
-    action: 'create',
-    title: 'New worker',
-    bucket: 'medium',
-    prompt: 'start this task',
-    settings: createSettings,
-  }, undefined, undefined);
-
-  assert.deepEqual(calls, [
+  await run(tool, { action: 'create', title: 'New worker', bucket: 'medium', prompt: 'start this task', settings: createSettings });
+  assert.deepEqual(calls.map(withoutKey), [
     { kind: 'session.control', action: 'settings.get', payload: { title: 'Research' } },
-    { kind: 'session.control', action: 'settings.set', payload: { self: true, settings } },
+    { kind: 'session.control', action: 'settings.set', payload: { title: 'Research', settings } },
     { kind: 'session.control', action: 'message', payload: { replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer' } },
     { kind: 'session.control', action: 'create', payload: { title: 'New worker', bucket: 'medium', prompt: 'start this task', settings: createSettings } },
   ]);
 });
 
-test('session_control validates create buckets and model conflicts before IPC', async () => {
-  const calls: WorkerToCoordinatorRequestBody[] = [];
-  const tool = createSessionControlTool(async (body) => { calls.push(body); return response({}); });
-  for (const bucket of [undefined, 'large', '', null, 1]) {
-    const result = await tool.execute('invalid-bucket', { action: 'create', title: 'A', bucket } as never, undefined, undefined);
-    assert.equal('isError' in result && result.isError, true);
-  }
-  const conflict = await tool.execute('model-conflict', {
-    action: 'create', title: 'A', bucket: 'medium', settings: { model: { provider: 'openai', id: 'test' } },
-  }, undefined, undefined);
-  assert.equal('isError' in conflict && conflict.isError, true);
-  for (const action of ['list', 'read', 'message', 'settings.get', 'settings.set', 'close']) {
-    const result = await tool.execute('non-create-bucket', { action, bucket: 'small' } as never, undefined, undefined);
-    assert.equal('isError' in result && result.isError, true);
+test('invalid create, targeting, inapplicable fields and attempted key replay do not reach IPC', async () => {
+  const { calls, tool } = harness();
+  for (const params of [
+    ...[undefined, 'large', '', null, 1].map(bucket => ({ action: 'create', title: 'A', bucket })),
+    { action: 'create', title: 'A', bucket: 'medium', settings: { model: { provider: 'p', id: 'm' } } },
+    { action: 'create', bucket: 'small' },
+    { action: 'create', bucket: 'small', title: 'a'.repeat(26) },
+    { action: 'create', bucket: 'small', title: 'a\nb' },
+    { action: 'create', bucket: 'small', title: 'A', cwd: '  ' },
+    { action: 'create', bucket: 'small', title: 'A', prompt: '  ' },
+    { action: 'message', prompt: 'hi' },
+    { action: 'message', title: '', replyTo: 'ref', prompt: 'hi' },
+    { action: 'message', title: 'A', replyTo: 'ref', prompt: 'hi' },
+    { action: 'message', title: 'A', prompt: '' },
+    { action: 'settings.set', title: 'A', settings: {} },
+    { action: 'message', title: 'A', prompt: 'hi', settings: {} },
+    { action: 'close', title: 'A', prompt: 'ignored' },
+    { action: 'message', title: 'A', prompt: 'hi', requestKey: 'caller-replay' },
+    { action: 'read', title: 'A', limit: 4 },
+    { action: 'read', self: false },
+    { action: 'message', self: true, replyTo: 'ref', prompt: 'hi' },
+    { action: 'close', title: 'A', self: true },
+    { action: 'list', title: 'A' },
+    { action: 'list', access: 'full' },
+    { action: 'operation.status' },
+    { action: 'operation.status', requestKey: '' },
+    { action: 'cleanup', dontCloseRunning: 'false' },
+  ]) {
+    const result = await run(tool, params);
+    assert.equal(result.isError, true, JSON.stringify(params));
   }
   assert.deepEqual(calls, []);
   for (const bucket of ['small', 'medium', 'frontier']) {
-    const result = await tool.execute('valid-bucket', { action: 'create', title: 'A', bucket } as never, undefined, undefined);
-    assert.equal('isError' in result && result.isError, false);
-    assert.deepEqual(calls.at(-1), { kind: 'session.control', action: 'create', payload: { title: 'A', bucket } });
+    assert.equal((await run(tool, { action: 'create', title: ' A ', bucket, cwd: ' /work ' })).isError, false);
+    assert.deepEqual(withoutKey(calls.at(-1)!), { kind: 'session.control', action: 'create', payload: { title: 'A', bucket, cwd: '/work' } });
   }
 });
 
-test('session_control requires an explicit title or self target and rejects conflicting targets', async () => {
-  const calls: Array<{ body: WorkerToCoordinatorRequestBody; signal?: AbortSignal }> = [];
-  const request: SessionControlToolRequest = async (body, signal) => {
-    calls.push({ body, signal });
-    return response({ ok: true });
-  };
-  const tool = createSessionControlTool(request);
-
-  const missing = await tool.execute('missing-call', { action: 'message', prompt: 'hi' }, undefined, undefined);
-  assert.equal('isError' in missing && missing.isError, true, 'there is no implicit current-session default');
-  assert.deepEqual(calls, [], 'an untargeted request must not reach the coordinator');
-
-  const conflict = await tool.execute(
-    'conflict-call',
-    { action: 'message', title: 'A', self: true, prompt: 'hi' },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in conflict && conflict.isError, true, 'title and self are mutually exclusive');
-  assert.deepEqual(calls, []);
+test('unnamed self targets remain usable, including subagent read of its owning primary', async () => {
+  const { calls, tool } = harness();
+  for (const params of [
+    { action: 'read', self: true }, { action: 'message', self: true, prompt: 'body' },
+    { action: 'settings.get', self: true }, { action: 'settings.set', self: true, settings: { reasoning: 'low' } },
+    { action: 'close', self: true },
+  ]) assert.equal((await run(tool, params)).isError, false);
+  assert.ok(calls.every(call => call.payload.self === true && call.payload.title === undefined));
+  const child = createSessionControlTool(async body => { calls.push(body as Request); return response({}); }, { readOnly: true });
+  assert.equal((await run(child, { action: 'read', self: true })).isError, false);
+  assert.equal(calls.at(-1)!.payload.self, true);
 });
 
-test('session_control requires a bounded create title and forwards it with the create payload', async () => {
-  const calls: Array<{ body: WorkerToCoordinatorRequestBody; signal?: AbortSignal }> = [];
-  const request: SessionControlToolRequest = async (body, signal) => {
-    calls.push({ body, signal });
-    return response({ ok: true, sessionPath: '/workspace/new.jsonl', title: 'Research notes' });
-  };
-  const tool = createSessionControlTool(request);
-
-  const missing = await tool.execute('create-missing', { action: 'create', bucket: 'small', cwd: '/workspace/project' }, undefined, undefined);
-  assert.equal('isError' in missing && missing.isError, true, 'create requires a title');
-
-  const created = await tool.execute(
-    'create-ok',
-    { action: 'create', bucket: 'small', title: 'Research notes', cwd: '/workspace/project' },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in created && created.isError, false);
-  assert.deepEqual(calls[0]?.body, {
-    kind: 'session.control',
-    action: 'create',
-    payload: { title: 'Research notes', bucket: 'small', cwd: '/workspace/project' },
-  });
+test('read applies defaults and validates opaque cursors, character limits and projection flags', async () => {
+  const { calls, tool } = harness();
+  await run(tool, { action: 'read', title: 'A' });
+  assert.deepEqual(calls[0].payload, { title: 'A', direction: 'latest', maxCharacters: 4000, includeToolCalls: false, includeReasoning: false });
+  await run(tool, { action: 'read', title: 'A', direction: 'newer', cursor: 'opaque', maxCharacters: 256 * 1024, includeToolCalls: true, includeReasoning: true });
+  assert.equal(calls[1].payload.maxCharacters, 256 * 1024);
+  for (const params of [
+    { direction: 'older' }, { direction: 'newer', cursor: { start: 0, end: 1 } },
+    { direction: 'latest', cursor: 'opaque' }, { direction: 'else' },
+    ...[0, 1.5, 256 * 1024 + 1, NaN].map(maxCharacters => ({ maxCharacters })),
+    { includeToolCalls: 1 }, { includeReasoning: 'true' },
+  ]) assert.equal((await run(tool, { action: 'read', title: 'A', ...params })).isError, true);
+  assert.equal(calls.length, 2);
 });
 
-test('session_control marks lost mutation acknowledgements unknown without implying remote cancellation', async () => {
-  const tool = createSessionControlTool(async () => { throw new Error('request cancelled'); });
+test('read renders the same compact serialization counted by its character budget', async () => {
+  const value = { sessionPath: '/session', messages: Array.from({ length: 12 }, (_, i) => ({ id: String(i), role: 'assistant', text: 'response body' })), cursor: 'opaque' };
+  const budget = JSON.stringify(value).length;
+  const result = await run(harness(value).tool, { action: 'read', title: 'A', maxCharacters: budget });
+  const text = (result.content[0] as { text: string }).text;
+  assert.equal(text.length, budget);
+  assert.equal(text, JSON.stringify(value));
+  assert.ok(JSON.stringify(value, null, 2).length > budget);
+});
+
+test('prompt bound is UTF-8 bytes for both create and message', async () => {
+  const { calls, tool } = harness();
+  for (const action of ['create', 'message']) {
+    const base = action === 'create' ? { action, title: 'A', bucket: 'small' } : { action, title: 'A' };
+    assert.equal((await run(tool, { ...base, prompt: 'é'.repeat(32 * 1024) })).isError, false);
+    assert.equal((await run(tool, { ...base, prompt: 'é'.repeat(32 * 1024 + 1) })).isError, true);
+    assert.equal((await run(tool, { ...base, prompt: 'x'.repeat(64 * 1024 + 1) })).isError, true);
+  }
+  assert.equal(calls.length, 2);
+});
+
+test('cleanup forwards privacy-owned close semantics and operation.status only looks up', async () => {
+  const { calls, tool } = harness();
+  await run(tool, { action: 'cleanup' });
+  await run(tool, { action: 'cleanup', dontCloseRunning: false });
+  await run(tool, { action: 'operation.status', requestKey: 'receipt' });
+  assert.deepEqual(calls.map(call => call.action === 'operation.status' ? call : withoutKey(call)), [
+    { kind: 'session.control', action: 'cleanup', payload: { dontCloseRunning: true } },
+    { kind: 'session.control', action: 'cleanup', payload: { dontCloseRunning: false } },
+    { kind: 'session.control', action: 'operation.status', payload: { requestKey: 'receipt' } },
+  ]);
+});
+
+test('lost mutation acknowledgements return key and exact lookup without suggesting replay', async () => {
+  const sent: Request[] = [];
+  const tool = createSessionControlTool(async body => { sent.push(body as Request); throw new Error('request cancelled'); });
   for (const params of [
     { action: 'create', bucket: 'frontier', title: 'Disposable' },
-    { action: 'message', self: true, prompt: 'body' },
-    { action: 'settings.set', self: true, settings: { reasoning: 'low' } },
-    { action: 'close', self: true },
+    { action: 'message', title: 'A', prompt: 'body' },
+    { action: 'settings.set', title: 'A', settings: { reasoning: 'low' } },
+    { action: 'close', title: 'A' }, { action: 'cleanup' },
   ]) {
-    const result = await tool.execute('lost-reply', params as never, undefined, undefined);
-    assert.equal('isError' in result && result.isError, true);
-    assert.equal((result.details as { outcome?: string }).outcome, 'unknown');
+    const result = await run(tool, params);
+    assert.equal(result.isError, true);
+    const details = result.details as { outcome: string; requestKey: string; lookup: unknown };
+    assert.equal(details.outcome, 'unknown');
+    assert.equal(details.requestKey, sent.at(-1)!.payload.requestKey);
+    assert.deepEqual(details.lookup, { action: 'operation.status', requestKey: details.requestKey });
     assert.match((result.content[0] as { text: string }).text, /may still continue.*Do not automatically retry/u);
   }
-  const read = await tool.execute('read-lost-reply', { action: 'read', self: true }, undefined, undefined);
-  assert.equal((read.details as { outcome?: string }).outcome, undefined);
-  const rejectedTool = createSessionControlTool(async () => ({
-    kind: 'session.control.result', requestId: 'rejected', ok: false,
-    error: { code: 'INVALID_PARAMS', message: 'Known preflight rejection' },
-  }));
-  const rejected = await rejectedTool.execute('known-rejection', { action: 'message', self: true, prompt: 'body' }, undefined, undefined);
-  assert.equal((rejected.details as { outcome?: string }).outcome, undefined);
+  assert.equal((await run(tool, { action: 'read', title: 'A' })).details.outcome, undefined);
 });
 
-test('session_control forwards cancellation and rejects an invalid uncursoried page direction before IPC', async () => {
+test('known rejection and partial/unknown phase outcomes are errors, not unconditional success', async () => {
+  const rejected = createSessionControlTool(async () => ({ kind: 'session.control.result', requestId: 'rejected', ok: false, error: { code: 'SESSION_CONTROL_FAILED', message: 'Known preflight rejection', retryable: false } }));
+  const failure = await run(rejected, { action: 'message', title: 'A', prompt: 'body' });
+  assert.equal(failure.isError, true);
+  assert.equal(failure.details.outcome, undefined);
+  for (const value of [
+    { creation: { status: 'not_created' } }, { configuration: { status: 'failed', appliedFields: ['reasoning'] } },
+    { creation: { status: 'created', titleAssigned: false }, configuration: { status: 'not_started' }, message: { status: 'not_sent' } },
+    { creation: { status: 'created', titleAssigned: false } }, { message: { status: 'not_sent' } },
+    { message: { status: 'rejected' } }, { message: { status: 'unknown' } }, { closed: false, unknown: true },
+    { operation: { status: 'known', outcome: 'unknown', result: { configuration: { status: 'unknown' } } } },
+    { operation: { status: 'known', outcome: 'known', evidenceUnavailable: true } },
+    { operation: { status: 'known', result: { configuration: { status: 'failed' } } } },
+    { operation: { status: 'unavailable' } }, { results: [{ unknown: true }] },
+    { results: [], resultsTruncated: true, failedCount: 1 }, { results: [], resultsTruncated: true, unknownCount: 1 },
+  ]) assert.equal((await run(harness(value).tool, { action: 'list' })).isError, true, JSON.stringify(value));
+  for (const value of [{ closed: true }, { closeRequested: true, closed: false }, { creation: { status: 'created' }, configuration: { status: 'succeeded' }, message: { status: 'not_requested' } }, { operation: { status: 'pending' } }]) {
+    assert.equal((await run(harness(value).tool, { action: 'list' })).isError, false, JSON.stringify(value));
+  }
+});
+
+test('cancellation signal is forwarded', async () => {
   let called = false;
   const request: SessionControlToolRequest = async (_body, signal) => {
     called = true;
-    return await new Promise<SessionControlResult>((_resolve, reject) => {
-      signal?.addEventListener('abort', () => reject(new Error('aborted')));
-    });
+    return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted'))));
   };
-  const tool = createSessionControlTool(request);
   const controller = new AbortController();
-  const pending = tool.execute(
-    'cancel-call',
-    { action: 'read', self: true, direction: 'newer', cursor: { start: 0, end: 1 } },
-    controller.signal,
-    undefined,
-  );
+  const pending = createSessionControlTool(request).execute('cancel', { action: 'read', title: 'A', direction: 'newer', cursor: 'opaque' }, controller.signal, undefined);
   controller.abort();
-  const cancelled = await pending;
+  await assert.rejects(pending, /session_control error:.*aborted/u);
   assert.equal(called, true);
-  assert.equal('isError' in cancelled && cancelled.isError, true);
-
-  const invalid = await tool.execute(
-    'invalid-call',
-    { action: 'read', title: 'Refactor auth', direction: 'older' },
-    undefined,
-    undefined,
-  );
-  assert.equal('isError' in invalid && invalid.isError, true);
 });
 
-// Guard the tool's public identity, schema, and operational guidance.
-test('session_control rejects action-inapplicable inputs instead of silently discarding agent intent', async () => {
-  const calls: unknown[] = [];
-  const tool = createSessionControlTool(async (body) => { calls.push(body); return response({}); });
-  for (const params of [
-    { action: 'list', title: 'ignored target' },
-    { action: 'create', bucket: 'small', title: 'A', self: true },
-    { action: 'settings.get', self: true, settings: { autonomousMode: false } },
-    { action: 'close', self: true, prompt: 'ignored instruction' },
-    { action: 'read', self: true, replyTo: 'ignored reply' },
-    { action: 'create', bucket: 'small', title: 'A', cwd: '  ' },
-    { action: 'create', bucket: 'small', title: 'a'.repeat(26) },
-  ]) {
-    const result = await tool.execute('invalid', params as never, undefined, undefined);
-    assert.equal('isError' in result && result.isError, true, JSON.stringify(params));
+test('subagent tool has read-only schema and cannot escalate by execute arguments', async () => {
+  const calls: Request[] = [];
+  const tools = createBackendTools({ kind: 'subagent', requestSessionControl: async body => { calls.push(body as Request); return response({}); } });
+  const tool = tools.find(tool => tool.name === 'session_control')!;
+  assert.equal(tool.parameters, SessionControlReadOnlyParameters);
+  assert.deepEqual(SessionControlReadOnlyParameters.properties.action.enum, ['list', 'read']);
+  for (const action of ['create', 'message', 'settings.get', 'settings.set', 'close', 'cleanup', 'operation.status']) {
+    assert.equal((await run(tool, { action, title: 'A', prompt: 'hi', bucket: 'small', requestKey: 'key' })).isError, true);
   }
+  assert.equal((await run(tool, { action: 'list', access: 'full' })).isError, true);
   assert.deepEqual(calls, []);
+  assert.equal((await run(tool, { action: 'list' })).isError, false);
+  assert.equal((await run(tool, { action: 'read', title: 'A' })).isError, false);
+  assert.equal(calls.length, 2);
 });
 
-test('session_control exposes its identity, schema, and collaboration guidance', () => {
-  const tool = createSessionControlTool(async () => response({ ok: true }));
-
+test('public schema and guidance reflect approved access and actions', () => {
+  const tool = harness().tool;
   assert.equal(tool.name, 'session_control');
-  assert.equal(tool.label, 'Session control');
   assert.equal(tool.executionMode, 'sequential');
   assert.equal(tool.parameters, SessionControlParameters);
-  assert.deepEqual(tool.promptGuidelines, [
-    'Create new sessions for substantial tasks that can run in parallel with other work and benefit from independent context and ongoing coordination. Use subagents for smaller, bounded tasks that return a result directly.',
-    'Include the task, ownership boundaries, and expected handoff in the initial prompt. Send session messages when another agent needs a result, finding, decision, or scope change to proceed correctly. Omit routine acknowledgements and progress chatter. Reply only when it advances the work; receiving a message does not itself require a reply.',
-    'list exposes live sessions with their assigned titles (field `title`) and provisional `name` labels; only assigned titles address existing sessions.',
-    "read, settings, and close require an explicit target: set `self` for the caller's own session or `title` for another live session; message may instead use replyTo.",
-    "create requires a 1-25-character title (trimmed) and an explicit bucket: small for simple tasks, medium for well-defined substantial tasks, frontier for hard reasoning. Bucket selection uses the caller's provider policy and bucket reasoning unless settings.reasoning overrides it; settings.model is not accepted. System-prompt toggles and execution settings are inherited and configured before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
-    'Cancellation or a lost mutation acknowledgement does not prove the coordinator stopped; its outcome is unknown and it may continue. Do not automatically repeat create, message, settings, or close requests after such an error.',
-    'Use read direction latest for the first page, then pass the returned cursor with direction older or newer. Tool bodies are bounded previews; renderer diagnostics and image bytes are omitted.',
-    "message uses ordinary send semantics: an idle target wakes and a busy target receives Pie's normal queued-send behavior. replyTo resolves only while the original sender is live.",
-    "settings.get captures the target's saved model, reasoning, system-prompt toggles, and execution preferences; settings.set persists only the supplied patch through its owning settings paths.",
-    'Close sessions you created once their results are collected and no further work is needed. Before completing the parent task, check for any you left open. Keep sessions open if the user requests it or has taken them over. Use ordinary close, not deletion.',
-    "close stops active and queued work, removes the tab, and runs host-owned lifecycle cleanup; collect needed results first. It does not merely hide a running tab.",
-    "A self-close returns after the host accepts responsibility (close requested), which is not a completed-close result; closing another session waits for the hosted stop/cleanup confirmation, or reports explicitly unknown when the acknowledgement is missing.",
-    'pass delete:true only when the existing privacy/deletion lifecycle is intended; deletion is committed by the host and can never be undone.',
-  ]);
-
-  const properties = SessionControlParameters.properties as Record<string, { type?: string; enum?: string[] }>;
-  assert.deepEqual([...SessionControlParameters.required ?? []].sort(), ['action']);
-  assert.deepEqual(properties.action?.enum, ['list', 'create', 'read', 'message', 'settings.get', 'settings.set', 'close']);
-  assert.deepEqual(properties.bucket?.enum, ['small', 'medium', 'frontier']);
-  assert.deepEqual(properties.direction?.enum, ['older', 'newer', 'latest']);
-  // Paths are never accepted: addressing uses title, self, or an identity-bound
-  // reply reference; settings use a closed patch schema.
-  assert.deepEqual(
-    Object.keys(properties).sort(),
-    ['action', 'bucket', 'cursor', 'cwd', 'delete', 'direction', 'limit', 'prompt', 'replyTo', 'self', 'settings', 'title'],
-  );
+  assert.deepEqual(SessionControlParameters.required, ['action']);
+  assert.deepEqual(SessionControlParameters.properties.action.enum, ['list', 'create', 'read', 'message', 'settings.get', 'settings.set', 'close', 'cleanup', 'operation.status']);
+  assert.equal(SessionControlParameters.properties.maxCharacters.maximum, 256 * 1024);
+  assert.equal(SessionControlParameters.properties.maxCharacters.default, 4000);
+  assert.equal(SessionControlParameters.properties.cursor.type, 'string');
+  assert.equal('self' in SessionControlParameters.properties, true);
+  assert.equal('self' in SessionControlReadOnlyParameters.properties, true);
+  assert.equal('limit' in SessionControlParameters.properties, false);
+  assert.equal('path' in SessionControlParameters.properties, false);
+  assert.match(SessionControlParameters.properties.replyTo.description!, /mutually exclusive with title/);
+  assert.ok(tool.promptGuidelines?.includes('Prefer cheaper subagents for large-output inspection; use bounded reads for small checks.'));
+  assert.ok(tool.promptGuidelines?.includes('Before cleanup, check for owned sessions the user is still using; close sessions individually if any should remain open'));
+  assert.ok(tool.promptGuidelines?.includes('Message decisions, blockers, interface changes, and final findings; omit routine progress and acknowledgements'));
+  assert.equal(tool.promptGuidelines?.some(text => text.includes('has taken them over')), false);
 });

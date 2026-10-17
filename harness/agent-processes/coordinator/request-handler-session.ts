@@ -9,7 +9,7 @@ import { toErrorMessage } from '../../../lib/structured-logging/error-message.js
 import { normalizeSessionControlBaseTitle } from './live-session-titles.js';
 import { boundTranscriptSnapshot } from '../../session-storage/transcripts/snapshot-boundary.js';
 import { generateSessionTitle } from '../workers/session-title-generator';
-import { appendAgentCreatedSessionProvenance } from '../../session-storage/metadata/session-provenance';
+import { appendAgentCreatedSessionProvenance, type SessionCreatorIdentity } from '../../session-storage/metadata/session-provenance';
 import { hasBillableSessionActivity } from '../workers/session-activity';
 import type { SdkSessionManager } from '../lib/sdk-integration/sdk';
 import type { SessionContext } from './server-types.js';
@@ -53,11 +53,12 @@ function createOperationIntentFingerprint(
   pathIdentity: string,
   agentCreated?: boolean,
   title?: string,
+  creator?: SessionCreatorIdentity,
 ): string {
   return JSON.stringify(kind === 'session.create'
     // The required title is part of the mutation intent: a retried create must
     // never be deduped across a different requested base title.
-    ? [kind, path.resolve(pathIdentity), agentCreated === true, title === undefined ? null : title]
+    ? [kind, path.resolve(pathIdentity), agentCreated === true, title === undefined ? null : title, creator ? [creator.sessionId, creator.identityFallback] : null]
     : [kind, path.resolve(pathIdentity)]);
 }
 
@@ -115,8 +116,9 @@ async function createColdSession(
   cwd?: string,
   pendingCreateOperationId?: string,
   agentCreated?: boolean,
+  creator?: SessionCreatorIdentity,
 ): Promise<{ sessionPath: string }> {
-  if (deps.createColdSession) return await deps.createColdSession(cwd, pendingCreateOperationId, agentCreated);
+  if (deps.createColdSession) return await deps.createColdSession(cwd, pendingCreateOperationId, agentCreated, creator);
   const manager = deps.sdk.SessionManager.create(cwd || deps.startupCwd, deps.sessionDir);
   if (agentCreated) {
     // The production cold store owns the durable marker; retain a compatible
@@ -124,7 +126,7 @@ async function createColdSession(
     try {
       appendAgentCreatedSessionProvenance(manager as SdkSessionManager & {
         appendCustomEntry?: (customType: string, data?: unknown) => string;
-      });
+      }, creator);
     } catch (error) {
       throw new BackendError('SESSION_CREATE_FAILED', error instanceof Error ? error.message : String(error));
     }
@@ -189,9 +191,10 @@ async function handleSessionCreate(
         params.cwd || deps.startupCwd,
         params.agentCreated,
         params.title,
+        params.creator,
       ),
       execute: async (registerDurablePath) => {
-        const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
+        const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated, params.creator);
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
@@ -250,7 +253,7 @@ async function handleSessionCreate(
       ...createdTitleResult(ledgerTitleOutcome),
     };
   }
-  const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
+  const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated, params.creator);
   const titleOutcome = await assignCreatedSessionTitle(deps, created.sessionPath, params.title, request.id);
   if (titleOutcome && !titleOutcome.assigned) {
     throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', titleOutcome.error ?? 'Title assignment failed.');
@@ -799,11 +802,13 @@ async function handleSessionTitleGenerate(
     thinkingLevel: params.thinkingLevel,
     timeoutSec: params.timeoutSec,
   }, {
-    onSettled: ({ usage, startedAt, endedAt, outcome }) => {
+    onSettled: ({ usage, startedAt, endedAt, outcome, attempt }) => {
       deps.emit('auxiliary-llm.usage', {
         sessionPath: params.sessionPath,
         kind: 'session_title',
-        sourceId: `session-title:${request.id}`,
+        // Distinct analytics identity per provider invocation: title retries
+        // must not dedupe against the first attempt's usage.
+        sourceId: `session-title:${request.id}:${attempt}`,
         occurredAt: endedAt,
         startedAt,
         modelId: params.model,

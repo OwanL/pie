@@ -25,7 +25,7 @@ export const PIE_TOOLS: readonly PieToolEntry[] = [
   { name: 'playwright', sourcePath: 'harness/tools/playwright/index.ts', registration: { kind: 'extension', extensionId: 'playwright', entryPath: 'extensions/playwright/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'request_capability', sourcePath: 'harness/tools/request-capability/index.ts', registration: { kind: 'extension', extensionId: 'skill-pruner', entryPath: 'extensions/skill-pruner/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'session_changes', sourcePath: 'harness/tools/session-changes/index.ts', registration: { kind: 'extension', extensionId: 'session-changes', entryPath: 'extensions/session-changes/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
-  { name: 'session_control', sourcePath: 'harness/tools/session-control/index.ts', registration: { kind: 'backend' }, contexts: ['primary', 'inventory'] },
+  { name: 'session_control', sourcePath: 'harness/tools/session-control/index.ts', registration: { kind: 'backend' }, contexts: ['primary', 'inventory', 'subagent'] },
   { name: 'subagent', sourcePath: 'harness/tools/subagent/register.ts', registration: { kind: 'extension', extensionId: 'subagent', entryPath: 'extensions/subagent/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
 ];
 

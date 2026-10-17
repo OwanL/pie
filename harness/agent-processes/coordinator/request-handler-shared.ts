@@ -102,6 +102,7 @@ export interface BackendRequestHandlerDeps {
     cwd?: string,
     pendingCreateOperationId?: string,
     agentCreated?: boolean,
+    creator?: import('../../session-storage/metadata/session-provenance').SessionCreatorIdentity,
   ): { sessionPath: string } | Promise<{ sessionPath: string }>;
   duplicateColdSession?(
     sessionPath: string,

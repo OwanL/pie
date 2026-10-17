@@ -581,6 +581,16 @@ test('hot title assignment replaces only the expected durable collision, never a
     params: { sessionPath: '/sessions/current.jsonl', title: 'Review (3)', replaceExpectedTitle: 'Review' },
   }, 'stale'), { assigned: false, changed: false, skipped: 'explicit-name' });
   assert.deepEqual(written, ['Review (2)']);
+  (host as unknown as { lifecycleBarrier: unknown }).lifecycleBarrier = {
+    runWriteMutationAsync: async (_id: string, _operation: string, write: () => Promise<unknown>) => {
+      name = 'Manual rename'; // A rename while lifecycle admission was pending.
+      return write();
+    },
+  };
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Review (3)', replaceExpectedTitle: 'Review (2)' },
+  }, 'racing-rename'), { assigned: false, changed: false, skipped: 'explicit-name' });
+  assert.deepEqual(written, ['Review (2)']);
 });
 
 test('hot duplicate runs through the owning runtime replacement and suppresses its intermediate event', async () => {
@@ -840,6 +850,19 @@ test('live-turn checkpoint and model catalog bypass a held session-title provide
   try {
     await providerStarted;
     assert.equal(providerCalls, 1, 'the title command is held inside its real async provider wait');
+    const duplicate = host.command('session.title.generate', {
+      params: { sessionPath, prompt: 'Concurrent title', provider: 'ollama', model: 'ollama-title-fixture', timeoutSec: 15 },
+    }, 'duplicate-title');
+    assert.equal(duplicate, title, 'concurrent generation shares one provider attempt');
+    // Assignment uses the ordinary mutation FIFO (unlike the catalog/checkpoint lanes).
+    const assignment = host.command('session.title.assign', {
+      params: { sessionPath, title: 'Manual title' },
+    }, 'assign-during-title');
+    const assignmentOutcome = await Promise.race([
+      assignment.then(() => 'settled', () => 'settled'),
+      waitForAsyncEvent().then(() => 'blocked'),
+    ]);
+    assert.equal(assignmentOutcome, 'settled', 'ordinary mutations must not wait for title inference');
     const catalog = host.command('models.list', { params: { sessionPath } }, 'models-during-title');
     const catalogOutcome = await Promise.race([
       catalog.then((result) => ({ state: 'settled' as const, result })),

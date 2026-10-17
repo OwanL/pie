@@ -9,7 +9,13 @@ interface SessionHeaderLike {
   id?: unknown;
 }
 
+export interface SessionCreatorIdentity {
+  sessionId: string;
+  identityFallback: boolean;
+}
+
 interface AgentCreatedProvenanceData {
+  creator?: unknown;
   version?: unknown;
   sessionId?: unknown;
 }
@@ -44,11 +50,31 @@ export function isAgentCreatedSession(
   return manager.getEntries().some((entry) => isAgentCreatedProvenanceEntry(entry, sessionId));
 }
 
+/** Read creator identity only from a marker belonging to this session, never a copied fork marker. */
+export function readAgentCreatedSessionCreator(
+  manager: Pick<SdkSessionManager, 'getSessionId' | 'getHeader' | 'getEntries'>,
+): SessionCreatorIdentity | undefined {
+  const sessionId = sessionIdFromManager(manager);
+  if (!sessionId) return undefined;
+  for (const entry of manager.getEntries()) {
+    if (!isAgentCreatedProvenanceEntry(entry, sessionId)) continue;
+    const creator = (entry.data as AgentCreatedProvenanceData).creator;
+    if (!creator || typeof creator !== 'object' || Array.isArray(creator)) continue;
+    const candidate = creator as Record<string, unknown>;
+    if (typeof candidate.sessionId === 'string' && candidate.sessionId.trim()
+      && typeof candidate.identityFallback === 'boolean') {
+      return { sessionId: candidate.sessionId, identityFallback: candidate.identityFallback };
+    }
+  }
+  return undefined;
+}
+
 /** Append the explicit provenance marker after the SDK has durably created the header. */
 export function appendAgentCreatedSessionProvenance(
   manager: Pick<SdkSessionManager, 'getSessionId' | 'getHeader'> & {
     appendCustomEntry?: (customType: string, data?: unknown) => string;
   },
+  creator?: SessionCreatorIdentity,
 ): void {
   const sessionId = sessionIdFromManager(manager);
   if (!sessionId) throw new Error('Cannot mark agent-created session without a durable session id.');
@@ -58,5 +84,6 @@ export function appendAgentCreatedSessionProvenance(
   manager.appendCustomEntry(AGENT_CREATED_SESSION_CUSTOM_TYPE, {
     version: AGENT_CREATED_SESSION_PROVENANCE_VERSION,
     sessionId,
+    ...(creator ? { creator: { ...creator } } : {}),
   });
 }

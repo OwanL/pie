@@ -542,6 +542,13 @@ export class WorkerRuntimeRouter {
     return await this.trackRuntimeCommand(request, false);
   }
 
+  /** Pending command/configuration admission is busy even before a hot route
+   * or active-request checkpoint exists. Read-only lifecycle consumers must
+   * not infer idleness from route state alone. */
+  hasPendingRuntimeWork(sessionPath: string): boolean {
+    return this.pendingRuntimeCommands.has(routeKey(sessionPath));
+  }
+
   beginAgentOperation(sessionPath: string): () => void {
     this.assertSessionAdmissionOpen(sessionPath);
     this.assertExecutionAdmissionOpen(sessionPath);

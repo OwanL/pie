@@ -35,8 +35,8 @@ by the backend, while session management and IPC stay backend-owned. The
 backend factory [`harness/agent-processes/coordinator/backend-tools.ts`](../../harness/agent-processes/coordinator/backend-tools.ts) assembles
 backend-dependent definitions for primary runtimes and initial-context
 inventory. Inventory has identical schemas/guidance but no operational
-transport. In-memory subagents do not get `session_control` or
-`wakeup_timer`; their capability fence uses the same catalog. The owner-routed
+transport. In-memory subagents get read-only `session_control` discovery and
+transcript access, but not `wakeup_timer`; session mutations remain primary-only. The owner-routed
 test is under [`session-control/test/`](session-control/test/), and the
 cross-owner catalog/SDK integration gate is under [`test/integration/`](../../test/integration/).
 

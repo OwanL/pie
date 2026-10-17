@@ -5,7 +5,7 @@ import { createSessionControlTool, type SessionControlToolRequest } from '../../
 export type BackendToolEnvironment =
   | { kind: 'primary'; requestSessionControl: SessionControlToolRequest }
   | { kind: 'inventory' }
-  | { kind: 'subagent' };
+  | { kind: 'subagent'; requestSessionControl: SessionControlToolRequest };
 
 /** Shared backend-tool assembly for actual primary runtimes and their inventory.
  * This module is separate from the metadata-only catalog so extension discovery
@@ -18,9 +18,9 @@ export function createBackendTools(environment: BackendToolEnvironment): ToolDef
       if (entry.name !== 'session_control') {
         throw new Error(`No backend factory for catalog tool: ${entry.name}`);
       }
-      const request: SessionControlToolRequest = environment.kind === 'primary'
+      const request: SessionControlToolRequest = environment.kind !== 'inventory'
         ? environment.requestSessionControl
         : async () => { throw new Error('Inventory tool definitions cannot execute session operations.'); };
-      return createSessionControlTool(request);
+      return createSessionControlTool(request, { readOnly: environment.kind === 'subagent' });
     });
 }
