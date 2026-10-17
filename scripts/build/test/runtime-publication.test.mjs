@@ -28,22 +28,38 @@ async function fixture(t, helper, { legacy = false, twoFiles = false } = {}) {
 }
 const check = (root, schema) => assertRuntimeBootstrapSupportsSchema({ extensionDir: root, schema });
 
+async function stageRuntime(t, root) {
+  const out = await mkdtemp(path.join(os.tmpdir(), 'pie-loader-output-'));
+  t.after(() => rm(out, { recursive: true, force: true }));
+  await mkdir(path.join(out, 'webview/panel/.vite'), { recursive: true });
+  for (const file of ['extension.js', 'backend.js', 'worker-entry.js', 'webview/panel/entry.js']) {
+    await writeFile(path.join(out, file), '// fixture');
+  }
+  for (const file of ['pie-build-id.txt', 'webview/panel/pie-build-id.txt']) {
+    await writeFile(path.join(out, file), 'fixture-build');
+  }
+  await writeFile(path.join(out, 'webview/panel/.vite/manifest.json'), JSON.stringify({ entry: { file: 'entry.js', isEntry: true } }));
+  return runtime.publishRuntimeGeneration({ sourceOutDir: out, extensionDir: root, identity: sourcePkg });
+}
+
 test('concurrent same-process loader installs own their staging paths', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pie-loader-concurrent-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'package.json'), JSON.stringify(sourcePkg));
+  await stageRuntime(t, root);
   const generations = await Promise.all(Array.from({ length: 16 }, () =>
     installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg })));
   assert.equal(new Set(generations).size, 1);
   await check(root, 2);
   assert.deepEqual(await readdir(path.join(root, 'pie-bootstrap')), [generations[0]]);
-  assert.deepEqual((await readdir(root)).sort(), ['package.json', 'pie-bootstrap']);
+  assert.deepEqual((await readdir(root)).sort(), ['package.json', 'pie-bootstrap', 'pie-runtime-v2']);
 });
 
 test('partial manifest staging writes remove only the exclusively owned file', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pie-loader-partial-write-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(path.join(root, 'package.json'), JSON.stringify(sourcePkg));
+  await stageRuntime(t, root);
   const untouchedPath = path.join(root, '.untouched');
   await writeFile(untouchedPath, 'keep me');
 
@@ -84,13 +100,27 @@ test('activation preserves prior loader and store when staging fails, then coexi
   assert.equal(await readFile(path.join(root, 'package.json'), 'utf8'), prior);
   await installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg, beforeSwitch: async () => {
     assert.equal(await readFile(path.join(root, 'package.json'), 'utf8'), prior);
-    await mkdir(path.join(root, 'pie-runtime-v2'));
-    await writeFile(path.join(root, 'pie-runtime-v2', 'mock-selected'), 'verified fixture');
+    await stageRuntime(t, root);
   } });
   await check(root, 2);
   assert.equal(await readFile(path.join(root, directory, 'runtime-generations.cjs'), 'utf8'), helper);
   assert.equal(await readFile(path.join(root, 'pie-runtime', 'sentinel'), 'utf8'), 'old selection');
-  assert.equal(await readFile(path.join(root, 'pie-runtime-v2', 'mock-selected'), 'utf8'), 'verified fixture');
+  assert.ok((await runtime.resolveRuntimeGeneration({ extensionDir: root, identity: sourcePkg })).generation);
+});
+
+test('missing or invalid target cannot switch manifest, even with a no-op or forged hook result', async t => {
+  for (const invalid of [false, true]) {
+    const { root } = await fixture(t, 'module.exports = {};', { legacy: true });
+    const prior = await readFile(path.join(root, 'package.json'), 'utf8');
+    if (invalid) {
+      const selected = await stageRuntime(t, root);
+      await writeFile(path.join(selected.outDir, 'extension.js'), 'corrupted');
+    }
+    for (const beforeSwitch of [undefined, async () => {}, async () => ({ generation: 'a'.repeat(64) })]) {
+      await assert.rejects(installRuntimeBootstrap({ extensionDir: root, pkg: sourcePkg, beforeSwitch }), /without a valid selected v2/u);
+      assert.equal(await readFile(path.join(root, 'package.json'), 'utf8'), prior);
+    }
+  }
 });
 
 test('source loader declares immutable schema capabilities', () => {

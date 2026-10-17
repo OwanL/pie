@@ -162,6 +162,14 @@ export async function installRuntimeBootstrap({ extensionDir, pkg, beforeSwitch 
     }
     // Publication and verified selection must complete before changing main.
     if (beforeSwitch) await beforeSwitch();
+    // A hook is not proof of readiness (nor is its return value). Resolve the
+    // actual v2 store after it finishes, including for loader-only upgrades.
+    // This verification cannot reuse a hook's earlier publication result: the
+    // arbitrary hook may have changed the store after publication completed.
+    const selected = await resolveRuntimeGeneration({ extensionDir, identity: pkg });
+    if (!selected.generation) {
+      throw new Error('Cannot install startup loader without a valid selected v2 runtime generation.');
+    }
     const installed = JSON.parse(await readFile(path.join(extensionDir, 'package.json'), 'utf8'));
     if (['publisher', 'name', 'version'].some(key => installed[key] !== pkg[key])) {
       throw new Error('Installed extension identity changed during bootstrap installation.');
