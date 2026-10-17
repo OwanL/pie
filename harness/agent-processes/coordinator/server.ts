@@ -3751,7 +3751,7 @@ export class BackendServer {
     if (this.hostMembershipSeen) {
       for (const { entry } of this.hostMembershipSessions.sessions.values()) {
         const key = backendSessionPathKey(entry.path);
-        if (this.hostMembershipClosing.has(key) || this.pendingLiveTitlePaths.has(key)) continue;
+        if (this.hostMembershipClosing.has(key)) continue;
         candidates.set(key, entry);
       }
     } else {

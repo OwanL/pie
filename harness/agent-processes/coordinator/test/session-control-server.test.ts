@@ -16,6 +16,7 @@ import {
   type SessionControlSettingsRequest,
 } from '../../lib/rpc/session-control-settings.js';
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { resolveSessionIdentity } from '../../../session-storage/ownership/session-identity.js';
 import { ColdSessionLeaseAuthority, ColdSessionStore } from '../../../session-storage/lifecycle/cold-session-store.js';
 import { parseWorkerToCoordinatorFrame, WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
 import { serializeRuntimeCommandError } from '../../workers/worker-entry.js';
@@ -2218,4 +2219,32 @@ test('list exposes assigned titles from the unique authority and never provision
   assert.equal(currentRow?.title, 'Current plan');
   assert.ok(currentRow?.name, 'the provisional label stays visible');
   assert.ok(idleRow && !('title' in idleRow));
+});
+test('replyTo resolves an unnamed pending-title live identity but rejects closing members', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-pending-reply-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const pendingPath = await writeSessionFile(dir, 'unnamed.jsonl');
+  const baseMembers = [membershipEntry(currentPath), membershipEntry(idlePath)];
+  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)]));
+  const internal = server as unknown as {
+    pendingLiveTitlePaths: Set<string>;
+    liveSessionTitles: { assigned(path: string): string | undefined };
+  };
+  const pendingKey = [...internal.pendingLiveTitlePaths].find((key) => key.endsWith('unnamed.jsonl'));
+  assert.ok(pendingKey, 'the live target is awaiting title admission');
+  assert.equal(internal.liveSessionTitles.assigned(pendingPath), undefined);
+
+  const replyReference = createSessionControlSender(resolveSessionIdentity(pendingPath), 'Unnamed plan').replyReference;
+  const resolveReply = (server as unknown as {
+    resolveSessionControlReplyTarget(payload: Record<string, unknown>, sourcePath: string): unknown;
+  }).resolveSessionControlReplyTarget.bind(server);
+  const resolved = resolveReply({ replyTo: replyReference }, currentPath) as { status: string; sessionPath: string };
+  assert.equal(resolved.status, 'live');
+  assert.equal(resolved.sessionPath, pendingPath, 'stable identity resolves despite pending title admission');
+
+  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)], [closeFrameEntry(pendingPath)]));
+  assert.throws(() => resolveReply({ replyTo: replyReference }, currentPath),
+    (error: { code?: string }) => error.code === 'SESSION_NOT_FOUND',
+    'host closing membership remains non-addressable');
 });
