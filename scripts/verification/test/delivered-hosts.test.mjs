@@ -512,6 +512,10 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
     }, shutdownConfirmed);
     assert.ok(teardown.safe, `VS Code fixture process-tree shutdown was not confirmed; profile retained at ${profile.root}.`);
     assert.deepEqual(await payloadFingerprint(t, release, 'AFTER teardown'), immutableBefore, 'packaged bootstrap must leave all out/SDK, runtime CJS and manifest bytes unchanged');
-    t.diagnostic(`Packaged main used flat out fallback and awaited activation; watcher closed, no generation leases/selections; ${immutableBefore.files} immutable payload files unchanged. Full Electron startup remains unqualified.`);
+    if (shutdownConfirmed) {
+      t.diagnostic(`Packaged main used flat out fallback and awaited activation; watcher closed, no generation leases/selections; ${immutableBefore.files} immutable payload files unchanged. Full Electron startup remains unqualified.`);
+    } else {
+      t.diagnostic(`Packaged main lifecycle confirmation failed; successful-deactivation summary suppressed. Payload bytes still verified: ${immutableBefore.files} immutable files unchanged.`);
+    }
   }
 });

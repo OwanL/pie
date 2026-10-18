@@ -13,29 +13,58 @@ function send(message) {
   if (typeof process.send === 'function' && process.connected) process.send(message);
 }
 
-childProcess.spawn = function (command, args, ...rest) {
-  if (Array.isArray(args)) {
-    const index = args.findIndex(argument => argument === '--sdkPath');
-    if (index >= 0 && typeof args[index + 1] === 'string') {
-      const record = {
-        type: 'backend-start',
-        command: String(command),
-        sdkPath: path.resolve(args[index + 1]),
-      };
-      const recordPath = process.env.PIE_DELIVERED_HOST_START_RECORD_FILE;
-      if (recordPath) {
-        try { fs.appendFileSync(recordPath, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 }); } catch {}
-      }
-      send(record);
-    }
-  }
-  return originalSpawn.call(this, command, args, ...rest);
-};
+// Deactivation lifecycle proof is one awaited sequence: a metadata inspection
+// failure after a fulfilled bootstrap deactivate must surface as the
+// deactivation-error IPC through the caller's rejection handler instead of an
+// unhandled rejection that strands the qualification until it times out.
+function handleDeactivationMessage(message, { runtime, releaseRoot, runtimeDirectory, send, disconnect }) {
+  if (message?.type !== 'deactivate' || !runtime) return undefined;
+  const metadataRoot = path.join(releaseRoot, runtimeDirectory);
+  send({ type: 'deactivating' });
+  return (async () => {
+    await runtime.deactivate();
+    // fs.FSWatcher emits close asynchronously after bootstrap deactivate.
+    await new Promise(resolve => setImmediate(resolve));
+    send({ type: 'deactivated', selectionWatcherCount: runtime.selectionWatchers.size,
+      leases: fs.readdirSync(path.join(metadataRoot, 'leases')),
+      selections: fs.readdirSync(path.join(metadataRoot, 'selections')) });
+  })().then(() => disconnect?.(), error => {
+    send({ type: 'deactivation-error', error: String(error?.stack ?? error) });
+    if (typeof process.send === 'function') process.exitCode = 1;
+    disconnect?.();
+  });
+}
+
+module.exports = { handleDeactivationMessage };
 
 if (require.main === module) {
+  // The spawn recorder is process-local; requiring this fixture as a module for
+  // focused tests must not patch the importer's spawn.
+  childProcess.spawn = function (command, args, ...rest) {
+    if (Array.isArray(args)) {
+      const index = args.findIndex(argument => argument === '--sdkPath');
+      if (index >= 0 && typeof args[index + 1] === 'string') {
+        const record = {
+          type: 'backend-start',
+          command: String(command),
+          sdkPath: path.resolve(args[index + 1]),
+        };
+        const recordPath = process.env.PIE_DELIVERED_HOST_START_RECORD_FILE;
+        if (recordPath) {
+          try { fs.appendFileSync(recordPath, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 }); } catch {}
+        }
+        send(record);
+      }
+    }
+    return originalSpawn.call(this, command, args, ...rest);
+  };
+
   const releaseRoot = process.env.PIE_DELIVERED_HOST_ROOT;
   const profileRoot = process.env.PIE_DELIVERED_HOST_PROFILE_DIR;
   let runtime;
+  // Authoritative delivered runtime metadata directory name, published by the
+  // packaged runtime-generations module and resolved during bootstrap require.
+  let runtimeDirectory;
 
   if (process.env.PIE_DELIVERED_HOST_ADAPTER === 'standalone') {
     let application;
@@ -87,19 +116,8 @@ if (require.main === module) {
     process.on('message', message => {
       if (message?.type !== 'deactivate' || deactivationStarted || !runtime) return;
       deactivationStarted = true;
-      send({ type: 'deactivating' });
-      void runtime.deactivate().then(async () => {
-        // fs.FSWatcher emits close asynchronously after bootstrap deactivate.
-        await new Promise(resolve => setImmediate(resolve));
-        const metadataRoot = path.join(releaseRoot, 'pie-runtime');
-        send({ type: 'deactivated', selectionWatcherCount: runtime.selectionWatchers.size,
-          leases: fs.readdirSync(path.join(metadataRoot, 'leases')),
-          selections: fs.readdirSync(path.join(metadataRoot, 'selections')) });
-        process.disconnect?.();
-      }, error => {
-        send({ type: 'deactivation-error', error: String(error?.stack ?? error) });
-        process.exitCode = 1;
-        process.disconnect?.();
+      void handleDeactivationMessage(message, {
+        runtime, releaseRoot, runtimeDirectory, send, disconnect: () => process.disconnect?.(),
       });
     });
 
@@ -130,6 +148,7 @@ if (require.main === module) {
         return loaded;
       };
       const { RUNTIME_DIRECTORY } = require(path.join(path.dirname(bootstrapEntry), 'runtime-generations.cjs'));
+      runtimeDirectory = RUNTIME_DIRECTORY;
       const originalWatch = fs.watch;
       const selectionWatchers = new Set();
       fs.watch = function (directory, ...args) {
