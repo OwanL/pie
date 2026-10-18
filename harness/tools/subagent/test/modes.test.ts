@@ -1,11 +1,9 @@
 /** Behavioral coverage for the production executeSingleTask object API. */
-import test, { afterEach, beforeEach } from "node:test";
+import { bootstrapMockSdk, SESSION_MOCK_SDK_SOURCE } from "./helpers/mock-sdk-bootstrap.js";
+import test, { after, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import Module, { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { isModelFailure } from "../selection.js";
 import { hashDelegatedPrompt } from "../runtime-provenance.js";
 import { resetFairSelectionBags } from "../bucket-selector.js";
@@ -50,58 +48,9 @@ function assistantMsg(text: string): any {
 // `selectionCtx.alwaysParentModel = true` keeps `resolveModel` pure (no
 // analytics I/O).
 
-const MOCK_SDK_SOURCE = [
-	"export class DefaultResourceLoader { constructor(a){ this.a = a; } async reload(){} }",
-	"export const SessionManager = { inMemory(cwd){ return { cwd: cwd }; } };",
-	"export function getAgentDir(){ return '.'; }",
-	"export async function createAgentSession(args){",
-	"  const listeners = [];",
-	"  let release;",
-	"  const session = {",
-	"    agent: { state: { model: { id: 'session-model' } } },",
-	"    extensionRunner: { setUIContext(ctx){ (globalThis.__MOCK_PROXIES__ = globalThis.__MOCK_PROXIES__ || []).push(ctx); } },",
-	"    subscribe(cb){ listeners.push(cb); return () => {}; },",
-	"    async prompt(p){",
-	"      const b = globalThis.__MOCK_SDK_BEHAVIOR__;",
-	"      if (b && b.onPrompt) { await b.onPrompt(function(ev){ for (const l of listeners) l(ev); }, p); return; }",
-	"      await new Promise(function(r){ release = r; });",
-	"    },",
-	"    async abort(){ if (release) release(); },",
-	"    dispose(){}",
-	"  };",
-	"  return { session: session };",
-	"}",
-].join("\n");
+const mockSdk = bootstrapMockSdk("modes-mock-sdk-", SESSION_MOCK_SDK_SOURCE);
+after(() => mockSdk.cleanup());
 
-const __mockSdkDir = mkdtempSync(path.join(tmpdir(), "modes-mock-sdk-"));
-const __mockSdkPath = path.join(__mockSdkDir, "mock-sdk.mjs");
-writeFileSync(__mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
-const __tsxConfigPath = process.env.TSX_TSCONFIG_PATH;
-if (!__tsxConfigPath) throw new Error("modes.test.ts requires the shared TSX config");
-const __tsxConfig = JSON.parse(readFileSync(path.resolve(__tsxConfigPath), "utf-8"));
-const __sdkPaths = __tsxConfig.compilerOptions?.paths;
-const __canonicalSdkPath = __sdkPaths?.["@earendil-works/pi-coding-agent"]?.[0];
-const __legacySdkPath = __sdkPaths?.["@mariozechner/pi-coding-agent"]?.[0];
-if (typeof __canonicalSdkPath !== "string" || typeof __legacySdkPath !== "string" || !path.isAbsolute(__canonicalSdkPath) || path.resolve(__canonicalSdkPath) !== path.resolve(__legacySdkPath)) {
-	throw new Error("The shared TSX config must map canonical and legacy coding-agent aliases to the same selected module");
-}
-const __selectedSdkPath = path.resolve(__canonicalSdkPath);
-const __selectedSdkUrl = pathToFileURL(__selectedSdkPath).href;
-const __hookPath = path.join(__mockSdkDir, "hook.mjs");
-writeFileSync(
-	__hookPath,
-	[
-		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@earendil-works/pi-coding-agent' || specifier === '@mariozechner/pi-coding-agent' || specifier === ${JSON.stringify(__selectedSdkPath)} || specifier === ${JSON.stringify(__selectedSdkUrl)} || specifier.startsWith(${JSON.stringify(`${__selectedSdkUrl}?tsx-namespace=`)})) return { url: ${JSON.stringify(pathToFileURL(__mockSdkPath).href)}, shortCircuit: true };`,
-		"  return nextResolve(specifier, context);",
-		"}",
-	].join("\n"),
-	"utf-8",
-);
-// Register the hook before requiring single.ts via createRequire: single.ts imports
-// runner.js (CJS), whose loadSubagentSdk() does a dynamic import() of the SDK —
-// native import() is intercepted by the registered ESM resolve hook.
-Module.register(pathToFileURL(__hookPath));
 const __require = createRequire(import.meta.url);
 const __singlePath = path.resolve("harness/tools/subagent/single.ts");
 const { executeSingleTask } = __require(__singlePath) as typeof import("../single.js");

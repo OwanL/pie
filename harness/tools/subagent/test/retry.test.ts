@@ -14,13 +14,12 @@
  * needed. A fake SDK module hook is shared with modes.test.ts.
  */
 
+import { bootstrapMockSdk, SESSION_MOCK_SDK_SOURCE } from "./helpers/mock-sdk-bootstrap.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import Module from "node:module";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import type { SingleResult } from "../types.js";
@@ -31,47 +30,8 @@ import { resetFairSelectionBags } from "../bucket-selector.js";
 // Mock SDK + hook (same technique as modes.test.ts)
 // ---------------------------------------------------------------------------
 
-const MOCK_SDK_SOURCE = [
-	"export class DefaultResourceLoader { constructor(a){ this.a = a; } async reload(){} }",
-	"export const SessionManager = { inMemory(cwd){ return { cwd: cwd }; } };",
-	"export function getAgentDir(){ return '.'; }",
-	"export async function createAgentSession(args){",
-	"  const listeners = [];",
-	"  let release;",
-	"  const session = {",
-	"    agent: { state: { model: { id: 'session-model' } } },",
-	"    extensionRunner: { setUIContext(ctx){ (globalThis.__MOCK_PROXIES__ = globalThis.__MOCK_PROXIES__ || []).push(ctx); } },",
-	"    subscribe(cb){ listeners.push(cb); return () => {}; },",
-	"    async prompt(p){",
-	"      const b = globalThis.__MOCK_SDK_BEHAVIOR__;",
-	"      if (b && b.onPrompt) { await b.onPrompt(function(ev){ for (const l of listeners) l(ev); }, p); return; }",
-	"      await new Promise(function(r){ release = r; });",
-	"    },",
-	"    async abort(){ if (release) release(); },",
-	"    dispose(){}",
-	"  };",
-	"  return { session: session };",
-	"}",
-].join("\n");
-
-const __mockSdkDir = mkdtempSync(path.join(tmpdir(), "retry-mock-sdk-"));
-const __mockSdkPath = path.join(__mockSdkDir, "mock-sdk.mjs");
-writeFileSync(__mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
-const __hookPath = path.join(__mockSdkDir, "hook.mjs");
-writeFileSync(
-	__hookPath,
-	[
-		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@mariozechner/pi-coding-agent') return { url: ${JSON.stringify(pathToFileURL(__mockSdkPath).href)}, shortCircuit: true };`,
-		"  return nextResolve(specifier, context);",
-		"}",
-	].join("\n"),
-	"utf-8",
-);
-if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__) {
-	(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__ = true;
-	Module.register(pathToFileURL(__hookPath));
-}
+const mockSdk = bootstrapMockSdk("retry-mock-sdk-", SESSION_MOCK_SDK_SOURCE);
+test.after(() => mockSdk.cleanup());
 
 const __require = createRequire(import.meta.url);
 const __singlePath = path.resolve("harness/tools/subagent/single.ts");
@@ -312,6 +272,7 @@ test.after(() => {
 		if (savedEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = savedEnv[key];
 	}
+	rmSync(agentDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------

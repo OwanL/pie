@@ -12,13 +12,12 @@
  *  - reported usage.cost is preserved through accumulation and rollup.
  */
 
+import { bootstrapMockSdk } from "./helpers/mock-sdk-bootstrap.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import Module from "node:module";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import type { AgentConfig } from "../../../agent-instructions/agent-discovery/agents.js";
 import type { SingleResult } from "../types.js";
@@ -51,24 +50,8 @@ const MOCK_SDK_SOURCE = [
 	"}",
 ].join("\n");
 
-const __mockSdkDir = mkdtempSync(path.join(tmpdir(), "usage-mock-sdk-"));
-const __mockSdkPath = path.join(__mockSdkDir, "mock-sdk.mjs");
-writeFileSync(__mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
-const __hookPath = path.join(__mockSdkDir, "hook.mjs");
-writeFileSync(
-	__hookPath,
-	[
-		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@mariozechner/pi-coding-agent') return { url: ${JSON.stringify(pathToFileURL(__mockSdkPath).href)}, shortCircuit: true };`,
-		"  return nextResolve(specifier, context);",
-		"}",
-	].join("\n"),
-	"utf-8",
-);
-if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__) {
-	(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__ = true;
-	Module.register(pathToFileURL(__hookPath));
-}
+const mockSdk = bootstrapMockSdk("usage-mock-sdk-", MOCK_SDK_SOURCE);
+test.after(() => mockSdk.cleanup());
 
 const __require = createRequire(import.meta.url);
 const { runSingleAgent } = __require(path.resolve("harness/tools/subagent/runner.js")) as typeof import("../runner.js");
@@ -231,6 +214,7 @@ test.after(() => {
 		if (savedEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = savedEnv[key];
 	}
+	rmSync(agentDir, { recursive: true, force: true });
 });
 
 // -----------------------------------------------------------------------------
