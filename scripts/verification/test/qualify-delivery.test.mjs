@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -157,12 +158,45 @@ test('skeleton copies only manifest, runtime CJS and icon, never an existing out
   const source = path.join(sandbox, 'application/hosts/vscode');
   const destination = path.join(sandbox, 'package');
   for (const directory of ['runtime', 'media', 'out']) await mkdir(path.join(source, directory), { recursive: true });
+  await mkdir(path.join(sandbox, 'lib/windows-runtime-lock'), { recursive: true });
   await mkdir(destination);
-  for (const [name, bytes] of Object.entries({ 'package.json': '{}', 'runtime/bootstrap.cjs': 'bootstrap', 'runtime/helper.cjs': 'helper', 'runtime/ignored.txt': 'ignored', 'media/icon.svg': '<svg/>', 'out/stale.js': 'stale' })) await writeFile(path.join(source, name), bytes);
+  for (const [name, bytes] of Object.entries({ 'package.json': '{}', 'runtime/bootstrap.cjs': 'bootstrap', 'runtime/helper.cjs': 'helper', 'runtime/ignored.txt': 'ignored', 'runtime/windows-runtime-lock.cjs': 'checkout adapter', 'media/icon.svg': '<svg/>', 'out/stale.js': 'stale' })) await writeFile(path.join(source, name), bytes);
+  await writeFile(path.join(sandbox, 'lib/windows-runtime-lock/windows-runtime-lock.cjs'), 'neutral primitive');
   await copyPackageSkeleton(sandbox, destination);
   assert.deepEqual((await readdir(destination)).sort(), ['media', 'package.json', 'runtime']);
-  assert.deepEqual((await readdir(path.join(destination, 'runtime'))).sort(), ['bootstrap.cjs', 'helper.cjs']);
+  assert.deepEqual((await readdir(path.join(destination, 'runtime'))).sort(), ['bootstrap.cjs', 'helper.cjs', 'windows-runtime-lock.cjs']);
   assert.equal(await readFile(path.join(destination, 'media/icon.svg'), 'utf8'), '<svg/>');
+  assert.equal(await readFile(path.join(destination, 'runtime/windows-runtime-lock.cjs'), 'utf8'), 'neutral primitive');
+});
+
+// Regression: the checkout-relative forwarding adapter cannot satisfy its
+// require once the runtime CJS files are relocated outside the repository.
+// The packaged startup loader must load the standalone neutral lock owner
+// bytes so every relative require resolves inside the delivery package.
+test('relocated packaged runtime requires stay in the package via the neutral lock primitive', async t => {
+  const destination = await mkdtemp(path.join(os.tmpdir(), 'pie-skeleton-relocated-'));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  await copyPackageSkeleton(root, destination);
+  const packagedRuntime = path.join(destination, 'runtime');
+  assert.deepEqual(await readFile(path.join(packagedRuntime, 'windows-runtime-lock.cjs')),
+    await readFile(path.join(root, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')));
+  assert.notDeepEqual(await readFile(path.join(packagedRuntime, 'windows-runtime-lock.cjs')),
+    await readFile(path.join(root, 'application/hosts/vscode/runtime/windows-runtime-lock.cjs')));
+  // Relative requires in the packaged runtime CJS must resolve within the
+  // package; the checkout wrapper resolves outside and fails relocated.
+  for (const name of ['bootstrap.cjs', 'runtime-generations.cjs', 'windows-runtime-lock.cjs']) {
+    const packaged = await readFile(path.join(packagedRuntime, name), 'utf8');
+    for (const [, request] of packaged.matchAll(/require\('([^']+)'\)/gu)) {
+      if (!request.startsWith('./')) continue;
+      const resolved = path.resolve(packagedRuntime, request);
+      assert.ok(resolved.startsWith(packagedRuntime + path.sep), `packaged ${name} require ${request} stays in the package`);
+      await assert.ok((await readFile(resolved)).length > 0);
+    }
+  }
+  // End-to-end relocated require, without the checkout: the packaged startup
+  // helper loads and exports its lock API (exactly the qualification fixture path).
+  const relocated = createRequire(path.join(packagedRuntime, 'relocated-require.cjs'))('./runtime-generations.cjs');
+  assert.equal(typeof relocated.resolveRuntimeGeneration, 'function');
 });
 
 test('no-close abort/timeout awaits identity-safe watchdog settlement, unreferences child and retains package', { timeout: 3_000 }, async t => {

@@ -50,7 +50,14 @@ export async function copyPackageSkeleton(root, packageRoot) {
   await copyFile(path.join(source, 'media/icon.svg'), path.join(packageRoot, 'media/icon.svg'));
   for (const entry of await readdir(path.join(source, 'runtime'), { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith('.cjs')) {
-      await copyFile(path.join(source, 'runtime', entry.name), path.join(packageRoot, 'runtime', entry.name));
+      // Source windows-runtime-lock.cjs is a checkout-relative forwarding
+      // adapter, not packageable bytes. Packaged startup loaders ship the
+      // standalone neutral owner bytes (the same authority installRuntimeBootstrap
+      // packages), so a relocated delivery package stays self-contained.
+      const copySource = entry.name === 'windows-runtime-lock.cjs'
+        ? path.join(root, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')
+        : path.join(source, 'runtime', entry.name);
+      await copyFile(copySource, path.join(packageRoot, 'runtime', entry.name));
     }
   }
 }
