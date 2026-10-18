@@ -91,6 +91,9 @@ export class LegacyStatsSettlement {
   private readonly ports: LegacyStatsSettlementPorts;
 
   constructor(ports: LegacyStatsSettlementPorts, options: LegacyStatsSettlementOptions) {
+    if (ports.canonicalCapture) {
+      throw new Error('Canonical authority must not construct legacy settlement persistence.');
+    }
     this.ports = ports;
     this.subagentObservationSource = ports.subagentObservationSource;
     const {
@@ -131,7 +134,6 @@ export class LegacyStatsSettlement {
       currentRunId: (sessionPath) => ports.currentRunId(sessionPath),
       activeOperationId: (sessionPath) => ports.activeOperationId(sessionPath),
       markDerivedExportDirty: () => this.storage.markDerivedExportDirty(),
-      ...(ports.canonicalCapture ? { canonicalCapture: ports.canonicalCapture } : {}),
     };
     accountingRef = new BillableAccounting(accountingDeps);
     this.accounting = accountingRef;

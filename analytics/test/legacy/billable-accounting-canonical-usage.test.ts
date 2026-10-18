@@ -84,8 +84,9 @@ test('canonical accounting submits exact settlements without a host history proj
     accounting.observeAuxiliaryLlmUsage('/sessions/a', assistantSample);
     assert.equal(captured.length, 1);
 
-    // The canonical authority never writes the legacy JSONL ledger.
-    assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
+    // Canonical adaptation does not even construct a legacy persistence owner.
+    assert.throws(() => accounting.invocationLedger, /unavailable under canonical authority/);
+    assert.throws(() => accounting.activityTimeline, /unavailable under canonical authority/);
     assert.equal(accounting.exportRecords().length, 0);
 
     assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
@@ -245,7 +246,7 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
     );
     assert.deepEqual(accounting.projectSessionUsage('/sessions/mixed.jsonl'), { samples: [], authority: 'unknown' });
     assert.equal(captured[0]?.providerReportedCostUsd, 0.03);
-    assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
+    assert.throws(() => accounting.invocationLedger, /unavailable under canonical authority/);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

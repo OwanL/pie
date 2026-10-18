@@ -37,7 +37,8 @@ import { WorkingTimeService } from '../../../analytics/legacy/working-time-servi
 import { CapturedPricingFactsLoader } from '../../../harness/model-providers/pricing/captured-pricing-facts.js';
 import { readSessionPricingFacts } from '../../../harness/model-providers/runtime/session-pricing-facts';
 import { resolveCapturedInvocationPricing } from '../../../harness/model-providers/pricing/captured-invocation-pricing.js';
-import { LegacyStatsSettlement } from '../../../analytics/legacy/stats-service/service';
+import { LegacyStatsSettlement, type LegacyStatsSettlementPorts } from '../../../analytics/legacy/stats-service/service';
+import { createCanonicalAccounting, legacyPrivacyStorageDirs } from '../../../analytics/usage-accounting/canonical-accounting';
 import type { BillableAccounting } from '../../../analytics/legacy/billable-accounting/service';
 import type { RunAnalyticsStorage } from '../../../analytics/legacy/stats-service/storage';
 import type { ActivityIntervalRecord } from '../../../analytics/contracts/activity-interval';
@@ -187,11 +188,18 @@ export class StatsService implements RunObserver {
   /** Legacy settlement/accounting persistence owner (storage + accounting
    * collaborator construction and the legacy restore/settle/export/dispose
    * sequences). The façade reads the collaborators through it. */
-  private readonly legacy: LegacyStatsSettlement;
+  private readonly legacySettlement?: LegacyStatsSettlement;
+  private readonly canonicalAccounting?: BillableAccounting;
+  private readonly privacyStorageDirs: string[];
 
-  /** Legacy accounting collaborator, owned by the settlement. */
+  private get legacy(): LegacyStatsSettlement {
+    if (!this.legacySettlement) throw new Error('Legacy settlement is unavailable under canonical authority.');
+    return this.legacySettlement;
+  }
+
+  /** Shared invocation adaptation; canonical mode has transient state only. */
   private get accounting(): BillableAccounting {
-    return this.legacy.accounting;
+    return this.canonicalAccounting ?? this.legacy.accounting;
   }
 
   /** Legacy run-analytics storage, owned by the settlement. */
@@ -314,17 +322,16 @@ export class StatsService implements RunObserver {
       onChanged: this.scheduleRender,
     });
 
-    // Legacy settlement/accounting persistence: storage + accounting
-    // collaborator construction lives in the analytics/legacy owner; the
-    // façade keeps the observer/query seam and privacy filtering.
+    // Construct persistence only for legacy authority. Canonical mode reuses
+    // invocation adaptation and transient run tracking without a legacy store.
     // Captured provider/model pricing facts: the provider pricing owner
     // loads the active + historical catalogs; settlement accounting prices
     // from the injected facts and never resolves runtime catalogs itself.
     const capturedPricingFacts = new CapturedPricingFactsLoader({
       getAgentDir: options.getAgentDir ?? (() => null),
     });
-    this.legacy = new LegacyStatsSettlement(
-      {
+    this.privacyStorageDirs = legacyPrivacyStorageDirs(options);
+    const settlementPorts: LegacyStatsSettlementPorts = {
         now,
         dispatchArchEvent,
         scheduleRender: this.scheduleRender,
@@ -355,15 +362,20 @@ export class StatsService implements RunObserver {
           }
         },
         compactionSignal: () => this.backgroundCompactionAbort.signal,
+      };
+    if (this.canonicalCapture) {
+      this.canonicalAccounting = createCanonicalAccounting({
+        ...settlementPorts,
         canonicalCapture: this.canonicalCapture,
-      },
-      {
+      });
+    } else {
+      this.legacySettlement = new LegacyStatsSettlement(settlementPorts, {
         dataOutcomesRootPath: options.dataOutcomesRootPath,
         legacyUsageDataRootPath: options.legacyUsageDataRootPath,
         workspaceId: options.workspaceId,
         legacyWorkspaceIds: options.legacyWorkspaceIds ?? [],
-      },
-    );
+      });
+    }
     const runState = new SessionRunStateManager({
       getArchState,
       dispatchArchEvent,
@@ -382,7 +394,7 @@ export class StatsService implements RunObserver {
         summary: null,
       }),
       scheduleRender: this.scheduleRender,
-      subagentObservationSource: this.legacy.subagentObservationSource,
+      subagentObservationSource,
     });
     this.tracker = tracker;
   }
@@ -632,7 +644,7 @@ export class StatsService implements RunObserver {
    * path derivation only: this never starts or writes legacy analytics. */
   private async scrubPrivateAuxiliaryLogs(sessionPath: string, sessionId?: string): Promise<void> {
     await forgetGlobalSideChannelsForStorageDirs(
-      this.storage.getGlobalSideChannelStorageDirs(),
+      this.privacyStorageDirs,
       sessionPath,
       sessionId,
     );
@@ -1725,7 +1737,7 @@ export class StatsService implements RunObserver {
 
   /** The resolved run-analytics storage directory (see {@link RunAnalyticsStorage.getStorageDir}). */
   getStorageDir(): string {
-    return this.storage.getStorageDir();
+    return this.privacyStorageDirs[0]!;
   }
 
   /** Durable canonical read model (P5), available only under canonical authority.
@@ -1905,6 +1917,7 @@ export class StatsService implements RunObserver {
 
   /** Correlated activity authority used by conservation tests and exports. */
   getActivityIntervals(): readonly ActivityIntervalRecord[] {
+    if (this.canonicalCapture) return [];
     return this.accounting.activityTimeline.projectAll();
   }
 
@@ -1925,6 +1938,7 @@ export class StatsService implements RunObserver {
    * completion bridge used by AggregateStatsService, preserving finalized
    * status/outcome/timestamps rather than its last observed open snapshot. */
   getPendingCompletedRuns(): RunSnapshot[] {
+    if (this.canonicalCapture) return [];
     return this.storage.getPendingCompletedRuns().filter((run) => !this.isPrivateSession(run.sessionPath));
   }
 

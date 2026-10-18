@@ -155,8 +155,18 @@ interface AppendUsageOptions {
 }
 
 export class BillableAccounting {
-  readonly invocationLedger: BillableInvocationLedger;
-  readonly activityTimeline: ActivityTimeline;
+  private readonly legacyInvocationLedger?: BillableInvocationLedger;
+  private readonly legacyActivityTimeline?: ActivityTimeline;
+
+  get invocationLedger(): BillableInvocationLedger {
+    if (!this.legacyInvocationLedger) throw new Error('Legacy ledger is unavailable under canonical authority.');
+    return this.legacyInvocationLedger;
+  }
+
+  get activityTimeline(): ActivityTimeline {
+    if (!this.legacyActivityTimeline) throw new Error('Legacy timeline is unavailable under canonical authority.');
+    return this.legacyActivityTimeline;
+  }
   private readonly deps: BillableAccountingDeps;
   private readonly pendingRetryBySession: Record<string, { sourceId: string; occurredAt: string } | undefined> = {};
   private readonly assistantInvocationObservedBySession: Record<string, boolean | undefined> = {};
@@ -175,12 +185,16 @@ export class BillableAccounting {
 
   constructor(deps: BillableAccountingDeps) {
     this.deps = deps;
-    this.invocationLedger = new BillableInvocationLedger(
-      path.join(deps.getStorageDir(), 'billable-invocations.jsonl'),
-    );
-    this.activityTimeline = new ActivityTimeline(
-      path.join(deps.getStorageDir(), 'activity-intervals.json'),
-    );
+    // Canonical adaptation retains pricing/retry/branch state, but must not
+    // construct either legacy persistence owner (or resolve its directory).
+    if (!deps.canonicalCapture) {
+      this.legacyInvocationLedger = new BillableInvocationLedger(
+        path.join(deps.getStorageDir(), 'billable-invocations.jsonl'),
+      );
+      this.legacyActivityTimeline = new ActivityTimeline(
+        path.join(deps.getStorageDir(), 'activity-intervals.json'),
+      );
+    }
   }
 
   /** Warm both durable stores without a synchronous full-file parse. The ledger initializes
@@ -1002,6 +1016,7 @@ export class BillableAccounting {
 
   /** Immutable ordinary invocation rows used by aggregate projections/export. */
   exportRecords(): readonly BillableInvocationRecord[] {
+    if (this.deps.canonicalCapture) return [];
     return this.invocationLedger.exportRecords();
   }
 
