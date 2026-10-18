@@ -14,7 +14,6 @@ import {
   buildNativePackageArgs,
   createCoverageScope,
   PACKAGE_CONFIGS,
-  buildTestArgs,
   parseArgs,
   runChildProcess,
   runPackage as executePackage,
@@ -93,11 +92,11 @@ test('skill-pruner production adapter explicitly retains single-process coverage
   assert.equal(result.retainedInvocation, undefined);
 });
 
-test('every covered owner preserves metadata and complete inventory through the shared executor', async (t) => {
+test('every owner preserves metadata and complete inventory through the shared executor', async (t) => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
   const indexed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
     .split(/\r?\n/u).filter(file => /\.test\.(?:ts|tsx|mjs|js)$/u.test(file));
-  for (const owner of PACKAGE_CONFIGS.filter(config => config.coverage !== false)) {
+  for (const owner of PACKAGE_CONFIGS) {
     await t.test(owner.id, async () => {
       const globs = (owner.coverageTestGlobs ?? owner.testGlobs).map(glob =>
         path.relative(root, path.resolve(owner.cwd, glob)).replaceAll('\\', '/'));
@@ -123,8 +122,10 @@ test('every covered owner preserves metadata and complete inventory through the 
           assert.equal(config.options.concurrency, 1);
           assert.deepEqual(config.options.testNamePatterns, ['metadata']);
           assert.deepEqual(args.slice(0, 2), ['/owner/tsx', '--tsconfig=/fixture/overlay']);
-          assert.equal(env.PIE_TEST_COVERAGE_CWD, owner.cwd);
-          assert.deepEqual(JSON.parse(env.PIE_TEST_COVERAGE_INCLUDES), owner.coverageIncludes);
+          assert.equal(env.PIE_TEST_COVERAGE_CWD, owner.coverage === false ? undefined : owner.cwd);
+          assert.deepEqual(env.PIE_TEST_COVERAGE_INCLUDES && JSON.parse(env.PIE_TEST_COVERAGE_INCLUDES), owner.coverageIncludes);
+          assert.equal(Object.hasOwn(env, 'NODE_TEST_CONTEXT'), true);
+          assert.equal(env.NODE_TEST_CONTEXT, undefined);
           assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
           assert.equal(env.TSX_TSCONFIG_PATH, '/fixture/overlay');
           return reporterResult();
@@ -159,16 +160,6 @@ test('parseArgs forwards arbitrary node:test arguments after --', () => {
   assert.equal(parsed.integration, true);
 });
 
-test('buildTestArgs places forwarded node:test arguments before test globs', () => {
-  const args = buildTestArgs({
-    testGlobs: ['./test/**/*.test.ts'],
-    coverageIncludes: ['src/**/*.ts'],
-  }, true, ['--test-name-pattern=answer with spaces']);
-
-  assert.equal(args.includes('tsx'), false, 'the caller invokes the local tsx CLI directly');
-  assert.ok(args.indexOf('--test-name-pattern=answer with spaces') < args.indexOf('./test/**/*.test.ts'));
-});
-
 test('native package invocation preserves owner globs, SDK aliases and name filters without batching', () => {
   const runtime = { sdkPath: '/verified/sdk' };
   const extension = PACKAGE_CONFIGS.find((config) => config.id === 'extension');
@@ -194,46 +185,6 @@ test('native package invocation preserves owner globs, SDK aliases and name filt
   const subagentArgs = buildNativePackageArgs(subagent, runtime);
   assert.equal(subagentArgs[subagentArgs.indexOf('--tsconfig') + 1], subagent.tsxConfig);
   assert.ok(subagentArgs.includes('harness/tools/subagent/test/**/*.test.ts'));
-});
-
-test('buildTestArgs applies an explicit fast worker budget', () => {
-  const args = buildTestArgs({
-    testGlobs: ['./test/**/*.test.ts'],
-    fastConcurrency: 4,
-  }, true);
-
-  assert.ok(args.includes('--test-concurrency=4'));
-  assert.equal(args.includes('--experimental-test-coverage'), false);
-});
-
-test('legacy argument builder cannot select covered entrypoints or isolation', () => {
-  const config = {
-    testGlobs: ['test/**/*.test.ts'],
-    coverageTestGlobs: ['test/coverage-suite.ts'],
-    coverageIncludes: ['src/**/*.ts'],
-  };
-  const releaseArgs = buildTestArgs(config, false);
-  assert.ok(releaseArgs.includes('--test'));
-  assert.ok(releaseArgs.includes('--test-concurrency=1'));
-  assert.equal(releaseArgs.includes('--experimental-test-coverage'), false);
-  assert.equal(releaseArgs.some((arg) => arg.startsWith('--test-coverage-include=')), false);
-  assert.equal(releaseArgs.includes('test/coverage-suite.ts'), false);
-  assert.ok(releaseArgs.includes('test/**/*.test.ts'));
-  assert.equal(releaseArgs.includes('--experimental-test-isolation=none'), false);
-  const fastArgs = buildTestArgs(config, true);
-  assert.ok(fastArgs.includes('test/**/*.test.ts'));
-  assert.equal(fastArgs.includes('test/coverage-suite.ts'), false);
-});
-
-test('buildTestArgs can run infrastructure tests without coverage collection', () => {
-  const args = buildTestArgs({
-    testGlobs: ['scripts/test/*.test.mjs'],
-    coverage: false,
-  }, false);
-
-  assert.equal(args.includes('--experimental-test-coverage'), false);
-  assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
-  assert.ok(args.includes('--test-concurrency=1'));
 });
 
 test('actual Node CLI raw capture preserves branch/function negatives and reporter counts without native aggregation', async (t) => {
@@ -263,7 +214,9 @@ test('control', () => {
 test.skip('skipped control', () => {});
 `);
     const includes = ['owner/**/*.mjs'];
-    const args = buildTestArgs({ testGlobs: [entry], coverageIncludes: includes }, false);
+    // Independent raw Node control, not a production owner invocation.
+    const args = ['--test', '--test-concurrency=1',
+      `--test-reporter=${new URL('../test-reporter.mjs', import.meta.url).href}`, entry];
     assert.equal(args.includes('--experimental-test-coverage'), false);
     assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
     const env = { ...process.env };
@@ -307,7 +260,7 @@ function fakeChild(code = 0, output = 'captured stdout', errorOutput = 'captured
 }
 
 const lifetimeConfig = { id: 'fixture', cwd: process.cwd(), coverage: false,
-  testGlobs: ['unused.test.ts'], coverageIncludes: [] };
+  testGlobs: ['scripts/verification/test/run-tests.test.mjs'], coverageIncludes: [] };
 
 test('retained coverage preserves uncertain child diagnostics and both output streams', async () => {
   const result = await runChildProcess('unused', [], process.cwd(), undefined, {}, true, {

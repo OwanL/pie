@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { buildRunnerInvocation, runPackageGroup, runPackageGroupCli } from '../run-package-group.mjs';
 import { extractRuntimeArgs, withVerificationRuntime } from '../verification-runtime.mjs';
-import { parseArgs, buildTestArgs } from '../run-tests.mjs';
+import { parseArgs } from '../run-tests.mjs';
+import { prepareNodeTestInvocation } from '../test-node.mjs';
 import { runProject, runWithConcurrency } from '../run-typechecks.mjs';
 
 function deferred() {
@@ -40,11 +41,18 @@ test('package group puts runtime selection before forwarding, acquires once, and
       const parsed = parseArgs(selection.args);
       assert.deepEqual(parsed.testArgs, ['--test-name-pattern=foo']);
       await withVerificationRuntime(selection, undefined, async () => {
-        const nodeArgs = buildTestArgs({ coverage: false, testGlobs: ['fixture.test.mjs'] }, false, parsed.testArgs);
-        assert.equal(nodeArgs.filter((arg) => arg === '--test-name-pattern=foo').length, 1);
-        assert.ok(!nodeArgs.includes('--pi-runtime'));
-        assert.ok(!nodeArgs.includes(artifactDir));
-        assert.ok(!nodeArgs.includes('--'));
+        const invocation = prepareNodeTestInvocation([path.join(artifactDir, 'fixture.test.mjs')], {
+          cwd: artifactDir, loaderMode: 'retained-esm', startupArgs: ['/owner/tsx'],
+          waitForOwnership: false, nodeFlags: parsed.testArgs,
+        });
+        try {
+          const nodeArgs = invocation.args;
+          const config = JSON.parse(await readFile(nodeArgs.at(-1), 'utf8'));
+          assert.deepEqual(config.options.testNamePatterns, ['foo']);
+          assert.ok(!nodeArgs.includes('--pi-runtime'));
+          assert.ok(!nodeArgs.includes(artifactDir));
+          assert.ok(!nodeArgs.includes('--'));
+        } finally { invocation.dispose(); }
       }, { withPiRuntime });
       return 0;
     },

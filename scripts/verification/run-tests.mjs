@@ -24,7 +24,6 @@ import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } fro
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
-const reporterSpecifier = pathToFileURL(path.join(__dirname, 'test-reporter.mjs')).href;
 
 // Package identity, ordering, aliases, test cwd, tsx/tsc compiler selection,
 // and fast concurrency live in scripts/lib/test-packages.mjs
@@ -718,29 +717,6 @@ function summarizeCoverageFailures(config, coverage) {
   return failures;
 }
 
-export function buildTestArgs(config, fast = false, testArgs = []) {
-  // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
-  // resolution / path aliases. Subagent, Playwright, and Computer-Use use
-  // this to resolve the embedded pi SDK's nested typebox/pi-ai to one pinned
-  // instance (their `tsxConfig` points at a runtime-only tsconfig whose
-  // `paths` target JS builds, not the typecheck-only `.d.ts` aliases). It must
-  // precede the positional test globs.
-  const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
-  return [
-    ...tsxConfigArgs,
-    '--test',
-    // Full verification is serialized for deterministic shared-env fixtures.
-    // Fast mode lets node:test parallelize independent test files, which is
-    // substantially quicker for the 2k+ extension suite.
-    ...(fast
-      ? ['--test-force-exit', ...(config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])]
-      : ['--test-concurrency=1']),
-    `--test-reporter=${reporterSpecifier}`,
-    ...testArgs,
-    ...config.testGlobs,
-  ];
-}
-
 function parseReporterOutput(stdout, stderr) {
   const combined = `${stdout}\n${stderr}`;
   const summaryLine = combined
@@ -913,7 +889,7 @@ export async function runPackage(config, fast = false, integration = false, test
   let teardownConfirmed = true;
   try {
     if (coveredOwner) coverageScope = makeCoverageScope(config);
-    if (coveredOwner) {
+    if (!fast) {
       const selection = nativePackageSelection({ ...config,
         testGlobs: coveredOwner && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs,
       });
@@ -927,14 +903,11 @@ export async function runPackage(config, fast = false, integration = false, test
       // not the native CLI's stdin authorization driver. Join/retain below.
       nativeInvocation = prepareNodeTestInvocation(files, { cwd: config.cwd, waitForOwnership: false,
         loaderMode: 'retained-esm',
-        isolation: config.singleProcessCoverage ? 'none' : 'process',
+        isolation: coveredOwner && config.singleProcessCoverage ? 'none' : 'process',
         startupArgs: [resolveTsx(config), `--tsconfig=${tsxOverlay.configPath}`],
         nodeFlags: ['--test-concurrency=1', `--test-reporter=${path.join(__dirname, 'test-reporter.mjs')}`, ...testArgs] });
     }
-    const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : nativeInvocation?.args ?? [
-      resolveTsx(config),
-      ...buildTestArgs({ ...config, tsxConfig: tsxOverlay.configPath }, false, testArgs),
-    ];
+    const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : nativeInvocation.args;
     teardownConfirmed = false;
     rawResult = await runChild(
       process.execPath,
