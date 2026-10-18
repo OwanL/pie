@@ -85,13 +85,23 @@ function freshProcess(body: string): void {
     const Module = require('node:module');
     const { createRequire } = Module;
     const entryRequire = createRequire(${JSON.stringify(entrySource)});
-    // Check actual loader resolution, not just inherited environment/config.
     const aliases = JSON.parse(process.env.SUBAGENT_FIXTURE_SDK_ALIASES);
+    (async () => {
+    // The compile hooks below deliberately exercise Pie's CJS-transformed
+    // source. Load the SDK natively first: its import-only exports (including
+    // pi-ai/compat) are not a CommonJS API. Both alias spellings share the
+    // actual ESM namespace, not a schema mock or transpiled SDK copy.
+    const sdkModules = new Map();
+    for (const name of ['pi-ai', 'pi-tui', 'pi-coding-agent']) {
+      const canonical = '@earendil-works/' + name;
+      const namespace = await import(require('node:url').pathToFileURL(aliases[canonical]).href);
+      sdkModules.set(canonical, namespace);
+      sdkModules.set('@mariozechner/' + name, namespace);
+    }
+    // Check actual loader resolution, not just inherited environment/config.
     for (const [name, target] of Object.entries(aliases)) {
       assert.equal(entryRequire.resolve(name), target, 'child lost selected SDK alias: ' + name);
     }
-    const legacyAi = entryRequire('@mariozechner/pi-ai');
-    assert.equal(legacyAi.Type, entryRequire('@earendil-works/pi-ai').Type);
     // Renderer-only seam, matching description-metadata.test.ts. The selected
     // SDK's renderer does not need an AgentSession for these checks.
     // Keep real pi-ai/schema aliases and all Pie registration modules.
@@ -100,9 +110,11 @@ function freshProcess(body: string): void {
       if (request === '@mariozechner/pi-coding-agent' && /[/\\\\]subagent[/\\\\]render\\.ts$/.test(parent?.filename ?? '')) {
         return { getMarkdownTheme: () => ({}) };
       }
+      if (sdkModules.has(request)) return sdkModules.get(request);
       return sdkLoad.call(this, request, parent, ...rest);
     };
-    (async () => {
+    const legacyAi = entryRequire('@mariozechner/pi-ai');
+    assert.equal(legacyAi.Type, entryRequire('@earendil-works/pi-ai').Type);
       ${body}
       console.log('lazy-registration assertions complete');
     })().catch(error => { console.error(error); process.exitCode = 1; });
