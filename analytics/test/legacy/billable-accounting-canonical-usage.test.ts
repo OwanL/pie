@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { BillableAccounting, type BillableAccountingDeps } from '../../legacy/billable-accounting/service';
+import { createCanonicalAccounting, type AccountingPort, type CanonicalAccountingDeps } from '../../usage-accounting/canonical-accounting';
 import { buildSubagentUsageSamples } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import type { CanonicalAnalyticsCapture, CanonicalProviderSettlement } from '../../capture/canonical-capture.js';
 
@@ -19,9 +19,8 @@ function accountingWithCapture(
     fields: Record<string, unknown>;
   }>,
   now?: () => Date,
-): BillableAccounting {
-  const deps: BillableAccountingDeps = {
-    getStorageDir: () => tempDir,
+): AccountingPort {
+  const deps: CanonicalAccountingDeps = {
     now: now ?? (() => new Date(Date.parse('2026-01-01T00:00:00.000Z'))),
     scheduleRender: () => undefined,
     dispatchArchEvent: () => undefined,
@@ -31,7 +30,6 @@ function accountingWithCapture(
     sessionIdentity: () => ({ sessionId: 'session-id-1' }),
     currentRunId: () => null,
     activeOperationId: () => null,
-    markDerivedExportDirty: () => undefined,
     canonicalCapture: {
       captureProviderSettlement: (record: CanonicalProviderSettlement) => {
         captured?.push(record);
@@ -50,7 +48,7 @@ function accountingWithCapture(
       },
     } as CanonicalAnalyticsCapture,
   };
-  return new BillableAccounting(deps);
+  return createCanonicalAccounting(deps);
 }
 
 const assistantSample = {
@@ -85,7 +83,7 @@ test('canonical accounting submits exact settlements without a host history proj
     assert.equal(captured.length, 1);
 
     // Canonical adaptation does not even construct a legacy persistence owner.
-    assert.throws(() => accounting.invocationLedger, /unavailable under canonical authority/);
+    assert.equal('invocationLedger' in accounting, false);
     assert.throws(() => accounting.activityTimeline, /unavailable under canonical authority/);
     assert.equal(accounting.exportRecords().length, 0);
 
@@ -246,7 +244,7 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
     );
     assert.deepEqual(accounting.projectSessionUsage('/sessions/mixed.jsonl'), { samples: [], authority: 'unknown' });
     assert.equal(captured[0]?.providerReportedCostUsd, 0.03);
-    assert.throws(() => accounting.invocationLedger, /unavailable under canonical authority/);
+    assert.equal('invocationLedger' in accounting, false);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -354,4 +352,21 @@ test('canonical capture preserves unknown channels without retaining settlements
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test('unavailable capture stays canonical without persistence or snapshot replay', () => {
+ const accounting = createCanonicalAccounting({
+ now: () => new Date(0), scheduleRender: () => {}, dispatchArchEvent: () => {},
+ getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined,
+ isPrivateSession: () => true, sessionIdentity: () => ({ sessionId: 'private' }),
+ currentRunId: () => null, activeOperationId: () => null, canonicalCapture: null,
+ });
+ const result = accounting.observeAuxiliaryLlmUsage('/private', assistantSample);
+ assert.equal(result.canonicalAccepted, false);
+ assert.equal(result.record?.inputTokens, 100);
+ accounting.observeSessionUsageSnapshot('/private', 'private', { samples: [] });
+ accounting.markSessionPrivate('/private');
+ accounting.forgetSession('/private');
+ assert.deepEqual(accounting.projectSessionUsage('/private'), { samples: [], authority: 'unknown' });
+ assert.equal('invocationLedger' in accounting, false);
 });

@@ -39,7 +39,7 @@ import { readSessionPricingFacts } from '../../../harness/model-providers/runtim
 import { resolveCapturedInvocationPricing } from '../../../harness/model-providers/pricing/captured-invocation-pricing.js';
 import { LegacyStatsSettlement, type LegacyStatsSettlementPorts } from '../../../analytics/legacy/stats-service/service';
 import { createCanonicalAccounting, legacyPrivacyStorageDirs } from '../../../analytics/usage-accounting/canonical-accounting';
-import type { BillableAccounting } from '../../../analytics/legacy/billable-accounting/service';
+import type { AccountingPort } from '../../../analytics/usage-accounting/canonical-accounting';
 import type { RunAnalyticsStorage } from '../../../analytics/legacy/stats-service/storage';
 import type { ActivityIntervalRecord } from '../../../analytics/contracts/activity-interval';
 import { activityProjectionSubjectFilter } from '../../../analytics/projections/activity-projection.js';
@@ -189,7 +189,7 @@ export class StatsService implements RunObserver {
    * collaborator construction and the legacy restore/settle/export/dispose
    * sequences). The façade reads the collaborators through it. */
   private readonly legacySettlement?: LegacyStatsSettlement;
-  private readonly canonicalAccounting?: BillableAccounting;
+  private readonly canonicalAccounting?: AccountingPort;
   private readonly privacyStorageDirs: string[];
 
   private get legacy(): LegacyStatsSettlement {
@@ -198,7 +198,7 @@ export class StatsService implements RunObserver {
   }
 
   /** Shared invocation adaptation; canonical mode has transient state only. */
-  private get accounting(): BillableAccounting {
+  private get accounting(): AccountingPort {
     return this.canonicalAccounting ?? this.legacy.accounting;
   }
 
