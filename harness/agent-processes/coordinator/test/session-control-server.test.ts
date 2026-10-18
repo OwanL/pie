@@ -589,6 +589,59 @@ test('restored untitled live titles survive a new coordinator and normal generat
   assert.equal(writes.length, 1);
 });
 
+test('title handleRequest assigns candidates and fail-open snippets but fences invalidated inference', async (t) => {
+  for (const outcome of ['generated', 'model-failed', 'disabled', 'invalidated'] as const) {
+    await t.test(outcome, async (t) => {
+      const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'title-request-'));
+      t.after(() => fs.rm(dir, { recursive: true, force: true }));
+      const sessionPath = await writeSessionFile(dir, 'a.jsonl');
+      const server = serverForTests();
+      const writes = installTitleWriter(server);
+      applyMembership(server, membership([membershipEntry(sessionPath)]));
+      await hydrate(server);
+      let generation = 0;
+      let inferenceCalls = 0;
+      let release!: () => void;
+      let started!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const inferenceStarted = new Promise<void>((resolve) => { started = resolve; });
+      (server as unknown as { workerRuntimeRouter: unknown }).workerRuntimeRouter = {
+        getRoute: () => ({ state: 'hot' }),
+        hasHotOwner: () => true,
+        operationCancellationGeneration: () => generation,
+        routeExisting: async () => {
+          inferenceCalls += 1;
+          if (outcome === 'model-failed') throw new Error('model unavailable');
+          if (outcome === 'invalidated') { started(); await blocked; }
+          return { generated: true, name: 'Fix Login' };
+        },
+      };
+      const pending = server.handleRequest({
+        id: `title-${outcome}`, method: 'session.title.generate',
+        params: { sessionPath, prompt: 'Investigate login', enabled: outcome !== 'disabled',
+          provider: 'ollama', model: 'test-model', thinkingLevel: 'off', timeoutSec: 15 },
+      });
+      if (outcome === 'invalidated') {
+        await inferenceStarted;
+        generation += 1;
+        release();
+      }
+      assert.deepEqual(await pending, outcome === 'invalidated'
+        ? { generated: false, reason: 'cancelled' }
+        : { generated: true, name: outcome === 'generated' ? 'Fix Login' : 'Investigate login',
+          ...(outcome === 'generated' ? {} : { reason: outcome }) });
+      assert.equal(inferenceCalls, outcome === 'disabled' ? 0 : 1);
+      assert.equal(writes.length, outcome === 'invalidated' ? 1 : 2);
+      const internal = server as unknown as {
+        liveSessionTitles: { assigned(path: string): string | undefined; isAdmissionFallback(path: string): boolean };
+      };
+      assert.equal(internal.liveSessionTitles.assigned(sessionPath), outcome === 'invalidated'
+        ? 'New Session' : outcome === 'generated' ? 'Fix Login' : 'Investigate login');
+      assert.equal(internal.liveSessionTitles.isAdmissionFallback(sessionPath), outcome === 'invalidated');
+    });
+  }
+});
+
 test('generation joins an in-flight admission write before replacing its fallback', async (t) => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'admission-title-race-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));

@@ -5316,7 +5316,7 @@ export class BackendServer {
         }
         let routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
         const operationCancellationGeneration = expectedCancellationGeneration
-          ?? (sessionPath && ISOLATED_PROMOTION_METHODS.has(request.method)
+          ?? (sessionPath && (ISOLATED_PROMOTION_METHODS.has(request.method) || request.method === 'session.title.generate')
             ? router.operationCancellationGeneration(sessionPath)
             : undefined);
         // Read/config commands do not initiate promotion, but once another
