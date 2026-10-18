@@ -33,7 +33,7 @@ test('pre-backend timings preserve ordering, degraded analytics and fatal stage 
     }) as HostRuntime;
     if (failure && failure !== 'analytics') await assert.rejects(runtime.start(), (caught) => caught === error);
     else await runtime.start();
-    const expected = ['handoff', 'analytics', failure === 'analytics' ? 'warning' : 'loaded', 'privacy', 'rates', 'aggregate', 'stats', 'session', 'browser', 'receipt'];
+    const expected = ['handoff', 'analytics', ...(failure === 'analytics' ? ['warning'] : []), 'privacy', 'rates', 'aggregate', 'stats', 'session', 'browser'];
     assert.deepEqual(calls, failure && failure !== 'analytics' ? expected.slice(0, expected.indexOf(failure) + 1) : expected);
     const stages = ['analytics-handoff-start', 'analytics-runtime-start', 'privacy-marker-initialization', 'host-stats-start'];
     const failedIndex = ['handoff', 'analytics', 'privacy', 'stats'].indexOf(failure ?? '');

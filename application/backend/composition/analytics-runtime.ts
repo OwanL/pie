@@ -96,6 +96,7 @@ export interface AnalyticsRuntimePort {
   start(): Promise<AnalyticsRuntimeReadiness>;
   recordLoadedGeneration(): void;
   backendDescriptor(): AnalyticsBackendDescriptor | undefined;
+  getCanonicalContext(): CanonicalAnalyticsRuntimeContext | undefined;
   /** Revoke producer admission and drain already accepted recorder writes. */
   fenceWriters(timeoutMs?: number): Promise<number>;
   /** Record terminal restart evidence only after the complete host readiness

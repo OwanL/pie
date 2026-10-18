@@ -697,20 +697,36 @@ test('HostRuntime omits the listener switch for compositions without an independ
   }
 });
 
-test('HostRuntime keeps legacy analytics authority with a fresh data root: canonical activity is omitted', async () => {
+test('HostRuntime uses canonical analytics with a fresh data root without creating the database during construction', async () => {
   const dataRoot = useTempDataRoot();
   try {
-    // No activation manifest exists under the fresh temp root, so the
-    // validated-manifest authority switch selects legacy: no canonical
-    // helper started and the optional canonical projections are omitted.
+    // Construction resolves a fresh canonical namespace without creating the store.
     assert.equal(fs.existsSync(path.join(dataRoot, 'analytics', 'analytics.sqlite')), false,
-      'legacy authority must not start the canonical store');
+      'construction must not initialize the canonical store');
     const { platform } = createPlatformFixture();
     const runtime = new HostRuntime(platform, new BackendClient());
     const viewState = runtime.buildViewState() as unknown as Record<string, unknown>;
-    assert.equal('canonicalActivityGlobal' in viewState, false,
-      'canonical activity/facet exposure must be omitted under legacy authority');
+    assert.equal('canonicalActivityGlobal' in viewState, true,
+      'canonical activity exposure does not require an activation manifest');
     await runtime.shutdown();
+  } finally {
+    delete process.env.PIE_DATA_DIR;
+  }
+});
+
+test('HostRuntime ignores malformed historical activation artifacts without touching them', async () => {
+  const dataRoot = useTempDataRoot();
+  try {
+    const stateDir = path.join(dataRoot, 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const manifestPath = path.join(stateDir, 'analytics-activation-v1.json');
+    const historical = '{not activation evidence';
+    fs.writeFileSync(manifestPath, historical);
+    const { platform } = createPlatformFixture();
+    const runtime = new HostRuntime(platform, new BackendClient());
+    assert.equal('canonicalActivityGlobal' in runtime.buildViewState(), true);
+    await runtime.shutdown();
+    assert.equal(fs.readFileSync(manifestPath, 'utf8'), historical);
   } finally {
     delete process.env.PIE_DATA_DIR;
   }

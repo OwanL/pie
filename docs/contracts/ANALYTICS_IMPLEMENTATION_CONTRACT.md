@@ -1,6 +1,6 @@
 # Analytics and runtime storage: implementation contract
 
-Living contract for the implemented analytics authority switch and the gated session-storage
+Living contract for the implemented canonical analytics authority and the gated session-storage
 cutoff. It describes checked-in production source; it is not a plan, a qualification record, or
 evidence that any gate has been activated.
 
@@ -8,27 +8,22 @@ evidence that any gate has been activated.
 [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) for the surrounding system. Query-level semantics live in
 [`skills/query-analytics/SKILL.md`](../../harness/agent-instructions/skills/query-analytics/SKILL.md).
 
-## 1. Authority
+## 1. Canonical authority
 
-Pie has exactly one analytics authority at a time, decided by the activation manifest in the
-resolved state directory (`<data-root>/state/analytics-activation-v1.json`).
+Production host composition is canonical-only. This describes checked-in source mode, not
+live activation, delivery, or installation evidence. Activation manifests, tombstones, and old
+loaded/terminal receipts are inert historical artifacts: startup neither consults nor updates them.
 
-- **Legacy authority (default: no active generation).** `AnalyticsRuntime.start()` starts no helper,
-  creates no database, and captures nothing. A validated manifest with no active generation
-  (candidate or ready) also selects legacy. The legacy owners stay authoritative: the run-analytics
-  store and checkpoints, billable-invocation ledger (`billable-invocations.jsonl`), and activity
-  timeline (`activity-intervals.json`) all share the same per-workspace run-analytics store directory
-  beneath the workspace outcomes root.
-- **Canonical authority (a validated active generation).** The host validates the manifest, derives
-  one descriptor snapshot from it, starts the production recorder, and proves the read path with a
-  disposable query. Before capture counts as ready it re-reads the activation and fails closed
-  unless that snapshot's authority, manifest revision/hash, and generation identity still match;
-  any failure fails startup closed rather than falling back to legacy capture.
+The host resolves exactly `<data-root>/analytics/analytics.sqlite`. Read-only inspection adopts
+its sole persisted capture namespace; an absent or genuinely empty database uses `canonical`.
+Ambiguous namespaces, unsupported schemas, and inspection failures fail explicitly without
+searching another root or selecting legacy capture. Recorder admission owns initialization and
+migration. Namespace identity is not activation or qualification evidence.
 
-Reads follow the same switch. `StatsService.getAnalyticsReadModel()` exposes the canonical read
-model only under canonical authority; `queryRunAnalytics()` returns an explicit empty legacy run
-layer under canonical authority (canonical usage comes from the canonical read model); and the
-canonical activity/facet projections are omitted under legacy authority.
+One canonical context binds host capture, helper startup, and backend construction. Lifecycle
+writer admission remains mandatory. Helpers prove recorder and disposable-query readiness before
+accepting captures; helper failure pauses capture with no legacy fallback. Reads use the canonical
+read model; the legacy run layer is empty. Browser and pruning behavior are unchanged.
 
 Host startup automatically reconciles stale writer identities before opening recorder admission.
 Candidates are snapshotted before collecting a complete OS process census. Recovery requires evidence
@@ -41,25 +36,9 @@ stopped or closing its lifecycle registry. Analytics stop also joins helper star
 release; helpers cannot publish readiness after stop. A failed analytics start leaves capture closed
 while the primary Pie host remains usable, with a warning, rather than selecting legacy capture.
 
-The switch is exclusive and fail-closed:
-
-- Capture is never a dual-write. Under canonical authority a settlement is submitted to the
-  canonical recorder and **never** appended to the legacy JSONL ledger; under legacy authority the
-  canonical recorder is not started at all.
-- Authority is never inferred from the other store's contents. A malformed, oversized, or
-  unreadable manifest raises instead of reading as legacy, and any incomplete or inconsistent
-  tombstone/manifest combination — a tombstone without a manifest, an ever-active manifest without
-  its tombstone, or an ever-active state without an active generation — fails closed rather than
-  re-enabling legacy authority.
-- There is no import, backfill, or transcript reconstruction of old analytics into the canonical
-  store. Canonical facts begin at activation. Canonical collection and queries do not read legacy
-  analytics/review files. Explicit legacy export still reads the legacy stores; privacy scrubbing
-  and explicit forget can delete legacy records.
-
-Persisted activation state is still validated on read, including the mandatory
-`qualificationSha256`/`trialSha256` evidence fields. The one-time admission/qualification tooling
-that recorded those fields has been removed from this tree, and any future admission is outside the
-retained workflow.
+Capture is exclusive: no legacy ledger append or dual-write. There is no import, backfill, or
+transcript reconstruction of old analytics. Explicit legacy export and privacy deletion retain
+their existing owners. Historical activation tooling is not a production authority selector.
 
 ## 2. Storage layout
 
