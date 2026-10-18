@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { collectSourceCoverage } from '../source-coverage.mjs';
 import { parseArgs as parseNativeArgs, resolveTestFiles } from '../test-node.mjs';
@@ -20,6 +20,45 @@ import {
   runPackage,
   runSelectedPackages,
 } from '../run-tests.mjs';
+
+test('internal native execution uses the same owner accountant and retention lifecycle', async () => {
+  const owner = PACKAGE_CONFIGS.find(config => config.id === 'model-provider-authentication');
+  for (const outcome of ['passed', 'failed', 'mapping', 'uncertain']) {
+    let invocationRoot;
+    let disposed = 0;
+    const result = await runPackage(owner, false, false, [], undefined, { sdkPath: '/fixture' }, {
+      execution: 'native',
+      createOverlay: () => ({ configPath: '/fixture/overlay', dispose() { disposed++; } }),
+      createCoverageScope: () => ({ directory: '/private/evidence', dispose() { disposed++; } }),
+      runChild: async (_command, args, cwd, _signal, env) => {
+        const configPath = args.at(-1);
+        invocationRoot = path.dirname(configPath);
+        const config = JSON.parse(readFileSync(configPath, 'utf8'));
+        assert.equal(config.cwd, owner.cwd);
+        assert.equal(cwd, owner.cwd);
+        assert.equal(config.waitForOwnership, false);
+        assert.equal(config.options.concurrency, 1);
+        assert.equal(env.TSX_TSCONFIG_PATH, '/fixture/overlay');
+        assert.equal(env.PIE_TEST_COVERAGE_CWD, owner.cwd);
+        assert.ok(Object.values(config.sourceFileByEntry).every(file => file.includes('authentication')));
+        return { ...reporterResult(outcome === 'failed' ? 1 : 0), teardownConfirmed: outcome !== 'uncertain' };
+      },
+      collectCoverage: async () => {
+        if (outcome === 'uncertain') assert.fail('accounting before join');
+        if (outcome === 'mapping') throw new Error('Missing TypeScript source map');
+        return qualifiedCoverage;
+      },
+    });
+    const retained = ['mapping', 'uncertain'].includes(outcome);
+    assert.equal(existsSync(invocationRoot), retained);
+    assert.equal(disposed, retained ? 0 : 2);
+    assert.equal(result.retainedInvocation, retained ? invocationRoot : undefined);
+    assert.equal(result.hasInfrastructureFailure, retained);
+    // The deliberately low fixture totals still fail the unchanged owner gate.
+    assert.equal(result.passed, false);
+    rmSync(invocationRoot, { recursive: true, force: true });
+  }
+});
 
 test('parseArgs forwards name filters without requiring a second separator', () => {
   assert.deepEqual(

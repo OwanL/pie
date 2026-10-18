@@ -17,6 +17,7 @@ import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
 import { PACKAGE_REGISTRY } from '../lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
+import { prepareNodeTestInvocation, resolveTestFiles } from './test-node.mjs';
 
 import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
 
@@ -843,22 +844,26 @@ export async function runChildProcess(command, args, cwd, signal, envOverrides =
   };
 }
 
-export function buildNativePackageArgs(config, runtime, testArgs = []) {
+function nativePackageSelection(config) {
   // Registry globs are relative to each owner's test cwd, while the native
   // runner discovers indexed/nonignored files relative to the repository.
   const globs = config.testGlobs.map((glob) =>
     path.relative(repoRoot, path.resolve(config.cwd, glob)).replaceAll('\\', '/'));
-  const includes = globs.flatMap((glob) => ['--include', glob]);
   const selectors = [...new Set(globs.map((glob) => {
     const wildcard = glob.search(/[*?{\[]/u);
     return wildcard < 0 ? glob : glob.slice(0, glob.lastIndexOf('/', wildcard)) || '.';
   }))];
+  return { selectors, includeGlobs: globs };
+}
+
+export function buildNativePackageArgs(config, runtime, testArgs = []) {
+  const selection = nativePackageSelection(config);
   return [
     path.join(repoRoot, 'scripts', 'verification', 'test-node.mjs'),
     '--tsconfig', config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json',
     '--sdk-path', runtime.sdkPath,
-    ...includes,
-    ...selectors,
+    ...selection.includeGlobs.flatMap(glob => ['--include', glob]),
+    ...selection.selectors,
     '--',
     `--test-reporter=${path.join(__dirname, 'test-reporter.mjs')}`,
     ...testArgs,
@@ -888,11 +893,17 @@ function coverageDiagnostics(coverage) {
 }
 
 export async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime, {
+  // Internal qualification seam only; public/default coverage remains retained.
+  execution = 'retained',
   createOverlay = createTsconfigOverlay, runChild = runChildProcess,
   createCoverageScope: makeCoverageScope = createCoverageScope, collectCoverage: accountCoverage = collectCoverage,
   resolveTsx = (owner) => owner.testTsx === 'root' ? resolveLocalTsx(repoRoot)
     : owner.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(owner.cwd),
 } = {}) {
+  if (!['retained', 'native'].includes(execution)) throw new Error(`Unknown test execution: ${execution}`);
+  if (!fast && execution === 'native' && config.singleProcessCoverage) {
+    throw new Error('Native qualification requires process isolation; single-process coverage is not qualified');
+  }
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
   // the raw repo-relative path. Native fast runs manage their own overlay.
@@ -907,6 +918,7 @@ export async function runPackage(config, fast = false, integration = false, test
   // npx and a platform shell. This preserves regexes/spaces in forwarded
   // node:test arguments and avoids command-resolution differences between cwd/shells.
   let rawResult;
+  let nativeInvocation;
   let coverageScope;
   let sourceCoverage = null;
   let coverageCaptured = false;
@@ -915,7 +927,17 @@ export async function runPackage(config, fast = false, integration = false, test
   let teardownConfirmed = true;
   try {
     if (coveredOwner) coverageScope = makeCoverageScope(config);
-    const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : [
+    if (!fast && execution === 'native') {
+      const selection = nativePackageSelection({ ...config,
+        testGlobs: coveredOwner && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs,
+      });
+      const files = resolveTestFiles(repoRoot, selection.selectors, selection);
+      // This lane uses the retained runner's existing watchdog/lifetime owner,
+      // not the native CLI's stdin authorization driver. Join/retain below.
+      nativeInvocation = prepareNodeTestInvocation(files, { cwd: config.cwd, waitForOwnership: false,
+        nodeFlags: ['--test-concurrency=1', `--test-reporter=${path.join(__dirname, 'test-reporter.mjs')}`, ...testArgs] });
+    }
+    const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : nativeInvocation?.args ?? [
       resolveTsx(config),
       ...buildTestArgs({ ...config, tsxConfig: tsxOverlay.configPath }, false, testArgs),
     ];
@@ -927,9 +949,12 @@ export async function runPackage(config, fast = false, integration = false, test
       signal,
       {
         ...(integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {}),
+        ...(nativeInvocation ? { TSX_TSCONFIG_PATH: tsxOverlay.configPath, NODE_TEST_CONTEXT: undefined } : {}),
         ...(coverageScope ? {
+          // The programmatic runner must not inherit debugPort=0: Node would
+          // increment it to invalid worker ports 1/2. Capture itself is identical.
           NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(path.join(__dirname, 'coverage-capture.cjs'))}`,
-            ...(!config.singleProcessCoverage ? ['--inspect-port=0'] : [])].filter(Boolean).join(' '),
+            ...(!config.singleProcessCoverage && !nativeInvocation ? ['--inspect-port=0'] : [])].filter(Boolean).join(' '),
           PIE_TEST_COVERAGE_DIR: coverageScope.directory,
           PIE_TEST_COVERAGE_ROOT: repoRoot,
           PIE_TEST_COVERAGE_CWD: config.cwd,
@@ -968,7 +993,10 @@ export async function runPackage(config, fast = false, integration = false, test
       exitCode: teardownConfirmed ? 1 : 125, teardownConfirmed,
       diagnostics: [String(error), ...(error.rawResult?.diagnostics ?? [])] };
   } finally {
-    if (teardownConfirmed && (!coverageScope || coverageCaptured)) tsxOverlay?.dispose();
+    if (teardownConfirmed && (!coverageScope || coverageCaptured)) {
+      tsxOverlay?.dispose();
+      nativeInvocation?.dispose();
+    }
     if (teardownConfirmed && coverageCaptured) coverageScope?.dispose();
   }
   let report;
@@ -989,6 +1017,7 @@ export async function runPackage(config, fast = false, integration = false, test
     teardownConfirmed,
     retainedOverlay: !teardownConfirmed || (coverageScope && !coverageCaptured) ? tsxOverlay?.configPath : undefined,
     retainedCoverage: coverageScope && !coverageCaptured ? coverageScope.directory : undefined,
+    retainedInvocation: !teardownConfirmed || (coverageScope && !coverageCaptured) ? nativeInvocation?.configRoot : undefined,
     coverageDiagnostics: coverageDiagnostics(coverage),
     rawResult,
     summary,
@@ -1024,6 +1053,7 @@ function printPackageResult(result) {
     for (const diagnostic of result.coverageDiagnostics ?? []) console.log(indent(`- ${diagnostic}`, '    '));
   }
 
+  if (result.retainedInvocation) console.log(indent(`- retaining native invocation: ${result.retainedInvocation}`, '    '));
   if (result.retainedCoverage) console.log(indent(`- retaining source coverage evidence: ${result.retainedCoverage}`, '    '));
   if (result.teardownConfirmed && result.retainedOverlay) console.log(indent(`- retaining coverage overlay for accounting diagnostics: ${result.retainedOverlay}`, '    '));
   if (hasInfrastructureFailure) {

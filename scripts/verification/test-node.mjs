@@ -401,7 +401,7 @@ export function createTestEnvironment(source = process.env, { fixtureRoot } = {}
 }
 
 /** Shared config, entries and argument generation for both lifetime drivers. */
-export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot } = {}) {
+export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot, waitForOwnership = true } = {}) {
   assertCoverageQualification(files, nodeFlags);
   const parsedFlags = parseNodeTestFlags(nodeFlags);
   const configRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-node-runner-'));
@@ -416,7 +416,7 @@ export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoo
       options: parsedFlags.options,
       reporterNames: parsedFlags.reporterNames,
       reporterDestinations: parsedFlags.reporterDestinations,
-      waitForOwnership: true,
+      waitForOwnership,
     }));
   } catch (error) {
     rmSync(configRoot, { recursive: true, force: true });

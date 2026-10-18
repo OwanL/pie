@@ -7,11 +7,41 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { collectSourceCoverage } from '../source-coverage.mjs';
+import { PACKAGE_CONFIGS, runPackage } from '../run-tests.mjs';
 import { assertCoverageQualification, buildNodeArgs, createNodeTestEntries, createTestEnvironment } from '../test-node.mjs';
 
 const require = createRequire(import.meta.url);
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 const preload = fileURLToPath(new URL('../coverage-capture.cjs', import.meta.url));
+
+// An SDK-free real registry owner exercises the production orchestration seam,
+// not the low-level fixture adapter below. No public native coverage flag.
+test('authentication owner matches full AST records in both runPackage execution lanes', async t => {
+  const owner = PACKAGE_CONFIGS.find(config => config.id === 'model-provider-authentication');
+  const reports = {};
+  for (const execution of ['retained', 'native']) {
+    const result = await runPackage(owner, false, false, [], undefined, {}, {
+      execution,
+      createOverlay: () => {
+        const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-owner-qualification-'));
+        const configPath = path.join(directory, 'tsconfig.json');
+        writeFileSync(configPath, JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' } }));
+        return { configPath, dispose: () => rmSync(directory, { recursive: true, force: true }) };
+      },
+    });
+    if (!result.passed) t.diagnostic(JSON.stringify(result));
+    assert.equal(result.passed, true);
+    assert.equal(result.summary.counts.passed, 18);
+    reports[execution] = result.coverage;
+  }
+  assert.deepEqual(reports.native, reports.retained);
+  assert.equal(reports.native.coveredLineCount, 32);
+  assert.equal(reports.native.totalLineCount, 32);
+  assert.equal(reports.native.coveredFunctionCount, 5);
+  assert.equal(reports.native.totalFunctionCount, 5);
+  assert.equal(reports.native.coveredBranchCount, 22);
+  assert.equal(reports.native.totalBranchCount, 23);
+});
 
 // Qualification only: deliberately bypass the public refusal using the existing
 // runner's fixture config, not a new execution or coverage implementation.
@@ -88,11 +118,16 @@ export function unused(n: boolean) { return n ? 1 : 2; }
   assert.equal(untouched.length, 1);
   assert.deepEqual(untouched[0].counts, [0, 0], 'untouched branch arms stay zero');
   const names = readdirSync(nativeOptions.directory).filter(name => name.startsWith('scripts-'));
-  const target = path.join(nativeOptions.directory, names[0]);
+  const target = names.map(name => path.join(nativeOptions.directory, name))
+    .find(filename => JSON.parse(readFileSync(filename, 'utf8')).scripts.length > 0);
   const original = readFileSync(target, 'utf8');
-  rmSync(target);
+  // Either isolated child can supply identical provenance. Remove every
+  // capture to test genuinely missing provenance rather than redundant bytes.
+  const originals = names.map(name => [path.join(nativeOptions.directory, name),
+    readFileSync(path.join(nativeOptions.directory, name), 'utf8')]);
+  for (const [filename] of originals) rmSync(filename);
   await assert.rejects(collectSourceCoverage(nativeOptions), /Missing.*capture/i);
-  writeFileSync(target, original);
+  for (const [filename, contents] of originals) writeFileSync(filename, contents);
   const record = JSON.parse(original);
   const map = JSON.parse(Buffer.from(record.scripts[0].sourceMapURL.split('base64,')[1], 'base64'));
   map.sourcesContent[0] += '\n// conflicting';
