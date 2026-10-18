@@ -57,6 +57,12 @@ Source through `62d31f80` passed fresh private delivery qualification using the 
 
 The VSIX now includes the standalone Windows lock module in build output, while preserving the original packaging CLI and versioning behavior. The explicit built-package fixture also passed startup, backend/session operations, and relocated loader checks. Qualification packaging and deactivation-reporting regressions were fixed in `f0282be0` and `218dbcb1`; Windows short/long path spellings are compared by physical path in the packaged fixture. This is not fresh Pi compilation, real Electron acceptance, publication, installation, or loaded-fix evidence. The three historical workspace readers remain untouched.
 
+### Expanded existing-SDK validation (2026-10-18)
+
+Using verified SDK `94c1af…` explicitly, five serial artifact runs passed 321 checks across agent/session lifecycle, provider and tool registration, integration boundaries, CLI and package resolution. Two initially gated provider-runtime cases were rerun with their artifact prerequisite and passed; the installed-prior-reader case remained unrun. Local mock-provider integration was enabled; no external provider acceptance is claimed. A CJS fixture incorrectly loading import-only SDK exports was corrected in `896a1050`, then the full 62-check provider/tool group passed with zero skips. All 32 registered typecheck projects also passed with the explicit runtime/tooling artifacts.
+
+The development refresh artifact suite was deliberately excluded: its fixture acquires a reader on the canonical native workspace and copies compiled workspace bytes rather than using the selected artifact. This is not full default artifact-lane qualification, fresh SDK compilation, coverage acceptance, or installed-host verification. No historical reader was reclaimed and no runtime was published or installed.
+
 ## Optional structural work
 
 Canonical frontend activity projection was separated from token/cost accounting. Backend analytics remains a larger follow-up: separate canonical read-cache lifecycle from live capture orchestration, and recorder schema/migration/query responsibilities from mutations, only with transaction, snapshot, privacy, and single-authority regression coverage. File size alone is not a reason to split these modules.
