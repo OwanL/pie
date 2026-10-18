@@ -11,6 +11,8 @@ import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { createTsconfigOverlay, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { resolveDevelopmentSdkWorkspaceRoot, withDevelopmentSdkReader } from '../lib/development-sdk-reader.mjs';
+import { runInNativeTrustedKeeper } from './native-test-keeper.mjs';
+import { runOwnedTestDriver } from './owned-test-driver.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
@@ -140,8 +142,78 @@ function projectCompiler(root = repoRoot) {
   return resolveTypeScriptCompiler({ dependencyOwnerRoot: path.resolve(root) });
 }
 
-/** Execute a single project. The incremental state only accelerates TS itself. */
-export function runTypecheck({
+/** Keeper-process typecheck entry. The lease has acquired the workspace reader
+ * before this validation/cache/overlay work began; the compiler child runs
+ * through the single kernel owned driver and its reader is released only on
+ * that driver's verified matching tree-empty proof. Ordinary tsc children wait
+ * on no ownership preload (the Job already contains their tree), so startup
+ * authorization is a no-token stdin close, and the compiler output is
+ * collected and returned instead of forwarded.
+ */
+export async function runOwnedTypecheck(invocation, options = {}, owner = {}) {
+  const absoluteRoot = path.resolve(owner.baseRoot ?? repoRoot);
+  const absoluteConfig = path.resolve(invocation.configPath);
+  if (!existsSync(absoluteConfig) || !statSync(absoluteConfig).isFile()) {
+    throw new Error(`TypeScript project config not found: ${absoluteConfig}`);
+  }
+  const absoluteSdk = options.sdkPath === undefined ? undefined : path.resolve(options.sdkPath);
+  const absoluteCompiler = path.resolve(options.compilerPath ?? projectCompiler(absoluteRoot));
+  const compiler = rootRequire('typescript');
+  const key = createTypecheckCacheKey({
+    configPath: absoluteConfig,
+    compilerPath: absoluteCompiler,
+    ...(absoluteSdk === undefined ? {} : { sdkPath: absoluteSdk }),
+    root: absoluteRoot,
+    compiler,
+  });
+  const cacheDirectory = path.join(absoluteRoot, '.cache', 'typecheck', key);
+  mkdirSync(cacheDirectory, { recursive: true });
+  const overlay = createTsconfigOverlay(absoluteConfig, {
+    typescript: true,
+    includeOwnerDependencies: true,
+    nativeWorkspace: resolveDevelopmentSdkWorkspaceRoot(absoluteSdk, { root: absoluteRoot }) !== undefined,
+    directory: cacheDirectory,
+    ...(absoluteSdk === undefined ? {} : { sdkPath: absoluteSdk }),
+  });
+  owner.overlay = overlay;
+  const buildInfoPath = path.join(cacheDirectory, 'project.tsbuildinfo');
+  const args = buildTypecheckArgs(overlay.configPath, buildInfoPath);
+  const childEnv = withoutPiHarnessEnv(withoutGitRepositoryEnv(options.env ?? process.env));
+  delete childEnv.NODE_TEST_CONTEXT;
+  await owner.writeLifetime?.({ overlayPath: overlay.configPath, cacheDirectory, compilerPath: absoluteCompiler });
+  owner.markAdmission?.();
+  let terminationNotice = '';
+  const result = await runOwnedTestDriver({
+    configRoot: cacheDirectory,
+    args: [absoluteCompiler, ...args],
+    dispose() {},
+  }, {
+    cwd: absoluteRoot,
+    env: childEnv,
+    signal: options.signal,
+    timeoutMs: resolveChildProcessTimeoutMs(),
+    // Ordinary tsc waits on no ownership handshake: the Job already contains
+    // its whole tree at creation. Empty startup authorization closes the
+    // child's stdin without writing a byte.
+    authorizationText: '',
+    collectOutput: true,
+    onTerminate: ({ reason }) => {
+      const detail = reason === 'timeout' ? ` after ${resolveChildProcessTimeoutMs()}ms` : '';
+      terminationNotice = `\nTypecheck process ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; terminating its process tree.\n`;
+    },
+  }, { ...owner });
+  return {
+    code: result.code,
+    output: (result.output ?? '') + terminationNotice,
+    cacheDirectory,
+    teardownConfirmed: true,
+  };
+}
+
+/** Explicit local seam for non-contained callers and isolated unit tests;
+ * native Windows workspace readers must be held by the keeper via the shared
+ * kernel owned driver instead. */
+export function runTypecheckLocal({
   configPath,
   sdkPath,
   signal,
@@ -233,6 +305,51 @@ export function runTypecheck({
       });
     });
   }, { root: absoluteRoot });
+}
+
+/** Execute a single project. The incremental state only accelerates TS itself.
+ * On Windows, an explicit native-workspace SDK reader is delegated to the
+ * detached keeper (which acquires before validation/overlay and releases only
+ * on the shared kernel owned driver's matching tree-empty proof); materialized
+ * and non-Windows selections keep the local watchdog lifetime. */
+export function runTypecheck({
+  configPath,
+  sdkPath,
+  signal,
+  root = repoRoot,
+  compilerPath = projectCompiler(root),
+  spawnImpl = spawn,
+  watchChildProcessImpl = watchChildProcess,
+  runInKeeper,
+}) {
+  const absoluteRoot = path.resolve(root);
+  const absoluteConfig = path.resolve(absoluteRoot, configPath);
+  if (!existsSync(absoluteConfig) || !statSync(absoluteConfig).isFile()) {
+    throw new Error(`TypeScript project config not found: ${absoluteConfig}`);
+  }
+  const absoluteSdk = sdkPath === undefined ? undefined : path.resolve(absoluteRoot, sdkPath);
+  if (process.platform === 'win32' && absoluteSdk !== undefined
+    && resolveDevelopmentSdkWorkspaceRoot(absoluteSdk, { root: absoluteRoot })) {
+    // Delegate BEFORE acquisition/validation/overlay. The local runner
+    // injections (spawnImpl/watchChildProcessImpl) are local-route seams and
+    // must never silently bypass production containment.
+    return (runInKeeper ?? runInNativeTrustedKeeper)('typecheck', { configPath: absoluteConfig }, {
+      repoRoot: absoluteRoot,
+      cwd: repoRoot,
+      sdkPath: absoluteSdk,
+      compilerPath: path.resolve(compilerPath),
+      signal,
+    });
+  }
+  return runTypecheckLocal({
+    configPath: absoluteConfig,
+    ...(absoluteSdk === undefined ? {} : { sdkPath: absoluteSdk }),
+    signal,
+    root: absoluteRoot,
+    compilerPath,
+    spawnImpl,
+    watchChildProcessImpl,
+  });
 }
 
 function printHelp() {

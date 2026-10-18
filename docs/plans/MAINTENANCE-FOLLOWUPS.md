@@ -26,6 +26,10 @@ Only cooperating updated writers are protected; older binaries do not acquire th
 
 The subagent resource loader exposes no reliable per-attempt handles for provider/pool signal listeners registered after cancelled reload or session creation. Delayed cleanup must not remove listeners belonging to another live attempt. The pass removed unsafe delayed global-snapshot reclamation. Mock-based regressions demonstrate the ownership gap; a current real-SDK reproduction of the listener leak remains unverified. Existing loader, provider-registration and session-disposal APIs do not supply the missing ownership handle. Establish that reproduction before designing SDK-owned disposal or registration handles. See [subagent lifecycle notes](../../harness/tools/subagent/README.md).
 
+### Native SDK-reader containment (2026-10-18)
+
+**Implemented; 113 focused checks passed on Windows (zero skips)**, including synthetic-workspace native tests, typecheck and explicit offline Pi Vitest. A dedicated keeper and atomic Job containment require open-handle/zero-active proof for release after child admission. Native test startup requires explicit authorization (EOF cannot authorize it); launcher loss takes normal cleanup, without WMI authority for owned routes. Regression coverage also checks delayed output drainage, case-insensitive Windows environments and reserved exit-code preservation. Guardian/keeper/enclosing-Job failure retains unknown state; no universal crash recovery is claimed. CLI, non-Windows and materialized-SDK paths are unchanged. Three legacy reader records remain untouched; no installed state changed. Fresh SDK compilation is still blocked. The isolated validation receipt below covers only `f4c08144`, not current code; full SDK-backed parity is unverified.
+
 ## Verification limitations
 
 - The native test runner's SDK alias overlay can fail dynamic ESM imports in SDK-independent warm-bash and relocated-owner tests. Their SDK-free routes pass; this does not qualify SDK-overlay parity. Build/package-resolution fixtures also need SDK-free execution to avoid ambient compiler-selection interference.

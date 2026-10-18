@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import childProcess, { spawn } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { acquireDevelopmentReader, withDevelopmentWriter } from '../../../lib/development-runtime/lifetime.mjs';
 import { snapshotProcessTree } from '../../lib/process-watchdog.mjs';
 import { spawnWindowsOwnedTree } from '../../../lib/process-lifecycle/windows-owned-tree.mjs';
-import { runNativeTestLease } from '../native-test-keeper.mjs';
+import { runNativeTestLease, runInNativeTrustedKeeper, runTrustedNativeLease } from '../native-test-keeper.mjs';
 import { runOwnedTestDriver } from '../owned-test-driver.mjs';
 import { OWNERSHIP_STARTUP_TOKEN } from '../ownership-startup.mjs';
 import { createTestEnvironment, runNodeTestsWithOverlay, runOwnedNodeTests } from '../test-node.mjs';
@@ -77,14 +77,41 @@ function invocation(t) {
 function fakeTree(events, overrides = {}) {
   const proof = { gone: true, activeProcesses: 0, invocationId: 'invocation', rootPid: 123,
     admissionSealed: true, authority: 'open-windows-job-accounting' };
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
   return {
-    invocationId: proof.invocationId, rootPid: proof.rootPid,
-    stdout: new PassThrough(), stderr: new PassThrough(),
+    invocationId: proof.invocationId, rootPid: proof.rootPid, stdout, stderr,
     completion: Promise.resolve({ code: 0 }),
     async authorizeStartup(text) { assert.equal(text, OWNERSHIP_STARTUP_TOKEN); events.push('authorize'); },
     async stopAndDrain() { events.push('drain'); return proof; },
-    async closeAfterRelease() { events.push('close'); },
+    // The driver awaits the sources' EOF after close; ending the streams here
+    // mirrors the primitive, where the coordinator observes EOF (potentially
+    // preceded by a late output tail) only after the guardian has exited.
+    async closeAfterRelease() { events.push('close'); stdout.end(); stderr.end(); },
     ...overrides,
+  };
+}
+
+// Primitive-contract fixture whose output sources mimic the real guardian:
+// closeAfterRelease resolves once the guardian has exited, while a final tail
+// still reaches the coordinator's streams shortly afterwards.
+function tailTree(events, { tailDelayMs = 25, end = true } = {}) {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const proof = { gone: true, activeProcesses: 0, invocationId: 'invocation', rootPid: 123,
+    admissionSealed: true, authority: 'open-windows-job-accounting' };
+  return {
+    invocationId: proof.invocationId, rootPid: proof.rootPid, stdout, stderr,
+    completion: Promise.resolve({ code: 0 }),
+    async authorizeStartup(text) { assert.equal(text, OWNERSHIP_STARTUP_TOKEN); events.push('authorize'); },
+    async stopAndDrain() { events.push('drain'); return proof; },
+    async closeAfterRelease() {
+      events.push('close');
+      setTimeout(() => {
+        stdout.push('tail-stdout'); stderr.push('tail-stderr');
+        if (end) { stdout.push(null); stderr.push(null); }
+      }, tailDelayMs);
+    },
   };
 }
 
@@ -395,3 +422,152 @@ for (const target of ['keeper', 'guardian']) {
     assert.match(run.output(), /ERROR/);
   });
 }
+
+test('owned driver collects output tails that arrive after the primitive close resolves', async (t) => {
+  const events = [];
+  const prepared = invocation(t);
+  const result = await runOwnedTestDriver(prepared, { collectOutput: true }, {
+    spawnTree: () => tailTree(events), releaseReader() { events.push('release'); },
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(events, ['authorize', 'drain', 'release', 'close']);
+  assert.match(result.output, /tail-stdout/u);
+  assert.match(result.output, /tail-stderr/u);
+});
+
+test('owned driver forwards output tails before releasing the forwarded streams', async (t) => {
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout');
+  const stderrDescriptor = Object.getOwnPropertyDescriptor(process, 'stderr');
+  const captured = { stdout: [], stderr: [] };
+  const events = [];
+  const prepared = invocation(t);
+  Object.defineProperty(process, 'stdout', { configurable: true, value: new Writable({
+    write(chunk, encoding, callback) { captured.stdout.push(String(chunk)); callback(); },
+  }) });
+  Object.defineProperty(process, 'stderr', { configurable: true, value: new Writable({
+    write(chunk, encoding, callback) { captured.stderr.push(String(chunk)); callback(); },
+  }) });
+  try {
+    await runOwnedTestDriver(prepared, {}, {
+      spawnTree: () => tailTree(events), releaseReader() { events.push('release'); },
+    });
+  } finally {
+    Object.defineProperty(process, 'stdout', stdoutDescriptor);
+    Object.defineProperty(process, 'stderr', stderrDescriptor);
+  }
+  assert.deepEqual(events, ['authorize', 'drain', 'release', 'close']);
+  assert.match(captured.stdout.join(''), /tail-stdout/u);
+  assert.match(captured.stderr.join(''), /tail-stderr/u);
+});
+
+test('owned driver reports streams that never reach EOF after confirmed cleanup', async (t) => {
+  const events = [];
+  const prepared = invocation(t);
+  await assert.rejects(runOwnedTestDriver(prepared, { collectOutput: true }, {
+    spawnTree: () => tailTree(events, { tailDelayMs: 5, end: false }),
+    releaseReader() { events.push('release'); }, outputSettleTimeoutMs: 50,
+  }), (error) => {
+    assert.match(error.message, /output incomplete/iu);
+    assert.equal(error.outputIncomplete, true);
+    assert.equal(error.teardownUnconfirmed, undefined);
+    return true;
+  });
+  assert.deepEqual(events, ['authorize', 'drain', 'release', 'close']);
+});
+
+test('owned driver reports output stream errors after confirmed cleanup', async (t) => {
+  const events = [];
+  const prepared = invocation(t);
+  await assert.rejects(runOwnedTestDriver(prepared, { collectOutput: true }, {
+    spawnTree: () => {
+      const tree = tailTree(events);
+      tree.closeAfterRelease = async () => {
+        events.push('close');
+        setTimeout(() => {
+          tree.stdout.destroy(new Error('fixture stream failure'));
+          tree.stderr.end();
+        }, 5);
+      };
+      return tree;
+    },
+    releaseReader() { events.push('release'); }, outputSettleTimeoutMs: 50,
+  }), (error) => {
+    assert.match(error.message, /output incomplete/iu);
+    assert.match(error.cause.errors[0].cause.message, /fixture stream failure/u);
+    assert.equal(error.teardownUnconfirmed, undefined);
+    return true;
+  });
+  assert.deepEqual(events, ['authorize', 'drain', 'release', 'close']);
+});
+
+// Trusted operation dispatch: every native Windows verification consumer
+// shares one keeper lease (acquire before validation/overlay/profile, queue
+// parent-loss cancellation, run through the single kernel owned driver,
+// release only on matching proof).
+
+test('keeper rejects untrusted operations before acquisition or evidence', async (t) => {
+  const ws = workspace(t);
+  await assert.rejects(runTrustedNativeLease('fixture-bogus', [], { repoRoot: ws.root, sdkPath: ws.sdkPath }),
+    /does not trust operation/u);
+  assert.equal(ws.records().length, 0);
+});
+
+for (const operation of ['typecheck', 'offline']) {
+  test(`pre-acquisition cancellation for the ${operation} operation never registers or launches`, async (t) => {
+    const ws = workspace(t);
+    const result = await runTrustedNativeLease(operation, {},
+      { repoRoot: ws.root, sdkPath: ws.sdkPath, signal: AbortSignal.abort() }, {
+        acquireReader() { assert.fail('acquisition'); },
+      });
+    assert.deepEqual(result, { code: 1, teardownConfirmed: true });
+    assert.equal(ws.records().length, 0);
+  });
+}
+
+test('typecheck keeper requires an explicit native workspace SDK', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-keeper-nosdk-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = path.join(root, 'tsconfig.json');
+  writeFileSync(config, '{"compilerOptions":{}}');
+  await assert.rejects(runTrustedNativeLease('typecheck', { configPath: config }, { repoRoot: root }),
+    /Native typecheck keeper requires an explicit native workspace SDK/u);
+});
+
+test('offline keeper requires the repository native Pi workspace', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-keeper-nopi-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  await assert.rejects(runTrustedNativeLease('offline', { packageName: 'ai', vitestArgs: [] }, { repoRoot: root }),
+    /Offline Vitest keeper requires the repository's native Pi workspace/u);
+});
+
+function fakeKeeperChild() {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.sent = [];
+  child.pid = 4242;
+  child.connected = true;
+  child.send = (message, callback) => { setImmediate(() => { child.sent.push(message); callback?.(); }); };
+  return child;
+}
+
+test('trusted-keeper launcher queues the operation invocation and parent cancellation over FIFO IPC', async (t) => {
+  const controller = new AbortController();
+  const child = fakeKeeperChild();
+  const pending = runInNativeTrustedKeeper('offline', { packageName: 'ai', vitestArgs: ['--run'] },
+    { signal: controller.signal, repoRoot: 'repos/root' }, { spawnImpl: () => child });
+  await until(() => child.sent.length >= 1);
+  controller.abort(new Error('fixture cancellation'));
+  await wait(20);
+  assert.equal(child.sent[0]?.type, 'run');
+  assert.equal(child.sent[0]?.operation, 'offline');
+  assert.deepEqual(child.sent[0]?.invocation, { packageName: 'ai', vitestArgs: ['--run'] });
+  assert.equal(child.sent[0]?.options?.repoRoot, 'repos/root');
+  assert.equal('signal' in (child.sent[0]?.options ?? {}), false, 'launcher signals are never serialized');
+  await until(() => child.sent.length >= 2);
+  assert.equal(child.sent[1]?.type, 'cancel', 'parent cancellation is queued, not enacted');
+  // End the fake keeper transport; its loss must settle as unconfirmed.
+  child.emit('exit', 1);
+  await assert.rejects(pending, (error) => error.teardownUnconfirmed === true
+    && /Native offline framework keeper lost without a cleanup result/u.test(error.message));
+});

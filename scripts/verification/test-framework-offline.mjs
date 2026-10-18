@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { withDevelopmentSdkReader } from '../lib/development-sdk-reader.mjs';
+import { resolveDevelopmentSdkWorkspaceRoot, withDevelopmentSdkReader } from '../lib/development-sdk-reader.mjs';
+import { runInNativeTrustedKeeper } from './native-test-keeper.mjs';
+import { runOwnedTestDriver } from './owned-test-driver.mjs';
 import { createOwnerRequire } from '../lib/package-resolution.mjs';
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
@@ -111,11 +113,42 @@ async function createPrivateProfile(sourceEnv) {
   }
 
   const env = verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(sourceEnv)));
+  // Windows names are case-insensitive. Read and write through the key casing
+  // already present so fallback/profile insertion cannot add a duplicate that
+  // the owned-tree CreateProcess environment rejects. Other platforms retain
+  // exact-name lookup and assignment semantics.
+  const windows = process.platform === 'win32';
+  const findEnvKey = windows ? (source, name) => {
+    const normalized = name.toLowerCase();
+    return Object.keys(source).find((key) => key.toLowerCase() === normalized);
+  } : undefined;
+  const readEnv = windows ? (source, name) => {
+    const key = findEnvKey(source, name);
+    return key === undefined ? undefined : source[key];
+  } : (source, name) => source[name];
+  const writeEnv = windows ? (name, value) => {
+    const key = findEnvKey(env, name);
+    if (key === undefined) env[name] = value;
+    else env[key] = value;
+  } : (name, value) => { env[name] = value; };
+  const deleteEnv = windows ? (name) => {
+    const key = findEnvKey(env, name);
+    if (key !== undefined) delete env[key];
+  } : (name) => { delete env[name]; };
   for (const name of Object.keys(env)) {
     if (name.toUpperCase() === 'NODE_PATH' || /^(?:PI|PIE)_/iu.test(name) || CREDENTIAL_OR_LIVE_ENV.test(name)) delete env[name];
   }
-  delete env.XDG_CACHE_HOME;
-  Object.assign(env, {
+  deleteEnv('XDG_CACHE_HOME');
+  // Private user state is isolated above; standard Windows system variables
+  // are not user state. Kernel-contained children fail Node initialization
+  // without SystemRoot (the CSPRNG provider cannot load), so absent base
+  // system variables are preserved from this owning process instead.
+  for (const name of ['SystemRoot', 'windir', 'SystemDrive', 'ComSpec', 'PATH', 'PATHEXT']) {
+    if (readEnv(env, name) !== undefined) continue;
+    const base = readEnv(sourceEnv, name) ?? readEnv(process.env, name);
+    if (base !== undefined) writeEnv(name, base);
+  }
+  for (const [name, value] of Object.entries({
     HOME: directories.home,
     USERPROFILE: directories.home,
     APPDATA: directories.appdata,
@@ -136,7 +169,7 @@ async function createPrivateProfile(sourceEnv) {
     // The existing development preloader supplies network denial and permits
     // loopback; it is a standalone Node preload and does not launch VS Code.
     NODE_OPTIONS: `--require ${JSON.stringify(networkDenialPreloader.replaceAll('\\', '/'))}`,
-  });
+  })) writeEnv(name, value);
   return { root, env };
 }
 
@@ -147,8 +180,50 @@ function unconfirmedTeardownError(message, profileRoot, cause) {
   });
 }
 
-/** Run one explicitly selected workspace package's pinned Vitest CLI. */
-export async function runOfflineVitest(packageName, vitestArgs, {
+/** Keeper-process workspace admission check for the offline facade: the
+ * coding-agent package is the canonical reader identity for the whole Pi
+ * workspace, including invocations targeting its ai and agent packages. */
+export function resolveOfflineWorkspaceRoot(root = repositoryRoot) {
+  return resolveDevelopmentSdkWorkspaceRoot(path.resolve(root, ...packageDirectories['coding-agent']), { root });
+}
+
+/** Keeper-process offline entry. The lease has acquired the workspace reader
+ * before this validation/profile work began; the pinned Vitest child runs
+ * through the single kernel owned driver and its reader is released only on
+ * that driver's verified matching tree-empty proof. Vitest children wait on no
+ * ownership preload (the Job already contains their whole tree), so startup
+ * authorization is a no-token stdin close, and child output keeps the
+ * `inherit` parity of the local route by forwarding to the keeper console. */
+export async function runOwnedOfflineVitest(invocation, options = {}, owner = {}) {
+  const root = path.resolve(options.root ?? options.repoRoot ?? repositoryRoot);
+  const framework = resolveFrameworkInvocation(invocation.packageName, root);
+  const profile = await createPrivateProfile(options.env ?? process.env);
+  await owner.writeLifetime?.({ profileRoot: profile.root, packageRoot: framework.packageRoot, cliPath: framework.cliPath, packageName: framework.packageName });
+  owner.markAdmission?.();
+  const result = await runOwnedTestDriver({
+    configRoot: profile.root,
+    args: [framework.cliPath, '--run', ...invocation.vitestArgs],
+    // Confirmed cleanup removes the private profile like the local route's
+    // teardown-confirmed path does; uncertain teardown retains it.
+    dispose() { rmSync(profile.root, { recursive: true, force: true }); },
+  }, {
+    cwd: framework.packageRoot,
+    env: profile.env,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs ?? resolveChildProcessTimeoutMs(),
+    authorizationText: '',
+    onTerminate: ({ reason }) => {
+      console.error(`\nPi ${framework.packageName} Vitest ${reason === 'timeout' ? 'timed out' : 'was cancelled'}; terminating its process tree.`);
+    },
+  }, { ...owner });
+  // Reserve 125 for unconfirmed teardown, just as the local route does.
+  return { ...result, code: result.code === TEARDOWN_UNCONFIRMED_EXIT_CODE ? 1 : result.code };
+}
+
+/** Explicit local seam for non-contained callers and isolated unit tests;
+ * native Windows workspace readers must be held by the keeper via the shared
+ * kernel owned driver instead. */
+export async function runOfflineVitestLocal(packageName, vitestArgs, {
   root = repositoryRoot,
   env = process.env,
   signal,
@@ -221,6 +296,32 @@ export async function runOfflineVitest(packageName, vitestArgs, {
   return result.code;
 }
 
+/** Run one explicitly selected workspace package's pinned Vitest CLI. On
+ * Windows against this repository's native Pi workspace the reader lifetime is
+ * delegated to the detached keeper (which acquires before validation/profile
+ * and releases only on the shared kernel owned driver's matching tree-empty
+ * proof); materialized and non-Windows selections keep the local watchdog
+ * lifetime. */
+export async function runOfflineVitest(packageName, vitestArgs, options = {}) {
+  const { root = repositoryRoot, runInKeeper, ...localOptions } = options;
+  const resolvedRoot = path.resolve(root);
+  if (process.platform === 'win32' && resolveOfflineWorkspaceRoot(resolvedRoot)) {
+    // Delegate BEFORE acquisition/validation/profile. The local runner
+    // injections (spawnImpl/watchChildProcessImpl) are local-route seams and
+    // must never silently bypass production containment.
+    const result = await (runInKeeper ?? runInNativeTrustedKeeper)('offline', { packageName, vitestArgs }, {
+      repoRoot: resolvedRoot,
+      cwd: repositoryRoot,
+      root: resolvedRoot,
+      env: localOptions.env ?? process.env,
+      signal: options.signal,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
+    return result.code;
+  }
+  return runOfflineVitestLocal(packageName, vitestArgs, { ...localOptions, root: resolvedRoot });
+}
+
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
   let parsed;
   try {
@@ -237,7 +338,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
 
   const abort = (dependencies.abortOnProcessSignals ?? abortOnProcessSignals)();
   try {
-    return await runOfflineVitest(parsed.packageName, parsed.vitestArgs, {
+    return await (dependencies.runOfflineVitest ?? runOfflineVitest)(parsed.packageName, parsed.vitestArgs, {
       ...(dependencies.runOptions ?? {}),
       signal: abort.signal,
     });
