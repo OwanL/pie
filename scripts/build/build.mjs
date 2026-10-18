@@ -73,6 +73,10 @@ const requiredBuildFiles = Object.freeze([
   'analytics-recorder-worker.js',
   'analytics-query-worker.js',
   'dictation-helper.js',
+  // The standalone neutral runtime-lock module must ship in every delivery
+  // output: the packaged VSIX's startup adapter resolves it from the packaged
+  // build output (see .vscodeignore) instead of checkout-relative bytes.
+  'windows-runtime-lock.cjs',
   path.join(webviewRelativeDir, '.vite', 'manifest.json'),
 ]);
 

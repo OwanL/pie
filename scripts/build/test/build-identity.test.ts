@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createBuildIdentityPlugin } from '../../../application/hosts/vscode/vite.config.ts';
+import { createBuildIdentityPlugin, createShippedRuntimeLockPlugin } from '../../../application/hosts/vscode/vite.config.ts';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageResolutionHelper = path.join(repositoryRoot, 'scripts', 'lib', 'package-resolution.mjs');
@@ -178,4 +178,26 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.notEqual(afterRuntimeNode.buildId, afterRootLibNode.buildId);
   assert.notEqual(afterRuntimeWebview.buildId, afterRootLibWebview.buildId);
   assert.equal(afterRuntimeNode.buildId, afterRuntimeWebview.buildId);
+});
+
+test('delivery node builds emit the neutral runtime lock bytes unchanged', () => {
+  const plugin = createShippedRuntimeLockPlugin();
+  assert.equal(plugin.name, 'pie-shipped-runtime-lock');
+  const emitted: EmittedAsset[] = [];
+  const generateBundle = plugin.generateBundle;
+  assert.equal(typeof generateBundle, 'function');
+  if (typeof generateBundle !== 'function') throw new Error('generateBundle hook is missing');
+  generateBundle.call(
+    { emitFile: (asset: EmittedAsset) => emitted.push(asset) } as never,
+    {} as never,
+    {} as never,
+    false,
+  );
+  const lockAsset = emitted.find((asset) => asset.fileName === 'windows-runtime-lock.cjs');
+  assert.ok(lockAsset, 'the shipped runtime-lock module must be emitted into the build output');
+  assert.deepEqual(
+    Buffer.from(String(lockAsset?.source ?? '')),
+    readFileSync(path.join(repositoryRoot, 'lib', 'windows-runtime-lock', 'windows-runtime-lock.cjs')),
+    'the emitted module must be the authoritative neutral owner bytes, unchanged',
+  );
 });

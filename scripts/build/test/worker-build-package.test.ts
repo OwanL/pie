@@ -23,13 +23,20 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const extensionRoot = path.join(repositoryRoot, 'application', 'hosts', 'vscode');
 
 type StandaloneWebSocket = EventEmitter & { send(data: string): void; close(): void };
-const WebSocketClient = createRequire(path.join(extensionRoot, 'package.json'))('ws') as {
-  new (url: string, options: { headers: Record<string, string> }): StandaloneWebSocket;
+const { WebSocket: WebSocketClient } = createRequire(path.join(extensionRoot, 'package.json'))('ws') as {
+  WebSocket: new (url: string, options: { headers: Record<string, string> }) => StandaloneWebSocket;
 };
 
 function containsPath(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+// Windows temp can be spelled through an 8.3 alias (OWANLA~1) in one owner and
+// canonically (OwanLazic) in another. Compare the physical session-file identity
+// rather than weakening the equality of the paths published by each boundary.
+async function canonicalPath(value: string): Promise<string> {
+  return fs.realpath(value);
 }
 
 /**
@@ -223,6 +230,9 @@ test('node build and package allowlist declare the stable worker entry artifact'
   assert.match(vite, /id\s*===\s*['"]bufferutil['"]/);
   assert.match(vite, /id\s*===\s*['"]utf-8-validate['"]/);
   assert.match(vscodeIgnore, /!out\/\*\.js/);
+  // The packaged neutral runtime-lock module ships in the build output: the
+  // packaged startup adapter resolves it without checkout ancestry.
+  assert.match(vscodeIgnore, /!out\/windows-runtime-lock\.cjs/);
   // The verified source Pi runtime must ship inside the VSIX: the packaged
   // backend resolves its SDK from the unpacked artifact, never a checkout or
   // globally installed copy.
@@ -406,6 +416,7 @@ test('packaged isolated source-artifact backend drives public message.send exten
       'out/phase4-worker-command-extension.js',
       'out/analytics-recorder-worker.js',
       'out/analytics-query-worker.js',
+      'out/windows-runtime-lock.cjs',
       'out/pie-build-id.txt',
       'out/webview/panel/.vite/manifest.json',
       'out/webview/panel/pie-build-id.txt',
@@ -432,6 +443,17 @@ test('packaged isolated source-artifact backend drives public message.send exten
     const packagedMain = packageRequire(String(packageManifest.main)) as { activate?: unknown; deactivate?: unknown };
     assert.equal(typeof packagedMain.activate, 'function');
     assert.equal(typeof packagedMain.deactivate, 'function');
+
+    // The packaged startup adapter must resolve the packaged neutral lock
+    // module without checkout ancestry, never a foreign fallback copy.
+    assert.deepEqual(await fs.readFile(path.join(packagedExtension, 'out', 'windows-runtime-lock.cjs')),
+      await fs.readFile(path.join(repositoryRoot, 'lib', 'windows-runtime-lock', 'windows-runtime-lock.cjs')),
+      'the packaged lock bytes must be the authoritative neutral owner bytes');
+    const relocatedLock = packageRequire('./runtime/windows-runtime-lock.cjs') as {
+      acquireWindowsRuntimeLock?: unknown;
+    };
+    assert.equal(typeof relocatedLock.acquireWindowsRuntimeLock, 'function',
+      'the relocated packaged startup adapter must resolve without checkout ancestry');
 
     const backendEntry = path.join(packagedExtension, 'out', 'backend.js');
     const workerEntry = path.join(packagedExtension, 'out', 'worker-entry.js');
@@ -786,6 +808,8 @@ test('packaged isolated source-artifact backend drives public message.send exten
       sourcePaths: string[];
       finalPath: string;
     };
+    commandResult.sourcePaths = await Promise.all(commandResult.sourcePaths.map(canonicalPath));
+    commandResult.finalPath = await canonicalPath(commandResult.finalPath);
     assert.equal(commandResult.sourcePaths.length, 3, 'new, switch, and fork each release one source');
     assert.notEqual(commandResult.finalPath, commandResult.sourcePaths.at(-1));
     const durableDestination = await fs.readFile(commandResult.finalPath, 'utf8');
@@ -802,6 +826,19 @@ test('packaged isolated source-artifact backend drives public message.send exten
           busy?: boolean;
         };
       });
+    for (const record of publicRecords) {
+      const payload = record.payload;
+      if (!payload) continue;
+      if (payload.session && typeof payload.session.path === 'string') {
+        payload.session.path = await canonicalPath(payload.session.path);
+      }
+      if (typeof payload.replacesSessionPath === 'string') {
+        payload.replacesSessionPath = await canonicalPath(payload.replacesSessionPath);
+      }
+      if (typeof payload.sessionPath === 'string') {
+        payload.sessionPath = await canonicalPath(payload.sessionPath);
+      }
+    }
     const publicOpened = publicRecords
       .filter((record) => record.event === 'session.opened');
     const replacementOpened = publicOpened.filter((record) => record.payload?.replacesSessionPath);
@@ -844,6 +881,9 @@ test('packaged isolated source-artifact backend drives public message.send exten
     }
     const lifecycle = (await fs.readFile(commandTracePath, 'utf8')).trim().split(/\r?\n/u)
       .map((line) => JSON.parse(line) as { kind: string; sessionPath?: string });
+    for (const entry of lifecycle) {
+      if (typeof entry.sessionPath === 'string') entry.sessionPath = await canonicalPath(entry.sessionPath);
+    }
     const commandDestinationIndex = lifecycle.findIndex((entry) => (
       entry.kind === 'command_destination' && entry.sessionPath === commandResult.finalPath
     ));

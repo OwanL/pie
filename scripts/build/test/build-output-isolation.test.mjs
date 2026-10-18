@@ -109,6 +109,9 @@ async function makeFixture(t) {
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-context.mjs')));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-artifact.mjs')));
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'pi-runtime', 'artifact.mjs')));
+  // The real vite config's shipped runtime-lock plugin reads this file when it
+  // emits the packaged module.
+  write(repo, 'lib/windows-runtime-lock/windows-runtime-lock.cjs', readFileSync(path.join(repositoryRoot, 'lib', 'windows-runtime-lock', 'windows-runtime-lock.cjs')));
   write(repo, 'scripts/build/publication.mjs', `
     export async function findCompatibleInstalledExtensionDir() {
       if (process.env.PIE_TEST_INSTALLED_EXTENSION) return process.env.PIE_TEST_INSTALLED_EXTENSION;
@@ -193,7 +196,7 @@ async function makeFixture(t) {
       fs.writeFileSync(process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME, 'mutated during build');
     }
     if (nodeMode) {
-      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js']) {
+      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'windows-runtime-lock.cjs']) {
         if ((name === 'standalone.js' && process.env.PIE_TEST_OMIT_STANDALONE === '1')
           || (name === 'dictation-helper.js' && process.env.PIE_TEST_OMIT_DICTATION_HELPER === '1')) continue;
         fs.writeFileSync(path.join(outDir, name), 'fixture');
@@ -290,7 +293,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   });
   assertBuildSucceeded(result);
 
-  for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'pie-build-id.txt']) {
+  for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'windows-runtime-lock.cjs', 'pie-build-id.txt']) {
     assert.ok(existsSync(path.join(output, name)), `missing isolated host output ${name}`);
   }
   assert.ok(existsSync(path.join(output, 'webview', 'panel', '.vite', 'manifest.json')));
@@ -756,12 +759,16 @@ test('actual copied Vite config builds a tiny fixture into the override with run
     'analytics-recorder-worker.js',
     'analytics-query-worker.js',
     'dictation-helper.js',
+    'windows-runtime-lock.cjs',
     'cold-browse-helper-entry.js',
     'initial-context-estimate-worker.js',
     'phase4-worker-command-extension.js',
   ]) {
     assert.ok(existsSync(path.join(output, name)), `actual Vite fixture omitted ${name}`);
   }
+  assert.deepEqual(readFileSync(path.join(output, 'windows-runtime-lock.cjs')),
+    readFileSync(path.join(fixture.repo, 'lib', 'windows-runtime-lock', 'windows-runtime-lock.cjs')),
+    'delivery emits the authoritative neutral runtime-lock bytes unchanged');
   assert.ok(existsSync(path.join(output, 'webview', 'panel', '.vite', 'manifest.json')));
   assert.equal(existsSync(path.join(fixture.owner, 'out')), false, 'real Vite config did not fall back to the package out directory');
   assert.equal(readFileSync(path.join(output, 'pie-build-id.txt'), 'utf8'), readFileSync(path.join(output, 'webview', 'panel', 'pie-build-id.txt'), 'utf8'));

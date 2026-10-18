@@ -282,7 +282,7 @@ function fakeVite(trace, owner, webviewFails) {
       const id = fs.existsSync(${JSON.stringify(path.join(path.dirname(trace), 'identity.txt'))}) ? fs.readFileSync(${JSON.stringify(path.join(path.dirname(trace), 'identity.txt'))}, 'utf8').trim() : '0123456789abcdefabcd';
       fs.mkdirSync(output, { recursive: true });
       if (nodeMode) {
-        for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js']) fs.writeFileSync(path.join(output, name), 'fixture');
+        for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'windows-runtime-lock.cjs']) fs.writeFileSync(path.join(output, name), 'fixture');
         fs.writeFileSync(path.join(output, 'pie-build-id.txt'), id + '\\n');
       } else {
         const web = path.join(output, 'webview/panel');

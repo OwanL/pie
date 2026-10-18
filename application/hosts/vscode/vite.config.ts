@@ -24,6 +24,35 @@ const developmentBuild = process.env.PIE_BUILD_DEVELOPMENT === '1';
 const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
+ * Delivery node builds emit the standalone neutral runtime-lock module into
+ * the build output. The packaged VSIX includes out/ (its own .vscodeignore
+ * line), so the source-only startup adapter resolves the packaged module
+ * inside an installed extension without checkout ancestry, while
+ * lib/windows-runtime-lock remains the single authoritative source the bytes
+ * are read from on every build.
+ */
+export function createShippedRuntimeLockPlugin(
+  lockSource = path.join(repoDir, 'lib', 'windows-runtime-lock', 'windows-runtime-lock.cjs'),
+): Plugin {
+  return {
+    name: 'pie-shipped-runtime-lock',
+    enforce: 'pre',
+    resolveId(source, importer) {
+      // Only the checkout adapter is replaced. Installed startup.cjs still
+      // needs its filesystem-selecting adapter; bundled hosts do not.
+      if (!importer || (!source.startsWith('.') && !path.isAbsolute(source))) return null;
+      const resolved = path.resolve(path.dirname(importer), source);
+      return resolved === path.join(vscodeHostDir, 'runtime', 'windows-runtime-lock.cjs')
+        ? lockSource
+        : null;
+    },
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'windows-runtime-lock.cjs', source: fs.readFileSync(lockSource) });
+    },
+  };
+}
+
+/**
  * Package imports resolve through the explicit dependency owner, never the
  * config's working directory: current and legacy Pi spellings map to the
  * explicitly selected SDK's nested graph (including the private pi-ai/TypeBox
@@ -156,13 +185,14 @@ export default defineConfig(({ mode }) => {
       ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-node') } : {}),
       publicDir: false,
       define,
-      plugins: [createBuildIdentityPlugin()],
+      plugins: [createBuildIdentityPlugin(), createShippedRuntimeLockPlugin()],
       build: {
         target: 'node20',
         outDir,
         emptyOutDir: !developmentBuild,
         manifest: false,
         ssr: true,
+        ssrEmitAssets: true,
         rollupOptions: {
           input: {
             extension: path.join(vscodeHostDir, 'activation', 'extension.ts'),

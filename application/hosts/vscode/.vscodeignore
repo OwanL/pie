@@ -5,6 +5,7 @@
 !runtime/*.cjs
 !out/*.js
 !out/pie-build-id.txt
+!out/windows-runtime-lock.cjs
 !out/pi-runtime/**
 !out/webview/panel/pie-build-id.txt
 !out/assets/**
