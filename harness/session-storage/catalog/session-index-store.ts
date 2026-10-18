@@ -8,7 +8,7 @@ import { backendSessionPathKey, type BackendSessionFileFingerprint } from './ses
 import type { SessionManagerFenceAdmission } from '../ownership/session-manager-fence';
 import type { IndexedSessionMetadata, SessionMetadataCheckpoint } from '../metadata/session-metadata';
 
-const SESSION_INDEX_SCHEMA_VERSION = 1;
+const SESSION_INDEX_SCHEMA_VERSION = 2;
 // Session list/open RPCs share the backend event loop with this synchronous
 // operational index. Multi-process contention must yield quickly; catalog
 // reconciliation retains its last complete projection and retries later.
@@ -182,6 +182,7 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     && typeof summary.name === 'string'
     && typeof summary.modifiedAt === 'string'
     && typeof summary.messageCount === 'number'
+    && (summary.isAdmissionFallback === undefined || typeof summary.isAdmissionFallback === 'boolean')
     && (summary.agentCreated === undefined || typeof summary.agentCreated === 'boolean');
 }
 
@@ -207,7 +208,7 @@ function isCheckpoint(value: unknown): value is SessionMetadataCheckpoint {
     state[field] === undefined || typeof state[field] === 'string';
   const validOptionalNumber = (field: string): boolean =>
     state[field] === undefined || (typeof state[field] === 'number' && Number.isFinite(state[field]));
-  return checkpoint.version === 2
+  return checkpoint.version === 3
     && typeof checkpoint.parsedBytes === 'number'
     && typeof checkpoint.endedWithNewline === 'boolean'
     && typeof checkpoint.firstWitnessHash === 'string'
@@ -218,6 +219,8 @@ function isCheckpoint(value: unknown): value is SessionMetadataCheckpoint {
     && typeof state.cwd === 'string'
     && validOptionalString('headerTimestamp')
     && validOptionalString('sessionId')
+    && validOptionalString('titleEntryId')
+    && typeof state.isAdmissionFallback === 'boolean'
     && (state.agentCreated === undefined || typeof state.agentCreated === 'boolean')
     && (state.explicitName === null || typeof state.explicitName === 'string')
     && typeof state.derivedName === 'string'

@@ -1799,16 +1799,26 @@ test('cold session titles append canonical session_info entries and survive a fr
   }
 });
 
-test('retained new-session handles remain promotable after a cold title write', async () => {
+test('retained new-session handles remain promotable after admission fallback and final title writes', async () => {
   const h = await makeHarness();
   try {
     const handle = h.store.create({ cwd: h.root });
-    const changed = h.store.setHandleSessionTitle(handle, 'Handle Title');
+    const changed = h.store.setHandleSessionTitle(handle, 'Handle Title', true);
     assert.deepEqual(changed, { titleChanged: true });
 
+    const admitted = await h.store.openHandleSnapshot(handle, browseOpenOptions);
+    assert.equal(admitted.session.name, 'Handle Title');
+    assert.equal(admitted.session.isAssignedTitle, true);
+    assert.equal(admitted.session.isAdmissionFallback, true);
+    const SessionManager = await getRealSessionManager();
+    const reopened = SessionManager.open(handle.sessionPath);
+    const marker = reopened.getEntries().at(-1);
+    assert.equal(marker.customType, 'pie.session-title-admission-fallback');
+    assert.equal(marker.data.titleEntryId, reopened.getEntries().at(-2).id);
+    assert.deepEqual(h.store.setHandleSessionTitle(handle, 'Handle Title'), { titleChanged: true });
     const opened = await h.store.openHandleSnapshot(handle, browseOpenOptions);
     assert.equal(opened.session.name, 'Handle Title');
-    assert.equal(opened.session.isAssignedTitle, true);
+    assert.equal(opened.session.isAdmissionFallback, undefined, 'same-text final title invalidates the old marker');
     assert.doesNotThrow(() => h.store.handoff(handle, () => undefined));
   } finally {
     await fs.rm(h.root, { recursive: true, force: true });

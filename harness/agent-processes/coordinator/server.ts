@@ -100,6 +100,7 @@ import {
   loadConfiguredModels,
 } from '../../model-providers/catalog/model-catalog';
 import { SessionCatalog } from '../../session-storage/catalog/session-catalog';
+import { getAdmissionFallbackTitle } from '../../session-storage/metadata/session-title';
 import { forgetLegacyReviewArtifacts } from '../../session-storage/lifecycle/legacy-review-artifact-cleanup';
 import { SessionLifecycleStore, type LifecycleArtifactRecord } from '../../session-storage/lifecycle/session-lifecycle-store';
 import {
@@ -3246,6 +3247,7 @@ export class BackendServer {
           sessionPath,
           sessionId: identity.sessionId,
           ...(read.metadata.summary.headerTimestamp ? { headerTimestamp: read.metadata.summary.headerTimestamp } : {}),
+          ...(read.metadata.summary.isAdmissionFallback === true ? { isAdmissionFallback: true } : {}),
           ...(read.metadata.summary.isAssignedTitle === true && read.metadata.summary.name
             ? { title: read.metadata.summary.name }
             : {}),
@@ -3266,10 +3268,13 @@ export class BackendServer {
   /** Persist one assigned title through the owning writer: the hot worker
    *  where its lease is live, otherwise the lease-fenced cold store. The
    *  coordinator never writes session JSONL under a worker lease. */
-  private async persistAssignedSessionTitle(sessionPath: string, title: string, requestId: string, replaceExpectedTitle?: string): Promise<void> {
+  private async persistAssignedSessionTitle(
+    sessionPath: string, title: string, requestId: string, replaceExpectedTitle?: string,
+    options?: { isAdmissionFallback?: boolean; replaceAdmissionFallback?: boolean },
+  ): Promise<void> {
     const router = this.workerRuntimeRouter;
     if (router?.hasHotOwner(sessionPath)) {
-      const outcome = await router.assignSessionTitle(sessionPath, title, requestId, replaceExpectedTitle);
+      const outcome = await router.assignSessionTitle(sessionPath, title, requestId, replaceExpectedTitle, options);
       if (outcome.skipped === 'explicit-name' || outcome.assigned !== true) {
         throw new BackendError(
           'SESSION_OWNERSHIP_CONFLICT',
@@ -3278,25 +3283,29 @@ export class BackendServer {
       }
       return;
     }
-    await this.persistAssignedColdSessionTitle(sessionPath, title, replaceExpectedTitle);
+    await this.persistAssignedColdSessionTitle(sessionPath, title, replaceExpectedTitle, options);
   }
 
   /** Lease-fenced cold-store title persistence for sessions without a hot
    *  runtime owner (newly created or restored cold members). */
-  private async persistAssignedColdSessionTitle(sessionPath: string, title: string, replaceExpectedTitle?: string): Promise<void> {
+  private async persistAssignedColdSessionTitle(
+    sessionPath: string, title: string, replaceExpectedTitle?: string,
+    options?: { isAdmissionFallback?: boolean; replaceAdmissionFallback?: boolean },
+  ): Promise<void> {
     const store = this.initializeColdSessionStore();
     await this.runColdSessionMutation(sessionPath, async () => {
       const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
-      const durableName = retained
-        ? retained.handle.manager.getSessionName()
-        : this.sdk.SessionManager.open(sessionPath).getSessionName();
-      if (replaceExpectedTitle !== undefined
-        ? durableName?.trim() !== replaceExpectedTitle
-        : Boolean(durableName?.trim())) {
+      const manager = retained?.handle.manager ?? this.sdk.SessionManager.open(sessionPath);
+      const durableName = manager.getSessionName();
+      if (options?.replaceAdmissionFallback
+        ? (replaceExpectedTitle === undefined || getAdmissionFallbackTitle(manager) !== replaceExpectedTitle)
+        : replaceExpectedTitle !== undefined
+          ? durableName?.trim() !== replaceExpectedTitle
+          : Boolean(durableName?.trim())) {
         throw new BackendError('SESSION_OWNERSHIP_CONFLICT', 'An intervening assigned title must not be overwritten.');
       }
-      if (retained) store.setHandleSessionTitle(retained.handle, title);
-      else store.setSessionTitle(sessionPath, title);
+      if (retained) store.setHandleSessionTitle(retained.handle, title, options?.isAdmissionFallback);
+      else store.setSessionTitle(sessionPath, title, options?.isAdmissionFallback);
     });
   }
 
@@ -3381,9 +3390,12 @@ export class BackendServer {
         if (!this.liveSessionTitles.assigned(sessionPath)) {
           const entry = await this.readLiveSessionTitleEntry(sessionPath);
           assertCurrent();
-          await this.liveSessionTitles.admit([entry], async (path, title, expected) => {
+          await this.liveSessionTitles.admit([entry], async (path, title, expected, isAdmissionFallback) => {
             assertCurrent();
-            await this.persistAssignedSessionTitle(path, title, 'live-title-open', expected);
+            await this.persistAssignedSessionTitle(path, title, 'live-title-open', expected, {
+              isAdmissionFallback,
+              replaceAdmissionFallback: isAdmissionFallback === true && expected !== undefined,
+            });
             assertCurrent();
           });
         }
@@ -3395,6 +3407,9 @@ export class BackendServer {
     }
     await admission;
     this.liveTitleAdmissionRetries.delete(key);
+    // Refresh host labels after durable assignment, without holding namespace
+    // admission on an unrelated archive/index scan.
+    void this.emitSessionListChanged();
   }
 
   /** Initial namespace establishment from the first complete restored
@@ -3409,10 +3424,16 @@ export class BackendServer {
     if (this.disposed || generation !== this.backendGeneration || this.hostMembershipSessions !== snapshot) return;
     await this.liveSessionTitles.reconcile(
       entries,
-      (sessionPath, title, expected) => this.persistAssignedSessionTitle(sessionPath, title, 'live-title-hydration', expected),
+      (sessionPath, title, expected, isAdmissionFallback) => this.persistAssignedSessionTitle(
+        sessionPath, title, 'live-title-hydration', expected, {
+          isAdmissionFallback,
+          replaceAdmissionFallback: isAdmissionFallback === true && expected !== undefined,
+        },
+      ),
       () => !this.disposed && generation === this.backendGeneration && this.hostMembershipSessions === snapshot,
     );
     if (this.disposed || generation !== this.backendGeneration || this.hostMembershipSessions !== snapshot) return;
+    void this.emitSessionListChanged();
     // Seed the removal basis exactly once per namespace generation.
     this.authoritativeLiveTitlePaths = new Map([
       ...[...snapshot.sessions.entries()].map(([key, { entry }]) => [key, entry.path] as [string, string]),
@@ -3513,6 +3534,14 @@ export class BackendServer {
     if (!this.liveSessionTitles.ready) await this.titleNamespaceHydration;
     if (!isCurrent()) return { generated: false, reason: 'cancelled' };
     try {
+      // Join this path's admission before choosing a replacement expectation.
+      // Otherwise its fallback write can overtake the generated assignment and
+      // make that assignment incorrectly look like a racing manual rename.
+      const key = this.coldManagerKey(sessionPath);
+      if (this.hostMembershipSessions.sessions.has(key) && !this.liveSessionTitles.assigned(sessionPath)) {
+        await this.admitOpenedSessionTitle(sessionPath);
+      }
+      if (!isCurrent()) return { generated: false, reason: 'cancelled' };
       const result = generated
         ? await this.finalizeCandidateSessionTitle(sessionPath, generation.name as string, requestId)
         : await this.finalizeFallbackSessionTitle(sessionPath, prompt, requestId);
@@ -3544,9 +3573,10 @@ export class BackendServer {
     requestId: string,
   ): Promise<{ assigned: boolean; title?: string }> {
     if (!this.liveSessionTitles.ready) return { assigned: false };
-    // A durably assigned title always wins and must never be replaced by
-    // generation: the candidate is dropped when the session is already named.
-    if (this.liveSessionTitles.assigned(sessionPath)) return { assigned: false };
+    // Only admission fallbacks are replaceable. The owning writer rechecks
+    // the entry-bound marker so an intervening manual name always wins.
+    const existing = this.liveSessionTitles.assigned(sessionPath);
+    if (existing && !this.liveSessionTitles.isAdmissionFallback(sessionPath)) return { assigned: false };
     const key = this.coldManagerKey(sessionPath);
     if (this.disposed || (this.hostMembershipSeen
       && (!this.hostMembershipSessions.sessions.has(key) || this.hostMembershipClosing.has(key)))) {
@@ -3558,7 +3588,8 @@ export class BackendServer {
       sessionId: identity.sessionId,
     });
     try {
-      await this.persistAssignedSessionTitle(sessionPath, reservation.title, `${requestId}:title`);
+      await this.persistAssignedSessionTitle(sessionPath, reservation.title, `${requestId}:title`, existing,
+        existing ? { replaceAdmissionFallback: true } : undefined);
       const key = this.coldManagerKey(sessionPath);
       if (this.hostMembershipSeen
         && (!this.hostMembershipSessions.sessions.has(key) || this.hostMembershipClosing.has(key))) {
@@ -3578,7 +3609,8 @@ export class BackendServer {
     requestId: string,
   ): Promise<{ assigned: boolean; title?: string }> {
     if (!this.liveSessionTitles.ready) return { assigned: false };
-    if (this.liveSessionTitles.assigned(sessionPath)) return { assigned: false };
+    if (this.liveSessionTitles.assigned(sessionPath)
+      && !this.liveSessionTitles.isAdmissionFallback(sessionPath)) return { assigned: false };
     const fallback = deriveSessionNameFromText(prompt).name;
     if (!fallback || fallback === NEW_SESSION_NAME) return { assigned: false };
     try {
@@ -3795,7 +3827,7 @@ export class BackendServer {
 
   private resolveLiveSessionPath(
     sessionPath: string,
-    _fallbackSourcePath: string,
+    sourceSessionPath: string,
     action: 'read' | 'message' | 'settings.get' | 'settings.set' | 'close',
   ): { status: 'live' | 'closing'; sessionPath: string; entry?: LiveSessionMembershipEntry } {
     if (!boundedAgentString(sessionPath, 16 * 1024)) {
@@ -3807,7 +3839,10 @@ export class BackendServer {
     }
     const live = this.hostMembershipSessions.sessions.get(key);
     if (live) {
-      if (this.pendingLiveTitlePaths.has(key) && action !== 'close') {
+      // A caller's durable identity is authoritative independently of title
+      // admission. In particular self:true must work for an unnamed caller.
+      if (this.pendingLiveTitlePaths.has(key)
+        && key !== backendSessionPathKey(sourceSessionPath) && action !== 'close') {
         throw new BackendError('LIVE_TITLE_NAMESPACE_UNAVAILABLE', 'This live session title is still being assigned.');
       }
       return { status: 'live', sessionPath: live.entry.path, entry: live.entry };

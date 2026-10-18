@@ -1,3 +1,4 @@
+import { getAdmissionFallbackTitle } from '../metadata/session-title';
 import * as fs from 'node:fs/promises';
 import { captureModelExchangeEntries, type CapturedModelExchangeEntry } from './tool-model-exchange';
 
@@ -95,6 +96,7 @@ export async function openSessionBrowseSnapshot(options: {
     name,
     isPlaceholder,
     isAssignedTitle,
+    ...(getAdmissionFallbackTitle(manager) ? { isAdmissionFallback: true } : {}),
     modifiedAt,
     messageCount: durableContext?.messages.length ?? cache.transcript.length,
     ...(activeModel ? { modelId: activeModel.modelId, provider: activeModel.provider } : {}),

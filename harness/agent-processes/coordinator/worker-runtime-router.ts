@@ -710,12 +710,18 @@ export class WorkerRuntimeRouter {
    * title and this routing asks the sole hot owner to durably persist it
    * (SDK `setSessionName`) and acknowledge before publication. Cold sessions
    * never route here; the coordinator persists through its ColdSessionStore
-   * seam instead. */
+   * seam instead. `options.isAdmissionFallback` also appends the durable
+   * admission-fallback marker (bound to the exact latest `session_info`
+   * entry) inside the same serialized write; `options.replaceAdmissionFallback`
+   * restricts an expected-title replacement to the still-marked admission
+   * fallback itself, so generation may retitle it but a manual rename always
+   * skips closed. */
   async assignSessionTitle(
     sessionPath: string,
     title: string,
     publicRequestId: string,
     replaceExpectedTitle?: string,
+    options?: { isAdmissionFallback?: boolean; replaceAdmissionFallback?: boolean },
   ): Promise<{ assigned: boolean; changed: boolean; skipped?: 'explicit-name' }> {
     const hot = this.requireHot(sessionPath);
     this.assertCurrentOwner(hot, sessionPath);
@@ -723,7 +729,13 @@ export class WorkerRuntimeRouter {
       kind: 'runtime.command',
       operation: 'session.title.assign',
       payload: asWorkerJsonObject({
-        params: { sessionPath, title, ...(replaceExpectedTitle !== undefined ? { replaceExpectedTitle } : {}) },
+        params: {
+          sessionPath,
+          title,
+          ...(replaceExpectedTitle !== undefined ? { replaceExpectedTitle } : {}),
+          ...(options?.isAdmissionFallback === true ? { isAdmissionFallback: true } : {}),
+          ...(options?.replaceAdmissionFallback === true ? { replaceAdmissionFallback: true } : {}),
+        },
         publicRequestId,
       }),
     }, 'response');

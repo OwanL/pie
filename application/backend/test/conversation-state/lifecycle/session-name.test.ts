@@ -227,3 +227,90 @@ test('a title failure keeps the snippet and stops its spinner', () => {
   assert.equal(result.state.sessions.titleGenerationBySession[SESSION_PATH]?.status, 'failed');
   assert.deepEqual(selectViewState(result.state).generatingTitleSessionPaths, []);
 });
+
+function stateWithAdmissionFallback() {
+  const state = createInitialArchState();
+  state.sessions.sessions.push({
+    path: SESSION_PATH,
+    name: 'Investigate Login Failures',
+    cwd: '/ws',
+    modifiedAt: '2026-08-30T00:00:00.000Z',
+    messageCount: 0,
+    // A durably assigned, still-replaceable admission fallback title.
+    isPlaceholder: false,
+    isAssignedTitle: true,
+    isAdmissionFallback: true,
+  });
+  return state;
+}
+
+test('an admission fallback re-arms generation without replacing its durable display', () => {
+  const result = reducer(stateWithAdmissionFallback(), {
+    kind: 'SessionTitleRearm',
+    sessionPath: SESSION_PATH,
+    sourcePrompt: 'Also look at the invited-user cookie refresh.',
+  });
+  const summary = result.state.sessions.sessions[0];
+  assert.equal(summary.name, 'Investigate Login Failures');
+  assert.equal(summary.isPlaceholder, false);
+  assert.equal(summary.isAdmissionFallback, true);
+  assert.deepEqual(result.state.sessions.titleGenerationBySession[SESSION_PATH], {
+    status: 'armed',
+    prompt: 'Also look at the invited-user cookie refresh.',
+  });
+});
+
+test('re-arming is fenced by the durable admission fallback flag', () => {
+  const state = stateWithAdmissionFallback();
+  state.sessions.sessions[0].isAdmissionFallback = false;
+  const result = reducer(state, {
+    kind: 'SessionTitleRearm',
+    sessionPath: SESSION_PATH,
+    sourcePrompt: 'Also look at the invited-user cookie refresh.',
+  });
+  assert.equal(result.state.sessions.titleGenerationBySession[SESSION_PATH], undefined);
+});
+
+test('re-arming never replaces an existing generation lifecycle entry', () => {
+  const state = stateWithAdmissionFallback();
+  state.sessions.titleGenerationBySession[SESSION_PATH] = {
+    status: 'failed',
+    prompt: 'First attempt.',
+  };
+  const result = reducer(state, {
+    kind: 'SessionTitleRearm',
+    sessionPath: SESSION_PATH,
+    sourcePrompt: 'A later prompt.',
+  });
+  assert.deepEqual(result.state.sessions.titleGenerationBySession[SESSION_PATH], {
+    status: 'failed',
+    prompt: 'First attempt.',
+  });
+});
+
+test('a generated title replaces a durable admission fallback display', () => {
+  const state = stateWithAdmissionFallback();
+  state.sessions.activeSessionPath = SESSION_PATH;
+  state.sessions.openTabPaths = [SESSION_PATH];
+  state.sessions.titleGenerationBySession[SESSION_PATH] = {
+    status: 'pending',
+    prompt: 'Investigate why invited users cannot log in.',
+    corrId: 'request-1',
+  };
+  assert.deepEqual(selectViewState(state).generatingTitleSessionPaths, [SESSION_PATH]);
+  const result = reducer(state, {
+    kind: 'SessionTitleResult',
+    sessionPath: SESSION_PATH,
+    corrId: 'request-1',
+    ok: true,
+    generated: true,
+    name: 'Investigate Invited User Login',
+  });
+  const summary = result.state.sessions.sessions[0];
+  assert.equal(summary.name, 'Investigate Invited User Login');
+  assert.equal(summary.isPlaceholder, false);
+  // Replacement clears the replaceable-fallback marker entirely.
+  assert.equal(summary.isAdmissionFallback, undefined);
+  assert.equal(summary.isAssignedTitle, true);
+  assert.equal(result.state.sessions.titleGenerationBySession[SESSION_PATH], undefined);
+});

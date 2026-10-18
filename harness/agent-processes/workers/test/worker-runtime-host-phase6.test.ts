@@ -12,6 +12,11 @@ import {
   type MutableSdkSessionManager,
   type SessionManagerFence,
 } from '../../../session-storage/ownership/session-manager-fence';
+import {
+  appendAdmissionFallbackMarker,
+  ADMISSION_FALLBACK_CUSTOM_TYPE,
+  getAdmissionFallbackTitle,
+} from '../../../session-storage/metadata/session-title.js';
 import type { ProviderIncident } from '../../../model-providers/traffic-observation/provider-incident';
 import type { ProviderTransportObservation } from '../../../model-providers/traffic-observation/provider-progress-bus';
 import { BackendLiveTurnAccumulator } from '../live-turn-accumulator';
@@ -591,6 +596,124 @@ test('hot title assignment replaces only the expected durable collision, never a
     params: { sessionPath: '/sessions/current.jsonl', title: 'Review (3)', replaceExpectedTitle: 'Review (2)' },
   }, 'racing-rename'), { assigned: false, changed: false, skipped: 'explicit-name' });
   assert.deepEqual(written, ['Review (2)']);
+});
+
+function makeMarkerManagerContext(options: {
+  sessionPath: string;
+  initialEntries?: Array<Record<string, unknown>>;
+}): { manager: Record<string, unknown>; entries: Array<Record<string, unknown>>; written: string[]; context: SessionContext } {
+  let entrySeq = 0;
+  let name: string | undefined;
+  const entries = options.initialEntries ?? [];
+  for (const entry of entries) {
+    if (entry.type === 'session_info') { entrySeq = Math.max(entrySeq, Number(String(entry.id).slice(3)) || 0); }
+    if (typeof entry.id !== 'string') entry.id = `ti-${++entrySeq}`;
+  }
+  if (entries.some((entry) => entry.type === 'session_info')) {
+    const latest = [...entries].reverse().find((entry) => entry.type === 'session_info')!;
+    name = String(latest.name);
+  }
+  const written: string[] = [];
+  const manager: Record<string, unknown> = {
+    getSessionName: () => name,
+    getSessionId: () => 'sid-current',
+    getEntries: () => entries,
+    appendCustomEntry: (customType: string, data: unknown) => {
+      entrySeq += 1;
+      const id = `mk-${entrySeq}`;
+      entries.push({ id, type: 'custom', customType, data });
+      return id;
+    },
+  };
+  const context = {
+    sessionPath: options.sessionPath,
+    session: {
+      sessionManager: manager,
+      // Mirrors the pinned SDK: every setter appends a fresh session_info entry.
+      setSessionName: (title: string) => {
+        name = title;
+        written.push(title);
+        entrySeq += 1;
+        entries.push({ id: `ti-${entrySeq}`, type: 'session_info', name: title });
+      },
+    },
+  } as unknown as SessionContext;
+  return { manager, entries, written, context };
+}
+
+test('admission fallback assignment marks the durable title and normal assignment clears the marker', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  internals.sdk = {};
+  const fixture = makeMarkerManagerContext({ sessionPath: '/sessions/current.jsonl' });
+  internals.context = fixture.context;
+
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Fix Flaky Windows', isAdmissionFallback: true },
+  }, 'fallback'), { assigned: true, changed: true, title: 'Fix Flaky Windows' });
+  assert.deepEqual(fixture.written, ['Fix Flaky Windows']);
+  assert.equal(getAdmissionFallbackTitle(fixture.manager as never), 'Fix Flaky Windows',
+    'the marker is appended before the acknowledgement and binds the latest title entry');
+
+  // A normal assignment appends fresh session_info even for identical text,
+  // which invalidates the stale marker.
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: {
+      sessionPath: '/sessions/current.jsonl', title: 'Fix Flaky Windows',
+      replaceExpectedTitle: 'Fix Flaky Windows',
+    },
+  }, 'normal-reconcile'), { assigned: true, changed: true, title: 'Fix Flaky Windows' });
+  assert.equal(getAdmissionFallbackTitle(fixture.manager as never), undefined);
+  assert.deepEqual(fixture.written, ['Fix Flaky Windows', 'Fix Flaky Windows']);
+});
+
+test('admission fallback replacement requires the still-marked reserved title', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  internals.sdk = {};
+  const fixture = makeMarkerManagerContext({ sessionPath: '/sessions/current.jsonl' });
+  internals.context = fixture.context;
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Fix Flaky Windows', isAdmissionFallback: true },
+  }, 'fallback'), { assigned: true, changed: true, title: 'Fix Flaky Windows' });
+
+  // A marked fallback may be retitled by generation when the expected
+  // fallback title still matches the exact marker-bound entry.
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: {
+      sessionPath: '/sessions/current.jsonl', title: 'Diagnose Windows Flakes',
+      replaceExpectedTitle: 'Fix Flaky Windows', replaceAdmissionFallback: true,
+    },
+  }, 'replace-fallback'), { assigned: true, changed: true, title: 'Diagnose Windows Flakes' });
+  assert.equal(getAdmissionFallbackTitle(fixture.manager as never), undefined);
+  assert.deepEqual(fixture.written, ['Fix Flaky Windows', 'Diagnose Windows Flakes']);
+
+  // A mismatching expected fallback (manual rename raced the reservation)
+  // skips closed without writing.
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Other', replaceAdmissionFallback: true },
+  }, 'missing-expected'), { assigned: false, changed: false, skipped: 'explicit-name' });
+  assert.deepEqual(fixture.written, ['Fix Flaky Windows', 'Diagnose Windows Flakes']);
+
+  // Re-arming admission assignment with a manual rename still active must
+  // never replace an explicit title without the marker bound to it.
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: {
+      sessionPath: '/sessions/current.jsonl', title: 'Manual Winner',
+      replaceExpectedTitle: 'Diagnose Windows Flakes', replaceAdmissionFallback: true,
+    },
+  }, 'manual-rename'), { assigned: false, changed: false, skipped: 'explicit-name' });
+  assert.deepEqual(fixture.written, ['Fix Flaky Windows', 'Diagnose Windows Flakes']);
+
+  // An admission-style assignment reconciling the same marked title re-marks
+  // the fresh session_info entry (still inside the serialized write).
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: {
+      sessionPath: '/sessions/current.jsonl', title: 'Restore Me', isAdmissionFallback: true,
+      replaceExpectedTitle: 'Diagnose Windows Flakes',
+    },
+  }, 're-mark'), { assigned: true, changed: true, title: 'Restore Me' });
+  assert.equal(getAdmissionFallbackTitle(fixture.manager as never), 'Restore Me');
 });
 
 test('hot duplicate runs through the owning runtime replacement and suppresses its intermediate event', async () => {

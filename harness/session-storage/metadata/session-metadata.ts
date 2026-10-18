@@ -1,3 +1,4 @@
+import { ADMISSION_FALLBACK_CUSTOM_TYPE, getAdmissionFallbackTitle } from './session-title';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 
@@ -33,8 +34,8 @@ export function textFromSessionMessageContent(content: unknown): string {
   return '';
 }
 
-// v2 replaces heuristic names with replaceable first-prompt snippets.
-const SESSION_METADATA_CHECKPOINT_VERSION = 2;
+// v3 tracks entry-bound admission fallback markers.
+const SESSION_METADATA_CHECKPOINT_VERSION = 3;
 const SESSION_METADATA_READ_CHUNK_BYTES = 256 * 1024;
 const SESSION_METADATA_WITNESS_BYTES = 4 * 1024;
 const SESSION_METADATA_YIELD_LINES = 256;
@@ -47,6 +48,8 @@ interface SessionMetadataAccumulator {
   sessionId?: string;
   agentCreated: boolean;
   explicitName: string | null;
+  titleEntryId?: string;
+  isAdmissionFallback: boolean;
   derivedName: string;
   derivedIsPlaceholder: boolean;
   sawFirstUserText: boolean;
@@ -60,7 +63,7 @@ interface SessionMetadataAccumulator {
  * prefix: a same-inode interior rewrite followed by an append falls back to a
  * full scan only when one of those sampled boundaries changes. */
 export interface SessionMetadataCheckpoint {
-  version: 2;
+  version: 3;
   parsedBytes: number;
   endedWithNewline: boolean;
   firstWitnessHash: string;
@@ -87,6 +90,7 @@ function emptyMetadataAccumulator(): SessionMetadataAccumulator {
     cwd: '',
     agentCreated: false,
     explicitName: null,
+    isAdmissionFallback: false,
     derivedName: NEW_SESSION_NAME,
     derivedIsPlaceholder: true,
     sawFirstUserText: false,
@@ -135,7 +139,17 @@ function applyMetadataLine(line: Buffer, accumulator: SessionMetadataAccumulator
     return;
   }
 
+  if (entry.type === 'custom' && entry.customType === ADMISSION_FALLBACK_CUSTOM_TYPE) {
+    const data = entry.data as Record<string, unknown> | null;
+    if (data && data.version === 1 && accumulator.titleEntryId
+      && data.titleEntryId === accumulator.titleEntryId && data.name === accumulator.explicitName) {
+      accumulator.isAdmissionFallback = true;
+    }
+    return;
+  }
   if (entry.type === 'session_info') {
+    accumulator.titleEntryId = typeof entry.id === 'string' ? entry.id : undefined;
+    accumulator.isAdmissionFallback = false;
     accumulator.explicitName = typeof entry.name === 'string' && entry.name.trim()
       ? entry.name.trim()
       : null;
@@ -239,6 +253,7 @@ function buildIndexedSummary(
     name: explicitName ?? accumulator.derivedName,
     isPlaceholder: explicitName === null ? accumulator.derivedIsPlaceholder : false,
     isAssignedTitle: explicitName !== null,
+    ...(accumulator.isAdmissionFallback ? { isAdmissionFallback: true } : {}),
     modifiedAt: new Date(modifiedMs).toISOString(),
     messageCount: accumulator.messageCount,
     ...(accumulator.sessionId ? { sessionId: accumulator.sessionId } : {}),
@@ -385,6 +400,7 @@ export function buildCurrentSummary(
     modelId: context.session.model?.id,
     provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
+    ...(getAdmissionFallbackTitle(context.session.sessionManager) ? { isAdmissionFallback: true } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(headerTimestamp ? { headerTimestamp } : {}),
     ...(isAgentCreatedSession(context.session.sessionManager) ? { agentCreated: true } : {}),

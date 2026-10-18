@@ -225,6 +225,7 @@ export interface SdkSessionManager {
   /** Atomically append a durable session_info title entry (pinned SDK seam
    * used by the coordinator-owned cold title assignment path). */
   appendSessionInfo?: (name: string) => string;
+  appendCustomEntry?: (customType: string, data: unknown) => string;
   attachPieWriteLease?: (adapter: SdkSessionOwnershipAdapter, lease: SdkSessionWriteLease) => void;
   revokePieWriteLease?: () => void;
   activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => Promise<SdkSessionWriteLease>;

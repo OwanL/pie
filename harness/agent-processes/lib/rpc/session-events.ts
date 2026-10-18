@@ -61,6 +61,8 @@ export interface BackendSessionSummary {
    *  an explicit SDK name). False/absent means the name is a provisional,
    *  replaceable first-prompt snippet that never resolves as a title target. */
   isAssignedTitle?: boolean;
+  /** Addressable admission title that may still be replaced automatically. */
+  isAdmissionFallback?: boolean;
   /** Explicit durable provenance for sessions created through the worker-local
    *  agent `session_control create` flow. This is not inferred from lineage. */
   agentCreated?: boolean;

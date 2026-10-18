@@ -34,13 +34,13 @@ test('reconciliation publishes restored titles and establishes the namespace', a
   const tracker = trackingPersists();
   const result = await titles.reconcile([
     entry('/s/a.jsonl', 'id-a', { title: 'Review Control', headerTimestamp: '2026-01-01T00:00:00.000Z' }),
-    entry('/s/b.jsonl', 'id-b'), // provisional session: never publishes a title
+    entry('/s/b.jsonl', 'id-b'), // untitled live sessions get a durable fallback
   ], tracker.persist);
 
   assert.equal(titles.ready, true);
   assert.equal(result.restoredEntries, 2);
   assert.deepEqual(result.suffixed, []);
-  assert.deepEqual(tracker.calls, []);
+  assert.deepEqual(tracker.calls, [{ sessionPath: '/s/b.jsonl', title: 'New Session' }]);
   assert.deepEqual(titles.resolve(' Review Control '), {
     sessionPath: '/s/a.jsonl',
     sessionId: 'id-a',
@@ -48,7 +48,59 @@ test('reconciliation publishes restored titles and establishes the namespace', a
   assert.equal(titles.resolve('Review Control'.toUpperCase()), undefined, 'matching stays exact');
   assert.equal(titles.resolve('review control'), undefined, 'no fuzzy matching');
   assert.equal(titles.assigned('/s/a.jsonl'), 'Review Control');
-  assert.equal(titles.assigned('/s/b.jsonl'), undefined, 'provisional labels never resolve as titles');
+  assert.equal(titles.assigned('/s/b.jsonl'), 'New Session');
+  assert.equal(titles.isAdmissionFallback('/s/b.jsonl'), true);
+  assert.equal(titles.resolve('New Session')?.sessionPath, '/s/b.jsonl');
+});
+
+test('admission fallbacks are unique, persist before readiness, and preserve their kind on collision', async () => {
+  const titles = new LiveSessionTitles();
+  let unblock!: () => void;
+  const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+  const writes: unknown[] = [];
+  const pending = titles.reconcile([
+    entry('/existing', 'existing', { title: 'New Session' }),
+    entry('/a', 'a'), entry('/b', 'b'),
+  ], async (path, title, expected, fallback) => {
+    writes.push({ path, title, expected, fallback });
+    assert.equal(titles.ready, false);
+    await blocked;
+  });
+  assert.equal(titles.ready, false);
+  assert.throws(() => titles.resolve('New Session (2)'), LiveTitleNamespaceUnavailableError);
+  unblock();
+  await pending;
+  assert.deepEqual(writes, [
+    { path: '/a', title: 'New Session (2)', expected: undefined, fallback: true },
+    { path: '/b', title: 'New Session (3)', expected: undefined, fallback: true },
+  ]);
+  await titles.admit([{ sessionPath: '/reopened', sessionId: 'reopened', title: 'New Session (2)', isAdmissionFallback: true }],
+    async (_path, title, expected, fallback) => {
+      assert.equal(title, 'New Session (2) (2)');
+      assert.equal(expected, 'New Session (2)');
+      assert.equal(fallback, true);
+    });
+  assert.equal(titles.isAdmissionFallback('/reopened'), true);
+});
+
+test('replacing an admission fallback frees its old name and reservation without an alias', async () => {
+  const titles = new LiveSessionTitles();
+  await titles.reconcile([], async () => undefined);
+  await titles.admit([entry('/a', 'a')], async () => undefined);
+  const replacement = titles.reserve('Generated title', { sessionPath: '/a', sessionId: 'a' });
+  titles.confirm(replacement);
+  assert.equal(titles.isAdmissionFallback('/a'), false);
+  assert.equal(titles.resolve('New Session'), undefined);
+  assert.equal(titles.reserve('New Session', { sessionPath: '/b', sessionId: 'b' }).title, 'New Session');
+});
+
+test('failed unnamed admission leaves readiness closed and publishes no fallback', async () => {
+  const titles = new LiveSessionTitles();
+  await assert.rejects(titles.reconcile([entry('/a', 'a')], async () => { throw new Error('writer failed'); }), /writer failed/);
+  assert.equal(titles.ready, false);
+  assert.equal(titles.assigned('/a'), undefined);
+  await titles.reconcile([entry('/a', 'a')], async () => undefined);
+  assert.equal(titles.assigned('/a'), 'New Session');
 });
 
 test('the oldest durable creation timestamp keeps a colliding title and persistence precedes publication', async () => {

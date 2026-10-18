@@ -640,6 +640,19 @@ export class MessageRouter {
         });
         this.scheduleRender();
       }
+    } else if (session?.isAdmissionFallback === true) {
+      // Retain the ordinary send rollback hook only when this send arms the
+      // attempt; a later rejected send must not clear an older pending one.
+      if (!archState.sessions.titleGenerationBySession[sessionPath]) previousSummary = session;
+      // A still-replaceable admission fallback keeps its durable display name:
+      // the new prompt re-arms generation only, and the title authority later
+      // replaces the fallback through a coordinated assignment.
+      this.dispatchEvent({
+        kind: 'SessionTitleRearm',
+        sessionPath,
+        sourcePrompt: composedText,
+      });
+      this.scheduleRender();
     }
 
     // Dispatch through CQRS spine.

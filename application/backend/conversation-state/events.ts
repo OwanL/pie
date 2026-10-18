@@ -727,6 +727,16 @@ export interface SessionNameDerivedEvent {
   sourcePrompt: string;
 }
 
+/** Emitted when the host re-arms automatic naming for a session whose durable
+ *  title is a still-replaceable admission fallback. The prompt is recorded for
+ *  generation, but the durable fallback display name is never replaced with a
+ *  prompt snippet. */
+export interface SessionTitleRearmEvent {
+  kind: 'SessionTitleRearm';
+  sessionPath: string;
+  sourcePrompt: string;
+}
+
 /** Emitted when an optimistic local user message is inserted into the transcript. */
 export interface OptimisticMessageInsertedEvent {
   kind: 'OptimisticMessageInserted';
@@ -1241,6 +1251,7 @@ export type HostEvent =
   | McpServersUpdatedEvent
   | McpSessionServersUpdatedEvent
   | SessionNameDerivedEvent
+  | SessionTitleRearmEvent
   | OptimisticMessageInsertedEvent
   | OptimisticMessageRemovedEvent
   | BackendReadyChangedEvent

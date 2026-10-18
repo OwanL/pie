@@ -11,8 +11,9 @@ import {
 } from '../session-title-generator';
 import type { SessionContext } from '../../coordinator/server-types.js';
 import type { SessionTitleGeneratorDeps } from '../session-title-generator';
+import { ADMISSION_FALLBACK_CUSTOM_TYPE } from '../../../session-storage/metadata/session-title.js';
 
-function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string; usage?: { input: number; output: number }; auth?: () => Promise<unknown> } = {}) {
+function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string; usage?: { input: number; output: number }; auth?: () => Promise<unknown>; sessionInfoEntries?: () => readonly unknown[] } = {}) {
   let writtenName: string | undefined;
   let explicitName = options.explicitName;
   let fetchCalls = 0;
@@ -20,6 +21,7 @@ function fakeContext(options: { explicitName?: string; explicitPropertyName?: st
     sessionName: options.explicitPropertyName,
     sessionManager: {
       getSessionName: () => explicitName,
+      ...(options.sessionInfoEntries ? { getEntries: options.sessionInfoEntries } : {}),
     },
     _modelRegistry: {
       find: (provider: string, id: string) => ({
@@ -184,6 +186,65 @@ test('the SDK sessionName property also prevents generated overwrite', async () 
   const fake = fakeContext({ explicitPropertyName: 'SDK Explicit Name' });
   const result = await generateSessionTitle(fake.context, {
     sdkPath: '/sdk', prompt: 'Fix the login flow.', provider: 'ollama', model: 'deepseek-v4-flash:0731-cloud',
+  }, { fetchFn: fake.fetchFn as typeof fetch });
+  assert.deepEqual(result, { generated: false, reason: 'explicit-name' });
+  assert.equal(fake.fetchCalls, 0);
+});
+
+test('an approved, marker-bound admission fallback title is generation-replaceable', async () => {
+  const fake = fakeContext({
+    explicitName: 'Fix Flaky Windows Tests',
+    sessionInfoEntries: () => [
+      { id: 'ti-1', type: 'session_info', name: 'Fix Flaky Windows Tests' },
+      {
+        id: 'mk-1', type: 'custom', customType: ADMISSION_FALLBACK_CUSTOM_TYPE,
+        data: { version: 1, titleEntryId: 'ti-1', name: 'Fix Flaky Windows Tests' },
+      },
+    ],
+  });
+  const manager = fake.context.session.sessionManager;
+  const getEntries = manager.getEntries;
+  manager.getEntries = function () {
+    assert.equal(this, manager, 'SDK methods retain their manager receiver');
+    return getEntries.call(manager);
+  };
+  const result = await generateSessionTitle(fake.context, {
+    sdkPath: '/sdk', prompt: 'Fix the flaky Windows tests.', provider: 'ollama', model: 'title-model',
+  }, { fetchFn: fake.fetchFn as typeof fetch });
+  assert.deepEqual(result, { generated: true, name: 'Fix Slow MCP Settings' });
+  assert.equal(fake.fetchCalls, 1);
+});
+
+test('a later manual rename invalidates the fallback marker even for the same text', async () => {
+  const fake = fakeContext({
+    explicitName: 'Fallback Title',
+    sessionInfoEntries: () => [
+      { id: 'ti-1', type: 'session_info', name: 'Fallback Title' },
+      {
+        id: 'mk-1', type: 'custom', customType: ADMISSION_FALLBACK_CUSTOM_TYPE,
+        data: { version: 1, titleEntryId: 'ti-1', name: 'Fallback Title' },
+      },
+      // A manual rename appends a fresh session_info entry: the oldest marker
+      // is tied to ti-1 and can never validate the newer ti-2.
+      { id: 'ti-2', type: 'session_info', name: 'Fallback Title' },
+    ],
+  });
+  const result = await generateSessionTitle(fake.context, {
+    sdkPath: '/sdk', prompt: 'Fix the login flow.', provider: 'ollama', model: 'title-model',
+  }, { fetchFn: fake.fetchFn as typeof fetch });
+  assert.deepEqual(result, { generated: false, reason: 'explicit-name' });
+  assert.equal(fake.fetchCalls, 0);
+});
+
+test('an unmarked generation-failure fallback title stays final and protected', async () => {
+  const fake = fakeContext({
+    explicitName: 'Stable Fallback Title',
+    sessionInfoEntries: () => [
+      { id: 'ti-1', type: 'session_info', name: 'Stable Fallback Title' },
+    ],
+  });
+  const result = await generateSessionTitle(fake.context, {
+    sdkPath: '/sdk', prompt: 'Fix the login flow.', provider: 'ollama', model: 'title-model',
   }, { fetchFn: fake.fetchFn as typeof fetch });
   assert.deepEqual(result, { generated: false, reason: 'explicit-name' });
   assert.equal(fake.fetchCalls, 0);

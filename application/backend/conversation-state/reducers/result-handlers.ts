@@ -1366,9 +1366,13 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
       const next = produce(state, (draft) => {
         if (event.ok && event.generated && event.name) {
           const summary = draft.sessions.sessions.find((session) => session.path === event.sessionPath);
-          if (summary?.isPlaceholder === true) {
+          // A generated title replaces a provisional snippet placeholder or a
+          // still-replaceable admission fallback; explicit assignments and
+          // normal (non-fallback) final titles are never touched.
+          if (summary?.isPlaceholder === true || summary?.isAdmissionFallback === true) {
             summary.name = event.name;
-            summary.isPlaceholder = false;
+            if (summary.isPlaceholder === true) summary.isPlaceholder = false;
+            delete summary.isAdmissionFallback;
           }
           delete draft.sessions.titleGenerationBySession[event.sessionPath];
         } else {

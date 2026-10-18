@@ -29,6 +29,32 @@ async function withStore(run: (store: ColdSessionStore, sessionPath: string, roo
   }
 }
 
+test('cold title writes preserve exact-kind no-ops and finalize a same-name fallback', async () => {
+  await withStore(async (store, sessionPath, _root, setManager) => {
+    const entries: any[] = [];
+    const manager = {
+      getSessionName: () => entries.filter((e) => e.type === 'session_info').at(-1)?.name,
+      getEntries: () => entries,
+      appendSessionInfo: (name: string) => {
+        const id = `title-${entries.length}`;
+        entries.push({ type: 'session_info', id, name });
+        return id;
+      },
+      appendCustomEntry: (customType: string, data: unknown) => {
+        entries.push({ type: 'custom', customType, data });
+        return 'marker';
+      },
+    };
+    setManager(manager);
+    assert.equal(store.setSessionTitle(sessionPath, 'Review', true).titleChanged, true);
+    assert.equal(entries.length, 2);
+    assert.equal(store.setSessionTitle(sessionPath, 'Review', true).titleChanged, false);
+    assert.equal(store.setSessionTitle(sessionPath, 'Review').titleChanged, true);
+    assert.equal(entries.length, 3);
+    assert.equal(store.setSessionTitle(sessionPath, 'Review').titleChanged, false);
+  });
+});
+
 test('hot durable metadata honors explicit thinking changes and otherwise uses settings defaults', async () => {
   await withStore(async (store, sessionPath, root, setManager) => {
     store.leases.reserveCanonicalPaths([sessionPath], 'hot:test', { hideFromCatalog: false });

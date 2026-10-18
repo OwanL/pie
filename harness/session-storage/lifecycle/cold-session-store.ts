@@ -1,3 +1,4 @@
+import { appendAdmissionFallbackMarker, getAdmissionFallbackTitle } from '../metadata/session-title';
 import * as crypto from 'node:crypto';
 import { appendProviderRuntimeReference, type ProviderRuntimeReference, type RuntimeEntryManager } from '../../model-providers/runtime';
 import * as fsSync from 'node:fs';
@@ -1116,10 +1117,11 @@ export class ColdSessionStore {
   setSessionTitle(
     sessionPath: string,
     title: string,
+    isAdmissionFallback = false,
   ): ColdSessionTitleResult {
     return this.withWriterAdmission(() => {
       const opened = this.openManagerWithMigrationLease(sessionPath);
-      return this.applySessionTitle(opened.manager, opened.stamp, title).result;
+      return this.applySessionTitle(opened.manager, opened.stamp, title, isAdmissionFallback).result;
     });
   }
 
@@ -1129,6 +1131,7 @@ export class ColdSessionStore {
   setHandleSessionTitle(
     handle: ColdSessionManagerHandle,
     title: string,
+    isAdmissionFallback = false,
   ): ColdSessionTitleResult {
     return this.withWriterAdmission(() => {
       const state = this.handleStates.get(handle);
@@ -1139,6 +1142,7 @@ export class ColdSessionStore {
         handle.manager,
         state.stamp,
         title,
+        isAdmissionFallback,
         (stamp) => { state.stamp = stamp; },
       );
       state.stamp = applied.stamp;
@@ -1773,6 +1777,7 @@ export class ColdSessionStore {
     manager: SdkSessionManager,
     initialStamp: ColdSessionOwnershipStamp,
     title: string,
+    isAdmissionFallback: boolean,
     onRestamp?: (stamp: ColdSessionOwnershipStamp) => void,
   ): {
     result: ColdSessionTitleResult;
@@ -1782,7 +1787,11 @@ export class ColdSessionStore {
     if (!recorded) {
       throw new Error('An assigned session title must contain visible characters.');
     }
-    const titleChanged = manager.getSessionName() !== recorded;
+    const titleChanged = manager.getSessionName() !== recorded
+      || Boolean(getAdmissionFallbackTitle(manager)) !== isAdmissionFallback;
+    if (isAdmissionFallback && typeof manager.appendCustomEntry !== 'function') {
+      throw new Error('This Pi session manager does not support admission fallback markers.');
+    }
     let stamp = initialStamp;
     let committed = false;
 
@@ -1791,8 +1800,11 @@ export class ColdSessionStore {
         if (typeof manager.appendSessionInfo !== 'function') {
           throw new Error('This Pi session manager does not support atomic durable session titles.');
         }
-        this.leases.commitSync(stamp, () => manager.appendSessionInfo!(recorded));
-        committed = true;
+        this.leases.commitSync(stamp, () => {
+          manager.appendSessionInfo!(recorded);
+          committed = true;
+          if (isAdmissionFallback) appendAdmissionFallbackMarker(manager);
+        });
         stamp = this.leases.restamp(stamp);
         onRestamp?.(stamp);
       }

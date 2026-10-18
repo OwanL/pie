@@ -8,6 +8,7 @@ import {
   PROVIDER_GATE_REQUEST_CLASS_SESSION_TITLE,
 } from '../../model-providers/concurrency/provider-gate-request-class.js';
 import { providerReportedCostUsd } from '../../model-providers/pricing/provider-cost.js';
+import { getAdmissionFallbackTitle } from '../../session-storage/metadata/session-title.js';
 import type { SessionContext } from '../coordinator/server-types.js';
 import type { AssistantUsage } from '../../../analytics/contracts/legacy-run-analytics-contracts.js';
 import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
@@ -47,7 +48,10 @@ interface AuxiliaryModel {
 
 interface TitleCapableSession {
   sessionName?: string;
-  sessionManager: { getSessionName(): string | undefined };
+  sessionManager: {
+    getSessionName(): string | undefined;
+    getEntries?: () => readonly unknown[];
+  };
   _modelRegistry?: { find(provider: string, id: string): unknown };
   _getCompactionRequestAuth?: (model: unknown) => Promise<{
     apiKey?: string;
@@ -316,8 +320,21 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/** A durable session name normally blocks generation and is never overwritten.
+ *  An approved admission-fallback title is the exception: its marker ties it to
+ *  the exact latest `session_info` entry, so it stays replaceable until any
+ *  later manual rename appends a fresh `session_info` and makes the name
+ *  explicit again. Ordinary generation-failure fallbacks without a marker
+ *  remain final and protected. */
 function hasExplicitSessionName(session: TitleCapableSession): boolean {
-  return Boolean(session.sessionName?.trim() || session.sessionManager.getSessionName()?.trim());
+  const contextName = session.sessionName?.trim();
+  const managerName = session.sessionManager.getSessionName?.()?.trim();
+  if (!contextName && !managerName) return false;
+  const manager = session.sessionManager;
+  const fallback = manager.getEntries
+    ? getAdmissionFallbackTitle({ getEntries: () => manager.getEntries!() }) : undefined;
+  if (fallback && managerName === fallback && (!contextName || contextName === fallback)) return false;
+  return true;
 }
 
 /** Generate one candidate title without a final durable write. Every expected

@@ -42,12 +42,13 @@ const LIVE_SESSION_TITLE_SUFFIX_SEARCH_LIMIT = 10_000;
 /** One restored live member of the title authority during reconciliation.
  * `headerTimestamp` is the durable creation timestamp from the SDK session
  * header and `title` is the existing durable assigned title, if any. Entries
- * without a title are provisional sessions and never enter the namespace. */
+ * without a title receive a durable, replaceable admission fallback. */
 export interface LiveSessionTitleEntry {
   sessionPath: string;
   sessionId: string;
   headerTimestamp?: string;
   title?: string;
+  isAdmissionFallback?: boolean;
 }
 
 /** Exact resolution of an assigned title against the live namespace. */
@@ -65,6 +66,7 @@ export interface LiveSessionTitleReservation {
   readonly title: string;
   readonly sessionPath: string;
   readonly sessionId: string;
+  readonly isAdmissionFallback?: boolean;
 }
 
 /** Snapshot record for list projections. `reserved` titles are allocated but
@@ -96,7 +98,7 @@ export interface LiveSessionTitlesReconcileResult {
 }
 
 export interface LiveSessionTitlesReconcilePersist {
-  (sessionPath: string, title: string, replaceExpectedTitle: string): Promise<void>;
+  (sessionPath: string, title: string, replaceExpectedTitle?: string, isAdmissionFallback?: boolean): Promise<void>;
 }
 
 /** Raised when the unique live namespace is not yet established. Callers must
@@ -131,6 +133,7 @@ interface PublishedTitle {
 interface AssignedTitle {
   sessionId: string;
   title: string;
+  isAdmissionFallback?: boolean;
 }
 
 interface ReservationState {
@@ -140,12 +143,14 @@ interface ReservationState {
   sessionPath: string;
   sessionId: string;
   state: 'reserved' | 'assigned';
+  isAdmissionFallback?: boolean;
 }
 
 interface ParsedEntry {
   sessionPath: string;
   sessionId: string;
   trimmedTitle: string;
+  isAdmissionFallback?: boolean;
   readonly sortKey: {
     validTimestamp: 0 | 1;
     timestamp: number;
@@ -196,6 +201,7 @@ export class LiveSessionTitles {
         sessionPath: entry.sessionPath,
         sessionId: entry.sessionId,
         trimmedTitle,
+        isAdmissionFallback: entry.isAdmissionFallback,
         sortKey: {
           validTimestamp: validTimestamp ? 0 : 1,
           timestamp: validTimestamp ? timestamp : 0,
@@ -238,7 +244,7 @@ export class LiveSessionTitles {
           // Keep the original (oldest) restored title. Idempotent on retry. The
           // entry's durable name outranks a still-unpublished in-flight
           // reservation holding the same title.
-          this.publish(entry.sessionPath, entry.sessionId, entry.trimmedTitle);
+          this.publish(entry.sessionPath, entry.sessionId, entry.trimmedTitle, entry.isAdmissionFallback);
           preserved.push({
             sessionPath: entry.sessionPath,
             sessionId: entry.sessionId,
@@ -251,15 +257,27 @@ export class LiveSessionTitles {
         // callback, and only then publish the assignment.
         const finalTitle = this.allocateTitle(entry.trimmedTitle, occupied);
         occupied.set(finalTitle, 'published');
-        await persist(entry.sessionPath, finalTitle, entry.trimmedTitle);
+        const isAdmissionFallback = entry.isAdmissionFallback;
+        await persist(entry.sessionPath, finalTitle, entry.trimmedTitle, isAdmissionFallback);
         if (!isCurrent()) throw new LiveTitleNamespaceUnavailableError();
-        this.publish(entry.sessionPath, entry.sessionId, finalTitle);
+        this.publish(entry.sessionPath, entry.sessionId, finalTitle, isAdmissionFallback);
         suffixed.push({
           sessionPath: entry.sessionPath,
           sessionId: entry.sessionId,
           from: entry.trimmedTitle,
           to: finalTitle,
         });
+      }
+      // Existing durable literals outrank new admission fallbacks. Keep the
+      // namespace closed until every fallback has been durably persisted.
+      for (const entry of [...entries].sort((a, b) => a.sessionId.localeCompare(b.sessionId))) {
+        if (entry.title?.trim() || this.assignedByPath.has(entry.sessionPath)) continue;
+        if (!isCurrent()) throw new LiveTitleNamespaceUnavailableError();
+        const title = this.allocateTitle('New Session', occupied);
+        occupied.set(title, 'published');
+        await persist(entry.sessionPath, title, undefined, true);
+        if (!isCurrent()) throw new LiveTitleNamespaceUnavailableError();
+        this.publish(entry.sessionPath, entry.sessionId, title, true);
       }
     } catch (error) {
       // Readiness fails closed: the namespace stays unavailable for callers.
@@ -286,7 +304,7 @@ export class LiveSessionTitles {
    * unconfirmed reservation is never published to `resolve()`. */
   reserve(
     baseTitle: string,
-    identity: { sessionPath: string; sessionId: string },
+    identity: { sessionPath: string; sessionId: string; isAdmissionFallback?: boolean },
   ): LiveSessionTitleReservation {
     if (!this.namespaceReady) throw new LiveTitleNamespaceUnavailableError();
     const normalized = normalizeBaseTitle(baseTitle);
@@ -304,6 +322,7 @@ export class LiveSessionTitles {
       sessionPath: identity.sessionPath,
       sessionId: identity.sessionId,
       state: 'reserved',
+      ...(identity.isAdmissionFallback ? { isAdmissionFallback: true } : {}),
     };
     this.reservations.set(reservationId, state);
     return { ...state };
@@ -326,7 +345,7 @@ export class LiveSessionTitles {
           `Live title reservation conflicts with a durable assignment: ${state.title}`,
         );
       }
-      this.publish(reservation.sessionPath, reservation.sessionId, reservation.title);
+      this.publish(reservation.sessionPath, reservation.sessionId, reservation.title, reservation.isAdmissionFallback);
       state.state = 'assigned';
     }
   }
@@ -375,6 +394,7 @@ export class LiveSessionTitles {
         sessionPath: entry.sessionPath,
         sessionId: entry.sessionId,
         trimmedTitle,
+        isAdmissionFallback: entry.isAdmissionFallback,
         sortKey: {
           validTimestamp: validTimestamp ? 0 : 1,
           timestamp: validTimestamp ? timestamp : 0,
@@ -400,7 +420,7 @@ export class LiveSessionTitles {
     for (const entry of pending) {
       const holder = this.published.get(entry.trimmedTitle);
       if (!holder || holder.sessionPath === entry.sessionPath) {
-        this.publish(entry.sessionPath, entry.sessionId, entry.trimmedTitle);
+        this.publish(entry.sessionPath, entry.sessionId, entry.trimmedTitle, entry.isAdmissionFallback);
         continue;
       }
       const occupied = new Map<string, unknown>();
@@ -416,10 +436,22 @@ export class LiveSessionTitles {
         reservationId: crypto.randomUUID(), baseTitle: entry.trimmedTitle,
         title: finalTitle, sessionPath: entry.sessionPath, sessionId: entry.sessionId,
         state: 'reserved',
+        ...(entry.isAdmissionFallback ? { isAdmissionFallback: true } : {}),
       };
       this.reservations.set(reservation.reservationId, reservation);
       try {
-        await persist(entry.sessionPath, finalTitle, entry.trimmedTitle);
+        await persist(entry.sessionPath, finalTitle, entry.trimmedTitle, reservation.isAdmissionFallback);
+        this.confirm(reservation);
+      } catch (error) {
+        this.release(reservation);
+        throw error;
+      }
+    }
+    for (const entry of [...entries].sort((a, b) => a.sessionId.localeCompare(b.sessionId))) {
+      if (entry.title?.trim() || this.assignedByPath.has(entry.sessionPath)) continue;
+      const reservation = this.reserve('New Session', { ...entry, isAdmissionFallback: true });
+      try {
+        await persist(entry.sessionPath, reservation.title, undefined, true);
         this.confirm(reservation);
       } catch (error) {
         this.release(reservation);
@@ -463,6 +495,10 @@ export class LiveSessionTitles {
     return this.assignedByPath.get(sessionPath)?.title;
   }
 
+  isAdmissionFallback(sessionPath: string): boolean {
+    return this.assignedByPath.get(sessionPath)?.isAdmissionFallback === true;
+  }
+
   /** Compact deterministic snapshot of every live assigned/reserved title. */
   list(): readonly LiveSessionTitleRecord[] {
     const records: LiveSessionTitleRecord[] = [];
@@ -494,13 +530,16 @@ export class LiveSessionTitles {
 
   /** Publish an assigned title. Never call before the name is durably
    * persisted on its owner (reconcile entries are durable already). */
-  private publish(sessionPath: string, sessionId: string, title: string): void {
-    // A repeatable reconciliation that re-assigns a path frees its previous
-    // published name so no historical alias is retained.
+  private publish(sessionPath: string, sessionId: string, title: string, isAdmissionFallback?: boolean): void {
+    // A replacement frees its old reservation as well as its published name;
+    // neither is a historical alias after generation replaces a fallback.
+    for (const [id, reservation] of this.reservations) {
+      if (reservation.sessionPath === sessionPath && reservation.state === 'assigned') this.reservations.delete(id);
+    }
     const previous = this.assignedByPath.get(sessionPath);
     if (previous && previous.title !== title) this.published.delete(previous.title);
     this.published.set(title, { sessionPath, sessionId });
-    this.assignedByPath.set(sessionPath, { sessionId, title });
+    this.assignedByPath.set(sessionPath, { sessionId, title, ...(isAdmissionFallback ? { isAdmissionFallback: true } : {}) });
   }
 
   private unassign(sessionPath: string, title: string): void {

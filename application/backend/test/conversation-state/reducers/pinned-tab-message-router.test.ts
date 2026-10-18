@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import type { WebviewToHostMessage } from '../../../../lib/protocol/index.js';
 import { setLogLevel } from '../../../../../lib/structured-logging/pie-logger';
+import { createInitialArchState, type ArchState } from '../../../conversation-state/arch-state';
 
 /**
  * Strict protocol-validation cases for the pinned-group message handlers.
@@ -69,11 +70,11 @@ interface Captured {
   commands: { kind: string; cmdKind: string; cmd: Record<string, unknown> }[];
 }
 
-function newRouter(): { router: import('../../../conversation-state/message-router').MessageRouter; capture: () => Captured } {
+function newRouter(state?: ArchState): { router: import('../../../conversation-state/message-router').MessageRouter; capture: () => Captured } {
   const events: unknown[] = [];
   const router = new MessageRouterCtor(
     (event) => events.push(event),
-    () => ({
+    () => state ?? ({
       sessions: { activeSessionPath: null, openTabPaths: ['/a'], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [] },
       composer: { pendingComposerInputsBySession: {} },
     } as never),
@@ -110,6 +111,24 @@ test('empty send dispatches Continue without creating a Send command', async () 
   assert.equal(commands.length, 1);
   assert.equal(commands[0].cmdKind, 'Continue');
   assert.equal(commands[0].cmd.sessionPath, '/a');
+});
+
+test('send to an admission fallback arms naming without a display snippet and retains rollback only for a new attempt', async () => {
+  for (const pending of [false, true]) {
+    const state = createInitialArchState();
+    state.sessions.openTabPaths = ['/a'];
+    const summary = { path: '/a', name: 'New Session (2)', cwd: '/ws', modifiedAt: '', messageCount: 0,
+      isPlaceholder: false, isAssignedTitle: true, isAdmissionFallback: true };
+    state.sessions.sessions = [summary];
+    if (pending) state.sessions.titleGenerationBySession['/a'] = { status: 'pending', prompt: 'Earlier prompt', corrId: 'older' };
+    const { router, capture } = newRouter(state);
+    await send(router, { type: 'send', sessionPath: '/a', text: 'Fix login', localId: 'local-title' });
+    const captured = capture();
+    assert.ok(captured.events.some((event) => (event as { kind: string }).kind === 'SessionTitleRearm'));
+    assert.ok(!captured.events.some((event) => (event as { kind: string }).kind === 'SessionNameDerived'));
+    assert.equal(captured.commands[0]?.cmd.previousSummary, pending ? null : summary);
+    assert.equal(summary.name, 'New Session (2)');
+  }
 });
 
 // ─── groupPinnedTab ────────────────────────────────────────────────────────

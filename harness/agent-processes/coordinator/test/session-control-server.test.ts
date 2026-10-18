@@ -19,6 +19,7 @@ import {
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 import { resolveSessionIdentity } from '../../../session-storage/ownership/session-identity.js';
 import { readAgentCreatedSessionCreator } from '../../../session-storage/metadata/session-provenance.js';
+import { appendAdmissionFallbackMarker, getAdmissionFallbackTitle } from '../../../session-storage/metadata/session-title.js';
 import { ColdSessionLeaseAuthority, ColdSessionStore } from '../../../session-storage/lifecycle/cold-session-store.js';
 import { parseWorkerToCoordinatorFrame, WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
 import { serializeRuntimeCommandError } from '../../workers/worker-entry.js';
@@ -211,6 +212,38 @@ async function writeSessionFile(dir: string, name: string, title?: string): Prom
   ];
   await fs.writeFile(filePath, `${lines.join('\n')}\n`);
   return filePath;
+}
+
+/** Test owning writer: durable entry-bound markers, with the same replacement
+ * guards as the hot/cold owners. Production store durability is covered by its
+ * SDK-backed fixtures; these coordinator cases exercise reserve/confirm flow. */
+function installTitleWriter(server: FakeServer) {
+  const writes: Array<{ sessionPath: string; title: string; options?: { isAdmissionFallback?: boolean; replaceAdmissionFallback?: boolean } }> = [];
+  const internal = server as unknown as {
+    persistAssignedSessionTitle(path: string, title: string, id: string, expected?: string,
+      options?: { isAdmissionFallback?: boolean; replaceAdmissionFallback?: boolean }): Promise<void>;
+    emitSessionListChanged(): Promise<void>;
+  };
+  internal.emitSessionListChanged = async () => undefined;
+  internal.persistAssignedSessionTitle = async (sessionPath, title, _id, expected, options) => {
+    const entries = (await fs.readFile(sessionPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    const current = entries.findLast((entry) => entry.type === 'session_info')?.name;
+    if (options?.replaceAdmissionFallback
+      ? getAdmissionFallbackTitle({ getEntries: () => entries }) !== expected
+      : expected !== undefined ? current !== expected : Boolean(current)) {
+      throw new BackendError('SESSION_OWNERSHIP_CONFLICT', 'Intervening manual name');
+    }
+    const row = { type: 'session_info', id: randomUUID(), name: title };
+    entries.push(row);
+    const appended: unknown[] = [row];
+    if (options?.isAdmissionFallback) appendAdmissionFallbackMarker({
+      getEntries: () => entries,
+      appendCustomEntry: (customType, data) => appended.push({ type: 'custom', customType, data }),
+    });
+    await fs.appendFile(sessionPath, `${appended.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+    writes.push({ sessionPath, title, options });
+  };
+  return writes;
 }
 
 /** Await the initial fail-closed hydration triggered by the first snapshot. */
@@ -520,6 +553,113 @@ test('a reopened collision is persisted before its title enters live admission',
   await admission;
   assert.equal(internal.liveSessionTitles.assigned(reopened), 'Review (2)');
   assert.match(await fs.readFile(reopened, 'utf8'), /Review \(2\)/);
+});
+
+test('restored untitled live titles survive a new coordinator and normal generation replaces only marked fallbacks', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'admission-title-restore-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const paths = [await writeSessionFile(dir, 'a.jsonl'), await writeSessionFile(dir, 'b.jsonl')];
+  const first = serverForTests();
+  const firstWrites = installTitleWriter(first);
+  const members = paths.map((path) => membershipEntry(path));
+  applyMembership(first, membership(members));
+  await hydrate(first);
+  assert.equal(firstWrites.length, 2);
+  const second = serverForTests();
+  const writes = installTitleWriter(second);
+  applyMembership(second, membership(members));
+  await hydrate(second);
+  const internal = second as unknown as {
+    liveSessionTitles: { assigned(path: string): string | undefined; isAdmissionFallback(path: string): boolean; resolve(title: string): unknown };
+    finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string): Promise<unknown>;
+  };
+  assert.equal(writes.length, 0, 'durable admission titles are not reassigned on restart');
+  assert.equal(internal.liveSessionTitles.assigned(paths[0]), 'New Session');
+  assert.equal(internal.liveSessionTitles.assigned(paths[1]), 'New Session (2)');
+  assert.equal(internal.liveSessionTitles.isAdmissionFallback(paths[0]), true);
+  assert.deepEqual(await internal.finalizeGeneratedLiveSessionTitle(paths[0], 'Fix login',
+    { generated: true, name: 'Fix Login' }, 'generated'), { generated: true, name: 'Fix Login' });
+  assert.equal(writes[0].options?.replaceAdmissionFallback, true);
+  assert.equal(internal.liveSessionTitles.resolve('New Session'), undefined, 'the fallback is not a historical alias');
+  assert.equal(internal.liveSessionTitles.isAdmissionFallback(paths[0]), false);
+  const rows = (await fs.readFile(paths[0], 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(getAdmissionFallbackTitle({ getEntries: () => rows }), undefined);
+  assert.deepEqual(await internal.finalizeGeneratedLiveSessionTitle(paths[0], 'Another prompt',
+    { generated: true, name: 'Do Not Replace' }, 'second'), { generated: false, reason: 'explicit-name' });
+  assert.equal(writes.length, 1);
+});
+
+test('generation joins an in-flight admission write before replacing its fallback', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'admission-title-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const writes = installTitleWriter(server);
+  const internal = server as unknown as {
+    persistAssignedSessionTitle(path: string, title: string, id: string, expected?: string, options?: object): Promise<void>;
+    finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string): Promise<unknown>;
+    liveSessionTitles: { assigned(path: string): string | undefined };
+    titleAdmission?: Promise<void>;
+  };
+  const original = internal.persistAssignedSessionTitle.bind(server);
+  let release!: () => void;
+  let dispatch!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { dispatch = resolve; });
+  internal.persistAssignedSessionTitle = async (...args) => {
+    if (args[2] === 'live-title-open') { dispatch(); await blocked; }
+    await original(...args);
+  };
+  const target = await writeSessionFile(dir, 'racing.jsonl');
+  applyMembership(server, membership([membershipEntry(currentPath), membershipEntry(idlePath), membershipEntry(target)]));
+  await started;
+  const generated = internal.finalizeGeneratedLiveSessionTitle(target, 'Fix login', { generated: true, name: 'Fix Login' }, 'racing');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(writes.length, 0);
+  release();
+  assert.deepEqual(await generated, { generated: true, name: 'Fix Login' });
+  await internal.titleAdmission;
+  assert.equal(writes.length, 2);
+  assert.equal(internal.liveSessionTitles.assigned(target), 'Fix Login');
+});
+
+test('generation failure replaces admission fallback with a stable final prompt title', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'admission-title-failure-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const sessionPath = await writeSessionFile(dir, 'a.jsonl');
+  const server = serverForTests();
+  const writes = installTitleWriter(server);
+  applyMembership(server, membership([membershipEntry(sessionPath)]));
+  await hydrate(server);
+  const internal = server as unknown as {
+    liveSessionTitles: { isAdmissionFallback(path: string): boolean; assigned(path: string): string | undefined };
+    finalizeGeneratedLiveSessionTitle(path: string, prompt: string, generation: object, id: string): Promise<unknown>;
+  };
+  assert.deepEqual(await internal.finalizeGeneratedLiveSessionTitle(sessionPath, 'Investigate login',
+    { generated: false, reason: 'timeout' }, 'failed'), { generated: true, reason: 'timeout', name: 'Investigate login' });
+  assert.equal(internal.liveSessionTitles.isAdmissionFallback(sessionPath), false);
+  assert.equal(internal.liveSessionTitles.assigned(sessionPath), 'Investigate login');
+  await internal.finalizeGeneratedLiveSessionTitle(sessionPath, 'Later prompt', { generated: true, name: 'Later' }, 'later');
+  assert.equal(writes.length, 2, 'successful failure-fallback assignment is stable');
+});
+
+test('cold generation replacement rechecks the exact admission marker against a same-text manual rename', async () => {
+  const server = serverForTests();
+  const entries: unknown[] = [
+    { type: 'session_info', id: 'admission', name: 'New Session' },
+    { type: 'custom', customType: 'pie.session-title-admission-fallback', data: { version: 1, titleEntryId: 'admission', name: 'New Session' } },
+    { type: 'session_info', id: 'manual', name: 'New Session' },
+  ];
+  const internal = server as unknown as {
+    sdk: unknown;
+    runColdSessionMutation(path: string, run: () => Promise<void>): Promise<void>;
+    initializeColdSessionStore(): unknown;
+    persistAssignedColdSessionTitle(path: string, title: string, expected: string, options: object): Promise<void>;
+  };
+  internal.sdk = { SessionManager: { open: () => ({ getSessionName: () => 'New Session', getEntries: () => entries }) } };
+  internal.runColdSessionMutation = async (_path, run) => run();
+  internal.initializeColdSessionStore = () => ({ setSessionTitle: () => assert.fail('manual name must not be overwritten') });
+  await assert.rejects(internal.persistAssignedColdSessionTitle('/s', 'Generated', 'New Session', { replaceAdmissionFallback: true }),
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_OWNERSHIP_CONFLICT');
 });
 
 test('a fallback name is returned as a published assignment even when model generation failed', async () => {
@@ -1608,6 +1748,14 @@ test('replyTo resolves an unnamed pending-title live identity but rejects closin
   assert.ok(pendingKey, 'the live target is awaiting title admission');
   assert.equal(internal.liveSessionTitles.assigned(pendingPath), undefined);
 
+  const resolveTarget = (server as unknown as {
+    resolveSessionControlTarget(action: string, payload: Record<string, unknown>, sourcePath: string): { sessionPath: string };
+  }).resolveSessionControlTarget.bind(server);
+  for (const action of ['read', 'message', 'settings.get', 'settings.set', 'close']) {
+    assert.equal(resolveTarget(action, { self: true }, pendingPath).sessionPath, pendingPath,
+      `${action} admits an unnamed caller independently of title admission`);
+  }
+
   const replyReference = createSessionControlSender(resolveSessionIdentity(pendingPath), 'Unnamed plan').replyReference;
   const resolveReply = (server as unknown as {
     resolveSessionControlReplyTarget(payload: Record<string, unknown>, sourcePath: string): unknown;
@@ -1616,7 +1764,10 @@ test('replyTo resolves an unnamed pending-title live identity but rejects closin
   assert.equal(resolved.status, 'live');
   assert.equal(resolved.sessionPath, pendingPath, 'stable identity resolves despite pending title admission');
 
-  applyMembership(server, membership([...baseMembers, membershipEntry(pendingPath)], [closeFrameEntry(pendingPath)]));
+  applyMembership(server, membership(baseMembers, [closeFrameEntry(pendingPath)]));
+  assert.throws(() => resolveTarget('read', { self: true }, pendingPath),
+    (error: { code?: string }) => error.code === 'SESSION_CLOSING',
+    'self targeting still respects closing membership');
   assert.throws(() => resolveReply({ replyTo: replyReference }, currentPath),
     (error: { code?: string }) => error.code === 'SESSION_NOT_FOUND',
     'host closing membership remains non-addressable');
@@ -2474,12 +2625,13 @@ test('an accepted self-close keeps its closing fence until the terminal acknowle
   assert.equal(bridge.closingSessionRequests.size, 0);
 });
 
-test('list exposes assigned titles from the unique authority and never provisional names', async () => {
+test('list exposes durable admission titles rather than provisional labels', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-badges-'));
   const currentPath = await writeSessionFile(dir, 'current.jsonl', 'Current plan');
-  // idle.jsonl has a provisional name only: it is never an address.
+  // idle.jsonl starts untitled and must become addressable on admission.
   const idlePath = await writeSessionFile(dir, 'idle.jsonl');
   const server = serverForTests();
+  const writes = installTitleWriter(server);
   applyMembership(server, membership([membershipEntry(currentPath), membershipEntry(idlePath)]));
   await hydrate(server);
   const listed = await server.handleWorkerSessionControl(frame('list'), currentPath);
@@ -2489,5 +2641,12 @@ test('list exposes assigned titles from the unique authority and never provision
   const idleRow = rows.find((row) => row.path === idlePath);
   assert.equal(currentRow?.title, 'Current plan');
   assert.ok(currentRow?.name, 'the provisional label stays visible');
-  assert.ok(idleRow && !('title' in idleRow));
+  assert.equal(idleRow?.title, 'New Session');
+  assert.equal(writes.length, 1);
+  const resolveTarget = (server as unknown as {
+    resolveSessionControlTarget(action: string, payload: Record<string, unknown>, sourcePath: string): { sessionPath: string };
+  }).resolveSessionControlTarget.bind(server);
+  for (const action of ['read', 'message', 'settings.get', 'settings.set', 'close']) {
+    assert.equal(resolveTarget(action, { title: 'New Session' }, currentPath).sessionPath, idlePath);
+  }
 });

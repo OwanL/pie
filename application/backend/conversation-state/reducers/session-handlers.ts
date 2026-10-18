@@ -716,6 +716,27 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
   return { state: nextState, effects: [] };
 }
 
+/** Re-arm automatic naming for a session whose durable title is a still-
+ *  replaceable admission fallback. This mirrors the unnamed-session arming at
+ *  the first committed user/assistant start, but never replaces the durable
+ *  fallback display name with a prompt snippet; normal generation failure
+ *  fallbacks and manual titles remain protected and never re-arm. */
+export function handleSessionTitleRearm(state: ArchState, event: Extract<Event, { kind: 'SessionTitleRearm' }>): ReducerResult {
+  const nextState = produce(state, (draft) => {
+    const summary = draft.sessions.sessions.find((session) => session.path === event.sessionPath);
+    // The fence is durable state, not the host summary alone: a stale rearm
+    // must not arm generation after the fallback title became explicit.
+    if (summary?.isAdmissionFallback !== true) return;
+    if (!draft.sessions.titleGenerationBySession[event.sessionPath]) {
+      draft.sessions.titleGenerationBySession[event.sessionPath] = {
+        status: 'armed',
+        prompt: event.sourcePrompt,
+      };
+    }
+  });
+  return { state: nextState, effects: [] };
+}
+
 export function canAcceptAgentSettlement(state: ArchState, event: Extract<Event, { kind: 'AgentSettled' }>): boolean {
   if (event.backendGeneration !== undefined
     && event.currentBackendGeneration !== undefined

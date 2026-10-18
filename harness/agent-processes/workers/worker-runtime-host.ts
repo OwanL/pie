@@ -20,6 +20,7 @@ import {
   AUTONOMOUS_MODE_BY_SESSION_ENV,
 } from '../lib/rpc/settings.js';
 import { HISTORY_COMPACTION_ENV } from '../../session-storage/settings/history-compaction.js';
+import { appendAdmissionFallbackMarker, getAdmissionFallbackTitle } from '../../session-storage/metadata/session-title.js';
 import type { DetailResult, LazyDetailRef, ChatMessage } from '../lib/rpc/message-contract.js';
 import type { ModelInfo, ModelSettings } from '../../model-providers/catalog/model-contract.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
@@ -504,9 +505,15 @@ export class WorkerRuntimeHost {
         if (recorded.length > 16 * 1024) throw new Error('The assigned session title is unbounded.');
         const context = this.context!;
         // Reconciliation may replace exactly the durable colliding title
-        // observed at hydration, but never an intervening manual rename.
+        // observed at hydration, but never an intervening manual rename. A
+        // replacement targeting an approved admission fallback must instead
+        // still see the coordinator's reserved title durably marked as that
+        // fallback; a manual rename (fresh `session_info`) unmarks it and skips.
         const expected = typeof params.replaceExpectedTitle === 'string'
           ? params.replaceExpectedTitle : undefined;
+        const isAdmissionFallback = params.isAdmissionFallback === true;
+        const replaceAdmissionFallback = params.replaceAdmissionFallback === true;
+        const manager = context.session.sessionManager;
         const sessionId = context.session.sessionManager.getSessionId?.();
         // The pinned SDK's session adapter installs a durable name setter
         // (`pi.setSessionName`), which Pie's `SdkSession` type does not declare;
@@ -517,14 +524,34 @@ export class WorkerRuntimeHost {
         const assigned = async () => {
           // Check inside the serialized lifecycle write, not before waiting for it.
           const currentName = context.session.sessionManager.getSessionName?.();
+          const currentFallback = typeof manager.getEntries === 'function'
+            ? getAdmissionFallbackTitle(manager)
+            : undefined;
           if (this.disposed || this.context !== context
-            || (expected !== undefined ? currentName?.trim() !== expected : Boolean(currentName?.trim()))) {
+            || (replaceAdmissionFallback
+              // The exact marker-bound fallback must still match what the
+              // coordinator reserved for a generation replacement to proceed.
+              ? (expected === undefined || currentFallback !== expected)
+              : expected !== undefined
+                ? currentName?.trim() !== expected
+                : Boolean(currentName?.trim()))) {
             return asWorkerJson({ assigned: false, changed: false, skipped: 'explicit-name' as const });
+          }
+          if (isAdmissionFallback && typeof manager.appendCustomEntry !== 'function') {
+            throw new Error('This Pi session runtime does not support admission fallback markers.');
           }
           if (typeof setNameCapable.setSessionName !== 'function') {
             throw new Error('This Pi session runtime does not support durable session titles.');
           }
+          // Appending the title as a fresh `session_info` entry also invalidates
+          // any stale admission-fallback marker, even for the same text.
           setNameCapable.setSessionName(recorded);
+          // The marker binds to the exact latest `session_info` id/name; append
+          // it inside this same serialized write and before the acknowledgement
+          // so publication never exposes an unmarked admission fallback.
+          if (isAdmissionFallback) {
+            appendAdmissionFallbackMarker(manager);
+          }
           return asWorkerJson({ assigned: true, changed: true, title: recorded });
         };
         return this.lifecycleBarrier && typeof sessionId === 'string' && sessionId
