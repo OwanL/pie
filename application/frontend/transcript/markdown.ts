@@ -118,10 +118,6 @@ const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX, {
   weight: (text, html) => 2 * (text.length + html.length),
 });
 
-/** Cache bounds, exported so tests can drive the eviction boundary exactly. */
-export const MARKDOWN_CACHE_MAX_ENTRIES = MARKDOWN_CACHE_MAX;
-export const MARKDOWN_CACHE_MAX_BYTES = MARKDOWN_CACHE_MAX_WEIGHT;
-
 const ORDINARY_PROSE_FILE_TOKEN = /(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])?[A-Za-z0-9_.~@%+-]+(?::[A-Za-z0-9_.-]+)?(?:[\\/][A-Za-z0-9_.~@%+-]+)*/g;
 const PROTECTED_PROSE_TAGS = new Set(['a', 'code', 'pre', 'script', 'style', 'textarea', 'title']);
 const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);

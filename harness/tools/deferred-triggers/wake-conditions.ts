@@ -168,14 +168,6 @@ export function validateWakeConditions(
   return { specs };
 }
 
-/** Compatibility-oriented name for callers that describe the values as specs. */
-export function validateTriggerSpecs(
-  raw: unknown,
-  options: WakeConditionValidationOptions = {},
-): WakeConditionValidation {
-  return validateWakeConditions(raw, options);
-}
-
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number'
     && Number.isSafeInteger(value)

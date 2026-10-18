@@ -8,7 +8,6 @@
  */
 
 export const ANALYTICS_SCHEMA_VERSION = 1 as const;
-export const ANALYTICS_GENERATION_VERSION = 1 as const;
 
 /** JSON-safe integer input. BigInt is accepted by pure helpers before a value
  * is put on the wire; values outside the safe JS range are serialized as
@@ -697,8 +696,6 @@ export function deriveAnalyticsIdempotencyKey(
   ]);
 }
 
-export const analyticsIdempotencyKey = deriveAnalyticsIdempotencyKey;
-
 export function validateAnalyticsObservation(value: unknown): ObservationValidationIssue[] {
   const issues: ObservationValidationIssue[] = [];
   if (!isRecord(value)) {
@@ -823,21 +820,4 @@ export function acceptAnalyticsObservation<Fields extends object>(
     return { status: 'duplicate', registryKey, fingerprint, state };
   }
   return { status: 'conflict', registryKey, fingerprint, state };
-}
-
-/** Throws only for a conflict; exact redelivery remains a no-op. */
-export function assertAnalyticsObservationCompatible<Fields extends object>(
-  state: AnalyticsObservationRegistry,
-  observation: AnalyticsObservation<Fields>,
-): ObservationAcceptance {
-  const result = acceptAnalyticsObservation(state, observation);
-  if (result.status === 'invalid') throw new AnalyticsValidationError(result.issues ?? []);
-  if (result.status === 'conflict') {
-    throw new AnalyticsSourceConflictError(
-      result.registryKey!,
-      state[result.registryKey!]!,
-      result.fingerprint!,
-    );
-  }
-  return result;
 }

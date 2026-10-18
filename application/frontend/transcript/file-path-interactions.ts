@@ -26,12 +26,6 @@ export function filePathReferenceFromTarget(target: EventTarget | null): string 
   return value || null;
 }
 
-/** Resolve a rendered path target using the session's active working directory. */
-export function resolvedFilePathFromTarget(target: EventTarget | null, workingDirectory: string | null): string | null {
-  const reference = filePathReferenceFromTarget(target);
-  return reference ? resolveLocalFilePath(reference, workingDirectory) : null;
-}
-
 export function filePathOpenRequestFromTarget(
   target: EventTarget | null,
   workingDirectory: string | null,

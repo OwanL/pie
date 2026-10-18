@@ -637,15 +637,6 @@ export function resolvePackageEntry(id) {
 }
 
 /**
- * Repo-relative cwd for a package's test run (null = repo root).
- * @param {PackageEntry} entry
- * @returns {string | null}
- */
-export function packageTestCwd(entry) {
-  return entry.testCwd ?? null;
-}
-
-/**
  * Repo-relative source roots routed to a package's verification id, in
  * classification-precedence order: install-owner dir, live owned dirs, retired
  * historical dirs, then explicitly declared (planned or distributed) roots.

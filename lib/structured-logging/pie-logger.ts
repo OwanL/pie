@@ -117,11 +117,6 @@ export function setRuntimeAuditLogEnabled(enabled: boolean): void {
   runtimeAuditLogEnabled = enabled;
 }
 
-/** Whether runtime audit logging is currently active. */
-export function isRuntimeAuditLogEnabled(): boolean {
-  return runtimeAuditLogEnabled;
-}
-
 function isAuditEnabled(): boolean {
   return devMode || runtimeAuditLogEnabled;
 }

@@ -85,15 +85,6 @@ interface DetailStoreContext {
 const EMPTY_CONTEXT: DetailStoreContext = { hostInstanceId: '', viewGeneration: 0, rendererId: '', rendererGeneration: 0 };
 let context: DetailStoreContext = { ...EMPTY_CONTEXT };
 
-export function getDetailStoreContext(): { hostInstanceId: string; viewGeneration: number; rendererId: string; rendererGeneration: number } {
-  return {
-    hostInstanceId: context.hostInstanceId,
-    viewGeneration: context.viewGeneration,
-    rendererId: context.rendererId,
-    rendererGeneration: context.rendererGeneration,
-  };
-}
-
 export function setDetailStoreContext(
   next: {
     hostInstanceId: string;

@@ -7,7 +7,6 @@
  */
 
 import {
-  canonicalInt64,
   parseInt64,
   type AnalyticsUsageChannels,
   type Int64Value,
@@ -103,9 +102,6 @@ export function summarizeUsageChannel(
   const distinct = distinctInvocationUsage(records);
   return summarizeInt64(distinct.map((record) => record.usage[channel]));
 }
-
-/** Compatibility name used by query adapters that call the operation a metric. */
-export const aggregateUsageChannel = summarizeUsageChannel;
 
 export interface EffectiveCostMetric extends CoverageMetric {
   reportedCount: number;
@@ -362,17 +358,4 @@ export function summarizeAccountingScope(
     if (!distinct.has(identity)) distinct.set(identity, record);
   }
   return summarizeEffectiveCost([...distinct.values()]);
-}
-
-/** Exported for parity tests and query adapters that need the exact identity set. */
-export function distinctAccountingInvocationIds(records: readonly AccountingInvocation[]): string[] {
-  return [...new Set(records.map((record) => record.invocationId))];
-}
-
-/** Stable source identity for a usage row when a query adapter needs to expose
- * it in a diagnostic result. */
-export function usageIdentity(record: InvocationUsageRecord): string {
-  return canonicalInt64(record.settledAtMs ?? 0n) === '0'
-    ? record.invocationId
-    : `${record.invocationId}@${canonicalInt64(record.settledAtMs!)}`;
 }

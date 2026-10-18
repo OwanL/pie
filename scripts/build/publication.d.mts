@@ -2,7 +2,6 @@ export const PUBLISHED_GENERATIONS_DIR: string;
 export const PUBLISHED_SELECTIONS_DIR: string;
 export const RETAINED_RENDERER_GENERATIONS: number;
 
-export function writeFileIfChanged(filePath: string, contents: string): Promise<boolean>;
 
 export interface NodeBundleStatus {
   builtFiles: string[];

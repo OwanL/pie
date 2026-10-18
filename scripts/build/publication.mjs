@@ -75,17 +75,6 @@ function manifestMatches(workspacePkg, installedPkg) {
     && installedPkg.version === workspacePkg.version;
 }
 
-export async function writeFileIfChanged(filePath, contents) {
-  try {
-    const existing = await readFile(filePath, 'utf8');
-    if (existing === contents) return false;
-  } catch (error) {
-    if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
-  }
-  await writeFile(filePath, contents);
-  return true;
-}
-
 async function listTopLevelNodeBundles(directory) {
   try {
     const entries = await readdir(directory, { withFileTypes: true });

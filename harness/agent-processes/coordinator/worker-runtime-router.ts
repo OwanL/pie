@@ -18,7 +18,7 @@ import type {
   HostToCoordinatorDetailMessage,
   LiveSubagentDetailAddress,
 } from '../lib/rpc/subagent-detail.js';
-import type { ColdSessionStore, SerializedColdSessionPromotionGrant } from '../../session-storage/lifecycle/cold-session-store';
+import type { ColdSessionStore } from '../../session-storage/lifecycle/cold-session-store';
 import {
   CoordinatorProviderNetworkLeaseAuthority,
   type CoordinatorProviderNetworkLease,
@@ -3306,11 +3306,4 @@ function truncateUtf8Field(value: unknown, fallback: string, maxBytes: number): 
     bytes += partBytes;
   }
   return parts.join('') || fallback;
-}
-
-export function assertPromotionGrantConsumedOnce(
-  store: ColdSessionStore,
-  grant: SerializedColdSessionPromotionGrant,
-): void {
-  store.consumePromotionGrant(grant);
 }

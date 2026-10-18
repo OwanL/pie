@@ -77,7 +77,6 @@ export function setAllToolsOverride(value: (() => ToolInfo[]) | null): void { st
 export function setGetActiveToolsOverride(value: (() => string[]) | null): void { state.getActiveToolsOverride = value; }
 export function setSetActiveToolsOverride(value: ((names: string[]) => void) | null): void { state.setActiveToolsOverride = value; }
 export function setCompleteFnOverride(value: CompleteSimpleFn | null | false): void { state.completeFnOverride = value; }
-export function set_piCompleteSimple(value: typeof state._piCompleteSimple): void { state._piCompleteSimple = value; }
 
 export function recordHiddenSkills(sessionId: string, skills: readonly Skill[]): void {
 	if (skills.length === 0) state.hiddenSkills.delete(sessionId);

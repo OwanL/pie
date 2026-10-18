@@ -189,12 +189,6 @@ export function buildSessionOpenedLiveSnapshot(
   }
 }
 
-export function buildSessionOpenedLiveCheckpoint(
-  context: Pick<SessionContext, 'activeRequest'>,
-): LiveTurnCheckpoint | undefined {
-  return buildSessionOpenedLiveSnapshot(context).checkpoint;
-}
-
 export function stripActiveAssistantTail(
   transcript: SessionOpenedPayload['transcript'],
 ): SessionOpenedPayload['transcript'] {

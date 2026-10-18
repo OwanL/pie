@@ -3,7 +3,7 @@ import { ASK_USER_TOOL_NAME } from '../../tools/catalog/tool-names.js';
 import { SUBAGENT_TOOL_NAME } from '../../model-providers/retry-and-failover/subagent-provider-policy.js';
 import { contextFilePathKey, prepareContextFiles } from './context-files';
 import type { ActiveModelInfo } from '../../model-providers/catalog/model-catalog';
-import type { SdkBuildSystemPromptOptions, SdkContextFile, SdkSkill, SdkToolInfo } from '../../agent-processes/lib/sdk-integration/sdk';
+import type { SdkBuildSystemPromptOptions, SdkSkill, SdkToolInfo } from '../../agent-processes/lib/sdk-integration/sdk';
 
 /** Maximum characters for system prompt and tool description summaries. */
 const SUMMARY_MAX_LENGTH = 80;
@@ -403,14 +403,6 @@ export function markDisabledEntries(
   return entries.map((e) =>
     e.id && disabled.has(e.id) && e.toggleable !== false ? { ...e, disabled: true } : e,
   );
-}
-
-/** Normalize a context file list for the option-filter helpers (exposed for
- *  tests that build options inline). */
-export function normalizeContextFiles(
-  files: readonly SdkContextFile[] | undefined,
-): SdkContextFile[] | undefined {
-  return files ? [...files] : undefined;
 }
 
 export function summarizePrompt(text: string): string {

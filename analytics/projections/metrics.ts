@@ -25,20 +25,6 @@ import {
   type UsageChannel,
 } from '../usage-accounting/metrics.js';
 
-export interface ActivityInterval {
-  startMs: number;
-  endMs?: number | null;
-  clockDomain: string;
-  coverage?: 'observed' | 'estimated' | 'unknown';
-}
-
-export interface DurationMetric {
-  durationMs: number | null;
-  intervalCount: number;
-  coverage: 'complete' | 'partial' | 'unavailable';
-  complete: boolean;
-}
-
 function finiteTime(value: number, fieldName: string): number {
   if (!Number.isFinite(value)) throw new RangeError(`${fieldName} must be finite.`);
   return value;
@@ -76,143 +62,11 @@ export function unionDurationMs(intervals: readonly { startMs: number; endMs: nu
   return total;
 }
 
-/** Combine owner busy intervals and explicitly uncovered preflight work. An
- * active interval is usable only when a reference `nowMs` is supplied. */
-export function summarizeBusyWallTime(
-  ownerIntervals: readonly ActivityInterval[],
-  uncoveredPreflightIntervals: readonly ActivityInterval[] = [],
-  nowMs?: number,
-): DurationMetric {
-  const all = [...ownerIntervals, ...uncoveredPreflightIntervals];
-  if (all.length === 0) return { durationMs: 0, intervalCount: 0, coverage: 'complete', complete: true };
-  const resolvedByClockDomain = new Map<string, { startMs: number; endMs: number }[]>();
-  let partial = false;
-  for (const interval of all) {
-    let end = interval.endMs ?? null;
-    if (end === null) {
-      if (nowMs === undefined) {
-        partial = true;
-        continue;
-      }
-      end = nowMs;
-      partial = true;
-    }
-    if (interval.coverage === 'unknown' || interval.coverage === 'estimated') partial = true;
-    const domainIntervals = resolvedByClockDomain.get(interval.clockDomain) ?? [];
-    domainIntervals.push({ startMs: interval.startMs, endMs: end });
-    resolvedByClockDomain.set(interval.clockDomain, domainIntervals);
-  }
-  if (resolvedByClockDomain.size > 1) partial = true;
-  const resolved = [...resolvedByClockDomain.values()];
-  if (resolved.length === 0) return {
-    durationMs: null,
-    intervalCount: all.length,
-    coverage: 'unavailable',
-    complete: false,
-  };
-  return {
-    // Domains without a correlation anchor cannot be unioned precisely; keep
-    // each domain's measured union and qualify the combined display value.
-    durationMs: resolved.reduce((total, intervals) => total + unionDurationMs(intervals), 0),
-    intervalCount: all.length,
-    coverage: partial ? 'partial' : 'complete',
-    complete: !partial,
-  };
-}
-
-export interface AdditiveDurationMetric {
-  durationMs: number;
-  knownCount: number;
-  unknownCount: number;
-  complete: boolean;
-}
-
-/** Sum independent session-work or tool/child-attempt durations. Unlike busy
- * wall time this intentionally remains additive for parallel work. */
-export function summarizeAdditiveDurations(
-  durationsMs: readonly (number | null | undefined)[],
-): AdditiveDurationMetric {
-  let durationMs = 0;
-  let knownCount = 0;
-  for (const [index, duration] of durationsMs.entries()) {
-    if (duration === undefined || duration === null) continue;
-    if (!Number.isFinite(duration) || duration < 0) throw new RangeError(`durationsMs[${index}] must be finite and non-negative.`);
-    durationMs += duration;
-    knownCount += 1;
-  }
-  return {
-    durationMs,
-    knownCount,
-    unknownCount: durationsMs.length - knownCount,
-    complete: knownCount === durationsMs.length,
-  };
-}
-
-export const summarizeAggregateWorkingTime = summarizeAdditiveDurations;
-export const summarizeToolChildWork = summarizeAdditiveDurations;
-
-export interface MeasuredWorkSample {
-  durationMs?: number | null;
-  coverage: 'measured' | 'estimated' | 'unknown';
-}
-
-export interface MeasuredWorkMetric extends AdditiveDurationMetric {
-  excludedEstimatedCount: number;
-}
-
-export function summarizeMeasuredWork(samples: readonly MeasuredWorkSample[]): MeasuredWorkMetric {
-  const measured = samples.map((sample) => sample.coverage === 'measured' ? sample.durationMs : null);
-  const result = summarizeAdditiveDurations(measured);
-  return {
-    ...result,
-    excludedEstimatedCount: samples.filter((sample) => sample.coverage !== 'measured').length,
-  };
-}
-
 export interface SettledThroughputSample {
   settled: boolean;
   outputTokens?: Int64Value | null;
   durationMs?: number | null;
   durationSource?: 'measured' | 'estimated' | 'unknown';
-}
-
-export interface LiveGenerationRateSample {
-  outputTokens?: Int64Value | null;
-  generationMs?: number | null;
-}
-
-export interface LiveGenerationRateMetric {
-  tokensPerSecond: number | null;
-  outputTokens: MetricInt64;
-  generationMs: number | null;
-  estimated: true;
-  complete: boolean;
-}
-
-/** Bounded live estimates remain separate from settled provider usage. The
- * token-rate owner supplies already-windowed samples; this helper never stores
- * display ticks. */
-export function summarizeLiveGenerationRate(
-  samples: readonly LiveGenerationRateSample[],
-): LiveGenerationRateMetric {
-  let output = 0n;
-  let duration = 0;
-  let known = 0;
-  for (const [index, sample] of samples.entries()) {
-    const tokens = optionalInt64(sample.outputTokens, `samples[${index}].outputTokens`);
-    if (tokens === null || sample.generationMs === undefined || sample.generationMs === null
-      || !Number.isFinite(sample.generationMs) || sample.generationMs <= 0) continue;
-    output += tokens;
-    duration += sample.generationMs;
-    known += 1;
-  }
-  return {
-    tokensPerSecond: known === 0 ? null : Number(output) / (duration / 1000),
-    outputTokens: metricInt64(output),
-    generationMs: known === 0 ? null : duration,
-    estimated: true,
-    complete: known === samples.length && known > 0,
-  };
 }
 
 export interface ThroughputMetric {
@@ -455,7 +309,6 @@ export interface LocalUsageCostBucket {
 
 function summarizeLocalUsageCostBuckets(
   records: readonly InvocationUsageRecord[],
-  timeZone: string,
   keyFor: (record: InvocationUsageRecord) => string,
 ): { buckets: ReadonlyMap<string, LocalUsageCostBucket>; undated: LocalUsageCostBucket; unknownSettlementCount: number } {
   const groups = new Map<string, InvocationUsageRecord[]>();
@@ -485,38 +338,22 @@ function summarizeLocalUsageCostBuckets(
   };
 }
 
-/** Daily/weekly query projections keep explicit settlement time and all
- * optional usage-channel coverage. Dimensioned adapters can append provider,
- * model, purpose and scopeKey to the returned bucket key. */
+/** Daily/weekly projections retain settlement time and optional channel coverage. */
 export function summarizeDailyUsageAndCost(
   records: readonly InvocationUsageRecord[],
   timeZone: string,
 ): { buckets: ReadonlyMap<string, LocalUsageCostBucket>; undated: LocalUsageCostBucket; unknownSettlementCount: number } {
-  return summarizeLocalUsageCostBuckets(records, timeZone, (record) => localCalendarDayKey(record.settledAtMs!, timeZone));
+  return summarizeLocalUsageCostBuckets(records, (record) => localCalendarDayKey(record.settledAtMs!, timeZone));
 }
 
 export function summarizeWeeklyUsageAndCost(
   records: readonly InvocationUsageRecord[],
   timeZone: string,
 ): { buckets: ReadonlyMap<string, LocalUsageCostBucket>; undated: LocalUsageCostBucket; unknownSettlementCount: number } {
-  return summarizeLocalUsageCostBuckets(records, timeZone, (record) => {
+  return summarizeLocalUsageCostBuckets(records, (record) => {
     const days = localCalendarWeekDateKeys(record.settledAtMs!, timeZone);
     return `${days[0]}..${days[6]}`;
   });
-}
-
-export function summarizeDimensionedDailyUsageAndCost(
-  records: readonly InvocationUsageRecord[],
-  timeZone: string,
-): { buckets: ReadonlyMap<string, LocalUsageCostBucket>; undated: LocalUsageCostBucket; unknownSettlementCount: number } {
-  return summarizeLocalUsageCostBuckets(records, timeZone, (record) => {
-    const day = localCalendarDayKey(record.settledAtMs!, timeZone);
-    return `${day}|provider=${record.provider ?? '?'}|model=${record.model ?? '?'}|purpose=${record.purpose ?? '?'}|scope=${record.scopeKey ?? '?'}`;
-  });
-}
-
-function summarizeCostBucket(records: readonly InvocationUsageRecord[]): EffectiveCostMetric {
-  return summarizeEffectiveCost(records);
 }
 
 export function summarizeDailyCost(
@@ -538,34 +375,8 @@ export function summarizeDailyCost(
     groups.set(key, bucket);
   }
   return {
-    buckets: new Map([...groups.entries()].map(([key, value]) => [key, summarizeCostBucket(value)])),
-    undated: summarizeCostBucket(undated),
-    unknownSettlementCount,
-  };
-}
-
-export function summarizeWeeklyCost(
-  records: readonly InvocationUsageRecord[],
-  timeZone: string,
-): LocalCostBucketResult {
-  const groups = new Map<string, InvocationUsageRecord[]>();
-  const undated: InvocationUsageRecord[] = [];
-  let unknownSettlementCount = 0;
-  for (const record of distinctInvocationUsage(records)) {
-    if (record.settledAtMs === undefined || record.settledAtMs === null) {
-      unknownSettlementCount += 1;
-      undated.push(record);
-      continue;
-    }
-    const days = localCalendarWeekDateKeys(record.settledAtMs, timeZone);
-    const key = `${days[0]}..${days[6]}`;
-    const bucket = groups.get(key) ?? [];
-    bucket.push(record);
-    groups.set(key, bucket);
-  }
-  return {
-    buckets: new Map([...groups.entries()].map(([key, value]) => [key, summarizeCostBucket(value)])),
-    undated: summarizeCostBucket(undated),
+    buckets: new Map([...groups.entries()].map(([key, value]) => [key, summarizeEffectiveCost(value)])),
+    undated: summarizeEffectiveCost(undated),
     unknownSettlementCount,
   };
 }

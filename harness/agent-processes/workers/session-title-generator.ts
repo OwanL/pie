@@ -13,7 +13,6 @@ import type { SessionContext } from '../coordinator/server-types.js';
 import type { AssistantUsage } from '../../../analytics/contracts/legacy-run-analytics-contracts.js';
 import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 
-export const SESSION_TITLE_TIMEOUT_MS = 15_000;
 export const SESSION_TITLE_MAX_INPUT_CHARS = 4_000;
 /** Base-title budget shared with the coordinator title authority. Automatic
  * collision suffixes are outside this candidate allowance. */

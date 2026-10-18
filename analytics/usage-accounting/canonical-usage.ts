@@ -1,6 +1,5 @@
 import type { Int64Value } from "../contracts/contracts.js";
 import type { ProviderSettlementProjection } from "../recording/sqlite-recorder.js";
-import type { BillableInvocationKind, BillableInvocationOutcome, BillableInvocationRecord } from './billable-invocation.js';
 import {
   summarizeAccountingScope,
   type AccountingInvocation,
@@ -9,7 +8,6 @@ import {
 } from './metrics.js';
 import {
   summarizeDailyUsageAndCost,
-  summarizeDimensionedDailyUsageAndCost,
   summarizeWeeklyUsageAndCost,
   type LocalUsageCostBucket,
 } from '../projections/metrics.js';
@@ -90,14 +88,6 @@ export function canonicalWeeklyUsageAndCost(
   return summarizeWeeklyUsageAndCost(records, timeZone);
 }
 
-/** Canonical settlements bucketed per day, provider, model, purpose, and scope. */
-export function canonicalDimensionedDailyUsageAndCost(
-  records: readonly CanonicalUsageRecord[],
-  timeZone: string,
-): ReturnType<typeof summarizeDimensionedDailyUsageAndCost> {
-  return summarizeDimensionedDailyUsageAndCost(records, timeZone);
-}
-
 const CANONICAL_USAGE_KINDS: ReadonlySet<string> = new Set([
   'conversation',
   'retry',
@@ -108,94 +98,6 @@ const CANONICAL_USAGE_KINDS: ReadonlySet<string> = new Set([
   'subagent',
   'other',
 ]);
-
-/**
- * Adapt one durable settlement to the legacy aggregate's value-only input
- * shape. This is a read-side adapter only: it never writes the invocation
- * ledger and it preserves canonical cost/coverage provenance. The aggregate
- * service uses it for its bounded historical projection while session usage
- * continues to use the richer adapter below.
- */
-export function canonicalSettlementToBillableRecord(
-  settlement: ProviderSettlementProjection,
-): BillableInvocationRecord {
-  const settledAtMs = canonicalMillis(settlement.settledAtMs);
-  // The compatibility record has string time fields but no undated bucket.
-  // Keep missing settlement time visibly undated so a compatibility consumer
-  // cannot silently attribute it to the Unix epoch.
-  const endedAt = settledAtMs === undefined ? 'undated' : new Date(settledAtMs).toISOString();
-  const kind: BillableInvocationKind = settlement.purpose !== null && CANONICAL_USAGE_KINDS.has(settlement.purpose)
-    ? settlement.purpose as BillableInvocationKind
-    : 'other';
-  const outcome: BillableInvocationOutcome = settlement.outcome === 'succeeded'
-    || settlement.outcome === 'failed'
-    || settlement.outcome === 'cancelled'
-    ? settlement.outcome
-    : 'unknown';
-  const inputTokens = safeUsageNumber(settlement.usage.inputTokens);
-  const outputTokens = safeUsageNumber(settlement.usage.outputTokens);
-  const cacheReadTokens = safeUsageNumber(settlement.usage.cacheReadTokens);
-  const cacheWriteTokens = safeUsageNumber(settlement.usage.cacheWriteTokens);
-  const reasoningTokens = safeUsageNumber(settlement.usage.reasoningTokens);
-  const providerTotalTokens = safeUsageNumber(settlement.usage.providerTotalTokens);
-  const channelsComplete = inputTokens !== undefined
-    && outputTokens !== undefined
-    && cacheReadTokens !== undefined
-    && cacheWriteTokens !== undefined;
-  const instrumentationGap = settlement.effectiveCostCoverage === 'unknown' || !channelsComplete;
-  const record: BillableInvocationRecord = {
-    schemaVersion: 1,
-    invocationId: settlement.invocationId,
-    sourceId: settlement.invocationId,
-    sessionId: settlement.rootSessionId,
-    sessionPath: null,
-    branchId: settlement.branchId,
-    parentOperationId: settlement.executionId,
-    parentRunId: settlement.executionId,
-    parentToolId: null,
-    kind,
-    provider: settlement.provider ?? 'unknown',
-    model: settlement.model ?? 'unknown',
-    ...(inputTokens === undefined ? {} : { inputTokens }),
-    ...(outputTokens === undefined ? {} : { outputTokens }),
-    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
-    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
-    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
-    ...(providerTotalTokens === undefined ? {} : { providerTotalTokens }),
-    ...(settlement.reportedCostUsd !== null ? { providerReportedCostUsd: settlement.reportedCostUsd } : {}),
-    // The canonical projection has already validated the effective calculated
-    // cost. Keep that value available to the existing aggregate math without
-    // pretending it came from this host's pricing catalog.
-    ...(settlement.reportedCostUsd === null && settlement.calculatedCostUsd !== null
-      && settlement.calculatedCostComplete
-      ? { pricing: { catalogVersion: 'canonical-projection', calculatedCostUsd: settlement.calculatedCostUsd } }
-      : {}),
-    provenance: settlement.effectiveCostSource === 'reported'
-      ? 'exact'
-      : settlement.effectiveCostSource === 'calculated' ? 'estimated'
-        : instrumentationGap ? 'unknown' : 'unpriced',
-    ...(instrumentationGap ? {
-      instrumentationGap: true as const,
-      instrumentationGapReason: 'The canonical settlement has incomplete usage or cost coverage.',
-    } : { instrumentationGap: false as const }),
-    startedAt: endedAt,
-    endedAt,
-    outcome,
-  };
-  return record;
-}
-
-function canonicalMillis(value: number | string | null | undefined): number | undefined {
-  if (value === null || value === undefined) return undefined;
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function safeUsageNumber(value: Int64Value | null | undefined): number | undefined {
-  if (value === null || value === undefined) return undefined;
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
-}
 
 /** Convert an int64 usage value to the public numeric protocol only when its
  * integer identity is exactly representable. The durable canonical row keeps

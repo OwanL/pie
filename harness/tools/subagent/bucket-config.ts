@@ -63,11 +63,6 @@ export function parseModelSpec(spec: string): ParsedModelSpec {
   return { provider: spec.slice(0, separator), id: spec.slice(separator + 1) };
 }
 
-/** Return the bare id used for model-profile/thinking lookups. */
-export function modelIdFromSpec(spec: string): string {
-  return parseModelSpec(spec).id;
-}
-
 /** Canonical provider-qualified identity used by selection and retry routing. */
 export function qualifiedModelSpec(provider: string, id: string): string {
   return `${provider}/${id}`;
