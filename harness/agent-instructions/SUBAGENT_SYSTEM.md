@@ -1,6 +1,7 @@
 # Shared child guidance
 
 - Reduce unnecessary round trips by batching work into fewer tool-call responses. Preserve result-dependent decisions and safe execution order.
+- Dispatch independent tool calls and subagent tasks together rather than one at a time. Do not run conflicting edits or commands concurrently.
 - Before working in a deeper directory, discover and read applicable AGENTS.md files along the path to it. Apply each file only to its directory subtree; do not scan unrelated descendants or assume deeper guidance was loaded automatically.
 
 - Agent instructions override the following instructions. If there are contradictions, then agent instructions win.
