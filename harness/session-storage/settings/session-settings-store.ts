@@ -140,6 +140,10 @@ async function persistSystemPromptTogglesForSession(
 ): Promise<void> {
   let tempFile: string | undefined;
   const releases: Array<() => Promise<void>> = [];
+  let writeFailed = false;
+  let writeError: unknown;
+  let releaseFailed = false;
+  let releaseError: unknown;
   try {
     const directories = [...new Set([currentFile, legacyFile].filter((entry): entry is string => !!entry)
       .map(entry => path.resolve(path.dirname(entry))))];
@@ -191,20 +195,28 @@ async function persistSystemPromptTogglesForSession(
     await scrubLegacySessionEntry(sessionPath, legacy, currentFile, legacyFile);
   } catch (error) {
     backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(error), file });
-    if (strict) throw error;
-    // Non-fatal: in-memory state still drives the live session.
+    writeFailed = true;
+    writeError = error;
+    // Non-fatal in best-effort mode: in-memory state still drives the live session.
   } finally {
     if (tempFile) {
       await fs.unlink(tempFile).catch(() => undefined);
     }
-    let releaseError: unknown;
     for (const release of releases.reverse()) {
-      try { await release(); } catch (error) { releaseError ??= error; }
+      try { await release(); } catch (error) {
+        if (!releaseFailed) releaseError = error;
+        releaseFailed = true;
+      }
     }
-    if (releaseError) {
-      backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(releaseError), file });
-      if (strict) throw releaseError;
-    }
+  }
+  if (releaseFailed) {
+    backendTrace('systemPromptToggles', 'write.failed', { level: 'debug', error: toErrorMessage(releaseError), file });
+  }
+  // Cleanup failure takes precedence over write failure, as before. Separate
+  // flags retain even falsey thrown values, and every release is attempted.
+  if (strict) {
+    if (releaseFailed) throw releaseError;
+    if (writeFailed) throw writeError;
   }
 }
 

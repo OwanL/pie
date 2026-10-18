@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import runtimeLocks from '../../../../lib/windows-runtime-lock/windows-runtime-lock.cjs';
 
 import {
   LEGACY_SESSION_SETTINGS_DIR_ENV,
@@ -40,6 +41,45 @@ async function withSidecarDir(run: (dir: string) => Promise<void>): Promise<void
     if (previousLegacy === undefined) delete process.env[LEGACY_SESSION_SETTINGS_DIR_ENV];
     else process.env[LEGACY_SESSION_SETTINGS_DIR_ENV] = previousLegacy;
     await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+for (const strict of [false, true]) {
+  for (const scenario of ['write-only', 'release-only', 'both'] as const) {
+    test(`fault cleanup: ${scenario}, strict=${strict}`, async (t) => {
+      await withSidecarDir(async (dir) => {
+        process.env[LEGACY_SESSION_SETTINGS_DIR_ENV] = path.join(dir, 'legacy');
+        const releases: number[] = [];
+        let acquisitions = 0;
+        // Two ancestor probes precede the two held directory locks. Inject at
+        // the existing lock boundary; no actual kernel locks are needed here.
+        const lockMock = t.mock.method(runtimeLocks, 'acquireWindowsRuntimeLock', async () => {
+          const index = ++acquisitions;
+          return async () => {
+            releases.push(index);
+            if (scenario !== 'write-only' && index > 2) {
+              // The first cleanup failure is deliberately falsey; the later
+              // truthy error must not replace it or prevent remaining cleanup.
+              throw index === 4 ? undefined : new Error('later release failure');
+            }
+          };
+        });
+        const writeFailure = false;
+        const renameMock = scenario === 'release-only' ? undefined
+          : t.mock.method(fs, 'rename', async () => { throw writeFailure; });
+        try {
+          const result = await writeSystemPromptTogglesForSession('/sessions/fault.jsonl', ['tools'], strict)
+            .then(() => ({ rejected: false, error: undefined }), (error: unknown) => ({ rejected: true, error }));
+          assert.equal(result.rejected, strict);
+          if (strict) assert.equal(result.error, scenario === 'write-only' ? writeFailure : undefined);
+          assert.deepEqual(releases, [1, 2, 4, 3], 'every held lock releases in reverse order');
+          assert.deepEqual((await fs.readdir(dir)).filter(name => name.endsWith('.tmp')), []);
+        } finally {
+          renameMock?.mock.restore();
+          lockMock.mock.restore();
+        }
+      });
+    });
   }
 }
 

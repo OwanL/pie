@@ -10,6 +10,31 @@ import { buildTranscriptRows, scopeTranscriptRowsToSession } from '../../../tran
 
 installDom();
 
+function fakeTranscriptLayout(): () => void {
+  const descriptors = ['offsetWidth', 'offsetHeight', 'clientHeight', 'scrollHeight'].map(
+    (key) => [key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key)] as const);
+  const boundingRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return { width: 320, height: this.classList.contains('transcript-virtual') ? 552 : 100,
+      top: 0, left: 0, right: 320, bottom: 100, x: 0, y: 0, toJSON() {} } as DOMRect;
+  };
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: { configurable: true, get: () => 320 },
+    offsetHeight: { configurable: true, get() { return this.classList.contains('transcript-virtual') ? 552 : 100; } },
+    clientHeight: { configurable: true, get: () => 552 },
+    scrollHeight: { configurable: true, get() {
+      return Number.parseFloat(this.querySelector('.transcript-virtual-inner')?.style.height ?? '0') || 0;
+    } },
+  });
+  return () => {
+    HTMLElement.prototype.getBoundingClientRect = boundingRect;
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
+      else delete (HTMLElement.prototype as any)[key];
+    }
+  };
+}
+
 test('real tool disclosure pins only while focused; editor pin and saved expansion are independent', async () => {
   await import('../../../transcript/rows/message-row');
   const { TranscriptVirtualList } = await import('../../../transcript/virtual-list');
@@ -24,32 +49,22 @@ test('real tool disclosure pins only while focused; editor pin and saved expansi
     const current = (vnode.props as any)?.virtualizer;
     if (current) instance = current;
   };
-  const dimensions = ['offsetWidth', 'offsetHeight', 'clientHeight'].map((key) =>
-    [key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key)] as const);
-  Object.defineProperties(HTMLElement.prototype, {
-    offsetWidth: { configurable: true, get: () => 320 },
-    offsetHeight: { configurable: true, get: () => 100 },
-    clientHeight: { configurable: true, get: () => 552 },
-  });
-  const rect = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = () => ({ width: 320, height: 552,
-    top: 0, left: 0, right: 320, bottom: 552, x: 0, y: 0, toJSON() {} }) as DOMRect;
+  const restoreLayout = fakeTranscriptLayout();
   const toolCall = { id: 'pin-disclosure-tool', name: 'bash', args: { command: 'echo saved' }, status: 'completed', result: 'saved' };
   const props = {
     sessionKey: '/pin-disclosure',
     transcriptWindow: { loadedStart: 0, loadedEnd: 3, totalCount: 3, hasOlder: false,
       hasNewer: false, isPartial: false, hasUserMessages: true },
     transcript: [
+      { id: 'pin-tail', role: 'user', createdAt: '', markdown: 'tail', status: 'completed' },
+      { id: 'pin-editor', role: 'user', createdAt: '', markdown: 'edit me', status: 'completed' },
       { id: 'pin-tool-message', role: 'assistant', createdAt: '', markdown: '', status: 'completed',
         parts: [{ kind: 'toolCall', toolCall }], toolCalls: [toolCall] },
-      { id: 'pin-editor', role: 'user', createdAt: '', markdown: 'edit me', status: 'completed' },
-      { id: 'pin-tail', role: 'user', createdAt: '', markdown: 'tail', status: 'completed' },
     ],
     busy: false, prefs: { showPruningMessages: true }, pruningSettings: {}, systemPrompts: [],
     pruningResult: null, workingDirectory: null, editingId: null as string | null,
     onEditRequest() {}, onEditConfirm() {}, onEditCancel() {}, onOpenFile() {}, onContextMenu() {},
   };
-  props.transcript.reverse();
   const paint = async () => {
     act(() => render(h(TranscriptVirtualList, props as never), root));
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -61,7 +76,7 @@ test('real tool disclosure pins only while focused; editor pin and saved expansi
     const index = Number(toggle.closest<HTMLElement>('[data-index]')!.dataset.index);
     const range = { startIndex: 0, endIndex: 0, overscan: 0, count: 3 };
     toggle.focus();
-    act(() => toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     assert.equal(root.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'true');
     assert.ok(instance!.options.rangeExtractor(range).includes(index), 'focused tool stays in an offscreen range');
     toggle.blur();
@@ -80,11 +95,7 @@ test('real tool disclosure pins only while focused; editor pin and saved expansi
     options.vnode = originalVNode;
     if (previousCSS === undefined) delete (globalThis as any).CSS;
     else (globalThis as any).CSS = previousCSS;
-    HTMLElement.prototype.getBoundingClientRect = rect;
-    for (const [key, descriptor] of dimensions) {
-      if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
-      else delete (HTMLElement.prototype as any)[key];
-    }
+    restoreLayout();
     root.remove();
   }
 });
@@ -127,21 +138,7 @@ test('same mounted list uses current catalog row keys and count on every render'
       return items;
     }, { updateDeps: original.updateDeps });
   };
-  const descriptors = ['offsetWidth', 'offsetHeight', 'clientHeight', 'scrollHeight'].map(
-    (key) => [key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key)] as const);
-  const boundingRect = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function () {
-    return { width: 320, height: this.classList.contains('transcript-virtual') ? 552 : 100,
-      top: 0, left: 0, right: 320, bottom: 100, x: 0, y: 0, toJSON() {} } as DOMRect;
-  };
-  Object.defineProperties(HTMLElement.prototype, {
-    offsetWidth: { configurable: true, get: () => 320 },
-    offsetHeight: { configurable: true, get() { return this.classList.contains('transcript-virtual') ? 552 : 100; } },
-    clientHeight: { configurable: true, get: () => 552 },
-    scrollHeight: { configurable: true, get() {
-      return Number.parseFloat(this.querySelector('.transcript-virtual-inner')?.style.height ?? '0') || 0;
-    } },
-  });
+  const restoreLayout = fakeTranscriptLayout();
   try {
     for (const count of [7, 0, 7]) {
       expectedKeys = scopeTranscriptRowsToSession(buildTranscriptRows({
@@ -167,12 +164,8 @@ test('same mounted list uses current catalog row keys and count on every render'
     assert.ok(renders >= 3);
   } finally {
     options.vnode = originalVNode;
-    HTMLElement.prototype.getBoundingClientRect = boundingRect;
     render(null, root);
     root.remove();
-    for (const [key, descriptor] of descriptors) {
-      if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
-      else delete (HTMLElement.prototype as any)[key];
-    }
+    restoreLayout();
   }
 });

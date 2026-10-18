@@ -13,7 +13,9 @@ import type { SessionContext } from '../../coordinator/server-types.js';
 import type { SessionTitleGeneratorDeps } from '../session-title-generator';
 import { ADMISSION_FALLBACK_CUSTOM_TYPE } from '../../../session-storage/metadata/session-title.js';
 
-function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string; usage?: { input: number; output: number }; auth?: () => Promise<unknown>; sessionInfoEntries?: () => readonly unknown[] } = {}) {
+type TitleAuthResult = { apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> };
+
+function fakeContext(options: { explicitName?: string; explicitPropertyName?: string; nameAfterFetch?: string; output?: string; expectedThink?: false | string; usage?: { input: number; output: number }; auth?: () => Promise<TitleAuthResult>; sessionInfoEntries?: () => readonly unknown[] } = {}) {
   let writtenName: string | undefined;
   let explicitName = options.explicitName;
   let fetchCalls = 0;
@@ -378,7 +380,7 @@ test('deadline includes stalled auth and ignores late completion', async () => {
   const fake = fakeContext({
     auth: () => new Promise((resolve) => { resolveAuth = resolve; }),
   });
-  let resolveAuth!: (value: {}) => void;
+  let resolveAuth!: (value: TitleAuthResult) => void;
   const settlements: unknown[] = [];
   await assert.rejects(generateSessionTitle(fake.context, {
     sdkPath: '/sdk', prompt: 'Fix auth', provider: 'ollama', model: 'title-model',
@@ -501,7 +503,7 @@ test('a caller abort during stalled auth fabricates no provider invocation', asy
   const fake = fakeContext({
     auth: () => new Promise((resolve) => { resolveAuth = resolve; }),
   });
-  let resolveAuth!: (value: {}) => void;
+  let resolveAuth!: (value: TitleAuthResult) => void;
   const settlements: unknown[] = [];
   const controller = new AbortController();
   const generation = generateSessionTitle(fake.context, {

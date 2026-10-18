@@ -45,13 +45,6 @@ function assistantMessage(parts: any[] = [], overrides: Partial<ChatMessage> = {
   } as unknown as ChatMessage;
 }
 
-async function loadWebviewModules() {
-  const [messageItemModule] = await Promise.all([
-    import('../../transcript/message-item.tsx'),
-  ]);
-  return { MessageItem: messageItemModule.MessageItem };
-}
-
 const noop = () => undefined;
 const noopContextMenu = () => undefined;
 
@@ -728,7 +721,7 @@ test('MessageItem renders TurnActivityStrip inline for assistant turns with acti
 });
 
 test('MessageItem renders TurnActivityStrip with neutral tone for thinking phase', async () => {
-  const { MessageItem } = await loadWebviewModules();
+  const { MessageItem } = await import('../../transcript/message-item.tsx');
   const activityState: TurnActivityState = {
     phase: 'thinking',
     label: 'thinking',

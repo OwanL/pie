@@ -64,12 +64,7 @@ function toolCall(overrides: Partial<ToolCall> = {}): ToolCall {
   };
 }
 
-// Hoist the 6 module loads out of the first test. Dynamic-importing them inside
-// the first test billed ~690 ms to that test. Loading synchronously at module
-// scope (require) runs them once during module evaluation, which node:test
-// does not bill to any test. (Top-level await isn't available here — tsx
-// compiles to CJS — and a before() hook's time is billed to the first test, so
-// neither of those would actually keep the first case under 200 ms.)
+// Load these modules synchronously at module scope to preserve their registration order.
 require('../../transcript/register-builtins');
 const messageItemModule: typeof import('../../transcript/message-item.tsx') = require('../../transcript/message-item.tsx');
 const toolCallCardModule: typeof import('../../transcript/tool-call-card.tsx') = require('../../transcript/tool-call-card.tsx');
@@ -87,10 +82,6 @@ const webviewModules = {
   SystemPromptMessage: systemPromptsModule.SystemPromptMessage,
   SystemPromptToggleMenu: systemPromptToggleMenuModule.SystemPromptToggleMenu,
 };
-
-function loadWebviewModules() {
-  return webviewModules;
-}
 
 test('empty durable provider failure renders its terminal error detail', () => {
   const { mapAssistantMessage, mapTranscript } = require('../../../../harness/session-storage/transcripts/transcript.ts');
@@ -125,8 +116,8 @@ function ExpandedToolBody(props: Parameters<typeof toolCallCardModule.ToolCallCa
   return h(ToolCallBody, { toolCall: props.toolCall, prefs: props.prefs, onOpenFile: props.onOpenFile });
 }
 
-test('rendered MessageItem covers assistant, editable user, and image-user branches', async () => {
-  const { MessageItem, ReasoningBlock } = await loadWebviewModules();
+test('rendered MessageItem covers assistant, editable user, and image-user branches', () => {
+  const { MessageItem, ReasoningBlock } = webviewModules;
   const prefs = {
     ...DEFAULT_CHAT_PREFS,
     autoExpandReasoning: true,
@@ -220,7 +211,7 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
 });
 
 test('parallel tool calls share a parallel-group strip while sequential calls do not', async () => {
-  const { MessageItem } = await loadWebviewModules();
+  const { MessageItem } = webviewModules;
   const renderToolRun = (parts: ChatMessagePart[]) => renderToString(h(MessageItem, {
     message: assistantMessage(parts),
     isStreaming: false,
@@ -327,7 +318,7 @@ test('parallel tool calls share a parallel-group strip while sequential calls do
 });
 
 test('message and nested-list render keys use host-projected identity while protocol ids stay authoritative', async () => {
-  const { MessageItem } = await loadWebviewModules();
+  const { MessageItem } = webviewModules;
   const html = renderToString(h(MessageItem, {
     message: assistantMessage([], { id: 'durable-id', renderIdentity: 'live-row-id' }),
     isStreaming: false,
@@ -372,7 +363,7 @@ test('tool renderers share one disclosure key behind a stable ToolCallItem lifec
   // so parallel-group children own distinct key-scoped subscriptions.
   assert.doesNotMatch(itemSource, /`subagent:\$\{toolCall\.id\}`/);
 
-  const { ToolCallItem } = await loadWebviewModules();
+  const { ToolCallItem } = webviewModules;
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({ id: 'stable-call', name: 'unknown_tool', status: 'drafting' }),
     prefs: DEFAULT_CHAT_PREFS,
@@ -509,8 +500,8 @@ test('collapsed running non-shell tools own their live result preview inline', (
   assert.match(awaitingOutputHtml, /aria-label="Running"/);
 });
 
-test('rendered tool-call components cover collapsed summaries, expanded bodies, and subagent metadata', async () => {
-  const { ToolCallHeader, ToolCallItem } = await loadWebviewModules();
+test('rendered tool-call components cover collapsed summaries, expanded bodies, and subagent metadata', () => {
+  const { ToolCallHeader, ToolCallItem } = webviewModules;
 
   const headerHtml = renderToString(h(ToolCallHeader, {
     open: false,
@@ -669,8 +660,8 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(fallbackSubagentHtml, /Too many parallel tasks/);
 });
 
-test('rendered ToolCallItem hides subagent model-selection badges in collapsed headers', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('rendered ToolCallItem hides subagent model-selection badges in collapsed headers', () => {
+  const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -718,7 +709,7 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
 });
 
 test('rendered ToolCallItem covers collapsed and parallel subagent branches without inferring from foreign results', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+  const { ToolCallItem } = webviewModules;
 
   const collapsedHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -990,8 +981,8 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.match(parallelHtml, /Error: spawn EPERM: permission denied/);
 });
 
-test('interrupted subagent renders a terminal warning state without live activity', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('interrupted subagent renders a terminal warning state without live activity', () => {
+  const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -1032,8 +1023,8 @@ test('interrupted subagent renders a terminal warning state without live activit
   assert.doesNotMatch(html, /\brunning\b/);
 });
 
-test('rendered parallel subagent cards keep per-child summaries and statuses while the parent is still running', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('rendered parallel subagent cards keep per-child summaries and statuses while the parent is still running', () => {
+  const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -1088,8 +1079,8 @@ test('rendered parallel subagent cards keep per-child summaries and statuses whi
   assert.equal((html.match(/status-chip-failed/g) ?? []).length, 1);
 });
 
-test('subagent card shows preview rows only while collapsed', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('subagent card shows preview rows only while collapsed', () => {
+  const { ToolCallItem } = webviewModules;
 
   function runningSingle(): ToolCall {
     return toolCall({
@@ -1188,8 +1179,8 @@ test('subagent card shows preview rows only while collapsed', async () => {
   assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);
 });
 
-test('a completed parallel child shows the same finished UI while its sibling keeps running', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('a completed parallel child shows the same finished UI while its sibling keeps running', () => {
+  const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -1220,8 +1211,8 @@ test('a completed parallel child shows the same finished UI while its sibling ke
   assert.match(html, /Waiting for output/);
 });
 
-test('parallel subagent children share one minimally indented batch wrapper', async () => {
-  const { ToolCallItem } = await loadWebviewModules();
+test('parallel subagent children share one minimally indented batch wrapper', () => {
+  const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -1272,8 +1263,8 @@ test('parallel-group CSS uses one thin shallow spine without connector ticks', a
   assert.doesNotMatch(css, /\.tool-call-parallel-group\s*\{/);
 });
 
-test('rendered SystemPromptMessage covers summary fallbacks, suppressed summaries, and token estimate branches', async () => {
-  const { SystemPromptMessage } = await loadWebviewModules();
+test('rendered SystemPromptMessage covers summary fallbacks, suppressed summaries, and token estimate branches', () => {
+  const { SystemPromptMessage } = webviewModules;
 
   const prompts: SystemPromptEntry[] = [
     {
@@ -1324,8 +1315,8 @@ test('rendered SystemPromptMessage covers summary fallbacks, suppressed summarie
   assert.doesNotMatch(zeroTokenHtml, /~\d+ tokens/);
 });
 
-test('SystemPromptToggleMenu hides display-only entries like the provider card', async () => {
-  const { SystemPromptToggleMenu } = await loadWebviewModules();
+test('SystemPromptToggleMenu hides display-only entries like the provider card', () => {
+  const { SystemPromptToggleMenu } = webviewModules;
   const providerEntry: SystemPromptEntry = {
     source: 'provider',
     id: 'provider',
@@ -1365,8 +1356,8 @@ test('SystemPromptToggleMenu hides display-only entries like the provider card',
   assert.doesNotMatch(triggerHtml, /disabled/);
 });
 
-test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap rows', async () => {
-  const { SystemPromptMessage, TranscriptVirtualRow } = await loadWebviewModules();
+test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap rows', () => {
+  const { SystemPromptMessage, TranscriptVirtualRow } = webviewModules;
   const prompt: SystemPromptEntry = {
     source: 'harness',
     availability: 'available',
@@ -1533,7 +1524,7 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
 });
 
 test('rendered assistant pruning header shows compact counts and expanded diagnostics', async () => {
-  const { MessageItem } = await loadWebviewModules();
+  const { MessageItem } = webviewModules;
   const { PruningHeaderButton, PruningHeaderChip, PruningHeaderPanel } = await import('../../transcript/pruning-header.tsx');
   const { formatPruningSummary, normalizePruningDetails } = await import('../../transcript/pruning.ts');
 
@@ -1622,8 +1613,8 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
   assert.deepEqual(normalizePruningDetails({ prepassError: 'timeout' })?.includedSkills, []);
 });
 
-test('rendered MessageItem keeps pruning pending state in the header without an inline body indicator', async () => {
-  const { MessageItem } = await loadWebviewModules();
+test('rendered MessageItem keeps pruning pending state in the header without an inline body indicator', () => {
+  const { MessageItem } = webviewModules;
 
   const html = renderToString(h(MessageItem, {
     message: assistantMessage([], { status: 'completed', modelId: 'gpt-5.4', thinkingLevel: 'xhigh' }),
@@ -1649,8 +1640,8 @@ test('rendered MessageItem keeps pruning pending state in the header without an 
   assert.doesNotMatch(html, /message-typing-indicator/);
 });
 
-test('rendered failed assistant turn exposes copyable error detail without a redundant edit-previous-prompt action', async () => {
-  const { MessageItem } = await loadWebviewModules();
+test('rendered failed assistant turn exposes copyable error detail without a redundant edit-previous-prompt action', () => {
+  const { MessageItem } = webviewModules;
 
   const failedAssistant = assistantMessage([{ kind: 'text', text: 'Partial' }], {
     id: 'assistant-99',
@@ -1680,7 +1671,7 @@ test('rendered failed assistant turn exposes copyable error detail without a red
   assert.doesNotMatch(html, /Load older messages to retry/);
 });
 
-test('rendered TurnActivityStrip covers all tones, standalone/inline variants, and runningDot states', async () => {
+test('rendered TurnActivityStrip covers all tones, standalone/inline variants, and runningDot states', () => {
   // Neutral tone - inline (no standalone class)
   const neutralInlineHtml = renderToString(h(TurnActivityStrip, {
     label: 'thinking',

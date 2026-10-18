@@ -8,6 +8,7 @@ import test from 'node:test';
 import { BackendServer } from '../server.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { isCoordinatorOperationAllowed } from '../coordinator-operations.js';
+import { getAdmissionFallbackTitle } from '../../../session-storage/metadata/session-title.js';
 
 const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk')).descriptor;
 
@@ -31,16 +32,36 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
   try {
     let runtimeCreations = 0;
     let serviceCreations = 0;
-    const manager = (sessionPath: string) => ({
-      getCwd: () => root,
-      getSessionId: () => path.basename(sessionPath),
-      getSessionFile: () => sessionPath,
-      getSessionName: () => undefined,
-      getBranch: () => [],
-      getEntries: () => [],
-      getTree: () => [],
-      buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
-    });
+    const manager = (sessionPath: string) => {
+      const getEntries = (): Array<Record<string, any>> => fsSync.readFileSync(sessionPath, 'utf8')
+        .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+        .filter((entry) => entry.type !== 'session');
+      const appendEntry = (fields: Record<string, unknown>) => {
+        const entries = getEntries();
+        const entry = {
+          ...fields,
+          id: `entry-${entries.length + 1}`,
+          parentId: entries.at(-1)?.id ?? null,
+          timestamp: new Date().toISOString(),
+        };
+        fsSync.appendFileSync(sessionPath, `${JSON.stringify(entry)}\n`);
+        return entry.id;
+      };
+      return {
+        getCwd: () => root,
+        getSessionId: () => path.basename(sessionPath),
+        getSessionFile: () => sessionPath,
+        getSessionName: () => getEntries().findLast((entry) => entry.type === 'session_info')?.name,
+        // Model the SDK's durable title and custom-entry seams, including the
+        // entry identity referenced by admission fallback markers across opens.
+        appendSessionInfo: (name: string) => appendEntry({ type: 'session_info', name: name.replace(/[\r\n]+/g, ' ').trim() }),
+        appendCustomEntry: (customType: string, data: unknown) => appendEntry({ type: 'custom', customType, data }),
+        getBranch: getEntries,
+        getEntries,
+        getTree: () => [],
+        buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+      };
+    };
     let nextId = 0;
     const server = new BackendServer({
       sdkPath: '/sdk',
@@ -113,6 +134,10 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
       v: 1, id: 'open', method: 'session.open', params: { sessionPath: created.sessionPath },
     });
     await inventoryPublished;
+    const reopenedCreated = manager(created.sessionPath);
+    assert.ok(reopenedCreated.getSessionName(), 'cold admission persists a title across manager opens');
+    assert.equal(getAdmissionFallbackTitle(reopenedCreated), reopenedCreated.getSessionName(),
+      'the durable admission marker identifies the assigned title entry');
     assert.equal(inventoryDiscoveries, discoveriesBeforeOpen + 1, 'public cold opens deliver fresh inventory after transcript publication');
 
     const discoveriesBeforeSettings = inventoryDiscoveries;

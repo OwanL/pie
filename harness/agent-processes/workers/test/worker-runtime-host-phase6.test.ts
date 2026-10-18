@@ -13,8 +13,6 @@ import {
   type SessionManagerFence,
 } from '../../../session-storage/ownership/session-manager-fence';
 import {
-  appendAdmissionFallbackMarker,
-  ADMISSION_FALLBACK_CUSTOM_TYPE,
   getAdmissionFallbackTitle,
 } from '../../../session-storage/metadata/session-title.js';
 import type { ProviderIncident } from '../../../model-providers/traffic-observation/provider-incident';

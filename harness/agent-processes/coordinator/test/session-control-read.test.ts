@@ -171,7 +171,7 @@ test('current tool names are a bounded live header, independent of transcript pa
 });
 
 test('whole envelope budget counts escaped content, metadata, activity and cursor; Unicode boundaries stay safe', () => {
-  const original = ('😀漢字\\\"\n\t'.repeat(2500));
+  const original = ('😀漢字\\"\n\t'.repeat(2500));
   const input = source([assistant('a', original)]);
   const pages = exhaustOlder(input, { maxCharacters: 1000 });
   assert.equal(pages.reverse().map(body).join(''), original);
