@@ -22,11 +22,10 @@
 
 import test, { after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import Module from "node:module";
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { bootstrapMockSdk } from "./helpers/mock-sdk-bootstrap.js";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { execute } from "../execute.js";
 
 // ---------------------------------------------------------------------------
@@ -64,34 +63,8 @@ const MOCK_SDK_SOURCE = [
 	"}",
 ].join("\n");
 
-const mockDir = mkdtempSync(path.join(tmpdir(), "sigint-leak-mock-sdk-"));
-const mockSdkPath = path.join(mockDir, "mock-sdk.mjs");
-writeFileSync(mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
-const tsxConfigPath = process.env.TSX_TSCONFIG_PATH;
-if (!tsxConfigPath) throw new Error("sigint-listener-hygiene.test.ts requires the shared TSX config");
-const sdkPaths = JSON.parse(readFileSync(path.resolve(tsxConfigPath), "utf-8")).compilerOptions?.paths;
-const canonicalSdkPath = sdkPaths?.["@earendil-works/pi-coding-agent"]?.[0];
-const legacySdkPath = sdkPaths?.["@mariozechner/pi-coding-agent"]?.[0];
-if (typeof canonicalSdkPath !== "string" || typeof legacySdkPath !== "string" || !path.isAbsolute(canonicalSdkPath) || path.resolve(canonicalSdkPath) !== path.resolve(legacySdkPath)) {
-	throw new Error("The shared TSX config must map canonical and legacy coding-agent aliases to the same selected module");
-}
-const selectedSdkPath = path.resolve(canonicalSdkPath);
-const selectedSdkUrl = pathToFileURL(selectedSdkPath).href;
-const hookPath = path.join(mockDir, "hook.mjs");
-writeFileSync(
-	hookPath,
-	[
-		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@earendil-works/pi-coding-agent' || specifier === '@mariozechner/pi-coding-agent' || specifier === ${JSON.stringify(selectedSdkPath)} || specifier === ${JSON.stringify(selectedSdkUrl)} || specifier.startsWith(${JSON.stringify(`${selectedSdkUrl}?tsx-namespace=`)})) return { url: ${JSON.stringify(pathToFileURL(mockSdkPath).href)}, shortCircuit: true };`,
-		"  return nextResolve(specifier, context);",
-		"}",
-	].join("\n"),
-	"utf-8",
-);
-if (!(globalThis as { __PIE_SIGINT_LEAK_HOOK_REGISTERED__?: boolean }).__PIE_SIGINT_LEAK_HOOK_REGISTERED__) {
-	(globalThis as { __PIE_SIGINT_LEAK_HOOK_REGISTERED__?: boolean }).__PIE_SIGINT_LEAK_HOOK_REGISTERED__ = true;
-	Module.register(pathToFileURL(hookPath));
-}
+// Native test-file isolation gives this suite its own hook and mock lifetime.
+const mockSdk = bootstrapMockSdk("sigint-leak-mock-sdk-", MOCK_SDK_SOURCE);
 
 // ---------------------------------------------------------------------------
 // Agent fixture
@@ -131,7 +104,7 @@ test.after(() => {
 });
 after(() => {
 	rmSync(agentDir, { recursive: true, force: true });
-	rmSync(mockDir, { recursive: true, force: true });
+	mockSdk.cleanup();
 });
 
 function makeCtx(): unknown {

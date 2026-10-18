@@ -11,19 +11,17 @@
  * `prompt`/`reload`/`createSession` read `globalThis.__MOCK_SDK_BEHAVIOR__`.
  * A never-resolving `onPrompt` simulates a dead provider stream / hung SDK
  * that ignores abort — the case that used to rely on the removed settlement
- * net and now is resolved only by explicit cancellation. Kept self-contained
- * (own mock + hook) but idempotent: a global guard prevents double-registration
- * if modes.test.ts already installed a hook in the same process.
+ * net and now is resolved only by explicit cancellation. Native test-file
+ * isolation keeps this suite's specialized mock and hook independent.
  */
 
 import test, { afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import Module from "node:module";
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { bootstrapMockSdk } from "./helpers/mock-sdk-bootstrap.js";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { execute } from "../execute.js";
 import { inflightSemaphore } from "../concurrency-limit.js";
 import type { RetryClock } from "../retry.js";
@@ -61,36 +59,7 @@ const MOCK_SDK_SOURCE = [
 	"}",
 ].join("\n");
 
-const mockDir = mkdtempSync(path.join(tmpdir(), "settlement-mock-sdk-"));
-const mockSdkPath = path.join(mockDir, "mock-sdk.mjs");
-writeFileSync(mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
-const tsxConfigPath = process.env.TSX_TSCONFIG_PATH;
-if (!tsxConfigPath) throw new Error("settlement.test.ts requires the shared TSX config");
-const sdkPaths = JSON.parse(readFileSync(path.resolve(tsxConfigPath), "utf-8")).compilerOptions?.paths;
-const canonicalSdkPath = sdkPaths?.["@earendil-works/pi-coding-agent"]?.[0];
-const legacySdkPath = sdkPaths?.["@mariozechner/pi-coding-agent"]?.[0];
-if (typeof canonicalSdkPath !== "string" || typeof legacySdkPath !== "string" || !path.isAbsolute(canonicalSdkPath) || path.resolve(canonicalSdkPath) !== path.resolve(legacySdkPath)) {
-	throw new Error("The shared TSX config must map canonical and legacy coding-agent aliases to the same selected module");
-}
-const selectedSdkPath = path.resolve(canonicalSdkPath);
-const selectedSdkUrl = pathToFileURL(selectedSdkPath).href;
-const hookPath = path.join(mockDir, "hook.mjs");
-writeFileSync(
-	hookPath,
-	[
-		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@earendil-works/pi-coding-agent' || specifier === '@mariozechner/pi-coding-agent' || specifier === ${JSON.stringify(selectedSdkPath)} || specifier === ${JSON.stringify(selectedSdkUrl)} || specifier.startsWith(${JSON.stringify(`${selectedSdkUrl}?tsx-namespace=`)})) return { url: ${JSON.stringify(pathToFileURL(mockSdkPath).href)}, shortCircuit: true };`,
-		"  return nextResolve(specifier, context);",
-		"}",
-	].join("\n"),
-	"utf-8",
-);
-// Guard against double-registration when modes.test.ts loads in the same tsx
-// process (the repo runner globs all subagent test files into one `tsx --test`).
-if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__) {
-	(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_REGISTERED__ = true;
-	Module.register(pathToFileURL(hookPath));
-}
+const mockSdk = bootstrapMockSdk("settlement-mock-sdk-", MOCK_SDK_SOURCE);
 
 // ---------------------------------------------------------------------------
 // Fake clock — timers resolve at 0 advance or explicitly (retry backoff seam).
@@ -177,7 +146,7 @@ test.after(() => {
 
 after(() => {
 	rmSync(agentDir, { recursive: true, force: true });
-	rmSync(mockDir, { recursive: true, force: true });
+	mockSdk.cleanup();
 });
 
 function setMockBehavior(b: unknown): void {
