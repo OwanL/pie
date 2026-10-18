@@ -3,6 +3,27 @@ import test from 'node:test';
 
 import { getToolCallPresentation, summarizeToolCall } from '../../../transcript/tool-call-summary';
 import type { ToolCall } from '../../../../lib/protocol/index.js';
+import { countTextLines } from '../../../../../analytics/capture/tool-call-analysis/mutation-size';
+
+test('line counts preserve empty, CRLF, bare CR and trailing separator semantics', () => {
+  const samples = ['', 'a', '\n', '\r', '\r\n', '\n\n', 'a\n', 'a\r\n', 'a\rb', 'a\r\n\nb\r'];
+  // Exhaust short mixed-newline inputs as well as the explicit boundary cases.
+  let generated = [''];
+  for (let length = 0; length < 5; length++) {
+    generated = generated.flatMap((prefix) => ['a', '\r', '\n'].map((suffix) => prefix + suffix));
+    samples.push(...generated);
+  }
+  for (const text of samples) {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    const expected = text.length === 0 ? 0 : (normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized).split('\n').length;
+    assert.equal(countTextLines(text), expected, JSON.stringify(text));
+    const presentation = getToolCallPresentation(makeToolCall({ name: 'write', input: { path: 'file.ts', content: text } }));
+    if (expected > 0) assert.equal(presentation.sizeHint, `+${expected} ${expected === 1 ? 'line' : 'lines'}`);
+    const edit = getToolCallPresentation(makeToolCall({ name: 'edit', input: { path: 'file.ts', oldText: text, newText: 'replacement' } }));
+    const touched = Math.max(1, expected);
+    assert.equal(edit.sizeHint, expected === 0 ? '+1 line' : `${touched} ${touched === 1 ? 'line' : 'lines'}`);
+  }
+});
 
 function makeToolCall(overrides: Partial<ToolCall>): ToolCall {
   return {

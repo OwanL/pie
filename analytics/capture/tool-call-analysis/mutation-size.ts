@@ -18,9 +18,16 @@ export function countTextLines(text: string): number {
     return 0;
   }
 
-  const normalized = text.replace(/\r\n?/g, '\n');
-  const withoutTrailingNewline = normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
-  return withoutTrailingNewline.split('\n').length;
+  // Count logical separators without allocating a normalized copy or line array.
+  let lines = 0;
+  for (let index = text.indexOf('\n'); index !== -1; index = text.indexOf('\n', index + 1)) {
+    lines++;
+  }
+  for (let index = text.indexOf('\r'); index !== -1; index = text.indexOf('\r', index + 1)) {
+    if (text.charCodeAt(index + 1) !== 10) lines++;
+  }
+  const lastCode = text.charCodeAt(text.length - 1);
+  return Math.max(1, lines + (lastCode === 10 || lastCode === 13 ? 0 : 1));
 }
 
 function toNonNegativeInteger(value: unknown): number | null {
