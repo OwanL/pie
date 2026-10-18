@@ -100,6 +100,7 @@ profileOrder:
   - gpt-5.3-codex
   - gpt-5.3-codex-spark
   - kimi-k3:cloud
+  - deepseek-v4.1-flash:1017-cloud
   - deepseek-v4.1-flash:cloud
   - deepseek-v4-flash:0731-cloud
   - deepseek-v4-pro:0813-cloud
@@ -246,6 +247,49 @@ providers:
           - medium
           - high
           - xhigh
+        disabledReason: null
+      # https://ollama.com/library/deepseek-v4.1-flash:1017-cloud
+      # Context, vision and thinking controls verified via Ollama /api/show.
+      - id: deepseek-v4.1-flash:1017-cloud
+        name: "Ollama Cloud: DeepSeek V4.1 Flash 1017"
+        compat:
+          supportsReasoningEffort: true
+        reasoning: true
+        input:
+          - text
+          - image
+        contextWindow: 1048576
+        # Retain Pie's existing V4.1 output cap; Ollama publishes no separate limit.
+        maxTokens: 65536
+        thinkingLevelMap:
+          off: none
+          minimal: null
+          low: low
+          medium: null
+          high: high
+          xhigh: null
+          max: max
+        # Official Ollama off-peak rates; weekday 12:00–18:00 UTC peak is 2x.
+        pricing:
+          input: 0.15
+          output: 0.6
+          cacheRead: 0.003
+          cacheWrite: 0
+          peak:
+            weekdaysUtc: [ 1, 2, 3, 4, 5 ]
+            startMinutesUtc: 720
+            endMinutesUtc: 1080
+            override:
+              input: 0.30
+              output: 1.2
+              cacheRead: 0.006
+              cacheWrite: 0
+        eligible: true
+        thinking:
+          - off
+          - low
+          - high
+          - max
         disabledReason: null
       - id: deepseek-v4.1-flash:cloud
         name: "Ollama Cloud: DeepSeek V4.1 Flash"

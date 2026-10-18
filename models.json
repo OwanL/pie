@@ -107,6 +107,52 @@
           }
         },
         {
+          "id": "deepseek-v4.1-flash:1017-cloud",
+          "name": "Ollama Cloud: DeepSeek V4.1 Flash 1017",
+          "compat": {
+            "supportsReasoningEffort": true
+          },
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
+          "cost": {
+            "input": 0.15,
+            "output": 0.6,
+            "cacheRead": 0.003,
+            "cacheWrite": 0,
+            "peak": {
+              "weekdaysUtc": [
+                1,
+                2,
+                3,
+                4,
+                5
+              ],
+              "startMinutesUtc": 720,
+              "endMinutesUtc": 1080,
+              "override": {
+                "input": 0.3,
+                "output": 1.2,
+                "cacheRead": 0.006,
+                "cacheWrite": 0
+              }
+            }
+          }
+        },
+        {
           "id": "deepseek-v4.1-flash:cloud",
           "name": "Ollama Cloud: DeepSeek V4.1 Flash",
           "compat": {

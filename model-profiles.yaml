@@ -378,6 +378,15 @@ profiles:
       - xhigh
     disabled_reason: null
   - provider: ollama
+    id: deepseek-v4.1-flash:1017-cloud
+    eligible: true
+    thinking:
+      - off
+      - low
+      - high
+      - max
+    disabled_reason: null
+  - provider: ollama
     id: deepseek-v4.1-flash:cloud
     eligible: true
     thinking:
