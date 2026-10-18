@@ -99,7 +99,20 @@ export type AnalyticsRuntimeActivationSnapshot = Pick<
   'manifest' | 'sha256' | 'authority'
 >;
 
+/** Capture namespace, not activation evidence. Reopening an existing store must
+ * retain its generationId so replay/idempotency keys keep their original scope.
+ * The composition owner must supply this identity; never infer it from legacy
+ * files or mint a replacement as part of helper startup. */
+export interface CanonicalAnalyticsRuntimeContext {
+  readonly mode: 'canonical-only';
+  readonly generationId: string;
+  readonly buildId: string;
+  readonly workspaceId: string;
+  readonly hostInstanceId: string;
+}
+
 export interface AnalyticsRuntimeAuthorityOptions {
+  canonicalContext?: CanonicalAnalyticsRuntimeContext;
   stateDir: string;
   workspaceId: string;
   processGeneration: string;
@@ -116,11 +129,28 @@ export interface AnalyticsRuntimeAuthorityOptions {
  * evidence. Helper lifecycle and application drain remain in composition. */
 export class AnalyticsRuntimeAuthority {
   private readonly store: ActivationStore;
+  readonly canonicalContext: CanonicalAnalyticsRuntimeContext | undefined;
   private descriptor: AnalyticsBackendDescriptor | undefined;
   private loadedGeneration: AnalyticsLoadedGenerationReceipt | undefined;
 
   constructor(private readonly options: AnalyticsRuntimeAuthorityOptions) {
     this.store = new ActivationStore({ stateDir: options.stateDir });
+    const context = options.canonicalContext;
+    if (context) {
+      if (context.mode !== 'canonical-only'
+        || !context.generationId.trim()
+        || context.buildId !== options.buildId
+        || context.workspaceId !== options.workspaceId
+        || context.hostInstanceId !== options.processGeneration) {
+        throw new ActivationManifestError('Canonical analytics context does not match the runtime identity.');
+      }
+      if (options.activationSnapshot || options.manifestBuildId !== undefined
+        || options.restartNonce != null || options.terminalRestartReceiptPath !== undefined
+        || options.loadedGenerationPath !== undefined) {
+        throw new ActivationManifestError('Canonical-only startup cannot carry activation or restart evidence options.');
+      }
+      this.canonicalContext = Object.freeze({ ...context });
+    }
     if (options.restartNonce !== undefined && options.restartNonce !== null
       && !isAnalyticsRestartNonce(options.restartNonce)) {
       throw new ActivationManifestError('Analytics restart correlation nonce has an invalid format or exceeds 128 bytes.');
@@ -128,6 +158,9 @@ export class AnalyticsRuntimeAuthority {
   }
 
   readActivation(): AnalyticsRuntimeActivationSnapshot {
+    if (this.canonicalContext) {
+      throw new ActivationManifestError('Canonical-only startup has no activation snapshot.');
+    }
     const read = this.store.read();
     return { manifest: read.manifest, sha256: read.sha256, authority: read.authority };
   }
@@ -173,10 +206,14 @@ export class AnalyticsRuntimeAuthority {
   }
 
   backendDescriptor(canonicalReady: boolean): AnalyticsBackendDescriptor | undefined {
+    if (this.canonicalContext) {
+      throw new ActivationManifestError('Canonical-only context requires a context-aware backend; activation descriptors are unavailable.');
+    }
     return canonicalReady ? this.descriptor : undefined;
   }
 
   recordLoadedGeneration(canonicalReady: boolean): void {
+    if (this.canonicalContext) return;
     if (!canonicalReady) return;
     try {
       const descriptor = this.descriptor;
@@ -216,6 +253,7 @@ export class AnalyticsRuntimeAuthority {
   }
 
   recordTerminalRestartReceipt(canonicalReady: boolean): void {
+    if (this.canonicalContext) return;
     if (!canonicalReady || this.options.restartNonce === null
       || this.options.restartNonce === undefined) return;
     const destination = this.options.terminalRestartReceiptPath;

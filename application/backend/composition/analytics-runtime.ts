@@ -5,6 +5,7 @@ import {
 import {
   AnalyticsRuntimeAuthority,
   type AnalyticsRuntimeActivationSnapshot,
+  type CanonicalAnalyticsRuntimeContext,
 } from '../../../analytics/authority/analytics-runtime.js';
 import {
   canonicalAnalyticsDatabasePath,
@@ -31,6 +32,9 @@ function validateAnalyticsTimeZone(configuredTimeZone: string): string {
 }
 
 export interface AnalyticsRuntimeOptions {
+  /** Bounded canonical-only startup seam. The caller owns namespace selection
+   * and lifecycle admission. Existing activation-based hosts are unchanged. */
+  canonicalContext?: CanonicalAnalyticsRuntimeContext;
   stateDir: string;
   analyticsDir: string;
   /** Packaged `analytics-recorder-worker.js` in the loaded runtime generation. */
@@ -186,6 +190,9 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
 
   constructor(private readonly options: AnalyticsRuntimeOptions) {
     this.authority = new AnalyticsRuntimeAuthority(options);
+    if (this.authority.canonicalContext && !options.writerAdmission) {
+      throw new ActivationManifestError('Canonical-only startup requires lifecycle writer admission.');
+    }
     const configuredTimeZone = options.timeZone?.trim()
       || Intl.DateTimeFormat().resolvedOptions().timeZone
       || 'UTC';
@@ -277,8 +284,55 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
     return startup;
   }
 
+  /** Capture identity is published only with helper readiness. Unlike an
+   * activation descriptor it contains no trial/qualification claims or hashes. */
+  getCanonicalContext(): CanonicalAnalyticsRuntimeContext | undefined {
+    return this.readiness?.authority === 'canonical'
+      ? this.authority.canonicalContext
+      : undefined;
+  }
+
+  private async startCanonicalContext(context: CanonicalAnalyticsRuntimeContext): Promise<AnalyticsRuntimeReadiness> {
+    let helpers: AnalyticsHelperStartup | undefined;
+    try {
+      helpers = await startAnalyticsHelpers({
+        label: 'Canonical',
+        recorderWorkerScript: this.options.recorderWorkerScript,
+        queryWorkerScript: this.options.queryWorkerScript,
+        databasePath: this.databasePath,
+        writerAdmission: this.options.writerAdmission,
+      });
+      if (this.stopped) throw new ActivationManifestError('Analytics runtime stopped during startup.');
+      this.recorder = helpers.recorder;
+      this.queryClient = helpers.queryClient;
+      this.readiness = {
+        authority: 'canonical',
+        manifestRevision: null,
+        manifestSha256: null,
+        generationId: context.generationId,
+        recorderSchemaVersion: helpers.recorderSchemaVersion,
+        projectionRevision: helpers.projectionRevision,
+        recorderReady: true,
+        queryReady: true,
+      };
+      return this.readiness;
+    } catch (error) {
+      if (helpers) await helpers.recorder.shutdown().catch(() => { /* preserve startup error */ });
+      this.recorder = undefined;
+      this.queryClient = undefined;
+      this.readiness = undefined;
+      if (!this.stopped) {
+        this.stopped = true;
+        this.options.onError?.(error, 'canonical-startup');
+      }
+      throw error;
+    }
+  }
+
   private async startInternal(): Promise<AnalyticsRuntimeReadiness> {
     if (this.stopped) throw new ActivationManifestError('Analytics runtime has stopped.');
+    const context = this.authority.canonicalContext;
+    if (context) return this.startCanonicalContext(context);
     const activation = this.readActivation();
     this.authority.assertStartupActivationUnchanged(activation);
     const { manifest, sha256, authority } = activation;
