@@ -34,7 +34,8 @@ spawnWindowsOwnedTree({
 ```
 
 `authorizeStartup` writes the exact UTF-8 text (at most 16 KiB, no NULs) once
-and closes private child stdin. Callers supply their own newline/token protocol;
+and closes private child stdin. Empty text closes stdin without a zero-length
+write. Callers supply their own newline/token protocol;
 the primitive does not validate a token or claim that arbitrary children wait
 for it. In particular Node preloads execute before authorization, **inside** the
 Job. A second authorization or authorization after stop is rejected. A lost
