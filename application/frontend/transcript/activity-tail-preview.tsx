@@ -14,7 +14,7 @@ import {
   takeLastChars,
   type TurnActivityTail,
 } from './activity-tail';
-import { textFromToolResult } from './highlight';
+import { textFromToolResult } from './tool-result-text';
 import { isForwardExtension, useBufferedText, type BufferedTextRate } from './use-buffered-text';
 
 /**

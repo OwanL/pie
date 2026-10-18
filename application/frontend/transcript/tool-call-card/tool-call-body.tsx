@@ -11,11 +11,10 @@ import { DEFAULT_CHAT_PREFS, type ChatPrefs } from '../../../lib/protocol/index.
 import {
   formatValueAsHighlightedYaml,
   highlightToolResultText,
-  isTextOnlyToolResult,
   languageForToolInput,
   stringifyValueAsYamlText,
-  textFromToolResult,
 } from '../highlight';
+import { isTextOnlyToolResult, textFromToolResult } from '../tool-result-text';
 
 import { isCommandSummaryTool } from './summary-model';
 import { TerminalOutput } from './terminal-output';

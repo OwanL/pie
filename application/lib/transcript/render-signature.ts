@@ -29,11 +29,16 @@ export function transcriptRenderSignature(state: Pick<
   | 'transcript'
 >): string {
   const tailStart = Math.max(0, state.transcript.length - 3);
-  const earlierStreaming = state.transcript
-    .slice(0, tailStart)
-    .filter((message) => message.status === 'streaming')
-    .map(messageRenderIdentity);
-  const tail = state.transcript.slice(tailStart).map(messageRenderIdentity);
+  const earlierStreaming: ReturnType<typeof messageRenderIdentity>[] = [];
+  const tail: ReturnType<typeof messageRenderIdentity>[] = [];
+  for (let index = 0; index < state.transcript.length; index += 1) {
+    const message = state.transcript[index]!;
+    if (index >= tailStart) {
+      tail.push(messageRenderIdentity(message));
+    } else if (message.status === 'streaming') {
+      earlierStreaming.push(messageRenderIdentity(message));
+    }
+  }
   const source = JSON.stringify({
     sessionPath: state.activeSession?.path ?? null,
     busy: state.busy,

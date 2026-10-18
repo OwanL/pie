@@ -26,6 +26,21 @@ function state() {
   };
 }
 
+test('transcript signature preserves pre-loop identities across tail boundaries and long queued histories', () => {
+  const expected = [[0, 'aff5023d'], [1, 'a5f01c3f'], [3, 'a2d38eae'],
+    [4, 'b6d49d9d'], [1000, 'ca5e6a76'], [10000, 'cbae4661']] as const;
+  for (const [length, identity] of expected) {
+    const transcript = Array.from({ length }, (_, index) => ({
+      id: String(index), role: 'user' as const, createdAt: '', markdown: `row${index}`,
+      status: index === 0 ? 'streaming' as const : 'queued' as const,
+      toolStateRevision: index,
+    }));
+    assert.equal(transcriptRenderSignature({
+      activeSession: null, busy: true, prepassPhase: 'idle', retryStatus: null, transcript,
+    }), identity);
+  }
+});
+
 test('transcript render signature changes for live status and content changes', () => {
   const base = state();
   const initial = transcriptRenderSignature(base);

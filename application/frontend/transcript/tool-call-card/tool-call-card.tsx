@@ -9,7 +9,7 @@ import { toMouseEvent } from '../../lib/components/preact-events';
 import { getToolCallPresentation } from '../tool-call-summary';
 import { CollapsibleCloseFooter } from '../../lib/components/collapsible-close-footer';
 import { CollapsibleGutter } from '../../lib/components/collapsible-gutter';
-import { textFromToolResult } from '../highlight';
+import { textFromToolResult } from '../tool-result-text';
 import { toolDisclosureKey, useCollapsibleOpen } from '../use-collapsible-open';
 import { useLazyDetail } from '../lazy-detail-store';
 import { normalizeToolCallName } from '../tool-call-summary-model';

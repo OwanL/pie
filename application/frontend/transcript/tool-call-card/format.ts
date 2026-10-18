@@ -1,5 +1,5 @@
 import type { ToolCall } from '../../../lib/protocol/index.js';
-import { textFromToolResult } from '../highlight';
+import { textFromToolResult } from '../tool-result-text';
 import { hasImageToolResult } from './tool-result-content';
 
 export function formatToolCallResultForDisplay(toolCall: Pick<ToolCall, 'name' | 'result'>): string {

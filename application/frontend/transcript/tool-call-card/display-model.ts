@@ -1,6 +1,6 @@
 import type { ToolCall } from '../../../lib/protocol/index.js';
 import { isRecord } from '../../../../lib/validation/type-guards';
-import { textFromToolResult } from '../highlight';
+import { textFromToolResult } from '../tool-result-text';
 import { normalizeToolCallName } from '../tool-call-summary-model';
 import { provisionalToolSummary } from './provisional';
 

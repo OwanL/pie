@@ -18,7 +18,7 @@
 import type { ChatMessagePart, ToolCall } from '../../lib/protocol/index.js';
 import { normalizeToolCallName } from './tool-call-summary-model';
 import { getToolCallPresentation } from './tool-call-summary';
-import { textFromToolResult } from './highlight';
+import { textFromToolResult } from './tool-result-text';
 import {
   getRenderableSubagentResultFromToolCall,
   isSubagentSingleResultRunning,

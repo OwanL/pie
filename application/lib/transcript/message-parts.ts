@@ -331,13 +331,18 @@ export function omitRedundantToolCallMirrorForTransport(message: ChatMessage): C
   if (
     message.role !== 'assistant'
     || !message.toolCalls
-    || !message.parts?.some((part) => part.kind === 'toolCall')
+    || !message.parts
   ) {
     return message;
   }
 
-  const { toolCalls: _redundantToolCalls, ...transportMessage } = message;
-  return transportMessage;
+  for (const part of message.parts) {
+    if (part.kind === 'toolCall') {
+      const { toolCalls: _redundantToolCalls, ...transportMessage } = message;
+      return transportMessage;
+    }
+  }
+  return message;
 }
 
 /**

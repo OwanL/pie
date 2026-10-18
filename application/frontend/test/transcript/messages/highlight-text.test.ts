@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
-import { textFromToolResult } from '../../../transcript/highlight';
+import { isTextOnlyToolResult, textFromToolResult } from '../../../transcript/tool-result-text';
+
+test('plain tool-result text imports only the browser-safe ANSI helper', () => {
+  const source = readFileSync('application/frontend/transcript/tool-result-text.ts', 'utf8');
+  const imports = source.match(/^import .*$/gm);
+  assert.deepEqual(imports, ["import { stripAnsiEscapes } from './tool-call-analysis';"]);
+  assert.doesNotMatch(source, /\b(?:require|import)\s*\(/);
+});
+
+test('isTextOnlyToolResult preserves metadata-only and structured-result classification', () => {
+  for (const result of [null, undefined, 'text', {}, { content: [], details: {} }]) {
+    assert.equal(isTextOnlyToolResult(result), true);
+  }
+  assert.equal(isTextOnlyToolResult({ content: 'text', exitCode: 1 }), false);
+});
 
 /**
  * `textFromToolResult` is the single display chokepoint for human-readable

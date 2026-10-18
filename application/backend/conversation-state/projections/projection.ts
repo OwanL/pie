@@ -622,7 +622,18 @@ export function selectViewState(state: ArchState): ViewState {
   ) {
     return cachedViewState;
   }
-  const viewState = projectViewState(state);
+  // Independently reuse the expensive join + error-redaction projection when
+  // only settings/composer/session metadata changed. Keep this bounded to the
+  // existing single-entry memo, not a session/history cache. Durable nested
+  // edits use Immer (and therefore replace activeTranscript); live transitions,
+  // checkpoint recovery and cleanup advance the session's live revision.
+  const reusableTranscript = cachedSignature !== null && cachedViewState !== null
+    && cachedSignature.activeSessionPath === signature.activeSessionPath
+    && cachedSignature.activeTranscript === signature.activeTranscript
+    && cachedSignature.activeLiveRevision === signature.activeLiveRevision
+    ? cachedViewState.transcript
+    : undefined;
+  const viewState = projectViewState(state, reusableTranscript);
   cachedSignature = signature;
   cachedViewState = viewState;
   return viewState;
@@ -635,7 +646,7 @@ export function selectViewState(state: ArchState): ViewState {
  * references (e.g. the webview `pickStable` barrier) see stability across
  * recomputes that leave a slice untouched.
  */
-function projectViewState(state: ArchState): ViewState {
+function projectViewState(state: ArchState, reusableTranscript?: ChatMessage[]): ViewState {
   const { sessions, transcript, settings, composer, fileChanges } = state;
   const activePath = sessions.activeSessionPath;
 
@@ -646,7 +657,7 @@ function projectViewState(state: ArchState): ViewState {
       : null;
 
   // ── Per-active-session lookups ──
-  const activeTranscript: ChatMessage[] = activePath
+  const activeTranscript: ChatMessage[] = reusableTranscript ?? (activePath
     ? projectTranscriptView(
         transcript.bySession[activePath] ?? EMPTY_TRANSCRIPT,
         state.livePipeline,
@@ -654,7 +665,7 @@ function projectViewState(state: ArchState): ViewState {
       ).messages.map((message) => message.errorDetail === undefined
         ? message
         : { ...message, errorDetail: redactRendererErrorText(message.errorDetail) })
-    : EMPTY_TRANSCRIPT;
+    : EMPTY_TRANSCRIPT);
 
   const activeTranscriptWindow: TranscriptWindow =
     activePath ? transcript.windowBySession[activePath] ?? EMPTY_TRANSCRIPT_WINDOW : EMPTY_TRANSCRIPT_WINDOW;

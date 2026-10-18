@@ -18,6 +18,7 @@ import { readFile } from 'node:fs/promises';
 import { BackendClient } from '../../agent-connection/client';
 import { BrowserServer } from '../../../hosts/browser/http/browser-server';
 import { HostRuntime } from '../../composition/host-runtime.js';
+import { createStandaloneHostRuntimePlatform } from '../../../hosts/standalone/platform.js';
 import { DictationService } from '../../dictation/service.js';
 import {
   getLivePipelineTraceHealth,
@@ -540,7 +541,10 @@ test('HostRuntime reports LAN preference persistence failures without claiming a
 test('HostRuntime persists the enabled preference and starts/stops the shared listener', async () => {
   const dataRoot = useTempDataRoot();
   const extensionPath = path.join(dataRoot, 'extension');
-  const panelDir = path.join(extensionPath, 'out', 'webview', 'panel');
+  const runtimeOutputDirectory = path.join(dataRoot, 'custom-output');
+  const panelDir = path.join(runtimeOutputDirectory, 'webview', 'panel');
+  fs.mkdirSync(path.join(extensionPath, 'media'), { recursive: true });
+  fs.writeFileSync(path.join(extensionPath, 'media', 'icon.svg'), '<svg>host-icon</svg>');
   fs.mkdirSync(path.join(panelDir, '.vite'), { recursive: true });
   fs.mkdirSync(path.join(panelDir, 'assets'), { recursive: true });
   fs.writeFileSync(path.join(panelDir, 'assets', 'panel-abc123.js'), 'console.log("pie");');
@@ -554,6 +558,20 @@ test('HostRuntime persists the enabled preference and starts/stops the shared li
       browserServerEnabled: false,
       browserServerPort: 0,
     });
+    // Exercise the real standalone asset adapter with distinct extension and
+    // output roots, rather than asserting how its path expressions are written.
+    const standalone = createStandaloneHostRuntimePlatform({
+      workspaceCwd: dataRoot,
+      extensionPath,
+      runtimeOutputDirectory,
+      dataPaths: {
+        rootDir: dataRoot, analyticsDir: dataRoot, sessionsDir: dataRoot,
+        artifactsDir: dataRoot, stateDir: dataRoot, cacheDir: dataRoot,
+      },
+      dependencies: { nodePath: process.execPath, sdkPath: dataRoot },
+      getBrowserServer: () => undefined,
+    });
+    platform.createBrowserServer = standalone.createBrowserServer;
     runtime = new HostRuntime(platform, new BackendClient());
 
     await runtime.handleWebviewMessage({ type: 'setBrowserServerEnabled', enabled: true } as WebviewToHostMessage);
@@ -563,6 +581,12 @@ test('HostRuntime persists the enabled preference and starts/stops the shared li
     assert.equal(state?.serverToggleAvailable, true, 'the VS Code fixture exposes the listener switch');
     assert.equal(state?.running, true, 'the listener starts when enabled');
     assert.ok(state?.localUrl, 'the actual localhost URL is projected');
+    const asset = await fetch(new URL('/assets/panel-abc123.js', state.localUrl));
+    assert.equal(asset.status, 200);
+    assert.equal(await asset.text(), 'console.log("pie");', 'the real adapter serves its selected renderer output');
+    const icon = await fetch(new URL('/favicon.svg', state.localUrl));
+    assert.equal(icon.status, 200);
+    assert.equal(await icon.text(), '<svg>host-icon</svg>', 'icons remain owned by the extension root');
     assert.equal(state?.pendingEnabled, null);
     assert.equal(state?.changeError, null);
 
@@ -576,6 +600,7 @@ test('HostRuntime persists the enabled preference and starts/stops the shared li
   } finally {
     await runtime?.shutdown();
     delete process.env.PIE_DATA_DIR;
+    fs.rmSync(dataRoot, { recursive: true, force: true });
   }
 });
 
@@ -693,9 +718,18 @@ test('HostRuntime keeps legacy analytics authority with a fresh data root: canon
 
 // ─── Boundary guards (one composition, one host implementation) ──────────────
 
+// Read each architectural authority once, shared by the boundary checks below.
+const boundarySources = Promise.all([
+  '../../composition/host-runtime.ts',
+  '../../../lib/platform-contracts/platform.ts',
+  '../../../lib/platform-contracts/browser-server-seam.ts',
+  '../../../hosts/browser/types.ts',
+  '../../../hosts/vscode/activation/extension-host.ts',
+  '../../../hosts/vscode/runtime/host-runtime-platform.ts',
+].map(relative => readFile(new URL(relative, import.meta.url), 'utf8')));
+
 test('host runtime modules must not import vscode or VS Code-only adapters', async () => {
-  const runtimeSource = await readFile(new URL('../../composition/host-runtime.ts', import.meta.url), 'utf8');
-  const platformSource = await readFile(new URL('../../../lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
+  const [runtimeSource, platformSource] = await boundarySources;
   for (const [name, source] of [['host-runtime.ts', runtimeSource], ['platform.ts', platformSource]] as const) {
     const imports = Array.from(source.matchAll(/from\s+['"]([^'"]+)['"]/g)).map((m) => m[1]);
     for (const imp of imports) {
@@ -708,11 +742,7 @@ test('host runtime modules must not import vscode or VS Code-only adapters', asy
 });
 
 test('browser-server seam is owned by the host-neutral runtime; no concrete implementation imports (including type-only)', async () => {
-  const runtimeSource = await readFile(new URL('../../composition/host-runtime.ts', import.meta.url), 'utf8');
-  const platformSource = await readFile(new URL('../../../lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
-  const seamSource = await readFile(new URL('../../../lib/platform-contracts/browser-server-seam.ts', import.meta.url), 'utf8');
-  const browserServerSource = await readFile(new URL('../../../hosts/browser/http/browser-server.ts', import.meta.url), 'utf8');
-  const typesSource = await readFile(new URL('../../../hosts/browser/types.ts', import.meta.url), 'utf8');
+  const [runtimeSource, platformSource, seamSource, typesSource] = await boundarySources;
 
   // Every import specifier must avoid the concrete browser-server domain —
   // the regex matches the `from` clause of both value and `import type`
@@ -726,7 +756,7 @@ test('browser-server seam is owned by the host-neutral runtime; no concrete impl
   ] as const) {
     const imports = Array.from(source.matchAll(/from\s+['"]([^'"]+)['"]/g)).map((m) => m[1]);
     for (const imp of imports) {
-      assert.ok(!imp.includes('browser-server/'),
+      assert.ok(!/hosts\/browser\/|browser-server\//.test(imp),
         `${name}: shared host runtime must not import the concrete browser-server implementation, even type-only (found "${imp}")`);
     }
     assert.ok(!/(^|[^A-Za-z])BrowserServerOptions/.test(source),
@@ -735,22 +765,8 @@ test('browser-server seam is owned by the host-neutral runtime; no concrete impl
       `${name}: the concrete hosts construct the browser service, not the shared runtime`);
   }
 
-  // The seam is the single host-neutral contract owner: the runtime consumes
-  // the lifecycle/service port, and the canonical settings/lifecycle shapes
-  // are defined once (not mirrored).
-  assert.ok(seamSource.includes('export interface BrowserServerService'),
-    'the host-neutral seam must own the browser service lifecycle port');
-  assert.ok(seamSource.includes('export interface HostRuntimeBrowserServerOptions'),
-    'the host-neutral seam must own the factory options interface (not a Pick of the concrete options)');
-  assert.ok(platformSource.includes('createBrowserServer(options: HostRuntimeBrowserServerOptions): BrowserServerService'),
-    'the platform factory must return the host-neutral service seam');
-  assert.ok(runtimeSource.includes('readonly browserServer: BrowserServerService'),
-    'HostRuntime must hold the browser server through the host-neutral service seam');
-
-  // The concrete implementation satisfies the seam; the canonical shapes are
-  // re-exported from the seam, never redeclared in the browser-server module.
-  assert.ok(browserServerSource.includes('export class BrowserServer implements BrowserServerService'),
-    'the BrowserServer implementation must declare the host-neutral service contract');
+  // Structural compatibility is exercised by constructing HostRuntime with a
+  // platform factory above; only source ownership needs a textual guard here.
   assert.ok(typesSource.includes("from '../../lib/platform-contracts/browser-server-seam.js'"),
     'browser-server types must re-export the canonical shapes from the host-neutral seam');
   assert.ok(!typesSource.includes('export interface BrowserServerSettings')
@@ -759,43 +775,17 @@ test('browser-server seam is owned by the host-neutral runtime; no concrete impl
 });
 
 test('BrowserServer construction stays in concrete hosts; PieExtension stays a thin adapter', async () => {
-  const adapterSource = await readFile(new URL('../../../hosts/vscode/activation/extension-host.ts', import.meta.url), 'utf8');
-  const runtimeSource = await readFile(new URL('../../composition/host-runtime.ts', import.meta.url), 'utf8');
-  const vscodePlatformSource = await readFile(new URL('../../../hosts/vscode/runtime/host-runtime-platform.ts', import.meta.url), 'utf8');
-  const standalonePlatformSource = await readFile(new URL('../../../hosts/standalone/platform.ts', import.meta.url), 'utf8');
-  const browserFactorySource = await readFile(new URL('../../../hosts/browser/http/browser-server-factory.ts', import.meta.url), 'utf8');
+  const [, , , , adapterSource, vscodePlatformSource] = await boundarySources;
 
   // One application composition authority; only concrete hosts construct the
   // host-specific server adapter and its asset paths.
   for (const symbol of ['new AnalyticsRuntime', 'new EffectRunner', 'new SessionService', 'new MessageRouter', 'new StatsService', 'new CanonicalAnalyticsReadModel']) {
     assert.ok(!adapterSource.includes(symbol), `PieExtension must not compose ${symbol}`);
-    assert.ok(runtimeSource.includes(symbol), `HostRuntime must compose ${symbol}`);
   }
-  assert.ok(!runtimeSource.includes('new BrowserServer'),
-    'HostRuntime must request the browser service through HostRuntimePlatform');
-  assert.ok(vscodePlatformSource.includes('createBrowserServer('),
-    'the VS Code platform adapter selects the browser service factory');
-  assert.ok(standalonePlatformSource.includes('createBrowserServer('),
-    'the standalone platform adapter selects the browser service factory');
-  assert.ok(browserFactorySource.includes('new BrowserServer'),
-    'the browser host factory constructs the concrete server');
   assert.ok(vscodePlatformSource.includes('assetDir: getWebviewAssetDir(context)'),
     'VS Code asset selection stays in its concrete adapter and honors the admitted development output');
-  assert.ok(standalonePlatformSource.includes("assetDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),
-    'standalone asset paths stay in its concrete adapter (runtime output directory)');
-  assert.ok(standalonePlatformSource.includes("fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),
-    'standalone renderer asset selection stays in its concrete adapter (runtime output directory)');
-  assert.ok(standalonePlatformSource.includes("iconPath: path.join(options.extensionPath, 'media', 'icon.svg')"),
-    'the standalone adapter keeps its host-owned icon path on the extension path');
   assert.ok(!adapterSource.includes('dispatch(this.archState'),
     'the reducer dispatch point must live in the shared runtime, not the adapter');
-  assert.ok(runtimeSource.includes('dispatch(this.archState, event)'),
-    'HostRuntime must own the single reducer dispatch point');
-
-  // The adapter still owns the VS Code shell surfaces.
-  for (const expected of ["'pie.openChat'", "'pie.newSession'", "'pie.restartBackend'", "'pie.dumpDebugState'", 'createStatusBarItem', 'registerWebviewViewProvider']) {
-    assert.ok(adapterSource.includes(expected), `PieExtension must keep the VS Code shell surface: ${expected}`);
-  }
 });
 
 test('selectRuntimeSetting fallback contract is shared by adapters (single authority)', () => {

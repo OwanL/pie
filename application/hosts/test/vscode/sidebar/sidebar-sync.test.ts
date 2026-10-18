@@ -126,4 +126,18 @@ test('renderer snapshots keep ordered tool parts and omit their redundant legacy
   assert.equal(sourceMessage.toolCalls.length, 1, 'source ViewState is not mutated');
   assert.equal(result.expectedTranscriptIdentity, transcriptRenderSignature(result.message.state));
   assert.equal(result.expectedTranscriptIdentity, transcriptRenderSignature(viewState), 'mirror omission preserves render identity');
+
+  // Same message and parts identities may be reused after compatibility mutation.
+  sourceMessage.markdown = 'updated';
+  sourceMessage.parts.splice(0);
+  const next = buildStateEnvelope('host-1', viewState,
+    { revision: 2, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
+  assert.equal(next.message.state, viewState, 'no omission means no transcript allocation');
+  assert.equal(next.message.state.transcript[0]?.toolCalls, sourceMessage.toolCalls);
+  assert.equal(next.message.state.transcript[0]?.markdown, 'updated');
+  sourceMessage.parts.push({ kind: 'toolCall', toolCall });
+  const restored = buildStateEnvelope('host-1', viewState,
+    { revision: 3, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
+  assert.equal(restored.message.state.transcript[0]?.toolCalls, undefined);
+  assert.equal(restored.message.state.transcript[0]?.markdown, 'updated');
 });

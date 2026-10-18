@@ -9,8 +9,8 @@ import { renderMarkdown } from '../markdown';
 import { getToolCallContextType } from '../../shell/chat-prefs';
 import {
   formatValueAsHighlightedYaml,
-  textFromToolResult,
 } from '../highlight';
+import { textFromToolResult } from '../tool-result-text';
 import { ToolCallCard } from '../tool-call-card';
 import { registerToolRenderer, type ToolRendererProps } from '../registry';
 import type { TranscriptContextMenuHandler } from '../types';

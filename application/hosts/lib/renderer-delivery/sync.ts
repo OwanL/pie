@@ -45,8 +45,20 @@ export function buildStateEnvelope(
   message: Extract<HostToWebviewMessage, { type: 'state' }>;
   expectedTranscriptIdentity: string;
 } {
-  const transportTranscript = viewState.transcript.map(omitRedundantToolCallMirrorForTransport);
-  const transportViewState = transportTranscript.some((message, index) => message !== viewState.transcript[index])
+  // Messages/parts are mutable compatibility values: do not cache by identity.
+  // Allocate a transcript only once a redundant mirror actually changes a row.
+  let transportTranscript: ViewState['transcript'] | undefined;
+  for (let index = 0; index < viewState.transcript.length; index += 1) {
+    const source = viewState.transcript[index]!;
+    const transport = omitRedundantToolCallMirrorForTransport(source);
+    if (transportTranscript) {
+      transportTranscript.push(transport);
+    } else if (transport !== source) {
+      transportTranscript = viewState.transcript.slice(0, index);
+      transportTranscript.push(transport);
+    }
+  }
+  const transportViewState = transportTranscript
     ? { ...viewState, transcript: transportTranscript }
     : viewState;
   const expectedTranscriptIdentity = transcriptRenderSignature(transportViewState);

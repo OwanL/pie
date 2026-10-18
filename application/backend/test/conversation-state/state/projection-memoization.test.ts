@@ -16,6 +16,8 @@ import { produce } from 'immer';
 
 import { createInitialArchState, type ArchState } from '../../../conversation-state/arch-state';
 import { selectViewState } from '../../../conversation-state/projections/projection';
+import { applyLiveSemanticEnvelope } from '../../../conversation-state/live-pipeline/transitions';
+import { interruptLivePipelineForRestart } from '../../../conversation-state/live-pipeline/cleanup';
 import type { ChatMessage } from '../../../../lib/protocol/index.js';
 
 const SESSION_A = '/ws/session-a';
@@ -123,6 +125,57 @@ test('projection memoization: a genuine active-session delta recomputes but keep
   assert.equal(second.pruningSettings, first.pruningSettings, 'pruningSettings unchanged → same reference');
   assert.equal(second.sessions, first.sessions, 'sessions slice unchanged → same reference');
   assert.equal(second.modelSettings, first.modelSettings, 'modelSettings unchanged → same reference');
+});
+
+test('transcript memo survives unrelated updates but detects nested durable edits and redacts again', () => {
+  let state = stateWithActiveSession(SESSION_A, [{ ...assistantMsg('a1'), errorDetail: 'Authorization: Bearer secret-one' }]);
+  let view = selectViewState(state);
+  assert.doesNotMatch(view.transcript[0].errorDetail!, /secret-one/);
+  for (const change of [
+    (draft: ArchState) => { draft.settings.notice = 'changed'; },
+    (draft: ArchState) => { draft.composer.draftTextBySession[SESSION_A] = 'typing'; },
+    (draft: ArchState) => { draft.sessions.sessions[0].name = 'renamed'; },
+  ]) {
+    state = produce(state, change);
+    const next = selectViewState(state);
+    assert.notEqual(next, view);
+    assert.equal(next.transcript, view.transcript);
+    view = next;
+  }
+  const edited = produce(state, (draft) => {
+    draft.transcript.bySession[SESSION_A][0].markdown = 'edited';
+    draft.transcript.bySession[SESSION_A][0].errorDetail = 'Authorization: Bearer secret-two';
+  });
+  const next = selectViewState(edited);
+  assert.notEqual(next.transcript, view.transcript);
+  assert.equal(next.transcript[0].markdown, 'edited');
+  assert.doesNotMatch(next.transcript[0].errorDetail!, /secret-two/);
+  assert.equal(state.transcript.bySession[SESSION_A][0].markdown, '');
+});
+
+test('transcript memo invalidates on live revisions and restart handoff without moving queued follow-ups', () => {
+  const base = { protocolVersion: 7 as const, sessionPath: SESSION_A, requestId: 'r', turnId: 't', attemptId: 'a', occurredAt: 1000, checkpointBytes: 100000 };
+  let state = stateWithActiveSession(SESSION_A, [assistantMsg('history'), { ...assistantMsg('queued'), role: 'user', status: 'queued' }]);
+  state = { ...state, livePipeline: applyLiveSemanticEnvelope(state.livePipeline, { ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'live', startedAt: 900 }, 20000).state };
+  const first = selectViewState(state);
+  assert.deepEqual(first.transcript.map((row) => row.id), ['history', 'live', 'queued']);
+  const renamed = produce(state, (draft) => { draft.sessions.sessions[0].name = 'new'; });
+  assert.equal(selectViewState(renamed).transcript, first.transcript);
+  state = { ...renamed, livePipeline: applyLiveSemanticEnvelope(state.livePipeline, { ...base, kind: 'turn.text', seq: 2, delta: 'hello' }, 20000).state };
+  const updated = selectViewState(state);
+  assert.notEqual(updated.transcript, first.transcript);
+  assert.equal(updated.transcript[1].markdown, 'hello');
+  const interrupted = interruptLivePipelineForRestart(state.livePipeline, 2000, 20000);
+  const settled = {
+    ...produce(state, (draft) => {
+      draft.transcript.bySession[SESSION_A].splice(1, 0, ...Object.values(interrupted.interruptedBySession));
+    }),
+    livePipeline: interrupted.state,
+  };
+  const final = selectViewState(settled);
+  assert.notEqual(final.transcript, updated.transcript);
+  assert.deepEqual(final.transcript.map((row) => row.id), ['history', 'live', 'queued']);
+  assert.equal(final.transcript[1].status, 'interrupted');
 });
 
 test('projection memoization: snooze changes invalidate the visible sessions slice', () => {
