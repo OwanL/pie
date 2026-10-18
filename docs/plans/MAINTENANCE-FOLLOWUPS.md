@@ -69,7 +69,13 @@ The supported `pi-runtime.mjs --isolated --allow-network` route compiled current
 
 Fresh-artifact validation passed 321 checks (one installed-prior-reader case remained skipped), all 32 typecheck projects, both private headless adapters/browser first paint, and all three explicit built-package checks including backend/session replacement and retirement. Development-refresh/native-workspace acceptance and real Electron/live-provider acceptance remain outside this evidence.
 
-A no-sync delivery build is staged locally at `application/hosts/vscode/out`, with host/renderer identity `4ad3d2939a32aa5e3ffc` and the fresh SDK above. The final packaged-candidate checks used that output. This is a built and tested candidate, **not published, installed, activated, or verified in the user's running VS Code host**. The three historical readers remain a shared-workspace limitation, not a blocker to this isolated candidate.
+A no-sync delivery build is staged locally at `application/hosts/vscode/out`, with host/renderer identity `4ad3d2939a32aa5e3ffc` and the fresh SDK above. The final packaged-candidate checks used that output. At that milestone it was a built and tested candidate only. Subsequent publication and activation are recorded below. The three historical readers remain a shared-workspace limitation, not a blocker to this isolated candidate.
+
+### Authorized publication and observed activation (2026-10-18)
+
+After explicit approval, publication installed generation `22bc7de8755ee045f4b5fa99787823453f26b78e51f5fedbedeb8a291dda9b43` and its startup loader. The user reloaded VS Code. Startup logs then show the backend loading from that generation and reaching `backend.ready` at 08:28:00 UTC; its installed SDK independently verifies as `9799129d…6709f3`. The live host's browser handshake reports build `4ad3d2939a32aa5e3ffc`, and its UI restored five session tabs and the message composer. This session resumed and executed tools on the new runtime. The pending continuation trigger was cancelled after direct resumption.
+
+Reload logs include transient pre-backend membership warnings and a cold-snapshot invalidation while this session changed; the observed UI recovered. This establishes loaded identity and bounded startup/session-resumption behavior, not exhaustive installed-feature acceptance or real Electron automation.
 
 ## Optional structural work
 
