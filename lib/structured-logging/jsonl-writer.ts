@@ -77,7 +77,12 @@ export class JsonlWriter {
 	private async writeJsonLine(logPath: string, line: string): Promise<void> {
 		await mkdir(path.dirname(logPath), { recursive: true });
 		if (await this.shouldRotateLog(logPath)) {
-			await this.rotateLog(logPath);
+			try {
+				await this.rotateLog(logPath);
+			} catch (error) {
+				// Rotation is best-effort: maxBytes is a rotation threshold, not an append quota.
+				console.warn(`${this.warnLabel.replace("failed to append", "failed to rotate")}: ${toErrorMessage(error)}`);
+			}
 		}
 		await appendFile(logPath, line, "utf-8");
 	}
