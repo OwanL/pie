@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { marked } from 'marked';
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 import { memo } from 'preact/compat';
@@ -560,6 +561,58 @@ test('a multi-KB streaming snapshot reaches the DOM and commit registry without 
       offsetWidth: offsetWidth!,
       offsetHeight: offsetHeight!,
     });
+  }
+});
+
+test('markdown mount parses once, then updates and terminal selection deferral retain honest leaf evidence', async (t) => {
+  const root = document.getElementById('root')!;
+  const timers = installFakeTimers(3000);
+  const parse = t.mock.method(marked, 'parse');
+  let leaf: unknown;
+  const capture = (value: unknown) => { leaf = value; };
+  const show = async (text: string, streaming: boolean) => {
+    await act(async () => {
+      render(h(TranscriptCommitProvider, {
+        target: null, appSurface: 'transcript', postMessage() {},
+        children: h('div', {}, [
+          h(BufferedTextPart, {
+            messageId: 'mount-count', index: 0, text, streaming,
+            workingDirectory: null, onOpenFile() {}, onContextMenu() {}, onFilePathContextMenu() {},
+          }),
+          h(CommitLeafProbe, { leafKey: 'text:mount-count:0', capture }),
+        ]),
+      }), root);
+      await Promise.resolve();
+    });
+  };
+  try {
+    await show('mount-count seed **bold**', true);
+    assert.equal(parse.mock.callCount(), 1, 'mount initializer is the only parse');
+    await timers.advanceBy(200);
+    assert.equal(parse.mock.callCount(), 1, 'mount must not arm a redundant parse');
+    await show('mount-count replacement **bold**', true);
+    assert.equal(parse.mock.callCount(), 2);
+    const body = root.querySelector('.message-body')!;
+    assert.match(body.textContent!, /replacement bold/);
+    assert.equal((leaf as { text: string }).text, 'mount-count replacement **bold**');
+
+    const selected = firstTextNode(body);
+    document.getSelection()!.setBaseAndExtent(selected, 0, selected, selected.length);
+    await show('mount-count terminal **bold**', false);
+    assert.equal(parse.mock.callCount(), 3, 'terminal transition still parses immediately');
+    assert.match(body.textContent!, /replacement bold/);
+    assert.equal((leaf as { text: string }).text, 'mount-count replacement **bold**');
+    await timers.advanceBy(400);
+    assert.equal(parse.mock.callCount(), 3, 'selection polling does not reparse');
+    document.getSelection()!.removeAllRanges();
+    await timers.advanceBy(200);
+    assert.match(body.textContent!, /terminal bold/);
+    assert.equal((leaf as { text: string }).text, 'mount-count terminal **bold**');
+  } finally {
+    document.getSelection()?.removeAllRanges();
+    render(null, root);
+    timers.restore();
+    parse.mock.restore();
   }
 });
 

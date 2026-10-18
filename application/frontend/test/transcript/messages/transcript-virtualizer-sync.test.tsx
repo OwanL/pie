@@ -3,11 +3,91 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { h, render, options } from 'preact';
+import { act } from 'preact/test-utils';
 import type { Virtualizer } from '@tanstack/virtual-core';
 import { installDom } from '../../helpers/dom';
 import { buildTranscriptRows, scopeTranscriptRowsToSession } from '../../../transcript/virtual-list-rows';
 
 installDom();
+
+test('real tool disclosure pins only while focused; editor pin and saved expansion are independent', async () => {
+  await import('../../../transcript/rows/message-row');
+  const { TranscriptVirtualList } = await import('../../../transcript/virtual-list');
+  const previousCSS = (globalThis as any).CSS;
+  (globalThis as any).CSS = (window as any).CSS;
+  const root = document.createElement('div');
+  document.body.append(root);
+  let instance: Virtualizer<any, any> | undefined;
+  const originalVNode = options.vnode;
+  options.vnode = (vnode) => {
+    originalVNode?.(vnode);
+    const current = (vnode.props as any)?.virtualizer;
+    if (current) instance = current;
+  };
+  const dimensions = ['offsetWidth', 'offsetHeight', 'clientHeight'].map((key) =>
+    [key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key)] as const);
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: { configurable: true, get: () => 320 },
+    offsetHeight: { configurable: true, get: () => 100 },
+    clientHeight: { configurable: true, get: () => 552 },
+  });
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = () => ({ width: 320, height: 552,
+    top: 0, left: 0, right: 320, bottom: 552, x: 0, y: 0, toJSON() {} }) as DOMRect;
+  const toolCall = { id: 'pin-disclosure-tool', name: 'bash', args: { command: 'echo saved' }, status: 'completed', result: 'saved' };
+  const props = {
+    sessionKey: '/pin-disclosure',
+    transcriptWindow: { loadedStart: 0, loadedEnd: 3, totalCount: 3, hasOlder: false,
+      hasNewer: false, isPartial: false, hasUserMessages: true },
+    transcript: [
+      { id: 'pin-tool-message', role: 'assistant', createdAt: '', markdown: '', status: 'completed',
+        parts: [{ kind: 'toolCall', toolCall }], toolCalls: [toolCall] },
+      { id: 'pin-editor', role: 'user', createdAt: '', markdown: 'edit me', status: 'completed' },
+      { id: 'pin-tail', role: 'user', createdAt: '', markdown: 'tail', status: 'completed' },
+    ],
+    busy: false, prefs: { showPruningMessages: true }, pruningSettings: {}, systemPrompts: [],
+    pruningResult: null, workingDirectory: null, editingId: null as string | null,
+    onEditRequest() {}, onEditConfirm() {}, onEditCancel() {}, onOpenFile() {}, onContextMenu() {},
+  };
+  props.transcript.reverse();
+  const paint = async () => {
+    act(() => render(h(TranscriptVirtualList, props as never), root));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+  try {
+    await paint();
+    const toggle = root.querySelector<HTMLButtonElement>('.tool-call-header .tool-call-toggle')!;
+    assert.ok(toggle, `list renders the real ToolCallHeader: ${root.innerHTML}`);
+    const index = Number(toggle.closest<HTMLElement>('[data-index]')!.dataset.index);
+    const range = { startIndex: 0, endIndex: 0, overscan: 0, count: 3 };
+    toggle.focus();
+    act(() => toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    assert.equal(root.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'true');
+    assert.ok(instance!.options.rangeExtractor(range).includes(index), 'focused tool stays in an offscreen range');
+    toggle.blur();
+    assert.deepEqual(instance!.options.rangeExtractor(range), [0], 'blurred expanded tool follows normal virtualization');
+    props.editingId = 'pin-editor';
+    await paint();
+    assert.deepEqual(instance!.options.rangeExtractor(range), [0, 1], 'inline editor remains pinned without focus');
+    await act(() => render(null, root));
+    props.editingId = null;
+    await paint();
+    assert.equal(root.querySelector('.tool-call-toggle')?.getAttribute('aria-expanded'), 'true',
+      'disclosure cache preserves expansion across list unmount/remount');
+    assert.deepEqual(instance!.options.rangeExtractor(range), [0]);
+  } finally {
+    await act(() => render(null, root));
+    options.vnode = originalVNode;
+    if (previousCSS === undefined) delete (globalThis as any).CSS;
+    else (globalThis as any).CSS = previousCSS;
+    HTMLElement.prototype.getBoundingClientRect = rect;
+    for (const [key, descriptor] of dimensions) {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
+      else delete (HTMLElement.prototype as any)[key];
+    }
+    root.remove();
+  }
+});
 
 test('same mounted list uses current catalog row keys and count on every render', async () => {
   await import('../../../transcript/rows/message-row');

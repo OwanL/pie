@@ -1,3 +1,6 @@
+/** @jsxRuntime automatic */
+/** @jsxImportSource preact */
+
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -241,25 +244,54 @@ test('nested virtual list: only viewport rows mount, keyed by stable identity', 
 });
 
 test('computeNestedRowRange maps scroll positions to bounded windows', async () => {
-  const { computeNestedRowRange } = await import('../../transcript/nested-virtual-list');
-  const estimates = Array.from({ length: 10 }, () => 50);
-  const atTop = computeNestedRowRange({ estimates, scrollTop: 0, viewportHeight: 100 });
+  const { computeNestedRowOffsets, computeNestedRowRange } = await import('../../transcript/nested-virtual-list');
+  const offsets = computeNestedRowOffsets(Array.from({ length: 10 }, () => 50));
+  const atTop = computeNestedRowRange({ offsets, scrollTop: 0, viewportHeight: 100 });
   assert.equal(atTop.startIndex, 0);
   assert.ok(atTop.endIndex >= 1 && atTop.endIndex <= 6, `overscan window near top: ${atTop.endIndex}`);
   assert.equal(atTop.totalHeight, 500);
 
-  const middle = computeNestedRowRange({ estimates, scrollTop: 250, viewportHeight: 100, overscan: 1 });
+  const middle = computeNestedRowRange({ offsets, scrollTop: 250, viewportHeight: 100, overscan: 1 });
   assert.equal(middle.startIndex, 4);
   assert.equal(middle.endIndex, 7);
   assert.deepEqual(middle.offsets, [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500]);
 
-  const bottom = computeNestedRowRange({ estimates, scrollTop: 450, viewportHeight: 100, overscan: 0 });
+  const bottom = computeNestedRowRange({ offsets, scrollTop: 450, viewportHeight: 100, overscan: 0 });
   assert.equal(bottom.startIndex, 9);
   assert.equal(bottom.endIndex, 9);
 
-  const noViewport = computeNestedRowRange({ estimates, scrollTop: 0, viewportHeight: 0 });
+  const noViewport = computeNestedRowRange({ offsets, scrollTop: 0, viewportHeight: 0 });
   assert.equal(noViewport.startIndex, 0);
   assert.equal(noViewport.endIndex, 9, 'unmeasured lists render everything');
+});
+
+test('nested row lookup preserves boundaries and reuses immutable offsets', async () => {
+  const { computeNestedRowOffsets, computeNestedRowRange } = await import('../../transcript/nested-virtual-list');
+  const offsets = Object.freeze(computeNestedRowOffsets([20, -5, 0, 30, 50]));
+  assert.deepEqual(offsets, [0, 20, 20, 20, 50, 100]);
+  const lookup = (scrollTop: number, viewportHeight = 30, overscan = 0) => {
+    const result = computeNestedRowRange({ offsets, scrollTop, viewportHeight, overscan });
+    assert.equal(result.offsets, offsets);
+    assert.equal(result.totalHeight, 100);
+    return [result.startIndex, result.endIndex];
+  };
+  assert.deepEqual(lookup(-10, 20), [0, 0]);
+  assert.deepEqual(lookup(19, 1), [0, 0]);
+  assert.deepEqual(lookup(20), [3, 3]);
+  assert.deepEqual(lookup(20, 31), [3, 4]);
+  assert.deepEqual(lookup(50, 50), [4, 4]);
+  assert.deepEqual(lookup(100), [5, 4]);
+  assert.deepEqual(lookup(200), [5, 4]);
+  assert.deepEqual(lookup(200, 30, 1), [4, 4]);
+  assert.deepEqual(lookup(20, 30, 10), [0, 4]);
+  assert.deepEqual(lookup(20, 0), [0, 4]);
+  assert.deepEqual(lookup(20, -1), [0, 4]);
+  assert.deepEqual(lookup(NaN), [0, 4]);
+  assert.deepEqual(lookup(Infinity), [0, 4]);
+  const emptyOffsets = computeNestedRowOffsets([]);
+  assert.deepEqual(computeNestedRowRange({ offsets: emptyOffsets, scrollTop: 0, viewportHeight: 30 }), {
+    startIndex: 0, endIndex: -1, totalHeight: 0, offsets: [0],
+  });
 });
 
 test('SegmentedText splits oversized text into exact byte-ranged segments', () => {

@@ -57,11 +57,11 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
     };
   }
   const streamGeneration = streamGenerationRef.current.generation;
+  const lastParseAtRef = useRef(Date.now());
   const [rendered, setRendered] = useState(() => ({
     html: renderMarkdown(text, !streaming),
     text,
   }));
-  const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   const timerGenerationRef = useRef<number | null>(null);
   const latestTextRef = useRef(text);
@@ -104,6 +104,11 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   }
 
   useEffect(() => {
+    // The initializer already parsed generation zero, including terminal
+    // markup. Check the generation, not “first effect”: props may have been
+    // replaced before this effect gets to run.
+    if (streamGeneration === 0) return;
+
     // If a newer streaming render superseded a deferred parse, re-arm it for
     // the current generation. This is needed when snapshots replace text more
     // quickly than the markdown throttle rather than merely append to it.

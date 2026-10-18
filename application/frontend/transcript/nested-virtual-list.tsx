@@ -41,15 +41,8 @@ export interface NestedRowRange {
   offsets: readonly number[];
 }
 
-/** Pure viewport→range mapping. A non-positive viewport height renders the
- *  full list (nothing measured yet). */
-export function computeNestedRowRange(input: {
-  estimates: readonly number[];
-  scrollTop: number;
-  viewportHeight: number;
-  overscan?: number;
-}): NestedRowRange {
-  const { estimates, scrollTop, viewportHeight, overscan = NESTED_VIRTUALIZE_OVERSCAN } = input;
+/** Build once per estimate revision, not on each scroll update. */
+export function computeNestedRowOffsets(estimates: readonly number[]): readonly number[] {
   const count = estimates.length;
   const offsets = new Array<number>(count + 1);
   let total = 0;
@@ -58,6 +51,20 @@ export function computeNestedRowRange(input: {
     total += Math.max(0, estimates[index] ?? 0);
     offsets[index + 1] = total;
   }
+  return offsets;
+}
+
+/** O(log n) viewport lookup over cumulative offsets built from estimates.
+ * A non-positive viewport height renders the full list (nothing measured yet). */
+export function computeNestedRowRange(input: {
+  offsets: readonly number[];
+  scrollTop: number;
+  viewportHeight: number;
+  overscan?: number;
+}): NestedRowRange {
+  const { offsets, scrollTop, viewportHeight, overscan = NESTED_VIRTUALIZE_OVERSCAN } = input;
+  const count = Math.max(0, offsets.length - 1);
+  const total = offsets[count] ?? 0;
   if (count === 0) return { startIndex: 0, endIndex: -1, totalHeight: 0, offsets };
   if (viewportHeight <= 0 || !Number.isFinite(scrollTop)) {
     return { startIndex: 0, endIndex: count - 1, totalHeight: total, offsets };
@@ -114,14 +121,15 @@ export function NestedVirtualList<T>({
     () => rows.map((row, index) => Math.max(0, estimateHeight(row, index))),
     [rows, estimateHeight],
   );
+  const offsets = useMemo(() => computeNestedRowOffsets(estimates), [estimates]);
   const range = useMemo(
     () => computeNestedRowRange({
-      estimates,
+      offsets,
       scrollTop: viewport.scrollTop,
       viewportHeight: viewport.height,
       overscan,
     }),
-    [estimates, viewport.scrollTop, viewport.height, overscan],
+    [offsets, viewport.scrollTop, viewport.height, overscan],
   );
 
   const scheduleScroll = useCallback(() => {
@@ -173,7 +181,7 @@ export function NestedVirtualList<T>({
     );
   }
 
-  const { startIndex, endIndex, totalHeight, offsets } = range;
+  const { startIndex, endIndex, totalHeight } = range;
   if (startIndex > endIndex) {
     return <div class="nested-virtual-list" style={{ height: `${totalHeight}px` }} aria-hidden="true" />;
   }

@@ -151,13 +151,7 @@ function useTranscriptVirtualizer(
       const focusPinned = Number.isSafeInteger(focusedIndex) && focusedIndex >= 0
         ? [focusedIndex]
         : [];
-      const expandedPinned = [...(scrollRef.current?.querySelectorAll<HTMLElement>('[data-index]') ?? [])]
-        .filter((row) => row.querySelector('.tool-call-header[aria-expanded="true"]'))
-        .flatMap((row) => {
-          const index = Number(row.dataset.index);
-          return Number.isSafeInteger(index) && index >= 0 ? [index] : [];
-        });
-      return extractRangeWithPinnedIndexes(range, [...pinnedIndexes, ...focusPinned, ...expandedPinned]);
+      return extractRangeWithPinnedIndexes(range, [...pinnedIndexes, ...focusPinned]);
     },
     [pinnedIndexes, scrollRef],
   );
