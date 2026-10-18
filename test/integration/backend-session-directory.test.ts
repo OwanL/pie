@@ -76,11 +76,18 @@ function createPollingTestServer(): PollingTestServer {
   return server;
 }
 
-test('backend RPCs use the configured directory while explicit legacy opens keep their path', async () => {
+test('backend RPCs use the configured directory while explicit legacy opens keep their path', async (t) => {
   const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
   const configuredDir = path.resolve('/configured/sessions');
   const sdkFallbackDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-default-'));
   process.env.PI_CODING_AGENT_SESSION_DIR = configuredDir;
+  // This directory-routing fixture models the legacy, unmanaged SDK path.
+  const previousProviderConfigDir = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = path.join(sdkFallbackDir, 'provider-config');
+  t.after(() => {
+    if (previousProviderConfigDir === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR;
+    else process.env.PIE_PROVIDER_CONFIG_DIR = previousProviderConfigDir;
+  });
   let releaseTitleRead: () => void = () => undefined;
   let titleNamespaceHydration: Promise<void> | undefined;
 

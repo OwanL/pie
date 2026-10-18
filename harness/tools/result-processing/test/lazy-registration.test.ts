@@ -63,7 +63,10 @@ test('isolated registration keeps hooks and reaping eager but loads transforms o
     adapter.filename = entry;
     adapter.paths = Module._nodeModulePaths(require('node:path').dirname(entry));
     adapter._compile(ts.transpileModule(fs.readFileSync(entry, 'utf8'), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+      // This script executes under the source-coverage capture preload too.
+      // Preserve ownership of the in-memory CommonJS transform at its TS URL.
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS,
+        inlineSourceMap: true, inlineSources: true },
       fileName: entry,
     }).outputText, entry);
     function register() {

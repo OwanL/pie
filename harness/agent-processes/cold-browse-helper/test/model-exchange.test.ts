@@ -20,7 +20,8 @@ test('cold browse serves capture only, wildcard size, partial refresh and explic
     message: { role: 'toolResult', toolCallId: 'tool', content: [{ type: 'text', text: 'display result' }] },
   }];
   const sdk = { SessionManager: { open: () => ({
-    getBranch: () => branch, getSessionName: () => '', getCwd: () => root,
+    getBranch: () => branch, getEntries: () => branch,
+    getSessionName: () => '', getCwd: () => root,
     buildSessionContext: () => ({ messages: [], model: null }),
   }) } } as unknown as Pick<SdkModule, 'SessionManager'>;
   const runtime = new ColdBrowseHelperRuntime({ sdk, startupCwd: root });

@@ -49,11 +49,13 @@ function fixture(t, { code = 0, gone = true, spawnFailure } = {}) {
 
 test('default domains resolve the intended artifact suites without ordinary source tests', () => {
   const files = resolveTestFiles(repoRoot, DEFAULT_ARTIFACT_SELECTORS, { includeGlobs: [ARTIFACT_TEST_GLOB] });
-  assert.equal(files.length, 50);
+  assert.equal(files.length, 51);
   const relative = files.map(file => path.relative(repoRoot, file).split(path.sep).join('/'));
   assert.ok(relative.every(file => path.matchesGlob(file, ARTIFACT_TEST_GLOB)));
+  assert.ok(relative.includes('harness/agent-processes/coordinator/test/existing-provider-inventory.artifact.test.ts'),
+    'default artifact discovery includes native keyless provider inventory coverage');
   const expectedFamilies = new Map([
-    ['harness/agent-processes/', 20],
+    ['harness/agent-processes/', 21],
     ['harness/session-storage/', 3],
     ['harness/tool-and-skill-selection/', 4],
     ['harness/tools/playwright/', 1],

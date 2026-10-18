@@ -139,6 +139,8 @@ function makeBuildFixture(t) {
     write(repo, `scripts/lib/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', helper)));
   }
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
+  // The actual Vite packaging plugin emits these neutral runtime-lock bytes.
+  write(repo, 'lib/windows-runtime-lock/windows-runtime-lock.cjs', readFileSync(path.join(repositoryRoot, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')));
   write(repo, 'scripts/build/pi-runtime.mjs', `
     import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
     import path from 'node:path';
@@ -254,6 +256,11 @@ test('explicit delivery source-bound isolated build selects candidate graph and 
     path.resolve(overlay.compilerOptions.paths['@earendil-works/pi-coding-agent'][0]),
     path.join(artifact.sdkPath, 'dist', 'index.d.ts'),
     'TypeScript resolves the explicit candidate SDK graph, not the installed owner copy',
+  );
+  assert.deepEqual(
+    readFileSync(path.join(output, 'windows-runtime-lock.cjs')),
+    readFileSync(path.join(fixture.repo, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')),
+    'the actual Vite packaging plugin preserves the fixture runtime-lock module bytes',
   );
   assert.ok(existsSync(path.join(output, 'standalone.js')), 'the actual Vite config emits the standalone host entry');
   assert.ok(existsSync(path.join(output, 'dictation-helper.js')), 'the actual Vite config emits the separately spawned dictation helper');

@@ -27,8 +27,15 @@ test('coordinator operation catalog includes runtime-free durable mutations only
   }
 });
 
-test('cold create/duplicate/truncate stay runtime and extension free while hot paths fail closed', async () => {
+test('cold create/duplicate/truncate stay runtime and extension free while hot paths fail closed', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-coordinator-cold-'));
+  // This legacy SDK fixture has no managed-provider configuration or auth API.
+  const previousProviderConfigDir = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = path.join(root, 'provider-config');
+  t.after(() => {
+    if (previousProviderConfigDir === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR;
+    else process.env.PIE_PROVIDER_CONFIG_DIR = previousProviderConfigDir;
+  });
   try {
     let runtimeCreations = 0;
     let serviceCreations = 0;

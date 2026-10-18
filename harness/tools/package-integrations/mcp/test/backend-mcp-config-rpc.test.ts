@@ -4,11 +4,16 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { handleBackendRequest, type BackendRequestHandlerDeps } from '../../../../agent-processes/coordinator/request-handler';
-import { validateMcpSetServerEnabled } from '../../../../agent-processes/lib/rpc/backend-rpc.js';
-import { BackendServer } from '../../../../agent-processes/coordinator/server';
-import { createSyntheticSourceTestSdkRuntime } from '../../../../agent-processes/test/fixtures/sdk-runtime-selection.js';
+import type { BackendRequestHandlerDeps } from '../../../../agent-processes/coordinator/request-handler';
 import type { McpServerEntryView } from '../mcp-config.js';
+
+let handleBackendRequest: typeof import('../../../../agent-processes/coordinator/request-handler').handleBackendRequest;
+let validateMcpSetServerEnabled: typeof import('../../../../agent-processes/lib/rpc/backend-rpc.js').validateMcpSetServerEnabled;
+let BackendServer: typeof import('../../../../agent-processes/coordinator/server').BackendServer;
+let createSyntheticSourceTestSdkRuntime: typeof import('../../../../agent-processes/test/fixtures/sdk-runtime-selection.js').createSyntheticSourceTestSdkRuntime;
+let tempHome: string;
+const originalHomeEnv = new Map<string, string | undefined>();
+const mcpHomeEnv = ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'XDG_CONFIG_HOME', 'PI_CODING_AGENT_DIR'];
 
 /** Minimal deps: the mcp RPC handlers only read `startupCwd`. */
 function makeDeps(cwd: string): BackendRequestHandlerDeps {
@@ -58,6 +63,37 @@ async function makeTempProject(): Promise<string> {
   return cwd;
 }
 
+test.before(async () => {
+  tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-mcp-home-'));
+  for (const key of mcpHomeEnv) originalHomeEnv.set(key, process.env[key]);
+  process.env.HOME = tempHome;
+  process.env.USERPROFILE = tempHome;
+  delete process.env.HOMEDRIVE;
+  delete process.env.HOMEPATH;
+  process.env.XDG_CONFIG_HOME = path.join(tempHome, '.config');
+  process.env.PI_CODING_AGENT_DIR = path.join(tempHome, '.pi');
+  await fs.mkdir(path.join(tempHome, '.config', 'mcp'), { recursive: true });
+  await fs.writeFile(path.join(tempHome, '.config', 'mcp', 'mcp.json'), JSON.stringify({
+    mcpServers: { globalFixture: { command: 'node', args: ['global-server.js'] } },
+  }));
+
+  // The adapter captures os.homedir() paths when its config module is evaluated.
+  // Set up the isolated home first so production's undefined override continues
+  // to merge a controlled user-global server with each temporary project.
+  ({ handleBackendRequest } = await import('../../../../agent-processes/coordinator/request-handler'));
+  ({ validateMcpSetServerEnabled } = await import('../../../../agent-processes/lib/rpc/backend-rpc.js'));
+  ({ BackendServer } = await import('../../../../agent-processes/coordinator/server'));
+  ({ createSyntheticSourceTestSdkRuntime } = await import('../../../../agent-processes/test/fixtures/sdk-runtime-selection.js'));
+});
+
+test.after(async () => {
+  for (const [key, value] of originalHomeEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  await fs.rm(tempHome, { recursive: true, force: true });
+});
+
 test('MCP config uses the exact root workspace adapter pin and its config-only entry', async () => {
   const root = path.resolve(__dirname, '../../../../..');
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf-8'));
@@ -82,8 +118,10 @@ test('mcp.list returns the effective server list with merged disabled state', as
   const result = await mcpList(cwd);
   assert.deepEqual(result.servers, [
     { name: 'echo', disabled: false },
+    { name: 'globalFixture', disabled: false },
     { name: 'jira', disabled: true },
-  ], 'only the temporary project servers should be discovered');
+  ], 'the isolated user-global server should merge with temporary project servers');
+  assert.ok(result.servers.some((server) => server.name === 'globalFixture'), 'isolated user-global config should be loaded');
   const echo = result.servers.find((s) => s.name === 'echo');
   const jira = result.servers.find((s) => s.name === 'jira');
   assert.ok(echo, 'server from project .mcp.json must be listed');
@@ -169,8 +207,10 @@ test('mcp RPCs reach the backend through BackendServer.handleRequest without a h
   const listed = await server.handleRequest({ v: 1, id: 'server-mcp-list', method: 'mcp.list', params: {} }) as McpListResult;
   assert.deepEqual(listed.servers, [
     { name: 'echo', disabled: false },
+    { name: 'globalFixture', disabled: false },
     { name: 'jira', disabled: true },
-  ], 'coordinator config discovery must stay isolated from user servers');
+  ], 'coordinator config discovery must merge the isolated user-global and temporary project servers');
+  assert.ok(listed.servers.some((server) => server.name === 'globalFixture'), 'BackendServer should preserve user-global config merging');
   const echo = listed.servers.find((s) => s.name === 'echo');
   const jira = listed.servers.find((s) => s.name === 'jira');
   assert.ok(echo, 'mcp.list through BackendServer must list the project server');

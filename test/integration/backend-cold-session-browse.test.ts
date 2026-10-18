@@ -72,6 +72,13 @@ async function makeColdServer(
 ) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-browse-'));
   bindColdHarnessSessionDir(t, dir);
+  // Keep legacy SDK fixtures independent of the developer's managed providers.
+  const previousProviderConfigDir = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = path.join(dir, 'provider-config');
+  t.after(() => {
+    if (previousProviderConfigDir === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR;
+    else process.env.PIE_PROVIDER_CONFIG_DIR = previousProviderConfigDir;
+  });
   const sessionPath = path.join(dir, 'session.jsonl');
   await fs.writeFile(sessionPath, [
     JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: dir }),
