@@ -7,6 +7,7 @@ import { Transform } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { run } from 'node:test';
 import * as reporters from 'node:test/reporters';
+import { waitForOwnershipAuthorization } from './ownership-startup.mjs';
 
 const [configPath] = process.argv.slice(2);
 if (!configPath) throw new Error('Node test runner configuration path is required.');
@@ -78,16 +79,8 @@ function workerExecArgv() {
   return args;
 }
 
-// Keep this root alive through the watchdog's live ownership census. stdin EOF
-// is the private release protocol also used by the isolated pnpm launcher.
-if (waitForOwnership) {
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Node test ownership startup handshake timed out')), 30_000);
-    process.stdin.once('error', error => { clearTimeout(timer); reject(error); });
-    process.stdin.once('end', () => { clearTimeout(timer); resolve(); });
-    process.stdin.resume();
-  });
-}
+// Keep this root child-free until the live ownership census explicitly authorizes it.
+if (waitForOwnership) await waitForOwnershipAuthorization(process.stdin);
 
 const selectedReporters = reporterNames.length > 0
   ? reporterNames

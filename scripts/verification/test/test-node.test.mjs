@@ -533,7 +533,10 @@ test('test wrappers and runner config survive unconfirmed process-tree teardown'
       assert.equal(config.waitForOwnership, true);
       const child = new EventEmitter();
       child.stdin = new EventEmitter();
-      child.stdin.end = () => { assert.equal(captureComplete, true); };
+      child.stdin.end = token => {
+        assert.equal(captureComplete, true);
+        assert.equal(token, 'pie-focused-ownership-ready\n');
+      };
       queueMicrotask(() => child.emit('close', 0));
       return child;
     },
@@ -553,7 +556,8 @@ test('test wrappers and runner config survive unconfirmed process-tree teardown'
   assert.equal(existsSync(path.dirname(confirmedConfigPath)), false, 'the temporary runner directory is removed after confirmed teardown');
 });
 
-test('failed ownership startup capture never releases the short suite', async () => {
+for (const state of [{ ownershipReady: false }, { ownershipReady: true, terminationStarted: true }]) {
+test(`failed or cancelled ownership startup never releases the short suite (${JSON.stringify(state)})`, async () => {
   let released = false;
   let settled = false;
   await assert.rejects(runNodeTests([], {
@@ -567,13 +571,14 @@ test('failed ownership startup capture never releases the short suite', async ()
       return child;
     },
     watchChildProcessImpl: () => ({
-      ownershipReady: false,
+      ...state,
       settle: async () => { settled = true; return { gone: true }; },
     }),
   }), /ownership startup handshake failed/u);
   assert.equal(released, false);
   assert.equal(settled, true);
 });
+}
 
 test('unconfirmed native SDK teardown retains its reader registration', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-node-sdk-reader-retained-'));

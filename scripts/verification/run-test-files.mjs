@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { OWNERSHIP_STARTUP_TOKEN } from './ownership-startup.mjs';
+
 // Run one or more repo-relative test files directly through the appropriate
 // LOCAL tsx with node:test, in fast mode (parallel files, no coverage). This is
 // the tightest dev loop: `node scripts/verification/run-test-files.mjs application/hosts/vscode/test/foo.test.ts
@@ -394,7 +396,7 @@ export function runGroup(group, args, signal, watchdogOptions = {}) {
     });
     if (waitForOwnership) {
       child.stdin.on('error', () => {});
-      if (watchdog.ownershipReady && !watchdog.terminationStarted) child.stdin.end('pie-focused-ownership-ready\n');
+      if (watchdog.ownershipReady && !watchdog.terminationStarted) child.stdin.end(OWNERSHIP_STARTUP_TOKEN);
       else void watchdog.settle().catch(() => {});
     }
   });

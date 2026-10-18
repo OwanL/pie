@@ -11,6 +11,7 @@ import { resolveDevelopmentSdkWorkspaceRoot, withDevelopmentSdkReader } from '..
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { initializeTestEnvironment, resolveTestProcessDirectories } from './test-environment.mjs';
+import { OWNERSHIP_STARTUP_TOKEN } from './ownership-startup.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
@@ -506,7 +507,7 @@ export function runNodeTests(files, {
     // watchChildProcess completes its bounded live census before returning.
     // Never release a short suite on failed or aborted ownership capture.
     if (watchdog.ownershipReady === true && !watchdog.terminationStarted) {
-      child.stdin.end();
+      child.stdin.end(OWNERSHIP_STARTUP_TOKEN);
     } else {
       child.spawnError = new Error('Node test watchdog ownership startup handshake failed');
       void watchdog.settle().catch(() => {});
