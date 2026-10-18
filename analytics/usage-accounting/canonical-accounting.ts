@@ -22,26 +22,15 @@ import type { CapturedPricingFacts } from '../contracts/model-pricing-facts.js';
 import type { InvocationPricingResolver } from '../contracts/invocation-pricing-resolver.js';
 import type { CanonicalProviderSettlement } from '../capture/canonical-capture.js';
 
-import type { ActivityTimeline } from '../legacy/activity-timeline/service';
-import { workspaceHash } from '../legacy/stats-service/helpers';
-export interface BillableAccountingPersistenceFailureNotice {
-  kind: 'NoticeShown';
-  notice: string;
-  noticeKind: 'operational-error';
-  noticeRaw: string;
-}
-
+import { workspaceHash } from '../legacy/privacy-storage.js';
 export interface CanonicalAccountingDeps {
   now: () => Date;
-  scheduleRender: () => void;
-  dispatchArchEvent: (event: BillableAccountingPersistenceFailureNotice) => void;
   /** Captured provider/model pricing facts, loaded by the provider pricing
    *  owner and handed across the boundary; settlement accounting never
    *  resolves runtime catalogs itself. Absent facts leave rows explicitly
    *  unpriced. */
   getCapturedPricingFacts: (sessionPath: string) => CapturedPricingFacts | undefined;
   resolveInvocationPricing: InvocationPricingResolver;
-  isPrivateSession: (sessionPath: string) => boolean;
   sessionIdentity: (
     sessionPath: string,
   ) => { sessionId: string | null; modelId?: string; provider?: string };
@@ -63,14 +52,10 @@ export interface CanonicalAccountingDeps {
 
 interface AppendUsageOptions { kind?: BillableInvocationKind; branchId?: string | null; operationId?: string | null; toolId?: string | null; outcome?: BillableInvocationRecord['outcome']; sessionId?: string | null; stableMissingTime?: boolean; }
 /** Structural accounting surface; no legacy persistence owner is required. */
-export interface AccountingPort extends Pick<CanonicalAccounting, 'observeAssistantTurnStarted' | 'observeSkillPruningUsage' | 'observeSubagentToolResult' | 'observeAssistantTurnEnded' | 'observeSessionUsageSnapshot' | 'observeBranchEntry' | 'observeAuxiliaryLlmUsage' | 'observeAutoRetry' | 'markSessionOrdinary' | 'markSessionPrivate' | 'onSessionClosed' | 'forgetSession' | 'replaceSessionPath' | 'projectSessionUsage' | 'exportRecords'> {
- readonly activityTimeline: Pick<ActivityTimeline, 'start' | 'settle' | 'record' | 'projectAll'>;
+export interface AccountingPort extends Pick<CanonicalAccounting, 'observeAssistantTurnStarted' | 'observeSkillPruningUsage' | 'observeSubagentToolResult' | 'observeAssistantTurnEnded' | 'observeSessionUsageSnapshot' | 'observeBranchEntry' | 'observeAuxiliaryLlmUsage' | 'observeAutoRetry' | 'onSessionClosed' | 'replaceSessionPath'> {
 }
 export function createCanonicalAccounting(deps: CanonicalAccountingDeps): AccountingPort { return new CanonicalAccounting(deps); }
 export class CanonicalAccounting implements AccountingPort {
- get activityTimeline(): AccountingPort['activityTimeline'] {
-   throw new Error('Legacy timeline is unavailable under canonical authority.');
- }
  constructor(private readonly deps: CanonicalAccountingDeps) {}
   private readonly pendingRetryBySession: Record<string, { sourceId: string; occurredAt: string } | undefined> = {};
   private readonly assistantInvocationObservedBySession: Record<string, boolean | undefined> = {};
@@ -449,9 +434,6 @@ export class CanonicalAccounting implements AccountingPort {
     delete this.lastFailedAssistantSettlementBySession[sessionPath];
   }
 
-  markSessionOrdinary(_sessionPath: string, _sessionId?: string): void {}
-  markSessionPrivate(_sessionPath: string, _sessionId?: string): void {}
-  forgetSession(sessionPath: string, _sessionId?: string): void { this.onSessionClosed(sessionPath); }
   replaceSessionPath(oldPath: string, newPath: string): void {
     const sources = this.currentBranchSourcesBySession[oldPath];
     if (sources) this.currentBranchSourcesBySession[newPath] = sources;
@@ -470,8 +452,6 @@ export class CanonicalAccounting implements AccountingPort {
     delete this.currentBranchDepthBySession[oldPath];
   }
 
-  projectSessionUsage(_sessionPath: string): SessionUsageSnapshot { return { samples: [], authority: 'unknown' }; }
-  exportRecords(): readonly BillableInvocationRecord[] { return []; }
   private appendUsageSample(sessionPath: string, sample: SessionUsageSample, options: AppendUsageOptions = {}): { invocationId: string; appendedDurable: boolean; canonicalAccepted?: boolean; record?: BillableInvocationRecord } {
  const identity = this.deps.sessionIdentity(sessionPath);
  const stableSessionId = options.sessionId ?? identity.sessionId;
@@ -503,17 +483,14 @@ export class CanonicalAccounting implements AccountingPort {
           sourceId: record.sourceId,
         });
       }
-      // Canonical mode never falls through to the legacy JSONL ledger. P5
-      // replaces the legacy query consumers before P7 is allowed to select
-      // this authority.
+      // Capture failure never falls through to a second persistence owner.
       return { invocationId, appendedDurable: false, canonicalAccepted: capture !== undefined && capture !== 'rejected', record };
     }
   }
 }
 
-/** Path-only compatibility selectors for explicit privacy cleanup. Never
- * instantiate a run store merely to locate retired auxiliary logs. Kept in
- * parity with RunAnalyticsStorage.getGlobalSideChannelStorageDirs(). */
+/** Path-only selectors for explicit privacy cleanup of preserved legacy files.
+ * Never initialize a run store merely to locate these paths. */
 export function legacyPrivacyStorageDirs(options: {
   dataOutcomesRootPath: string;
   legacyUsageDataRootPath?: string;

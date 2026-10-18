@@ -13,8 +13,6 @@ import type { CanonicalAnalyticsReadModel } from '../../../analytics/queries/que
 import type { ActivityProjectionReadModel } from '../../../analytics/projections/activity-projection.js';
 import type { ToolFacetProjectionReadModel } from '../../../analytics/projections/tool-facet.js';
 import type { AnalyticsQuerySnapshotMetadata } from '../../../analytics/recording/sqlite-recorder.js';
-import type { ActivityIntervalRecord } from '../../../analytics/contracts/activity-interval';
-import type { BillableInvocationRecord } from '../../../analytics/usage-accounting/billable-invocation';
 import type { ArchState } from '../conversation-state/arch-state';
 import type { Event } from '../conversation-state/events';
 import type {
@@ -22,7 +20,6 @@ import type {
   TurnLatencyMeasurement,
   TurnThroughputStatus,
 } from '../../../analytics/legacy/run-analytics/types.js';
-import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../../../analytics/legacy/run-analytics/query';
 
 export type DispatchArchEvent = (event: Event) => void;
 export type GetArchState = () => ArchState;
@@ -66,7 +63,7 @@ export interface RunObserver {
   /** A session.opened publication supplies the authoritative root identity and
    * gives canonical cold-session hydration a post-reducer lifecycle boundary. */
   onSessionOpened?(sessionPath: string, sessionId?: string): void;
-  /** Transcript-derived usage is migration/rebuild input only. */
+  /** Transcript snapshots supply branch identity only, never usage backfill. */
   onSessionUsageSnapshot(
     sessionPath: string,
     sessionId: string | undefined,
@@ -171,14 +168,9 @@ export interface CanonicalActivityStats {
 export interface StatsServicePort extends RunObserver {
   start(): Promise<void>;
   shutdown(): Promise<void>;
-  flush(): Promise<void>;
   onExperimentAssignmentChanged(assignment: string | null): void;
   startNewTask(sessionPath: string): void;
   continueTask(sessionPath: string): void;
-  queryRunAnalytics(): Promise<RunAnalyticsQueryResult>;
-  queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult>;
-  exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload>;
-  getStorageDir(): string;
   getAnalyticsReadModel?(): CanonicalAnalyticsReadModel | undefined;
   getAnalyticsRevisionRefreshStats?(): { revision: string | null } | undefined;
   getWorkingTimeBySession(): Record<string, import('../../lib/protocol/index.js').WorkingTimeState>;
@@ -186,10 +178,7 @@ export interface StatsServicePort extends RunObserver {
   getCanonicalToolFacetProjection(sessionPath?: string): CanonicalToolFacetProjectionSnapshot;
   getCanonicalActivityStats(sessionPath?: string): CanonicalActivityStats;
   getSessionUsage(sessionPath: string): SessionUsageSnapshot;
-  getActivityIntervals(): readonly ActivityIntervalRecord[];
-  getBillableInvocationRecords(): readonly BillableInvocationRecord[];
   getOpenRuns(): RunSnapshot[];
-  getPendingCompletedRuns(): RunSnapshot[];
 }
 
 export interface AssistantTurnIdentity {
@@ -245,10 +234,9 @@ export interface StatsServiceOptions {
    *  historical pricing catalog back the captured pricing facts handed to
    *  settlement accounting. */
   getAgentDir?: () => string | null;
-  /** Disabled/legacy by default. A canonical authority is injected only after
-   * P0/P2b/P5 activation prerequisites are independently accepted. */
+  /** Canonical capture context. Unavailable capture never selects legacy
+   * persistence; live run and working-time projections remain available. */
   analyticsCapture?: CanonicalAnalyticsCapture;
-  /** P5 durable canonical read model. Path-only until a consumer queries it;
-   * consumers must gate on canonical authority until the P7a cutover. */
+  /** Durable canonical reads require the same admitted capture context. */
   analyticsReadModel?: CanonicalAnalyticsReadModel;
 }

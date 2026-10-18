@@ -7,7 +7,7 @@ import { performImageAction, copyNativeImage } from '../../lib/image-actions.js'
 import { createLocalFileOpenService, type LocalFileOpenService } from '../../lib/local-file-open.js';
 
 import type { HostRuntimePlatform, HostRendererSurface } from '../../../lib/platform-contracts/platform.js';
-import { buildWorkspaceAnalyticsId } from '../../../../analytics/legacy/run-analytics/storage';
+import { buildWorkspaceAnalyticsId } from '../../../../analytics/legacy/privacy-storage.js';
 import { requestWindowAttention } from '../completion-attention.js';
 import type { SessionHostPlatform } from '../../../lib/platform-contracts/session-platform.js';
 import { selectRuntimeSetting } from '../../../lib/platform-contracts/session-platform.js';

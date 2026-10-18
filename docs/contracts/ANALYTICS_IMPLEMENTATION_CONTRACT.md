@@ -23,7 +23,8 @@ migration. Namespace identity is not activation or qualification evidence.
 One canonical context binds host capture, helper startup, and backend construction. Lifecycle
 writer admission remains mandatory. Helpers prove recorder and disposable-query readiness before
 accepting captures; helper failure pauses capture with no legacy fallback. Reads use the canonical
-read model; the legacy run layer is empty. Browser and pruning behavior are unchanged.
+read model. Fresh history is captured automatically only in the canonical store; live in-memory
+run/session projections remain available. Browser and pruning behavior are unchanged.
 
 Host startup automatically reconciles stale writer identities before opening recorder admission.
 Candidates are snapshotted before collecting a complete OS process census. Recovery requires evidence
@@ -37,8 +38,8 @@ release; helpers cannot publish readiness after stop. A failed analytics start l
 while the primary Pie host remains usable, with a warning, rather than selecting legacy capture.
 
 Capture is exclusive: no legacy ledger append or dual-write. There is no import, backfill, or
-transcript reconstruction of old analytics. Explicit legacy export and privacy deletion retain
-their existing owners. Historical activation tooling is not a production authority selector.
+transcript reconstruction of old analytics. Legacy export is retired; privacy scrubbing and
+explicit forget remain. Historical activation tooling is not a production authority selector.
 
 ## 2. Storage layout
 
@@ -100,10 +101,8 @@ gated cutoff in §7.
 Privacy mode is session-scoped, reversible, and never sticky. The operational session owner
 persists the setting and freezes the value used at close, so a restart cannot change the decision.
 
-- **Legacy authority.** While privacy is enabled, run analytics are suppressed and existing
-  analytics are scrubbed. Ledger rows for the session stay process-local (never appended to disk,
-  never exported), enabling privacy rewrites away already-persisted rows, and closing the private
-  session scrubs the in-memory rows.
+- **Retired files.** Privacy scrubbing and explicit forget still remove attributed records from
+  preserved legacy analytics files; retirement does not disable these deletion obligations.
 - **Canonical authority, session open.** Enabling privacy neither suppresses capture nor scrubs
   existing facts: the session's analytics remain capturable and locally queryable while it is open.
 - **Canonical authority, explicit close.** A private close deletes the whole session's captured
@@ -111,7 +110,7 @@ persists the setting and freezes the value used at close, so a restart cannot ch
   before the close reports success. Capture arriving during the deletion fence cannot repopulate
   deleted data.
 
-Either way, closing a private session retires the backend runtime, removes the transcript and
+Closing a private session retires the backend runtime, removes the transcript and
 session-owned sidecars, scrubs attributed records from the retired review sidecars, and removes the
 persisted privacy marker only after deletion succeeds. Turning privacy off before close selects
 ordinary retention instead.
@@ -129,14 +128,13 @@ reads remain visibly stale, while deletion/privacy/identity fences remain fail-c
 scopes, coverage, and example SQL belong to
 [`skills/query-analytics/SKILL.md`](../../harness/agent-instructions/skills/query-analytics/SKILL.md).
 
-## 6. Legacy exports
+## 6. Retired legacy persistence and exports
 
-The local DuckDB batch-query workspace is retired. This does not activate canonical authority,
-change capture or accounting, or delete local databases, exports, or legacy stores.
-
-The legacy run store automatically refreshes a `run-analytics.json` export alongside its
-JSONL/checkpoint files. The optional VS Code setting `pie.experimentAssignment` labels new
-run analytics snapshots for treatment comparisons.
+Legacy run JSONL/checkpoint persistence, billable ledgers, activity timeline snapshots/journals,
+automatic `run-analytics.json` exports, and the VS Code `pie.exportRunAnalytics` command are retired.
+The local DuckDB batch-query workspace is also retired. None is a capture, query, or fallback path.
+Existing files, exports, and databases are preserved, not swept or imported. Privacy scrubbing and
+explicit forget remain the only deletion paths; retirement does not authorize physical cleanup.
 
 ## 7. Gated session-storage cutoff
 
@@ -153,31 +151,13 @@ policy they implement is: sessions close at the cutoff and expire in place 24 ho
 privacy-on sessions delete immediately instead, new session-owned writes use the final root, and
 closed sessions have no Pie UI reopen/resume workflow.
 
-## 8. Historical migration and recalculation
+## 8. Fresh history, not historical migration
 
-New capture fixes do not rewrite historical ledger or canonical settlement rows. Historical usage
-migration is an explicit, restartable operation owned by `BillableAccounting`; it appends only
-missing compatibility rows and marks them with `evidenceOrigin: migration`. Its stable invocation
-identity is derived from the selected session identity, billable kind, and source row/event id, so a
-retry is idempotent and cannot silently replace a live observation.
-
-A separate auditable recalculation is required when a historical catalog estimate must be corrected.
-Each run must retain, at minimum, the invocation id, source ledger/run/observation row ids, prior
-and replacement cost provenance, the catalog version/rate snapshot used, and the reason for the
-correction. It must not present a catalog estimate as provider-reported evidence or mutate the
-original source row in place.
-
-Migration and recalculation operators must record bounded-work metrics. The historical migration
-reports runs considered, attempted rows, new durable invocation rows, activity-batch flushes,
-duration, and cancellation. The ledger-to-activity healing pass separately reports ledger rows
-considered, intervals healed, activity-batch flushes, duration, and cancellation. These metrics are
-operational evidence of what was attempted; they are not proof that an unobserved provider cost was
-recovered.
-
-The legacy in-memory run tracker forwards auxiliary usage only when all token channels are known.
-An incomplete or cost-only auxiliary observation is still retained by the billable ledger and
-canonical analytics path; consumers that require complete historical coverage must read that
-canonical source rather than infer absence from the legacy tracker projection.
+Legacy history migration and ledger-to-activity healing are retired. Startup does not import,
+backfill, reconstruct, or recalculate preserved history. Canonical history starts with newly
+captured facts; old files do not establish canonical coverage. Capture fixes do not rewrite existing
+canonical settlements. Incomplete or cost-only observations remain canonical facts with explicit
+unknown channels, regardless of what a live in-memory projection can display.
 
 ## 9. Explicit non-claims
 

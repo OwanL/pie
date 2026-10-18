@@ -365,7 +365,7 @@ test('StatsService forwards tool timing provenance and keeps missing terminal ti
   });
 });
 
-test('StatsService sanitizes reversed unmarked tool timing before legacy timeline settlement', async () => {
+test('unavailable capture keeps tool observations transient without a timeline owner', async () => {
   await withTempDir(async (root) => {
     const sessionPath = '/workspace/legacy-tool-timing.jsonl';
     const state = createInitialArchState();
@@ -399,19 +399,9 @@ test('StatsService sanitizes reversed unmarked tool timing before legacy timelin
       stats.onToolFinished(sessionPath, {
         id: 'tool-reversed-wall', name: 'fixture', input: {}, status: 'completed',
       });
-      const accounting = stats as unknown as {
-        accounting: { activityTimeline: { projectAll: () => readonly {
-          intervalId: string; startedAt: string; endedAt?: string; durationMs?: number;
-          outcome?: string;
-        }[] } };
-      };
-      const intervals = accounting.accounting.activityTimeline.projectAll();
-      assert.equal(intervals.length, 1);
-      const [interval] = intervals;
-      assert.ok(interval?.intervalId.endsWith(':tool-reversed-wall'));
-      assert.deepEqual([
-        interval?.startedAt, interval?.endedAt, interval?.durationMs, interval?.outcome,
-      ], ['1970-01-01T00:00:05.000Z', undefined, undefined, 'succeeded']);
+      assert.equal(stats.getOpenRuns()[0]?.toolUsage.totalCount, 1, 'duplicate terminals do not duplicate live tool counts');
+      assert.equal('getActivityIntervals' in stats, false);
+      assert.equal('getBillableInvocationRecords' in stats, false);
     } finally {
       await stats.shutdown();
     }

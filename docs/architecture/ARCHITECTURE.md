@@ -87,9 +87,9 @@ For delivered runtimes, host code, Pi packages, dependencies and assets form one
 
 Transcript JSONL is durable session truth. Session catalog indexes and browse caches are derived and rebuildable, not alternative transcript authorities. Explicit session paths remain distinct from execution-worker readiness.
 
-Analytics have exactly one active authority: legacy stores by default, or the canonical SQLite store selected by a validated activation manifest. Capture is never duplicated across those authorities. Analytics persistence does not block agent execution; usage, pricing provenance, and activity timing remain separate facts rather than estimates reconstructed from transcript display.
+Production analytics are canonical-only: fresh history is captured automatically in SQLite at the resolved data root, without legacy fallback or dual-write. Legacy run JSONL/checkpoints, ledgers, timeline persistence, exports, history migration, and DuckDB paths are retired; existing files are preserved except for privacy scrubbing and explicit forget. Live in-memory projections, browser behavior, and pruning remain. Analytics persistence does not block agent execution; usage, pricing provenance, and activity timing remain separate facts rather than estimates reconstructed from transcript display.
 
-The [analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns authority selection, data-root resolution, privacy, and the separately gated session-storage cutoff. Source support does not establish that an installation has activated either gate.
+The [analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns canonical authority, data-root resolution, privacy, and the separately gated session-storage cutoff. Source mode does not establish live installation or activation of the storage cutoff.
 
 ## Where to make changes
 

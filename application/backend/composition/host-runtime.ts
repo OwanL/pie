@@ -5,7 +5,7 @@ import { FileDiffService } from '../file-changes/file-diff-service.js';
 import { MessageRouter } from '../conversation-state/message-router.js';
 import { DictationService } from '../dictation/service.js';
 
-import { getDataOutcomesRootPath } from '../../../analytics/legacy/run-analytics/storage.js';
+import { getDataOutcomesRootPath } from '../../../analytics/legacy/privacy-storage.js';
 import type { BackendClient } from '../agent-connection/client.js';
 import type {
   BrowserServerLifecycleEvent,
@@ -544,8 +544,6 @@ export class HostRuntime {
     this.aggregateStatsService = new AggregateStatsService({
       getArchState: () => this.archState,
       statsService: this.statsService,
-      tokenRateService: this.tokenRateService,
-      getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
       fetchProviderGateStats: () => this.backend
         .request<ProviderGateStats>('provider_gate.metrics', undefined, { timeoutMs: 2000 })
         .catch(() => EMPTY_PROVIDER_GATE_STATS),

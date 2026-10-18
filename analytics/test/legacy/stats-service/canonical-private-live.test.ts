@@ -31,21 +31,21 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-for (const authority of ['canonical', 'legacy'] as const) {
-  test(`${authority} authority preserves its open private live-event policy`, async () => {
+for (const captureAvailable of [true, false]) {
+  test(`canonical privacy preserves open live projections with capture ${captureAvailable ? 'available' : 'unavailable'}`, async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'pie-private-live-'));
     const sessionPath = path.join(root, 'private.jsonl');
     const state = sessionState(sessionPath);
     const observations: AnalyticsObservation<object>[] = [];
     let nowMs = Date.parse('2026-09-10T00:00:00.000Z');
     const capture = new CanonicalAnalyticsCapture({
-      authority, generationId: 'generation', workspaceId: 'workspace', buildId: 'build', processGeneration: 'process',
+      authority: 'canonical', generationId: 'generation', workspaceId: 'workspace', buildId: 'build', processGeneration: 'process',
       sink: { submit: (observation) => { observations.push(observation); } },
       detailSink: { submitDetail: () => undefined },
       lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
     });
     const stats = new StatsService({ dataOutcomesRootPath: path.join(root, 'legacy'),
-      workspaceId: 'workspace', getArchState: () => state, now: () => new Date(nowMs), analyticsCapture: capture });
+      workspaceId: 'workspace', getArchState: () => state, now: () => new Date(nowMs), analyticsCapture: captureAvailable ? capture : undefined });
     try {
       stats.prepareForSend(sessionPath, []);
       stats.onModelConfigChanged(sessionPath, 'fixture-model', undefined, 'fixture-provider');
@@ -59,23 +59,27 @@ for (const authority of ['canonical', 'legacy'] as const) {
       stats.onUnsupportedInputAttempt(sessionPath);
       stats.onBusyChanged(sessionPath, false);
       const open = stats.getOpenRuns();
-      if (authority === 'canonical') {
-        assert.equal(open.length, 1, 'an open private run remains part of the live surface');
-        assert.equal(open[0]?.modelId, 'fixture-model');
-        assert.equal(open[0]?.contextTokens, 42);
-        assert.equal(open[0]?.autoRetryCount, 1);
-        assert.equal(open[0]?.compactionCount, 1);
-        assert.equal(open[0]?.interruptedCount, 1);
-        assert.equal(open[0]?.unsupportedInputCount, 1);
+      assert.equal(open.length, 1, 'an open private run remains part of the live surface');
+      assert.equal(open[0]?.modelId, 'fixture-model');
+      assert.equal(open[0]?.contextTokens, 42);
+      assert.equal(open[0]?.autoRetryCount, 1);
+      assert.equal(open[0]?.compactionCount, 1);
+      assert.equal(open[0]?.interruptedCount, 1);
+      assert.equal(open[0]?.unsupportedInputCount, 1);
+      if (captureAvailable) {
         const spans = observations.filter((observation) => observation.entityKind === 'activitySpan');
         assert.ok(spans.some(({ fields }) => (fields as { kind: string }).kind === 'retry_wait'));
         assert.equal(spans.filter(({ fields }) => (fields as { kind: string }).kind === 'busy').length, 2);
+      } else {
+        assert.equal(observations.length, 0, 'unavailable capture never chooses another authority');
+      }
+      if (captureAvailable) {
         await stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
         assert.equal(stats.getOpenRuns().length, 0);
         assert.equal(stats.getWorkingTimeBySession()[sessionPath], undefined);
       } else {
-        assert.equal(open.length, 0, 'legacy privacy continues suppressing analytics');
-        assert.equal(observations.length, 0);
+        await assert.rejects(stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root'), /unavailable/);
+        assert.equal(stats.getOpenRuns().length, 1, 'failed durable deletion retains retryable local state');
       }
     } finally {
       await stats.shutdown();

@@ -1,6 +1,5 @@
 import type { SessionAnalyticsFactors } from '../../contracts/legacy-run-analytics-contracts.js';
 import type {
-  PersistedSessionRunState,
   RunFinalizationReason,
   RunSnapshot,
   TaskBoundaryIntent,
@@ -47,8 +46,6 @@ export function emptySessionRunState(): SessionRunState {
 /** Application-owned run-state manager surface consumed by the analytics tracker. */
 export interface SessionRunStateManagerPort {
   readonly sessions: Map<string, SessionRunState>;
-  restore(checkpointSessions: Record<string, PersistedSessionRunState>): void;
-  serializeSessions(): Record<string, PersistedSessionRunState>;
   getOrCreateSessionState(sessionPath: string): SessionRunState;
   getMostRelevantRun(sessionPath: string): RunSnapshot | null;
   createRunSnapshot(sessionPath: string, state: SessionRunState): RunSnapshot;
@@ -57,6 +54,6 @@ export interface SessionRunStateManagerPort {
   diffAnalyticsFactors(current: SessionAnalyticsFactors, next: SessionAnalyticsFactors): TreatmentChangeKind[];
   closeBusyInterval(state: SessionRunState): boolean;
   syncSessionSummary(sessionPath: string): void;
-  persist(snapshotToAppend?: RunSnapshot): void;
+  onChanged(snapshotToAppend?: RunSnapshot): void;
   isoNow(): string;
 }

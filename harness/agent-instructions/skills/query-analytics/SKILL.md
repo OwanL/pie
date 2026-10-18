@@ -48,13 +48,18 @@ raising bounds. Queries are cancelled by aborting the caller; only that
 helper fork is terminated.
 
 The host-side adapter is `CanonicalAnalyticsReadModel`
-(`analytics/queries/query-entry.ts`). The store exists only under canonical
-analytics authority (a validated active activation manifest in the resolved
-state directory); with no active generation recorded, the runtime stays on legacy
-authority, starts no recorder, and captures nothing — and a corrupt activation
-state fails startup closed — so the database may simply not exist. Treat every
-explicit error (missing database, schema-version mismatch) as a hard stop —
-there is no legacy fallback.
+(`analytics/queries/query-entry.ts`). Production capture is canonical-only and automatic for
+fresh history. Read-only inspection adopts the store's sole capture namespace, or `canonical`
+for a new/empty store; old activation artifacts are inert. Helper failure pauses capture, never
+selects legacy capture. Treat every explicit error (missing database, ambiguous namespace,
+schema-version mismatch) as a hard stop — there is no legacy fallback.
+
+Legacy run JSONL/checkpoints, billable ledgers, timeline persistence, automatic and command
+exports, historical migration/healing, and DuckDB paths are retired. Old files are preserved,
+not imported or backfilled; they do not establish canonical history coverage. Privacy scrubbing
+and explicit forget remain. Live projections, browser behavior, pruning, and the separately gated
+session-storage cutoff are unchanged; see the
+[analytics contract](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md).
 
 ## Primary usage view
 
@@ -63,7 +68,7 @@ there is no legacy fallback.
 | Column | Meaning |
 |---|---|
 | `invocation_id` | stable billable-invocation identity |
-| `generation_id` | analytics activation generation; process identity is separate producer evidence |
+| `generation_id` | persisted capture namespace; not activation evidence; process identity is separate producer evidence |
 | `owning_root_session_id` | root session that owns the settlement (branch/copy work is attributed to the owning root) |
 | `execution_id`, `branch_id` | captured execution and entry-ancestry anchors; `NULL` means unavailable |
 | `provider`, `effective_model`, `purpose`, `outcome` | attribution dimensions |

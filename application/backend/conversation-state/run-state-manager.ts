@@ -8,7 +8,6 @@ import {
   appendUnique,
   areStringArraysEqual,
   toActiveRunSummary,
-  toPersistedSessionState,
 } from '../analytics-views/helpers';
 import {
   createEmptyFileExtensionRollup,
@@ -18,7 +17,6 @@ import {
   normalizeExperimentAssignment,
 } from '../../../analytics/legacy/run-analytics/coercion.js';
 import {
-  type PersistedSessionRunState,
   type RunFinalizationReason,
   type RunSnapshot,
   type TreatmentChangeKind,
@@ -56,7 +54,7 @@ function skillsKeyExcludingMtime(skills: SessionSkillFactor[]): string {
 interface SessionRunStateManagerOptions {
   getArchState: GetArchState;
   dispatchArchEvent: DispatchArchEvent;
-  schedulePersist: (snapshotToAppend?: RunSnapshot) => void;
+  onChanged: (snapshotToAppend?: RunSnapshot) => void;
   now: () => Date;
   createId: () => string;
   getExperimentAssignment: () => string | null;
@@ -66,7 +64,7 @@ export class SessionRunStateManager implements SessionRunStateManagerPort {
   readonly sessions = new Map<string, SessionRunState>();
   private readonly getArchState: GetArchState;
   private readonly dispatchArchEvent: DispatchArchEvent;
-  private readonly schedulePersistCallback: SessionRunStateManagerOptions['schedulePersist'];
+  private readonly onChangedCallback: SessionRunStateManagerOptions['onChanged'];
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly getExperimentAssignment: () => string | null;
@@ -74,38 +72,10 @@ export class SessionRunStateManager implements SessionRunStateManagerPort {
   constructor(options: SessionRunStateManagerOptions) {
     this.getArchState = options.getArchState;
     this.dispatchArchEvent = options.dispatchArchEvent;
-    this.schedulePersistCallback = options.schedulePersist;
+    this.onChangedCallback = options.onChanged;
     this.now = options.now;
     this.createId = options.createId;
     this.getExperimentAssignment = options.getExperimentAssignment;
-  }
-
-  restore(checkpointSessions: Record<string, PersistedSessionRunState>): void {
-    this.sessions.clear();
-    for (const [sessionPath, sessionState] of Object.entries(checkpointSessions)) {
-      this.sessions.set(sessionPath, {
-        currentRun: sessionState.currentRun,
-        lastRun: sessionState.lastRun,
-        nextTaskIntent: sessionState.nextTaskIntent,
-        queuedUnsupportedInputCount: sessionState.queuedUnsupportedInputCount,
-        turnIdsSeenInCurrentRun: new Set<string>(),
-        endedTurnIdsInCurrentRun: new Set<string>(),
-        startedToolCallIdsInCurrentRun: new Set<string>(),
-        finishedToolCallIdsInCurrentRun: new Set<string>(),
-        toolNamesByCallIdInCurrentRun: new Map<string, string>(),
-        toolExecutionIntervalsInCurrentRun: [],
-        busyStartedAt: sessionState.busyStartedAt,
-      });
-      this.syncSessionSummary(sessionPath);
-    }
-  }
-
-  serializeSessions(): Record<string, PersistedSessionRunState> {
-    const sessions: Record<string, PersistedSessionRunState> = {};
-    for (const [sessionPath, state] of this.sessions) {
-      sessions[sessionPath] = toPersistedSessionState(state);
-    }
-    return sessions;
   }
 
   getOrCreateSessionState(sessionPath: string): SessionRunState {
@@ -228,7 +198,7 @@ export class SessionRunStateManager implements SessionRunStateManagerPort {
     state.busyStartedAt = null;
 
     this.syncSessionSummary(sessionPath);
-    this.persist(finalizedRun);
+    this.onChanged(finalizedRun);
     return finalizedRun;
   }
 
@@ -354,8 +324,8 @@ export class SessionRunStateManager implements SessionRunStateManagerPort {
     });
   }
 
-  persist(snapshotToAppend?: RunSnapshot): void {
-    this.schedulePersistCallback(snapshotToAppend);
+  onChanged(snapshotToAppend?: RunSnapshot): void {
+    this.onChangedCallback(snapshotToAppend);
   }
 
   isoNow(): string {

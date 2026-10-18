@@ -19,6 +19,7 @@ test('cold initial inventory is shown as a pre-filter estimate without an approx
   assert.ok(!indicator.label.includes('±'));
   assert.match(breakdown.title, /Discovered initial prompt, tools, and skills/);
   assert.match(breakdown.title, /before Pie skill pruning or prompt\/tool disabling/);
+  assert.match(breakdown.title, /not a prediction of the outgoing request/);
   assert.match(breakdown.title, /provider-hidden instructions/);
 });
 

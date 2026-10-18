@@ -606,9 +606,6 @@ export interface RunSnapshot {
   verification: VerificationRollup;
 }
 
-/** Schema version stamped on every persisted run-analytics artifact. */
-export const RUN_ANALYTICS_SCHEMA_VERSION = 1;
-
 /**
  * Revision stamped on every run recorded by the current harness. Stable by
  * design: bump it only when the harness materially changes, so previously

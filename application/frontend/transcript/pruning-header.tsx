@@ -9,7 +9,7 @@ import { PruningHeaderChipControl } from '../lib/components/panel-chip';
 import { CollapsibleChevron } from '../lib/components/chevron';
 import { AGENT_ACTIVITY_LABELS } from './activity';
 import { PruningDiagnostics } from './pruning-details';
-import { formatPruningSummary, pruningTotals, type PruningHeaderState } from './pruning';
+import { formatPruningSummary, pruningSavingsLabel, pruningTotals, type PruningHeaderState } from './pruning';
 import { formatCompactTokens } from '../lib/formatting/format-tokens';
 
 interface PruningHeaderChipProps {
@@ -35,9 +35,11 @@ interface PruningHeaderPanelProps {
 function formatPruningChipLabel(details: PruningDetails, fallbackText?: string): string {
   if (details.prepassError) return 'Pruning failed';
 
+  // Shadow mode evaluated but did not prune the request: label the figure
+  // potential savings instead of claiming tokens were saved.
   const { tokensSaved } = pruningTotals(details);
-  if (tokensSaved > 0) return `${formatCompactTokens(tokensSaved)} tokens saved`;
-  return fallbackText?.trim() ? fallbackText : '';
+  return pruningSavingsLabel(tokensSaved, details.mode, formatCompactTokens)
+    || (fallbackText?.trim() ? fallbackText : '');
 }
 
 function PendingPruningHeader({ state, onCancel }: {

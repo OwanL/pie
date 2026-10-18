@@ -73,14 +73,6 @@ export class SessionRunTracker {
     this.subagentObservationSource = options.subagentObservationSource;
   }
 
-  restore(checkpointSessions: Parameters<SessionRunStateManagerPort['restore']>[0]): void {
-    this.runState.restore(checkpointSessions);
-  }
-
-  serializeSessions(): ReturnType<SessionRunStateManagerPort['serializeSessions']> {
-    return this.runState.serializeSessions();
-  }
-
   getOpenRuns(): RunSnapshot[] {
     const runs: RunSnapshot[] = [];
     for (const state of this.runState.sessions.values()) {
@@ -143,7 +135,7 @@ export class SessionRunTracker {
     state.nextTaskIntent = null;
 
     this.runState.syncSessionSummary(sessionPath);
-    this.runState.persist();
+    this.runState.onChanged();
     this.scheduleRender();
     return run.runId;
   }
@@ -159,7 +151,7 @@ export class SessionRunTracker {
       state.turnIdsSeenInCurrentRun.add(turnId);
       run.assistantTurnCount += 1;
       run.updatedAt = this.runState.isoNow();
-      this.runState.persist();
+      this.runState.onChanged();
     }
   }
 
@@ -242,7 +234,7 @@ export class SessionRunTracker {
       ...(durationMs === undefined ? {} : { durationMs }),
     }];
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   onAssistantTurnEnded(
@@ -347,7 +339,7 @@ export class SessionRunTracker {
     }
 
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   onToolStarted(sessionPath: string, toolCall: RunToolObservation): void {
@@ -367,7 +359,7 @@ export class SessionRunTracker {
     run.toolUsage.totalCount += 1;
     incrementNamedCount(run.toolUsage.countsByName, normalizedName);
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   /** `analysis` accepts the terminal analysis the caller already computed for
@@ -430,7 +422,7 @@ export class SessionRunTracker {
     }
 
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   /** Terminal ask_user results report the user's settlement structurally in
@@ -935,17 +927,16 @@ export class SessionRunTracker {
     run.auxiliaryLlmUsage = [...samples, ...additions];
   }
 
-  /** Persist terminal child-attempt diagnostics exactly once per stable attempt id.
+  /** Record terminal child-attempt diagnostics exactly once per stable attempt id.
    * Every terminal subagent tool call is accounted for at ingestion: a call
    * without parseable records increments explicit unknown coverage, so mixed
-   * runs (one well-formed call plus one malformed call) stay mixed on reload. */
+   * runs (one well-formed call plus one malformed call) retain mixed coverage. */
   private recordSubagentLifecycle(run: RunSnapshot, toolCall: RunToolObservation): void {
     const { samples: additions, coverageComplete } = this.subagentObservationSource
       .getTerminalSubagentAttemptSamplesFromToolCall(toolCall);
     // Presence of an empty list is meaningful: this run has new-format
     // lifecycle ingestion, so aggregate code must not apply the legacy fallback.
-    // Persisting source IDs makes terminal replay after checkpoint restore
-    // idempotent even though process-local finished-tool sets are rebuilt.
+    // Source IDs keep repeated terminal observations idempotent.
     run.unknownSubagentAttemptRecordSourceIds ??= [];
     if (!coverageComplete && !run.unknownSubagentAttemptRecordSourceIds.includes(toolCall.id)) {
       run.unknownSubagentAttemptRecordSourceIds = [...run.unknownSubagentAttemptRecordSourceIds, toolCall.id];
@@ -1037,10 +1028,10 @@ export class SessionRunTracker {
 
     run.interruptedCount += 1;
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
-  /** Persist exact response usage at the earliest durable boundary. Parent
+  /** Record exact response usage at the earliest observed boundary. Parent
    * assistant samples are reconciled with terminal run totals by aggregation. */
   onAuxiliaryLlmUsage(
     sessionPath: string,
@@ -1093,7 +1084,7 @@ export class SessionRunTracker {
       ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
     }];
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   /** Count a history-compaction (`/compact`) LLM call against the relevant run.
@@ -1108,7 +1099,7 @@ export class SessionRunTracker {
 
     run.compactionCount = (run.compactionCount ?? 0) + 1;
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   /** Count an auto-retry and retain its configured backoff even before a
@@ -1135,7 +1126,7 @@ export class SessionRunTracker {
       }];
     }
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   onAutoRetryMeasured(
@@ -1158,7 +1149,7 @@ export class SessionRunTracker {
     };
     run.retryTimingSamples = samples.map((sample, sampleIndex) => sampleIndex === index ? updated : sample);
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   onMessageEdited(sessionPath: string): void {
@@ -1174,7 +1165,7 @@ export class SessionRunTracker {
     // currentRun's full snapshot is appended at finalization, so mid-run mutations
     // just update the checkpoint — avoiding write amplification and leaking
     // in-progress runs into the completedRuns export.
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   onTruncatedAfter(sessionPath: string): void {
@@ -1186,7 +1177,7 @@ export class SessionRunTracker {
 
     run.truncatedAfterCount += 1;
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   onBackendError(sessionPath: string | undefined, code: string): void {
@@ -1201,7 +1192,7 @@ export class SessionRunTracker {
 
     run.backendErrorCodes = [...run.backendErrorCodes, code];
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist(state.currentRun ? undefined : run);
+    this.runState.onChanged(state.currentRun ? undefined : run);
   }
 
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void {
@@ -1213,7 +1204,7 @@ export class SessionRunTracker {
     run.contextTokens = tokens;
     run.contextLimit = limit;
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   onBusyChanged(sessionPath: string, busy: boolean): void {
@@ -1237,14 +1228,14 @@ export class SessionRunTracker {
         state.busyStartedAt = this.runState.isoNow();
         run.busyPeriodCount += 1;
         run.updatedAt = this.runState.isoNow();
-        this.runState.persist();
+        this.runState.onChanged();
       }
       return;
     }
 
     if (this.runState.closeBusyInterval(state)) {
       run.updatedAt = this.runState.isoNow();
-      this.runState.persist();
+      this.runState.onChanged();
     }
   }
 
@@ -1284,7 +1275,7 @@ export class SessionRunTracker {
     if (thinkingLevel) run.thinkingLevel = thinkingLevel;
     this.runState.markTreatmentChanges(run, changedKinds);
     run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {
@@ -1295,7 +1286,7 @@ export class SessionRunTracker {
     } else {
       state.queuedUnsupportedInputCount += 1;
     }
-    this.runState.persist();
+    this.runState.onChanged();
   }
 
   /** Drop private-session analytics without finalizing or persisting a run. */
@@ -1313,7 +1304,7 @@ export class SessionRunTracker {
     }
     this.runState.sessions.delete(sessionPath);
     this.clearActiveRunSummary(sessionPath);
-    this.runState.persist();
+    this.runState.onChanged();
     this.scheduleRender();
   }
 
@@ -1353,7 +1344,7 @@ export class SessionRunTracker {
 
     this.runState.sessions.delete(oldPath);
     this.runState.sessions.set(newPath, state);
-    this.runState.persist(snapshotToAppend ?? undefined);
+    this.runState.onChanged(snapshotToAppend ?? undefined);
   }
 
   startNewTask(sessionPath: string): void {
@@ -1364,7 +1355,7 @@ export class SessionRunTracker {
 
     state.nextTaskIntent = 'new_task';
     this.runState.syncSessionSummary(sessionPath);
-    this.runState.persist();
+    this.runState.onChanged();
     this.scheduleRender();
   }
 
@@ -1376,7 +1367,7 @@ export class SessionRunTracker {
 
     state.nextTaskIntent = 'continue_task';
     this.runState.syncSessionSummary(sessionPath);
-    this.runState.persist();
+    this.runState.onChanged();
     this.scheduleRender();
   }
 
@@ -1393,7 +1384,7 @@ export class SessionRunTracker {
       changed = true;
     }
     if (changed) {
-      this.runState.persist();
+      this.runState.onChanged();
     }
   }
 

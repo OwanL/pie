@@ -1,8 +1,7 @@
 /**
  * Analytics-views barrel: the StatsService presentation/query façade plus the
  * canonical projection read types and the RunObserver port. All re-exports;
- * no logic. Legacy accounting/storage collaborators are owned by
- * `analytics/legacy/` modules and are not re-exported here.
+ * no logic or legacy analytics persistence surface.
  */
 export { StatsService, type StatsStartupStageMetric } from './service';
 export {

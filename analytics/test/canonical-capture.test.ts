@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
 import { deserialize } from 'node:v8';
 
@@ -10,11 +7,7 @@ import {
   CanonicalAnalyticsCapture,
   analyticsRootSessionId,
 } from '../capture/canonical-capture.js';
-import { BillableAccounting } from '../legacy/billable-accounting/service.js';
-
-function tempRoot(): string {
-  return mkdtempSync(path.join(tmpdir(), 'pie-canonical-capture-'));
-}
+import { CanonicalAccounting } from '../usage-accounting/canonical-accounting.js';
 
 test('throwing capture diagnostics preserve rejection disposition and sequence settlement', async () => {
   for (const mode of ['sync', 'tracked', 'async'] as const) {
@@ -543,10 +536,8 @@ test('branch and copy adapters scope SDK entry IDs and never persist session pat
   assert.equal(JSON.stringify(observations).includes('/private/'), false);
 });
 
-test('canonical accounting seam is exclusive and never falls through to the legacy ledger', () => {
-  const root = tempRoot();
+test('canonical accounting captures each branch settlement under producer ownership', () => {
   const observations: AnalyticsObservation<object>[] = [];
-  try {
     const capture = new CanonicalAnalyticsCapture({
       authority: 'canonical',
       generationId: 'generation-exclusive',
@@ -557,18 +548,13 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       detailSink: { submitDetail: () => undefined },
       lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
     });
-    const accounting = new BillableAccounting({
-      getStorageDir: () => root,
+    const accounting = new CanonicalAccounting({
       now: () => new Date('2026-09-10T00:00:01.000Z'),
-      scheduleRender: () => undefined,
-      dispatchArchEvent: () => undefined,
       getCapturedPricingFacts: () => undefined,
       resolveInvocationPricing: () => undefined,
-      isPrivateSession: () => false,
       sessionIdentity: () => ({ sessionId: 'session-exclusive', provider: 'provider-a', modelId: 'model-a' }),
       currentRunId: () => 'run-exclusive',
       activeOperationId: () => 'operation-exclusive',
-      markDerivedExportDirty: () => assert.fail('canonical settlement must not dirty a legacy export'),
       canonicalCapture: capture,
     });
 
@@ -606,9 +592,7 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       occurredAt: '2026-09-10T00:00:03.000Z', inputTokens: 30, outputTokens: 3,
       cacheReadTokens: 0, cacheWriteTokens: 0, reportedCostUsd: 0.03, outcome: 'succeeded',
     });
-    assert.deepEqual(accounting.projectSessionUsage('/session-exclusive.jsonl'), {
-      samples: [], authority: 'unknown',
-    }, 'selected-branch reads belong to the durable read model');
+    assert.equal('projectSessionUsage' in accounting, false);
     assert.deepEqual(observations.map((observation) => observation.scope.branchId),
       ['entry-A', 'entry-B', 'entry-C'].map((entry) => capture.scopedBranchId({
         sessionId: 'session-exclusive', sessionPath: '/session-exclusive.jsonl',
@@ -619,10 +603,6 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       total + ('reportedCostUsd' in observation.fields
         && typeof observation.fields.reportedCostUsd === 'number' ? observation.fields.reportedCostUsd : 0)
     ), 0), 0.06);
-    assert.deepEqual(accounting.exportRecords(), [], 'legacy JSONL remains empty in canonical mode');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 test('pending bind and private close derive the same subject from the actual create origin', async () => {

@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 
 export interface AnalyticsUriLike {
@@ -17,6 +18,7 @@ export interface BuildWorkspaceAnalyticsIdOptions {
   platform?: NodeJS.Platform;
 }
 
+/** Resolve the preserved legacy outcomes root for privacy deletion, not capture. */
 export function getDataOutcomesRootPath(
   configuredRoot: string | undefined | null,
   globalStoragePath: string,
@@ -31,18 +33,9 @@ export function getDataOutcomesRootPath(
     : path.join(globalStoragePath, 'data', 'outcomes');
 }
 
-export function getDefaultRunAnalyticsExportPath(
-  configuredRoot: string | undefined | null,
-  globalStoragePath: string,
-  workspaceRoot: string,
-): string {
-  const trimmedRoot = configuredRoot?.trim();
-  if (trimmedRoot) {
-    return path.join(trimmedRoot, 'analysis', 'data', 'exports', 'run-analytics-export.json');
-  }
-
-  const workspaceLabel = path.basename(workspaceRoot) || 'workspace';
-  return path.join(globalStoragePath, 'exports', workspaceLabel, 'run-analytics-export.json');
+/** Stable workspace directory key used to locate preserved legacy analytics. */
+export function workspaceHash(workspaceId: string): string {
+  return crypto.createHash('sha256').update(workspaceId).digest('hex').slice(0, 16);
 }
 
 export function buildWorkspaceAnalyticsId(options: BuildWorkspaceAnalyticsIdOptions): string {

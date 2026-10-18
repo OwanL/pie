@@ -1,5 +1,4 @@
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger';
-import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../../../analytics/legacy/run-analytics/query';
 import type { RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../../../analytics/legacy/run-analytics/types.js';
 import type {
   AgentSettledPayload,
@@ -15,6 +14,7 @@ import { analyzeToolCall, type ToolCallAnalysis } from '../../../analytics/captu
 import { resolveSessionCwd } from '../file-changes/file-change-derivation.js';
 import { SessionRunTracker } from '../../../analytics/legacy/stats-service/tracker';
 import { forgetGlobalSideChannelsForStorageDirs } from '../../../analytics/legacy/run-analytics/side-channel';
+import { forgetLegacyAnalyticsForStorageDirs } from '../../../analytics/legacy/privacy-deletion';
 import { SessionRunStateManager } from '../conversation-state/run-state-manager';
 import type {
   AssistantTurnIdentity,
@@ -37,10 +37,8 @@ import { WorkingTimeService } from '../../../analytics/legacy/working-time-servi
 import { CapturedPricingFactsLoader } from '../../../harness/model-providers/pricing/captured-pricing-facts.js';
 import { readSessionPricingFacts } from '../../../harness/model-providers/runtime/session-pricing-facts';
 import { resolveCapturedInvocationPricing } from '../../../harness/model-providers/pricing/captured-invocation-pricing.js';
-import { LegacyStatsSettlement, type LegacyStatsSettlementPorts } from '../../../analytics/legacy/stats-service/service';
 import { createCanonicalAccounting, legacyPrivacyStorageDirs } from '../../../analytics/usage-accounting/canonical-accounting';
 import type { AccountingPort } from '../../../analytics/usage-accounting/canonical-accounting';
-import type { RunAnalyticsStorage } from '../../../analytics/legacy/stats-service/storage';
 import type { ActivityIntervalRecord } from '../../../analytics/contracts/activity-interval';
 import { activityProjectionSubjectFilter } from '../../../analytics/projections/activity-projection.js';
 import type {
@@ -139,18 +137,12 @@ function canonicalTimestampAnchor(value: unknown): number | null {
   return null;
 }
 
-/** One persistent structured startup-stage measurement, also mirrored in
- *  memory for tests/diagnostics. Emitted for storage.start, the persisted
- *  analytics query, accounting.initialize (ledger and timeline warm-up),
- *  timeline restore, timeline healing, and historical migration. Durations
- *  use the monotonic `performance.now` clock, never the injected wall clock. */
+/** Canonical startup measurement, mirrored in memory for diagnostics.
+ * Durations use the monotonic clock, never the injected wall clock. */
 export interface StatsStartupStageMetric {
   stage: string;
   durationMs: number;
   counts: Record<string, number>;
-  /** Delta of cumulative timeline read/write/fsync/apply counters
-   *  (ActivityTimeline.getDiagnostics()) across the stage. */
-  timelineDelta?: Record<string, number>;
 }
 
 function stableEvidenceTime(value: string | undefined): number | null {
@@ -171,41 +163,17 @@ function finiteToolDuration(value: unknown): number | null {
     : null;
 }
 
-/**
- * RunObserver/query façade for session accounting. Run observation is split by
- * ownership: run/token/working-time tracking stays in {@link SessionRunTracker}
- * and {@link WorkingTimeService}, while billable ledger adaptation (usage
- * events, migration, projection, privacy fences) is owned by
- * {@link BillableAccounting}. Query surfaces (open runs, pending completions,
- * session usage, exports) remain here so callers keep one seam.
- */
+/** Live run/working-time projections and canonical capture/read façade.
+ * Invocation adaptation is persistence-free; no legacy analytics are restored,
+ * reconstructed from transcripts, or written by this service. */
 export class StatsService implements RunObserver {
   private readonly scheduleRender: () => void;
   private readonly getArchState: NonNullable<StatsServiceOptions['getArchState']>;
   private readonly dispatchArchEvent: NonNullable<StatsServiceOptions['dispatchArchEvent']>;
   private readonly tracker: SessionRunTracker;
   private readonly workingTime: WorkingTimeService;
-  /** Legacy settlement/accounting persistence owner (storage + accounting
-   * collaborator construction and the legacy restore/settle/export/dispose
-   * sequences). The façade reads the collaborators through it. */
-  private readonly legacySettlement?: LegacyStatsSettlement;
-  private readonly canonicalAccounting?: AccountingPort;
+  private readonly accounting: AccountingPort;
   private readonly privacyStorageDirs: string[];
-
-  private get legacy(): LegacyStatsSettlement {
-    if (!this.legacySettlement) throw new Error('Legacy settlement is unavailable under canonical authority.');
-    return this.legacySettlement;
-  }
-
-  /** Shared invocation adaptation; canonical mode has transient state only. */
-  private get accounting(): AccountingPort {
-    return this.canonicalAccounting ?? this.legacy.accounting;
-  }
-
-  /** Legacy run-analytics storage, owned by the settlement. */
-  private get storage(): RunAnalyticsStorage {
-    return this.legacy.storage;
-  }
   private readonly activeBusyIntervalsBySession: Record<string, Set<string> | undefined> = {};
   private readonly activeBusyStartedAtByInterval: Record<string, string | undefined> = {};
   private readonly activeToolIntervalBySessionAndTool: Record<string, string | undefined> = {};
@@ -290,17 +258,6 @@ export class StatsService implements RunObserver {
   private startPromise: Promise<void> | null = null;
   private started = false;
   private disposed = false;
-  /** Tracked background continuation covering the event-loop defer, ledger→
-   *  timeline healing, and historical migration, so shutdown() drains or
-   *  cancels all of it and no deferred accounting work lands afterwards. */
-  private backgroundWork: Promise<void> | null = null;
-  /** Compaction is the only deferred accounting operation that cannot consult
-   *  the service's disposed flag between every serialization batch. Abort it
-   *  explicitly so shutdown does not wait for a full-history rewrite. */
-  private readonly backgroundCompactionAbort = new AbortController();
-  /** Persisted runs captured during restoration; input to the deferred
-   *  historical-migration pass. */
-  private deferredMigrationRuns: readonly RunSnapshot[] = [];
   private readonly startupStageMetrics: StatsStartupStageMetric[] = [];
 
   constructor(options: StatsServiceOptions) {
@@ -322,8 +279,7 @@ export class StatsService implements RunObserver {
       onChanged: this.scheduleRender,
     });
 
-    // Construct persistence only for legacy authority. Canonical mode reuses
-    // invocation adaptation and transient run tracking without a legacy store.
+    // Capture can be unavailable without selecting a persistence fallback.
     // Captured provider/model pricing facts: the provider pricing owner
     // loads the active + historical catalogs; settlement accounting prices
     // from the injected facts and never resolves runtime catalogs itself.
@@ -331,57 +287,23 @@ export class StatsService implements RunObserver {
       getAgentDir: options.getAgentDir ?? (() => null),
     });
     this.privacyStorageDirs = legacyPrivacyStorageDirs(options);
-    const settlementPorts: LegacyStatsSettlementPorts = {
-        now,
-        dispatchArchEvent,
-        scheduleRender: this.scheduleRender,
-        getCapturedPricingFacts: (sessionPath) => {
-          const capture = readSessionPricingFacts(sessionPath);
-          return capture.kind === 'legacy' ? capturedPricingFacts.get() : capture.facts;
-        },
-        resolveInvocationPricing: resolveCapturedInvocationPricing,
-        subagentObservationSource,
-        isPrivateSession: (sessionPath) => this.isPrivateSession(sessionPath),
-        sessionIdentity: (sessionPath) => this.sessionIdentity(sessionPath),
-        currentRunId: (sessionPath) => this.currentRunId(sessionPath),
-        activeOperationId: (sessionPath) => this.activeOperationId(sessionPath),
-        serializeSessions: () => this.tracker.serializeSessions(),
-        recordStage: (stage, startedAtMs, counts, diagnosticsBefore) =>
-          this.recordStage(stage, startedAtMs, counts, diagnosticsBefore),
-        isDisposed: () => this.disposed,
-        rehydrateRestoredIntervals: (activityIntervals) => {
-          for (const interval of activityIntervals) {
-            if (!interval.endedAt && !interval.outcome && interval.kind === 'busy') {
-              (this.activeBusyIntervalsBySession[interval.sessionPath] ??= new Set()).add(interval.intervalId);
-            } else if (!interval.endedAt && !interval.outcome && interval.kind === 'tool' && interval.toolId) {
-              const toolKey = this.toolIntervalKey(interval.sessionPath, interval.toolId);
-              this.activeToolIntervalBySessionAndTool[toolKey] = interval.intervalId;
-              const startedAt = finiteToolTimestamp(Date.parse(interval.startedAt));
-              if (startedAt !== null) this.activeToolStartedAtBySessionAndTool[toolKey] = startedAt;
-            }
-          }
-        },
-        compactionSignal: () => this.backgroundCompactionAbort.signal,
-      };
-    if (this.canonicalCapture) {
-      this.canonicalAccounting = createCanonicalAccounting({
-        ...settlementPorts,
-        canonicalCapture: this.canonicalCapture,
-      });
-    } else {
-      this.legacySettlement = new LegacyStatsSettlement(settlementPorts, {
-        dataOutcomesRootPath: options.dataOutcomesRootPath,
-        legacyUsageDataRootPath: options.legacyUsageDataRootPath,
-        workspaceId: options.workspaceId,
-        legacyWorkspaceIds: options.legacyWorkspaceIds ?? [],
-      });
-    }
+    this.accounting = createCanonicalAccounting({
+      now,
+      getCapturedPricingFacts: (sessionPath) => {
+        const capture = readSessionPricingFacts(sessionPath);
+        return capture.kind === 'legacy' ? capturedPricingFacts.get() : capture.facts;
+      },
+      resolveInvocationPricing: resolveCapturedInvocationPricing,
+      sessionIdentity: (sessionPath) => this.sessionIdentity(sessionPath),
+      currentRunId: (sessionPath) => this.currentRunId(sessionPath),
+      activeOperationId: (sessionPath) => this.activeOperationId(sessionPath),
+      canonicalCapture: this.canonicalCapture,
+    });
     const runState = new SessionRunStateManager({
       getArchState,
       dispatchArchEvent,
-      schedulePersist: this.canonicalCapture
-        ? () => undefined
-        : (snapshotToAppend) => this.storage.schedulePersist(snapshotToAppend),
+      // The retained run-state adapter notifies on mutation; no storage owner.
+      onChanged: this.scheduleRender,
       now,
       createId,
       getExperimentAssignment,
@@ -399,7 +321,7 @@ export class StatsService implements RunObserver {
     this.tracker = tracker;
   }
 
-  /** In-memory mirror of the persistent startup stage metrics. */
+  /** In-memory mirror of canonical startup measurements. */
   getStartupStageMetrics(): readonly StatsStartupStageMetric[] {
     return this.startupStageMetrics;
   }
@@ -408,171 +330,76 @@ export class StatsService implements RunObserver {
     // Canonical capture has no legacy restore/import fallback. Restore the
     // bounded durable session projection before making the host usable; the
     // old early return left every post-restart session view empty.
-    if (this.canonicalCapture) {
-      if (this.disposed || this.started) return;
-      if (this.startPromise) {
-        await this.startPromise;
-        return;
-      }
-      const startup = (async () => {
-        const canonicalQueryStartAt = performance.now();
-        // Establish the revision baseline before hydrating any session rows.
-        // The refresher deliberately does not notify for its first successful
-        // read; starting it after hydration would therefore allow a peer
-        // delete to become the baseline and leave the hydrated cache stale.
-        const baselineRevision = await this.startCanonicalRevisionRefresh();
-        if (this.disposed) return;
-        if (baselineRevision === null) {
-          // A failed first read must not be followed by hydration: the first
-          // later successful refresher read is a silent baseline and could
-          // otherwise absorb a peer delete. Stay unknown until that baseline
-          // exists; getSessionUsage will then perform a fresh bounded read.
-          this.canonicalRevisionAwaitingBaseline = Boolean(this.analyticsReadModel);
-          this.invalidateCanonicalSessionCache(false);
-        } else {
-          this.canonicalRevisionAwaitingBaseline = false;
-          // The bounded pass hydrates provider usage plus the global and
-          // displayed-session activity/facet projections. It remains one
-          // revision-fenced refresh rather than an agent-path query.
-          await this.refreshCanonicalSessionUsage();
-          if (this.disposed) return;
-          // A peer can commit while hydration is in flight. Compare the
-          // completed cache with a fresh durable watermark before exposing
-          // startup as complete. Unknown cache entries are safe; only a
-          // canonical snapshot at an older revision is stale data.
-          await this.reconcileCanonicalSessionUsageRevision(baselineRevision);
-        }
-        if (this.disposed) return;
-        this.recordStage('canonical-session-usage', canonicalQueryStartAt, {
-          sessions: this.canonicalSessionUsageByPath.size,
-        });
-        // Cold working-time restoration: the canonical busy wall spans are the
-        // only evidence (there is no legacy timeline under canonical
-        // authority). Paths the bounded usage pass hydrated restore their
-        // elapsed busy wall-time union here; the rest hydrate lazily with
-        // their first durable read.
-        const workingTimeRestoreStartAt = performance.now();
-        await this.restoreCanonicalWorkingTimeForPaths([...this.canonicalSessionUsageByPath.keys()]);
-        if (this.disposed) return;
-        this.recordStage('canonical-working-time', workingTimeRestoreStartAt, {
-          restored: this.canonicalBusyRestoredRootByPath.size,
-        });
-        this.started = true;
-        this.scheduleRender();
-      })();
-      this.startPromise = startup;
-      try {
-        await startup;
-      } finally {
-        this.startPromise = null;
-      }
-      return;
-    }
-    // Shutdown is terminal: never reactivate storage/restoration after it.
-    if (this.disposed) {
-      return;
-    }
-    if (this.started) {
-      return;
-    }
+    if (this.disposed || this.started) return;
     if (this.startPromise) {
-      return await this.startPromise;
+      await this.startPromise;
+      return;
     }
-
-    // Startup covers only essential restoration: storage, tracker restore,
-    // the persisted analytics query, ledger and timeline warm-up, and
-    // working-time restoration. Healing and historical migration are deferred
-    // background work (see runDeferredStartupWork) so the first usable panel
-    // never waits for either. The restore/settle sequences live in the
-    // legacy settlement owner; the façade keeps privacy filtering and the
-    // lifecycle flags.
     const startup = (async () => {
-      await this.legacy.restoreLegacyStartup({
-        tracker: this.tracker,
-        workingTime: this.workingTime,
-      });
+      const canonicalQueryStartAt = performance.now();
+      // Establish the revision baseline before hydrating any session rows.
+      // The refresher deliberately does not notify for its first successful
+      // read; starting it after hydration would therefore allow a peer
+      // delete to become the baseline and leave the hydrated cache stale.
+      const baselineRevision = await this.startCanonicalRevisionRefresh();
       if (this.disposed) return;
-      // Startup completes here: the resolved promise and the first scheduled
-      // render precede all restart-only accounting work.
+      if (baselineRevision === null) {
+        // A failed first read must not be followed by hydration: the first
+        // later successful refresher read is a silent baseline and could
+        // otherwise absorb a peer delete. Stay unknown until that baseline
+        // exists; getSessionUsage will then perform a fresh bounded read.
+        this.canonicalRevisionAwaitingBaseline = Boolean(this.analyticsReadModel);
+        this.invalidateCanonicalSessionCache(false);
+      } else {
+        this.canonicalRevisionAwaitingBaseline = false;
+        // The bounded pass hydrates provider usage plus the global and
+        // displayed-session activity/facet projections. It remains one
+        // revision-fenced refresh rather than an agent-path query.
+        await this.refreshCanonicalSessionUsage();
+        if (this.disposed) return;
+        // A peer can commit while hydration is in flight. Compare the
+        // completed cache with a fresh durable watermark before exposing
+        // startup as complete. Unknown cache entries are safe; only a
+        // canonical snapshot at an older revision is stale data.
+        await this.reconcileCanonicalSessionUsageRevision(baselineRevision);
+      }
+      if (this.disposed) return;
+      this.recordStage('canonical-session-usage', canonicalQueryStartAt, {
+        sessions: this.canonicalSessionUsageByPath.size,
+      });
+      // Cold working-time restoration: the canonical busy wall spans are the
+      // only evidence (there is no legacy timeline under canonical
+      // authority). Paths the bounded usage pass hydrated restore their
+      // elapsed busy wall-time union here; the rest hydrate lazily with
+      // their first durable read.
+      const workingTimeRestoreStartAt = performance.now();
+      await this.restoreCanonicalWorkingTimeForPaths([...this.canonicalSessionUsageByPath.keys()]);
+      if (this.disposed) return;
+      this.recordStage('canonical-working-time', workingTimeRestoreStartAt, {
+        restored: this.canonicalBusyRestoredRootByPath.size,
+      });
       this.started = true;
       this.scheduleRender();
     })();
     this.startPromise = startup;
-
-    // Background continuation after startup resolved. The promise covering
-    // defer, healing, and migration is tracked on the instance so shutdown()
-    // drains/cancels all of it; failures are caught so deferred accounting
-    // work can never surface as an unhandled rejection or reject the
-    // already-resolved start() promise. It is assigned only once startup
-    // resolved: a shutdown while startup is still pending must not await the
-    // chain — the disposed checks in runDeferredStartupWork keep any
-    // late-resolving startup from starting deferred work instead.
-    void startup
-      .then(() => {
-        this.backgroundWork = this.runDeferredStartupWork()
-          .catch((error) => {
-            appendPieLog('warn', 'stats-service', 'deferred startup accounting work failed', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      })
-      .catch((error) => {
-        appendPieLog('warn', 'stats-service', 'deferred startup accounting work failed', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-
     try {
-      await this.startPromise;
+      await startup;
     } finally {
       this.startPromise = null;
     }
   }
 
-  /** Background continuation of start(): ledger→timeline healing and the
-   *  historical usage migration. Runs strictly after the start() promise
-   *  resolved and the first render was scheduled, deferred by an explicit
-   *  event-loop turn. Cancellation-aware: shutdown stops healing at its next
-   *  bounded batch and the migration at its next run boundary or attempted
-   *  row (bounded drain — never a full legacy-catalogue wait) so no ledger
-   *  write, activity write, or render can land after shutdown.
-   *
-   *  Healed intervals are provider/auxiliary/history_compaction kinds only,
-   *  which WorkingTimeService.restoreActivityIntervals ignores (it consumes
-   *  busy/tool intervals exclusively), so a late heal can never rewrite or
-   *  double-count live working-time clocks restored at startup. */
-  private async runDeferredStartupWork(): Promise<void> {
-    await this.legacy.runDeferredWork();
-  }
-
-  /** Cumulative ActivityTimeline diagnostics snapshot for stage deltas. */
-  private timelineDiagnostics(): Record<string, number> {
-    return this.legacy.timelineDiagnostics();
-  }
-
-  /** Record one structured startup stage: duration, counts, and (when the
-   *  timeline exposes cumulative counters) the timeline diagnostics delta.
-   *  Persisted via the pie log and mirrored in memory. */
+  /** Record a canonical startup stage in the pie log and memory. */
   private recordStage(
     stage: string,
     startedAtMs: number,
     counts: Record<string, number> = {},
-    diagnosticsBefore?: Record<string, number>,
   ): void {
     const metric: StatsStartupStageMetric = {
       stage,
       durationMs: Math.max(0, performance.now() - startedAtMs),
       counts: { ...counts },
     };
-    if (diagnosticsBefore) {
-      const after = this.timelineDiagnostics();
-      const delta: Record<string, number> = {};
-      for (const [key, value] of Object.entries(after)) {
-        const before = diagnosticsBefore[key];
-        if (before !== undefined) delta[key] = value - before;
-      }
-      if (Object.keys(delta).length > 0) metric.timelineDelta = delta;
-    }
     this.startupStageMetrics.push(metric);
     appendPieLog('info', 'stats-service', 'startup stage metrics', { ...metric });
   }
@@ -640,9 +467,10 @@ export class StatsService implements RunObserver {
     return `${sessionPath}\0${toolId}`;
   }
 
-  /** Scrub only the shared auxiliary JSONL logs. Reading the run-store path is
-   * path derivation only: this never starts or writes legacy analytics. */
+  /** Delete attributed records from preserved legacy files and shared logs.
+   * Path derivation never starts a legacy persistence owner. */
   private async scrubPrivateAuxiliaryLogs(sessionPath: string, sessionId?: string): Promise<void> {
+    await forgetLegacyAnalyticsForStorageDirs(this.privacyStorageDirs, sessionPath, sessionId);
     await forgetGlobalSideChannelsForStorageDirs(
       this.privacyStorageDirs,
       sessionPath,
@@ -685,7 +513,10 @@ export class StatsService implements RunObserver {
       await operation.promise;
       return;
     }
-    await this.setSessionPrivacy(sessionPath, true);
+    await this.scrubPrivateAuxiliaryLogs(sessionPath, stableRootSessionId ?? this.sessionIdentity(sessionPath).sessionId ?? undefined);
+    // A missing recorder cannot prove durable deletion. Retain local state so
+    // explicit close can be retried when its canonical lifecycle owner exists.
+    throw new Error('Canonical analytics capture is unavailable for private session deletion.');
   }
 
   private async performCanonicalPrivateClose(
@@ -751,20 +582,8 @@ export class StatsService implements RunObserver {
       }
       return;
     }
-    const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
-    if (!enabled) {
-      this.accounting.markSessionOrdinary(sessionPath, sessionId);
-      return;
-    }
-    this.workingTime.resetSession(
-      sessionPath,
-      this.getArchState().sessions.runningSessionPaths.includes(sessionPath),
-    );
-    this.tracker.discardSession(sessionPath);
-    // Publish the durable privacy fence (and scrub the live timeline plus
-    // queued writes) before durable analytics are forgotten.
-    this.accounting.markSessionPrivate(sessionPath, sessionId);
-    await this.storage.forgetSession(sessionPath, sessionId);
+    // An unavailable capture has no durable analytics owner. Privacy remains
+    // reversible while open; explicit close still scrubs retired side channels.
   }
 
   prepareForSend(
@@ -773,7 +592,6 @@ export class StatsService implements RunObserver {
     initialUserMessage = '',
     operationId?: string | null,
   ): string {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return 'private-run';
     const runId = this.isCanonicalCloseActive(sessionPath)
       ? this.currentRunId(sessionPath) ?? this.createId()
       : this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
@@ -822,7 +640,6 @@ export class StatsService implements RunObserver {
         },
       );
     }
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
   }
@@ -844,7 +661,6 @@ export class StatsService implements RunObserver {
       Date.parse(occurredAt),
       { feature: 'pruning', decision: 'provider-settled', ruleVersion: 'legacy-adapter-v1' },
     );
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onSkillPruningUsage(sessionPath, messageId, occurredAt, details);
     this.syncWorkingTimeBreakdown(sessionPath);
@@ -931,7 +747,6 @@ export class StatsService implements RunObserver {
         );
       }
     }
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, latency);
     this.syncWorkingTimeBreakdown(sessionPath);
@@ -1150,7 +965,6 @@ export class StatsService implements RunObserver {
       `tool:${toolCall.id}:begin`,
       finiteToolTimestamp(toolCall.startedAt) ?? 0,
     );
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
     this.workingTime.onToolStarted(sessionPath, toolCall);
@@ -1177,11 +991,7 @@ export class StatsService implements RunObserver {
         kind: 'tool',
         startedAt: new Date(observedStartedAt).toISOString(),
       };
-      if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
-      else {
-        this.accounting.activityTimeline.start(interval);
-        this.storage.markDerivedExportDirty();
-      }
+      this.canonicalCapture?.captureActivity(this.analyticsContext(sessionPath), interval);
     }
   }
 
@@ -1223,7 +1033,6 @@ export class StatsService implements RunObserver {
       ),
       endedAtMs ?? startedAtMs ?? 0,
     );
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (closing) return;
     // Producer timing is authoritative. In particular, no terminal receipt
     // timestamp is substituted for a missing tool endpoint or duration.
@@ -1237,22 +1046,7 @@ export class StatsService implements RunObserver {
         ? intervalStartedAtMs + durationMs
         : null
     );
-    const orderedWallBounds = intervalStartedAtMs !== undefined
-      && activityEndedAtMs !== null
-      && activityEndedAtMs >= intervalStartedAtMs;
     const hasMeasuredMonotonicDuration = monotonic && durationMs !== null;
-    // Keep wall endpoints only when they are an ordered producer interval, or
-    // when a valid monotonic duration independently permits a reversed wall
-    // correlation anchor. Never pass a reversed unmarked interval to timeline
-    // normalization, and never turn missing timing into a receipt-time end.
-    const settledEndedAtMs = activityEndedAtMs !== null
-      && (orderedWallBounds || hasMeasuredMonotonicDuration)
-      ? activityEndedAtMs
-      : null;
-    const settledDurationMs = durationMs !== null
-      && (hasMeasuredMonotonicDuration || orderedWallBounds)
-      ? durationMs
-      : null;
     if (intervalId && intervalStartedAtMs !== undefined) {
       const outcome = toolCall.status === 'failed' ? 'failed' as const : 'succeeded' as const;
       const interval: ActivityIntervalRecord = {
@@ -1272,23 +1066,7 @@ export class StatsService implements RunObserver {
         ...(hasMeasuredMonotonicDuration ? { durationClockDomain: 'monotonic-same-process' as const } : {}),
         outcome,
       };
-      if (this.canonicalCapture) {
-        this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
-      } else {
-        // Timeline normalization accepts a terminal monotonic duration without
-        // a fabricated wall endpoint, and accepts reversed wall anchors only
-        // when an independent monotonic duration accompanies them.
-        this.accounting.activityTimeline.settle(
-          intervalId,
-          settledEndedAtMs === null ? undefined : new Date(settledEndedAtMs).toISOString(),
-          outcome,
-          {
-            ...(settledDurationMs === null ? {} : { durationMs: settledDurationMs }),
-            ...(hasMeasuredMonotonicDuration ? { durationClockDomain: 'monotonic-same-process' as const } : {}),
-          },
-        );
-        this.storage.markDerivedExportDirty();
-      }
+      this.canonicalCapture?.captureActivity(this.analyticsContext(sessionPath), interval);
     }
     delete this.activeToolIntervalBySessionAndTool[toolKey];
     delete this.activeToolStartedAtBySessionAndTool[toolKey];
@@ -1297,13 +1075,11 @@ export class StatsService implements RunObserver {
   }
 
   onInterrupted(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onInterrupted(sessionPath);
   }
 
   onCompaction(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onCompaction(sessionPath);
   }
@@ -1312,7 +1088,6 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
   ): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     const observed = this.accounting.observeAuxiliaryLlmUsage(sessionPath, sample);
     if (observed.channelsKnown) {
@@ -1390,7 +1165,6 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
   ): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.accounting.observeAutoRetry(sessionPath, timing);
     this.tracker.onAutoRetry(sessionPath, timing);
@@ -1404,69 +1178,32 @@ export class StatsService implements RunObserver {
     durationMs: number,
     evidence?: Pick<import('../../lib/protocol/index.js').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt' | 'durationClockDomain'>,
   ): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
-    if (this.canonicalCapture) {
-      this.canonicalCapture.captureRetryTiming(this.analyticsContext(sessionPath, evidence?.operationId ?? null), sourceId, {
-        ...evidence, measuredDelayMs, durationMs,
-      });
-      this.syncWorkingTimeBreakdown(sessionPath);
-      return;
-    }
-    const measuredElapsedMs = measuredDelayMs !== undefined
-      && Number.isFinite(measuredDelayMs) && measuredDelayMs >= 0
-      ? Math.trunc(measuredDelayMs) : null;
-    const terminalElapsedMs = Number.isFinite(durationMs) && durationMs >= 0
-      ? Math.trunc(durationMs) : null;
-    const elapsed = measuredElapsedMs ?? terminalElapsedMs;
-    if (!sourceId.trim() || elapsed === null) {
-      this.syncWorkingTimeBreakdown(sessionPath);
-      return;
-    }
-    const endedAtMs = this.now().getTime();
-    const ownerId = this.currentRunId(sessionPath)
-      ?? analyticsRootSessionId(this.sessionIdentity(sessionPath).sessionId, sessionPath);
-    const interval: ActivityIntervalRecord = {
-      schemaVersion: 1,
-      intervalId: `activity:retry-wait:${ownerId}:${sourceId}`,
-      sessionId: this.sessionIdentity(sessionPath).sessionId,
-      sessionPath,
-      parentRunId: this.currentRunId(sessionPath),
-      parentOperationId: this.activeOperationId(sessionPath),
-      invocationId: null,
-      toolId: null,
-      kind: 'retry_wait',
-      startedAt: new Date(Math.max(0, endedAtMs - elapsed)).toISOString(),
-      endedAt: new Date(endedAtMs).toISOString(),
-      outcome: 'succeeded',
-    };
-    this.accounting.activityTimeline.record(interval);
-    this.storage.markDerivedExportDirty();
+    this.canonicalCapture?.captureRetryTiming(this.analyticsContext(sessionPath, evidence?.operationId ?? null), sourceId, {
+      ...evidence, measuredDelayMs, durationMs,
+    });
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
   onMessageEdited(sessionPath: string, _messageId: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onMessageEdited(sessionPath);
   }
 
   onTruncatedAfter(sessionPath: string, _messageId: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onTruncatedAfter(sessionPath);
   }
 
   onBackendError(sessionPath: string | undefined, code: string): void {
-    if (!sessionPath || (this.isPrivateSession(sessionPath) && !this.canonicalCapture)) return;
+    if (!sessionPath) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onBackendError(sessionPath, code);
   }
 
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number,
     evidence?: Omit<import('../../lib/protocol/index.js').ContextUsageChangedPayload, 'sessionPath' | 'contextUsage'>): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     if (Number.isFinite(limit) && limit > 0) this.tracker.onContextUsageChanged(sessionPath, tokens, limit);
     if (this.canonicalCapture) {
@@ -1496,7 +1233,6 @@ export class StatsService implements RunObserver {
   onBusyChanged(sessionPath: string, busy: boolean): void {
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.workingTime.onBusyChanged(sessionPath, busy);
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onBusyChanged(sessionPath, busy);
     const nowIso = this.now().toISOString();
     if (busy && (this.activeBusyIntervalsBySession[sessionPath]?.size ?? 0) === 0) {
@@ -1523,8 +1259,7 @@ export class StatsService implements RunObserver {
         kind: 'busy',
         startedAt: nowIso,
       };
-      if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
-      else this.accounting.activityTimeline.start(interval);
+      this.canonicalCapture?.captureActivity(this.analyticsContext(sessionPath), interval);
     } else if (!busy) {
       const intervalIds = this.activeBusyIntervalsBySession[sessionPath];
       for (const intervalId of intervalIds ?? []) {
@@ -1543,14 +1278,11 @@ export class StatsService implements RunObserver {
             endedAt: nowIso,
             outcome: 'succeeded',
           });
-        } else {
-          this.accounting.activityTimeline.settle(intervalId, nowIso, 'succeeded');
         }
         delete this.activeBusyStartedAtByInterval[intervalId];
       }
       delete this.activeBusyIntervalsBySession[sessionPath];
     }
-    if (!this.canonicalCapture) this.storage.markDerivedExportDirty();
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 
@@ -1560,13 +1292,11 @@ export class StatsService implements RunObserver {
     thinkingLevel: ThinkingLevel | undefined,
     provider?: string,
   ): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onUnsupportedInputAttempt(sessionPath);
   }
@@ -1612,24 +1342,13 @@ export class StatsService implements RunObserver {
       }
       return;
     }
-    if (this.isPrivateSession(sessionPath)) {
-      const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
-      this.workingTime.resetSession(sessionPath, false);
-      this.tracker.discardSession(sessionPath);
-      this.accounting.forgetSession(sessionPath, sessionId);
-      delete this.activeBusyIntervalsBySession[sessionPath];
-      for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
-        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
-      }
-      for (const key of Object.keys(this.activeToolStartedAtBySessionAndTool)) {
-        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolStartedAtBySessionAndTool[key];
-      }
-      return;
-    }
     this.syncWorkingTimeBreakdown(sessionPath);
     this.tracker.onSessionClosed(sessionPath);
-    this.accounting.onSessionClosed(sessionPath);
-    this.pendingCanonicalUsageByPath.delete(sessionPath);
+    this.releaseCanonicalSessionCorrelations(sessionPath);
+    if (this.isPrivateSession(sessionPath)) {
+      this.workingTime.resetSession(sessionPath, false);
+      this.tracker.discardSession(sessionPath);
+    }
   }
 
   replaceSessionPath(
@@ -1700,13 +1419,11 @@ export class StatsService implements RunObserver {
   }
 
   startNewTask(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.startNewTask(sessionPath);
   }
 
   continueTask(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.continueTask(sessionPath);
   }
@@ -1715,40 +1432,8 @@ export class StatsService implements RunObserver {
     this.tracker.onExperimentAssignmentChanged(assignment);
   }
 
-  private filterPrivateAnalytics(result: RunAnalyticsQueryResult): RunAnalyticsQueryResult {
-    return {
-      completedRuns: result.completedRuns.filter((run) => !this.isPrivateSession(run.sessionPath)),
-      openRuns: result.openRuns.filter((run) => !this.isPrivateSession(run.sessionPath)),
-    };
-  }
-
-  async queryRunAnalytics(): Promise<RunAnalyticsQueryResult> {
-    if (this.canonicalCapture) {
-      await this.start();
-      // RunSnapshot is a legacy transcript/run shape and has no canonical
-      // equivalent. Returning an explicit empty run layer keeps legacy cache
-      // consumers from reading the wrong authority; canonical usage is served
-      // by getSessionUsage and AggregateStatsService below.
-      return { completedRuns: [], openRuns: [] };
-    }
-    await this.start();
-    return this.filterPrivateAnalytics(await this.storage.queryRunAnalytics());
-  }
-
-  /** The resolved run-analytics storage directory (see {@link RunAnalyticsStorage.getStorageDir}). */
-  getStorageDir(): string {
-    return this.privacyStorageDirs[0]!;
-  }
-
-  /** Durable canonical read model (P5), available only under canonical authority.
-   *
-   * Returns `undefined` under legacy authority even though the host wires the
-   * model at startup, so no consumer can read canonical data before the P7a
-   * cutover. The check lives here rather than in each consumer: it was previously
-   * an unenforced convention documented on this accessor, and a single consumer
-   * that forgot it would silently read the canonical database under legacy
-   * authority. Queries are read-only and fail explicitly when the canonical
-   * database is absent. */
+  /** Reads require the same admitted canonical context as capture; an
+   * unavailable helper/capture must not expose a different authority. */
   getAnalyticsReadModel(): CanonicalAnalyticsReadModel | undefined {
     if (!this.canonicalCapture) return undefined;
     return this.analyticsReadModel;
@@ -1860,9 +1545,9 @@ export class StatsService implements RunObserver {
     return visible.length > 0 ? { ...snapshot, pendingSamples: visible } : snapshot;
   }
 
-  /** Ledger-backed session usage projection for UI and fixture conservation checks. */
+  /** Durable canonical usage plus bounded, identity-keyed live handoff. */
   getSessionUsage(sessionPath: string): SessionUsageSnapshot {
-    if (!this.canonicalCapture) return this.accounting.projectSessionUsage(sessionPath);
+    if (!this.canonicalCapture) return this.unknownSessionUsage();
     if (this.canonicalPrivateClosesByPath.has(sessionPath) || this.canonicalCacheFailClosed) {
       return this.unknownSessionUsage();
     }
@@ -1915,64 +1600,14 @@ export class StatsService implements RunObserver {
     return this.sessionUsageWithPending(sessionPath, this.unknownSessionUsage('refreshing'));
   }
 
-  /** Correlated activity authority used by conservation tests and exports. */
-  getActivityIntervals(): readonly ActivityIntervalRecord[] {
-    if (this.canonicalCapture) return [];
-    return this.accounting.activityTimeline.projectAll();
-  }
-
-  /** Immutable ordinary invocation rows used by aggregate projections/export. */
-  getBillableInvocationRecords(): readonly BillableInvocationRecord[] {
-    return this.accounting.exportRecords();
-  }
-
   /** Current in-memory runs for live aggregate updates; does not touch disk. */
   getOpenRuns(): RunSnapshot[] {
     return this.tracker.getOpenRuns().filter((run) => (
       !this.canonicalPrivateClosesByPath.has(run.sessionPath)
-      && (this.canonicalCapture || !this.isPrivateSession(run.sessionPath))
     ));
   }
 
-  /** Finalized snapshots waiting for their batched JSONL append. This is the
-   * completion bridge used by AggregateStatsService, preserving finalized
-   * status/outcome/timestamps rather than its last observed open snapshot. */
-  getPendingCompletedRuns(): RunSnapshot[] {
-    if (this.canonicalCapture) return [];
-    return this.storage.getPendingCompletedRuns().filter((run) => !this.isPrivateSession(run.sessionPath));
-  }
-
-  /** Query the completed-data cache source without forcing pending analytics
-   * to flush. Intended for mtime-gated host rollups. */
-  async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
-    if (this.canonicalCapture) {
-      return await this.queryRunAnalytics();
-    }
-    await this.start();
-    return this.filterPrivateAnalytics(await this.storage.queryPersistedRunAnalytics());
-  }
-
-  async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
-    if (this.canonicalCapture) throw new Error('Canonical analytics export is not wired; P5 activation fence remains closed.');
-    await this.start();
-    const privatePaths = new Set(
-      Object.entries(this.getArchState().sessions.privacyModeBySession)
-        .filter(([, enabled]) => enabled)
-        .map(([sessionPath]) => sessionPath),
-    );
-    const privateIds = new Set<string>();
-    for (const sessionPath of privatePaths) {
-      const summaryId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
-      if (summaryId) privateIds.add(summaryId);
-      try { privateIds.add(resolveSessionIdentity(sessionPath).sessionId); } catch { /* path filtering remains authoritative */ }
-    }
-    return await this.legacy.exportLegacyRunAnalytics(targetPath, privatePaths, privateIds);
-  }
-
-  async flush(): Promise<void> {
-    if (this.canonicalCapture) return;
-    await this.legacy.flush();
-  }
+  /** Observation never waits on recorder persistence. */
 
   private canonicalProjectionScope(sessionPath?: string): CanonicalProjectionScope {
     if (sessionPath === undefined) return { kind: 'global' };
@@ -3046,10 +2681,9 @@ export class StatsService implements RunObserver {
    * observable through the shared projection revision, so this reads that small
    * value at a bounded interval and hydrates before rendering on change. It
    * never scans history, never replays events and retains no per-history state.
-   * Dormant under the legacy authority: there is no canonical revision to
-   * follow yet. */
+   * An unavailable capture context never admits helper reads. */
   private async startCanonicalRevisionRefresh(): Promise<string | null> {
-    if (!this.analyticsReadModel) return null;
+    if (!this.canonicalCapture || !this.analyticsReadModel) return null;
     if (this.analyticsRevisionRefresher) {
       if (this.canonicalRevisionStart) await this.canonicalRevisionStart;
       return this.analyticsRevisionRefresher.getStats().revision;
@@ -3147,50 +2781,32 @@ export class StatsService implements RunObserver {
   }
 
   async shutdown(): Promise<void> {
-    if (this.canonicalCapture) {
-      this.disposed = true;
-      this.canonicalSessionUsageRefreshAbort?.abort(new Error('StatsService is shutting down.'));
-      this.cancelCanonicalSessionPathRefreshes(new Error('StatsService is shutting down.'));
-      this.cancelCanonicalSessionUsageRetry();
-      const revisionRefreshDrain = this.analyticsRevisionRefresher?.stop();
-      this.backgroundCompactionAbort.abort();
-      const refreshes = [
-        this.canonicalRevisionStart,
-        revisionRefreshDrain,
-        this.canonicalSessionUsageRefresh,
-        ...this.canonicalSessionPathRefreshes.values(),
-        ...[...this.canonicalPrivateClosesByPath.values()].map(({ promise }) => promise),
-      ].filter((promise): promise is Promise<void> => promise !== null);
-      await Promise.allSettled(refreshes);
-      this.clearCanonicalSessionCache();
-      this.canonicalSessionUsageHeldByPath = null;
-      this.canonicalCacheFailClosed = true;
-      this.canonicalSessionPathEpochs.clear();
-      this.canonicalSessionPathRefreshes.clear();
-      this.canonicalSessionPathRefreshAborts.clear();
-      this.canonicalPrivateClosesByPath.clear();
-      this.canonicalBranchEntriesBySession.clear();
-      this.canonicalBusyRestoredRootByPath.clear();
-      this.canonicalRootSessionIdByPath.clear();
-      this.pendingCreateOperationBySessionPath.clear();
-      this.analyticsRevisionRefresher = undefined;
-      this.canonicalRevisionStart = null;
-      this.canonicalSessionUsageRefresh = null;
-      return;
-    }
-    // Terminal: block start reactivation immediately, then drain the tracked
-    // background promise (defer, healing, migration) — healing stops at its
-    // next bounded batch and the in-flight migration at its next run
-    // boundary instead of waiting out a large legacy catalogue. Unmigrated
-    // runs resume on the next startup.
     this.disposed = true;
-    this.analyticsRevisionRefresher?.stop();
-    this.backgroundCompactionAbort.abort();
-    const background = this.backgroundWork;
-    if (background) {
-      await background;
-    }
-    this.tracker.finalizeOpenRunsForShutdown();
-    await this.legacy.dispose();
+    this.canonicalSessionUsageRefreshAbort?.abort(new Error('StatsService is shutting down.'));
+    this.cancelCanonicalSessionPathRefreshes(new Error('StatsService is shutting down.'));
+    this.cancelCanonicalSessionUsageRetry();
+    const revisionRefreshDrain = this.analyticsRevisionRefresher?.stop();
+    const refreshes = [
+      this.canonicalRevisionStart,
+      revisionRefreshDrain,
+      this.canonicalSessionUsageRefresh,
+      ...this.canonicalSessionPathRefreshes.values(),
+      ...[...this.canonicalPrivateClosesByPath.values()].map(({ promise }) => promise),
+    ].filter((promise): promise is Promise<void> => promise !== null);
+    await Promise.allSettled(refreshes);
+    this.clearCanonicalSessionCache();
+    this.canonicalSessionUsageHeldByPath = null;
+    this.canonicalCacheFailClosed = true;
+    this.canonicalSessionPathEpochs.clear();
+    this.canonicalSessionPathRefreshes.clear();
+    this.canonicalSessionPathRefreshAborts.clear();
+    this.canonicalPrivateClosesByPath.clear();
+    this.canonicalBranchEntriesBySession.clear();
+    this.canonicalBusyRestoredRootByPath.clear();
+    this.canonicalRootSessionIdByPath.clear();
+    this.pendingCreateOperationBySessionPath.clear();
+    this.analyticsRevisionRefresher = undefined;
+    this.canonicalRevisionStart = null;
+    this.canonicalSessionUsageRefresh = null;
   }
 }

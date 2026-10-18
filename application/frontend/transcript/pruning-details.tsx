@@ -4,7 +4,7 @@
 import { useState } from 'preact/hooks';
 
 import type { PruningDetails } from '../../lib/protocol/index.js';
-import { pruningTotals } from './pruning';
+import { pruningTotals, pruningSavingsLabel } from './pruning';
 import { Collapsible } from '../lib/components/collapsible';
 import { ResizablePre } from '../lib/components/resizable-pre';
 import { highlightToolResultText } from './highlight';
@@ -35,10 +35,12 @@ function modeLabel(mode: PruningDetails['mode']): string {
   }
 }
 
-/** Quiet metadata; category headers own the kept/total counts. */
-function prepassLabel(details: PruningDetails, tokensSaved: number, presentation: PruningDiagnosticsProps['presentation']): string {
+/** Quiet metadata; category headers own the kept/total counts. Savings are
+ *  labelled estimated, or potential in shadow mode (see pruningSavingsLabel). */
+function prepassLabel(details: PruningDetails, presentation: PruningDiagnosticsProps['presentation']): string {
   const parts: string[] = [];
-  if (presentation === 'inline' && tokensSaved > 0) parts.push(`${formatTokens(tokensSaved)} tokens saved`);
+  const savings = pruningSavingsLabel(pruningTotals(details).tokensSaved, details.mode, formatTokens);
+  if (presentation === 'inline' && savings) parts.push(savings);
   if (details.prepassProvider) parts.push(details.prepassProvider);
   if (details.prepassModel) parts.push(details.prepassModel);
   if (details.prepassThinkingLevel) parts.push(`thinking ${details.prepassThinkingLevel}`);
@@ -92,7 +94,7 @@ function PruningCategory({ title, kept, total, included, excluded }: CategoryPro
 function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle, presentation }: PruningDiagnosticsProps) {
   const failed = !!details.prepassError;
   const totals = pruningTotals(details);
-  const prepass = prepassLabel(details, totals.tokensSaved, presentation);
+  const prepass = prepassLabel(details, presentation);
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   const showSkills = totals.skillsTotal > 0 || details.excludedSkills.length > 0;

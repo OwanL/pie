@@ -27,12 +27,8 @@ test('disabled aggregate never arms timers or calls analytics sources', () => {
       enabled: false,
       getArchState: fail,
       statsService: {
-        getStorageDir: fail,
-        queryPersistedRunAnalytics: async () => fail(),
         getOpenRuns: fail,
-        getPendingCompletedRuns: fail,
         getAnalyticsReadModel: fail,
-        getBillableInvocationRecords: fail,
       } as never,
       tokenRateService: { getRates: fail } as never,
       getAgentDir: fail,

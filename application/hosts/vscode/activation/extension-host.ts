@@ -4,9 +4,6 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import type { BackendClient } from '../../../backend/agent-connection/client';
-import {
-  type RunAnalyticsExportPayload,
-} from '../../../../analytics/legacy/run-analytics/query';
 import { SidebarViewProvider } from '../sidebar/provider';
 import { EMPTY_DIFF_SCHEME, EmptyDiffContentProvider } from '../editor-integration/file-diff';
 import { createVscodeHostRuntimePlatform } from '../runtime/host-runtime-platform';
@@ -21,7 +18,6 @@ import {
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger';
 import { HostRuntime } from '../../../backend/composition/host-runtime.js';
 import type { HostRendererSurface, HostRuntimeStatus } from '../../../lib/platform-contracts/platform.js';
-import { getDefaultRunAnalyticsExportPath } from '../../../../analytics/legacy/run-analytics/storage';
 import type { SessionOperationSource } from '../../../backend/conversation-state/operation-types.js';
 import { toErrorMessage } from '../../../../lib/structured-logging/error-message';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from '../../../lib/stream-telemetry.js';
@@ -308,11 +304,6 @@ export class PieExtension implements vscode.Disposable {
       vscode.commands.registerCommand('pie.restartBackend', async (source?: SessionOperationSource) => {
         await this.restart(source);
       }),
-      vscode.commands.registerCommand('pie.exportRunAnalytics', async (
-        target?: vscode.Uri | string,
-      ) => {
-        return await this.exportRunAnalytics(target);
-      }),
       vscode.commands.registerCommand('pie.attachFiles', async (
         resource?: vscode.Uri,
         resources?: vscode.Uri[],
@@ -361,46 +352,6 @@ export class PieExtension implements vscode.Disposable {
       targets.map((uri) => uri.fsPath),
       source,
     );
-  }
-
-  private async exportRunAnalytics(
-    target?: vscode.Uri | string,
-  ): Promise<RunAnalyticsExportPayload | undefined> {
-    const shouldNotify = !target;
-    const resolvedTarget = typeof target === 'string'
-      ? vscode.Uri.file(target)
-      : target ?? await vscode.window.showSaveDialog({
-        defaultUri: vscode.Uri.file(getDefaultRunAnalyticsExportPath(
-          process.env.PI_CODING_AGENT_DIR,
-          this.context.globalStorageUri.fsPath,
-          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
-        )),
-        filters: {
-          JSON: ['json'],
-        },
-        saveLabel: 'Export Run Analytics',
-        title: 'Export pie run analytics',
-      });
-
-    if (!resolvedTarget) {
-      return undefined;
-    }
-
-    try {
-      const payload = await this.runtime.statsService.exportRunAnalytics(resolvedTarget.fsPath);
-      if (shouldNotify) {
-        void vscode.window.showInformationMessage(
-          `pie: Exported run analytics to ${resolvedTarget.fsPath}`,
-        );
-      }
-      return payload;
-    } catch (error) {
-      const message = toErrorMessage(error);
-      if (shouldNotify) {
-        void vscode.window.showErrorMessage(`pie: Failed to export run analytics: ${message}`);
-      }
-      throw error;
-    }
   }
 
   private async dumpDebugState(): Promise<string> {

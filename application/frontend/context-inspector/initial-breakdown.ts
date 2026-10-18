@@ -42,7 +42,7 @@ export function buildInitialContextBreakdown(
     { key: 'window.total', label: 'Total', value: formatTokens(contextWindow), kind: 'exact', tokens: contextWindow },
   ];
   const notes = [
-    'Fresh estimate of successfully discovered/registered resources before Pie skill pruning or prompt/tool disabling.',
+    'Fresh estimate of successfully discovered/registered resources before Pie skill pruning or prompt/tool disabling; not a prediction of the outgoing request, which reflects per-turn pruning and disabling.',
     'Includes initially sent prompt text and tool/skill catalog metadata, not provider-hidden instructions, prompt-template bodies, or full skill bodies.',
   ];
   return {

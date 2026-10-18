@@ -145,7 +145,7 @@ test('canonical authority never re-settles transcript-derived snapshot history a
   }
 });
 
-test('legacy authority keeps migrating transcript-derived snapshots and dedups repeated opens', async () => {
+test('unavailable capture never reconstructs transcript-derived snapshots on repeated opens', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-snapshot-legacy-'));
   const sessionPath = '/sessions/legacy-open.jsonl';
   const state = sessionState(sessionPath, 'root-a');
@@ -162,13 +162,10 @@ test('legacy authority keeps migrating transcript-derived snapshots and dedups r
     const branchEntryIds = ['entry-1', 'entry-2', 'entry-3'];
     stats.onSessionUsageSnapshot(sessionPath, 'root-a', snapshotFor(branchEntryIds), 'snapshot:open-1', nowMs);
     nowMs += 1_000;
-    // A repeated open replays the same transcript-derived sample; legacy
-    // migration must stay idempotent on source identity.
+    // Repeated opens can carry ancestry, but never historical usage backfill.
     stats.onSessionUsageSnapshot(sessionPath, 'root-a', snapshotFor(branchEntryIds), 'snapshot:open-2', nowMs);
-    const rows = stats.getBillableInvocationRecords();
-    assert.equal(rows.length, 1, 'legacy migration still runs and dedups repeated opens');
-    assert.equal(rows[0]?.sourceId, 'assistant:turn-1');
-    assert.equal(rows[0]?.evidenceOrigin, 'migration');
+    assert.equal('getBillableInvocationRecords' in stats, false);
+    assert.equal(stats.getSessionUsage(sessionPath).authority, 'unknown');
   } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });

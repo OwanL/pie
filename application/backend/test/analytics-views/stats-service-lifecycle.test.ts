@@ -5,15 +5,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  RUN_ANALYTICS_SCHEMA_VERSION,
-} from '../../../../analytics/legacy/run-analytics/types.js';
-import {
   createEmptyFileMutationRollup,
   createEmptyToolUsageRollup,
   createEmptyVerificationRollup,
 } from '../../../../analytics/legacy/run-analytics/coercion.js';
 import { StatsService } from '../../analytics-views';
-import { workspaceHash } from '../../analytics-views/helpers';
+import { legacyPrivacyStorageDirs } from '../../../../analytics/usage-accounting/canonical-accounting';
 import { createInitialArchState, type ArchState } from '../../conversation-state/arch-state';
 import { CanonicalAnalyticsCapture } from '../../../../analytics/capture/canonical-capture.js';
 import type { AnalyticsObservation } from '../../../../analytics/contracts/contracts.js';
@@ -27,9 +24,7 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-/** A completed legacy run snapshot that survives coerceRunSnapshot and carries
- *  token usage so the historical migration emits one conversation-residual row
- *  (`legacy-run:<runId>:conversation-residual`) per run. */
+/** Preserved historical fixture: startup must neither import nor rewrite it. */
 function legacyCompletedRun(runId: string, usage: { inputTokens: number; outputTokens: number }) {
   return {
     sessionPath: `/workspace/${runId}.jsonl`,
@@ -76,7 +71,7 @@ function legacyCompletedRun(runId: string, usage: { inputTokens: number; outputT
 async function seedLegacyRunSnapshots(storageDir: string, runs: ReturnType<typeof legacyCompletedRun>[]) {
   await fs.mkdir(storageDir, { recursive: true });
   const lines = runs.map((run) => JSON.stringify({
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+    schemaVersion: 1,
     kind: 'run_snapshot',
     recordedAt: '2026-01-01T00:10:00.000Z',
     run,
@@ -100,28 +95,23 @@ function optionsFor(
   };
 }
 
-async function pumpMacrotasks(ticks = 25): Promise<void> {
-  for (let index = 0; index < ticks; index += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  await new Promise<void>((resolve) => setTimeout(resolve, 25));
-}
-
 test('the canonical read model is withheld unless canonical authority is active', async () => {
   await withTempDir(async (tempDir) => {
     const state = createInitialArchState();
-    // The host wires a read model at startup regardless of authority, so the
-    // accessor is what has to withhold it. A consumer that read canonical data
-    // under legacy authority would be reading a store nothing is writing.
+    // A read model alone does not establish the admitted capture context.
+    // Both the accessor and startup must withhold its reads. Reading data
+    // without capture would bypass the admitted canonical context.
     const readModel = {} as NonNullable<ReturnType<StatsService['getAnalyticsReadModel']>>;
-    const legacyStats = new StatsService({
+    const unavailableStats = new StatsService({
       ...optionsFor(path.join(tempDir, 'analytics-legacy'), tempDir, state, { renders: 0 }),
       analyticsReadModel: readModel,
     });
     try {
-      assert.equal(legacyStats.getAnalyticsReadModel(), undefined, 'legacy authority must not expose canonical reads');
+      assert.equal(unavailableStats.getAnalyticsReadModel(), undefined, 'unavailable capture must not expose canonical reads');
+      await unavailableStats.start();
+      assert.equal(unavailableStats.getAnalyticsRevisionRefreshStats(), undefined, 'startup cannot query a read model without capture');
     } finally {
-      await legacyStats.shutdown();
+      await unavailableStats.shutdown();
     }
 
     const capture = new CanonicalAnalyticsCapture({
@@ -153,12 +143,17 @@ test('the canonical read model is withheld unless canonical authority is active'
 test('canonical authority neither reads nor extends the legacy run/ledger layer', async () => {
   await withTempDir(async (tempDir) => {
     const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
-    const storageDir = path.join(analyticsRoot, workspaceHash('workspace-exclusive-authority'));
+    const storageDir = legacyPrivacyStorageDirs({ dataOutcomesRootPath: analyticsRoot, workspaceId: 'workspace-exclusive-authority' })[0]!;
     // A durable legacy run snapshot is present and must stay untouched: the
     // exclusive authority switch never imports or migrates legacy analytics.
     await seedLegacyRunSnapshots(storageDir, [
       legacyCompletedRun('legacy-run-authority', { inputTokens: 100, outputTokens: 10 }),
     ]);
+    const retiredFiles = ['run-snapshots.jsonl', 'run-state.json', 'activity-intervals.json'];
+    for (const name of retiredFiles.slice(1)) {
+      await fs.writeFile(path.join(storageDir, name), `retired ${name}\r\n`, 'utf8');
+    }
+    const before = await Promise.all(retiredFiles.map((name) => fs.readFile(path.join(storageDir, name))));
     const observations: AnalyticsObservation<object>[] = [];
     const capture = new CanonicalAnalyticsCapture({
       authority: 'canonical',
@@ -175,15 +170,12 @@ test('canonical authority neither reads nor extends the legacy run/ledger layer'
       workspaceId: 'workspace-exclusive-authority',
       analyticsCapture: capture,
     });
-    const ledgerPath = path.join(stats.getStorageDir(), 'billable-invocations.jsonl');
+    const ledgerPath = path.join(storageDir, 'billable-invocations.jsonl');
     const sessionPath = '/sessions/exclusive-authority.jsonl';
     try {
       await stats.start();
-      assert.deepEqual(
-        await stats.queryRunAnalytics(),
-        { completedRuns: [], openRuns: [] },
-        'canonical authority must return an explicit empty legacy run layer',
-      );
+      assert.deepEqual(stats.getOpenRuns(), []);
+      assert.equal('getPendingCompletedRuns' in stats, false);
       assert.equal(observations.length, 0, 'a durable legacy run snapshot is never imported into canonical capture');
 
       // One settlement under canonical authority goes to the canonical sink and
@@ -213,6 +205,15 @@ test('canonical authority neither reads nor extends the legacy run/ledger layer'
       );
     } finally {
       await stats.shutdown();
+    }
+    assert.deepEqual((await fs.readdir(storageDir)).sort(), [...retiredFiles].sort(),
+      'startup, capture, and shutdown must create no legacy files');
+    for (const [index, name] of retiredFiles.entries()) {
+      assert.deepEqual(await fs.readFile(path.join(storageDir, name)), before[index],
+        `${name} must remain byte-identical`);
+    }
+    for (const owner of ['store', 'runStore', 'ledger', 'activityTimeline']) {
+      assert.equal(owner in stats, false, `canonical startup must not construct ${owner}`);
     }
   });
 });
@@ -520,163 +521,5 @@ test('host replacement retains the exact pending-create origin through bind and 
     assert.deepEqual(deletedSubjects, boundSubjects);
     assert.notEqual(boundSubjects[0], 'actual-create-origin');
     assert.notEqual(boundSubjects[0], 'cleanup-close-operation');
-  });
-});
-
-test('shutdown during historical migration stops writes and renders at the run boundary and blocks start reactivation', async () => {
-  await withTempDir(async (tempDir) => {
-    const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
-    const storageDir = path.join(analyticsRoot, workspaceHash('workspace-migration-lifecycle'));
-    const runA = legacyCompletedRun('legacy-run-a', { inputTokens: 100, outputTokens: 10 });
-    const runB = legacyCompletedRun('legacy-run-b', { inputTokens: 200, outputTokens: 20 });
-    await seedLegacyRunSnapshots(storageDir, [runA, runB]);
-
-    const counters = { renders: 0 };
-    const state = createInitialArchState();
-    const stats = new StatsService(optionsFor(analyticsRoot, tempDir, state, counters));
-
-    // Start without awaiting: the migration processes run A, then yields via
-    // setImmediate between runs.
-    const startPromise = stats.start();
-
-    // Deterministically wait until run A's migration row exists. At this
-    // moment the migration is suspended at its inter-run yield.
-    const residualA = `legacy-run:${runA.runId}:conversation-residual`;
-    const residualB = `legacy-run:${runB.runId}:conversation-residual`;
-    let ticks = 0;
-    while (!stats.getBillableInvocationRecords().some((record) => record.sourceId === residualA)) {
-      if (++ticks > 10_000) {
-        throw new Error('historical migration never processed the first legacy run');
-      }
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-
-    // Shutdown synchronously marks the service disposed (cancelling the
-    // suspended migration) and drains at the run boundary instead of waiting
-    // out the remaining catalogue.
-    const baselineRenders = counters.renders;
-    await stats.shutdown();
-    await startPromise;
-
-    const ledgerPath = path.join(stats.getStorageDir(), 'billable-invocations.jsonl');
-    const rowsAfterShutdown = (await fs.readFile(ledgerPath, 'utf8')).trim().split('\n');
-    assert.equal(rowsAfterShutdown.length, 1, 'exactly the first legacy run must have migrated');
-    const records = stats.getBillableInvocationRecords();
-    assert.ok(records.some((record) => record.sourceId === residualA), 'run A migrated before shutdown');
-    assert.equal(
-      records.some((record) => record.sourceId === residualB),
-      false,
-      'shutdown must cancel the remaining migration instead of waiting for the full catalogue',
-    );
-
-    await pumpMacrotasks();
-    assert.equal(counters.renders, baselineRenders, 'no render may be scheduled after shutdown');
-    assert.equal(
-      (await fs.readFile(ledgerPath, 'utf8')).trim().split('\n').length,
-      1,
-      'no ledger row may be written after shutdown',
-    );
-
-    // A late start() call must not reactivate the disposed service.
-    await stats.start();
-    await pumpMacrotasks();
-    assert.equal(counters.renders, baselineRenders, 'start after shutdown must not render');
-    assert.equal(
-      stats.getBillableInvocationRecords().some((record) => record.sourceId === residualB),
-      false,
-      'start after shutdown must not re-run the historical migration',
-    );
-    assert.equal(
-      (await fs.readFile(ledgerPath, 'utf8')).trim().split('\n').length,
-      1,
-      'start after shutdown must not write ledger rows',
-    );
-  });
-});
-
-test('a rejected persisted query after shutdown skips healing, migration, and render', async () => {
-  await withTempDir(async (tempDir) => {
-    const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
-    const counters = { renders: 0 };
-    const stats = new StatsService(optionsFor(
-      analyticsRoot,
-      tempDir,
-      createInitialArchState(),
-      counters,
-    ));
-    const seams = stats as unknown as {
-      storage: { queryPersistedRunAnalytics: () => Promise<never> };
-      accounting: {
-        healActivityFromLedger: (options?: { shouldContinue?: () => boolean }) => Promise<unknown>;
-        migrateHistoricalRunUsage: () => Promise<void>;
-      };
-    };
-    let healCalls = 0;
-    let migrationCalls = 0;
-    seams.accounting.healActivityFromLedger = () => {
-      healCalls += 1;
-      return Promise.resolve({
-        ledgerRowsConsidered: 0,
-        healedIntervals: 0,
-        activityBatchFlushes: 0,
-        durationMs: 0,
-        cancelled: false,
-      });
-    };
-    seams.accounting.migrateHistoricalRunUsage = async () => { migrationCalls += 1; };
-
-    let rejectQuery!: (reason?: unknown) => void;
-    let resolveQueryStarted!: () => void;
-    const queryStarted = new Promise<void>((resolve) => { resolveQueryStarted = resolve; });
-    seams.storage.queryPersistedRunAnalytics = () => {
-      resolveQueryStarted();
-      return new Promise<never>((_, reject) => { rejectQuery = reject; });
-    };
-
-    const unhandledRejections: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown) => { unhandledRejections.push(reason); };
-    process.on('unhandledRejection', onUnhandledRejection);
-    const startPromise = stats.start();
-    try {
-      await queryStarted;
-      await stats.shutdown();
-      rejectQuery(new Error('controlled persisted-query failure after shutdown'));
-      await startPromise;
-      await pumpMacrotasks();
-
-      assert.equal(healCalls, 0, 'shutdown must prevent activity healing after a rejected query');
-      assert.equal(migrationCalls, 0, 'shutdown must prevent migration after a rejected query');
-      assert.equal(counters.renders, 0, 'shutdown must prevent rendering after a rejected query');
-      assert.deepEqual(unhandledRejections, [], 'the rejected query must be handled by start()');
-    } finally {
-      rejectQuery(new Error('release controlled persisted query'));
-      await startPromise.catch(() => undefined);
-      process.off('unhandledRejection', onUnhandledRejection);
-    }
-  });
-});
-
-test('start() after shutdown never reactivates storage or migrates', async () => {
-  await withTempDir(async (tempDir) => {
-    const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
-    const storageDir = path.join(analyticsRoot, workspaceHash('workspace-migration-lifecycle'));
-    const runA = legacyCompletedRun('legacy-run-a', { inputTokens: 100, outputTokens: 10 });
-    await seedLegacyRunSnapshots(storageDir, [runA]);
-
-    const counters = { renders: 0 };
-    const state = createInitialArchState();
-    const stats = new StatsService(optionsFor(analyticsRoot, tempDir, state, counters));
-    await stats.shutdown();
-    const baselineRenders = counters.renders;
-
-    await stats.start();
-    await pumpMacrotasks();
-
-    assert.equal(counters.renders, baselineRenders, 'start after shutdown must be a no-op');
-    await assert.rejects(
-      fs.access(path.join(stats.getStorageDir(), 'billable-invocations.jsonl')),
-      { code: 'ENOENT' },
-      'start after shutdown must not restore/migrate storage',
-    );
   });
 });

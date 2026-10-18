@@ -8,18 +8,16 @@ import { reducer } from '../../../conversation-state/reducer';
 import type { Event } from '../../../conversation-state/events';
 import type { ArchState } from '../../../conversation-state/arch-state';
 import {
-  type PersistedSessionRunState,
   type RunSnapshot,
   type TreatmentChangeKind,
   CURRENT_HARNESS_REVISION,
 } from '../../../../../analytics/legacy/run-analytics/types.js';
 import { SessionRunStateManager } from '../../../conversation-state/run-state-manager';
-import { toPersistedSessionState } from '../../../analytics-views/helpers';
 import type { SessionAnalyticsFactors, SessionSkillFactor } from '../../../../lib/protocol/index.js';
 
 interface Harness {
   manager: SessionRunStateManager;
-  persistCalls: Array<{ snapshot?: RunSnapshot }>;
+  changeCalls: Array<{ snapshot?: RunSnapshot }>;
   renderCount: number;
   getArchState: () => ArchState;
   dispatchArchEvent: (event: Event) => void;
@@ -71,7 +69,7 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
     draft.sessions.analyticsFactorsBySession[sessionPath] = baseAnalyticsFactors('a');
   });
 
-  const persistCalls: Array<{ snapshot?: RunSnapshot }> = [];
+  const changeCalls: Array<{ snapshot?: RunSnapshot }> = [];
   const renderCount = 0;
 
   const getArchState = () => archState;
@@ -83,8 +81,8 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
   const manager = new SessionRunStateManager({
     getArchState,
     dispatchArchEvent,
-    schedulePersist: (snapshot) => {
-      persistCalls.push({ snapshot });
+    onChanged: (snapshot) => {
+      changeCalls.push({ snapshot });
     },
     now: () => new Date(nowMs),
     createId: () => `id-${++idCounter}`,
@@ -97,7 +95,7 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
 
   return {
     manager,
-    persistCalls,
+    changeCalls,
     get renderCount() { return renderCount; },
     getArchState,
     dispatchArchEvent,
@@ -211,11 +209,11 @@ test('createRunSnapshot falls back to default model settings when the session ro
   assert.equal(run.thinkingLevel, 'low', 'falls back to defaultThinkingLevel');
 });
 
-test('finalizeCurrentRun with closed reason transitions to closed and persists snapshot', () => {
+test('finalizeCurrentRun with closed reason transitions to closed and notifies with snapshot', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
-  h.persistCalls.length = 0;
+  h.changeCalls.length = 0;
 
   // Advance the injected clock so finalizedAt is strictly newer than startedAt.
   h.setNow(Date.UTC(2026, 0, 1, 0, 0, 5));
@@ -230,9 +228,9 @@ test('finalizeCurrentRun with closed reason transitions to closed and persists s
   assert.equal(finalized!.finalizedAt, expectedFinalizedAt, 'finalizedAt uses the injected now()');
   assert.notEqual(finalized!.finalizedAt, run.startedAt, 'finalizedAt advances past startedAt');
 
-  // The returned snapshot is the exact object downstream persistence receives (no copy/loss).
-  assert.equal(h.persistCalls.length, 1, 'exactly one persist call on finalize');
-  assert.equal(h.persistCalls[0].snapshot, finalized, 'persisted snapshot is the finalized run object');
+  // The returned snapshot is the exact object downstream change callback receives (no copy/loss).
+  assert.equal(h.changeCalls.length, 1, 'exactly one change call on finalize');
+  assert.equal(h.changeCalls[0].snapshot, finalized, 'notified snapshot is the finalized run object');
 
   // currentRun cleared, lastRun holds the finalized snapshot.
   const state = h.manager.sessions.get(sessionPath);
@@ -247,39 +245,39 @@ test('finalizeCurrentRun with closed reason transitions to closed and persists s
   );
 });
 
-test('finalizeCurrentRun with new_task reason transitions to closed and persists snapshot', () => {
+test('finalizeCurrentRun with new_task reason transitions to closed and notifies with snapshot', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
-  h.persistCalls.length = 0;
+  h.changeCalls.length = 0;
 
   const finalized = h.manager.finalizeCurrentRun(sessionPath, 'new_task');
   assert.ok(finalized);
   assert.equal(finalized!.status, 'closed');
   assert.equal(finalized!.finalizationReason, 'new_task');
 
-  assert.equal(h.persistCalls.length, 1);
-  assert.equal(h.persistCalls[0].snapshot, finalized);
+  assert.equal(h.changeCalls.length, 1);
+  assert.equal(h.changeCalls[0].snapshot, finalized);
 });
 
 test('finalizeCurrentRun is a safe no-op when there is no current run (idempotent)', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
-  h.persistCalls.length = 0;
+  h.changeCalls.length = 0;
   // Session state has never been created — no current run.
   const result = h.manager.finalizeCurrentRun(sessionPath, 'closed');
   assert.equal(result, null);
-  assert.equal(h.persistCalls.length, 0, 'no persist scheduled when nothing to finalize');
+  assert.equal(h.changeCalls.length, 0, 'no change notified when nothing to finalize');
   // No summary dispatched for an unknown session.
   assert.equal(h.getArchState().composer.activeRunSummaryBySession[sessionPath], undefined);
 
   // Even after a run exists and is finalized, a second finalize is a no-op.
   openRun(h.manager, sessionPath);
   h.manager.finalizeCurrentRun(sessionPath, 'closed');
-  h.persistCalls.length = 0;
+  h.changeCalls.length = 0;
   const second = h.manager.finalizeCurrentRun(sessionPath, 'closed');
   assert.equal(second, null);
-  assert.equal(h.persistCalls.length, 0, 'second finalize after closing is a no-op (no double persist)');
+  assert.equal(h.changeCalls.length, 0, 'second finalize after closing is a no-op (no double notification)');
 });
 
 test('getOrCreateSessionState is idempotent and getMostRelevantRun prefers current over last', () => {
@@ -426,86 +424,7 @@ test('diffAnalyticsFactors flags prompt, tool, skills (excluding mtime), and ext
   );
 });
 
-test('serializeSessions then restore round-trips persisted state exactly and resets transient bookkeeping', () => {
-  const h = createHarness();
-  const sessionPath = '/workspace/session-rsm.jsonl';
-  const run = openRun(h.manager, sessionPath);
-  run.sendCount = 3;
-  run.assistantTurnCount = 2;
-  run.inputTokens = 500;
-  const state = h.manager.sessions.get(sessionPath)!;
-  // Simulate transient bookkeeping that must NOT be persisted.
-  state.turnIdsSeenInCurrentRun.add('turn-1');
-  state.endedTurnIdsInCurrentRun.add('turn-1');
-  state.startedToolCallIdsInCurrentRun.add('tool-1');
-  state.finishedToolCallIdsInCurrentRun.add('tool-1');
-  state.queuedUnsupportedInputCount = 7;
-  state.nextTaskIntent = 'new_task';
-  state.busyStartedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, 0)).toISOString();
 
-  const serialized = h.manager.serializeSessions();
-  const expectedPersisted: PersistedSessionRunState = {
-    currentRun: run,
-    lastRun: null,
-    nextTaskIntent: 'new_task',
-    queuedUnsupportedInputCount: 7,
-    busyStartedAt: state.busyStartedAt,
-  };
-  assert.deepEqual(serialized[sessionPath], expectedPersisted, 'persisted state contains exactly the run + checkpoint fields');
-  // Persisted state excludes the transient Sets.
-  assert.equal((serialized[sessionPath] as unknown as Record<string, unknown>).turnIdsSeenInCurrentRun, undefined);
-
-  // Restore into a fresh manager (downstream restart path).
-  const h2 = createHarness();
-  h2.manager.restore(serialized);
-  const restored = h2.manager.sessions.get(sessionPath)!;
-  assert.ok(restored);
-  assert.equal(restored.currentRun, run, 'currentRun object is preserved across restore');
-  assert.equal(restored.currentRun!.sendCount, 3);
-  assert.equal(restored.currentRun!.inputTokens, 500);
-  assert.equal(restored.nextTaskIntent, 'new_task');
-  assert.equal(restored.queuedUnsupportedInputCount, 7);
-  assert.equal(restored.busyStartedAt, state.busyStartedAt);
-  // Transient Sets are reset to empty on restore (no stale dedup state).
-  assert.equal(restored.turnIdsSeenInCurrentRun.size, 0);
-  assert.equal(restored.endedTurnIdsInCurrentRun.size, 0);
-  assert.equal(restored.startedToolCallIdsInCurrentRun.size, 0);
-  assert.equal(restored.finishedToolCallIdsInCurrentRun.size, 0);
-
-  // restore dispatches a summary reflecting nextTaskIntent === 'new_task'.
-  assert.deepEqual(
-    h2.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'open', nextSendStartsNewTask: true },
-  );
-
-  // restore clears the in-memory map. By design it only syncs summaries for
-  // sessions present in the checkpoint, so a previously-known session that is
-  // absent from the checkpoint is simply dropped — it does not get a null
-  // summary dispatched (the production restart path uses a fresh archState, so
-  // there is never a stale summary to clear).
-  h2.manager.restore({});
-  assert.equal(h2.manager.sessions.size, 0, 'restore with empty checkpoint clears existing sessions');
-});
-
-test('restore only syncs summaries for sessions present in the checkpoint (absent sessions are not nulled)', () => {
-  const h = createHarness();
-  const sessionPath = '/workspace/session-rsm.jsonl';
-  const run = openRun(h.manager, sessionPath);
-  h.manager.syncSessionSummary(sessionPath);
-  const priorSummary = h.getArchState().composer.activeRunSummaryBySession[sessionPath];
-  assert.ok(priorSummary);
-  void run;
-
-  // Restoring an empty checkpoint clears the session map but leaves the
-  // previously-dispatched summary untouched (restore does not null absent sessions).
-  h.manager.restore({});
-  assert.equal(h.manager.sessions.size, 0);
-  assert.equal(
-    h.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    priorSummary,
-    'restore does not null summaries for sessions absent from the checkpoint',
-  );
-});
 
 test('syncSessionSummary reflects nextSendStartsNewTask only when nextTaskIntent is new_task', () => {
   const h = createHarness();
@@ -540,18 +459,18 @@ test('syncSessionSummary reflects nextSendStartsNewTask only when nextTaskIntent
   assert.equal(h.getArchState().composer.activeRunSummaryBySession['/workspace/unknown.jsonl'], null);
 });
 
-test('persist forwards verbatim to the scheduled callback', () => {
+test('onChanged forwards verbatim to the scheduled callback', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
 
-  h.persistCalls.length = 0;
-  h.manager.persist(run);
-  assert.equal(h.persistCalls.length, 1);
-  assert.equal(h.persistCalls[0].snapshot, run);
+  h.changeCalls.length = 0;
+  h.manager.onChanged(run);
+  assert.equal(h.changeCalls.length, 1);
+  assert.equal(h.changeCalls[0].snapshot, run);
 
-  h.manager.persist();
-  assert.equal(h.persistCalls.length, 2, 'persist with no args still forwards');
+  h.manager.onChanged();
+  assert.equal(h.changeCalls.length, 2, 'onChanged with no args still forwards');
 });
 
 test('createRunSnapshot reuses the last taskGroupId across sends within a task, but mints a new one on new_task', () => {
@@ -598,25 +517,4 @@ test('isoNow reflects the injected clock', () => {
   const h = createHarness();
   h.setNow(Date.UTC(2026, 6, 7, 12, 30, 0));
   assert.equal(h.manager.isoNow(), '2026-07-07T12:30:00.000Z');
-});
-
-test('toPersistedSessionState helper agrees with serializeSessions for a single session', () => {
-  const h = createHarness();
-  const sessionPath = '/workspace/session-rsm.jsonl';
-  const run = openRun(h.manager, sessionPath);
-  const state = h.manager.sessions.get(sessionPath)!;
-  state.queuedUnsupportedInputCount = 4;
-  state.nextTaskIntent = 'continue_task';
-  state.busyStartedAt = '2026-01-01T00:00:00.000Z';
-
-  const serialized = h.manager.serializeSessions()[sessionPath];
-  const helperSerialized = toPersistedSessionState({
-    currentRun: state.currentRun,
-    lastRun: state.lastRun,
-    nextTaskIntent: state.nextTaskIntent,
-    queuedUnsupportedInputCount: state.queuedUnsupportedInputCount,
-    busyStartedAt: state.busyStartedAt,
-  });
-  assert.deepEqual(serialized, helperSerialized);
-  assert.equal(serialized.currentRun, run, 'serializeSessions keeps the live run object (downstream consumes the same reference)');
 });

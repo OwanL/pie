@@ -276,8 +276,6 @@ test('canonical historical session and aggregate projections survive a new host 
   const aggregate = new AggregateStatsService({
     getArchState: () => state,
     statsService: stats,
-    tokenRateService: { getRates: () => ({}) } as never,
-    getAgentDir: () => null,
     fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
     onChanged: () => undefined,
     now: () => new Date(at + 2_000),
@@ -289,7 +287,7 @@ test('canonical historical session and aggregate projections survive a new host 
     assert.equal(usage.authority, 'canonical');
     assert.deepEqual(usage.samples.map((sample) => sample.kind), ['conversation', 'retry']);
     assert.equal(usage.samples.find((sample) => sample.kind === 'retry')?.instrumentationGap, true);
-    assert.deepEqual(await stats.queryPersistedRunAnalytics(), { completedRuns: [], openRuns: [] });
+    assert.equal('getPendingCompletedRuns' in stats, false);
 
     await (aggregate as unknown as { recompute(): Promise<void> }).recompute();
     const first = aggregate.getAggregateStats();

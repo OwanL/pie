@@ -7,7 +7,7 @@ import test from 'node:test';
 import type { AnalyticsObservation } from '../contracts/contracts.js';
 import { CanonicalAnalyticsCapture } from '../capture/canonical-capture.js';
 import { SqliteAnalyticsRecorder } from '../recording/sqlite-recorder.js';
-import { BillableAccounting } from '../legacy/billable-accounting/service.js';
+import { CanonicalAccounting } from '../usage-accounting/canonical-accounting.js';
 
 test('activity capture retains missing and reversed source bounds without fabricated observed duration', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-activity-timestamps-'));
@@ -237,12 +237,11 @@ test('accounting adapter does not replace missing producer dates with its clock 
     lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
     onCaptureError: (error) => { captureErrors.push(error); },
   });
-  const accounting = new BillableAccounting({
-    getStorageDir: () => root, now: () => new Date('2026-09-12T12:00:00Z'),
-    scheduleRender: () => undefined, dispatchArchEvent: () => undefined,
-    getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined, isPrivateSession: () => false,
+  const accounting = new CanonicalAccounting({
+    now: () => new Date('2026-09-12T12:00:00Z'),
+    getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined,
     sessionIdentity: () => ({ sessionId: 'session' }), currentRunId: () => null,
-    activeOperationId: () => null, markDerivedExportDirty: () => assert.fail('legacy export'),
+    activeOperationId: () => null,
     canonicalCapture: capture,
   });
   try {

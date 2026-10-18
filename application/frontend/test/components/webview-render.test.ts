@@ -1547,7 +1547,7 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
 
   assert.equal(
     formatPruningSummary(details),
-    'Kept 3/14 skills, Kept 5/13 tools · Saved 2080 tokens',
+    'Kept 3/14 skills, Kept 5/13 tools · ~2080 est. tokens saved',
   );
 
   const messageHtml = renderToString(h(MessageItem, {
@@ -1567,8 +1567,8 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
     pruningHeaderState: { kind: 'result', details },
   }));
 
-  assert.match(messageHtml, /aria-label="Kept 3\/14 skills, Kept 5\/13 tools · Saved 2080 tokens"/);
-  assert.match(messageHtml, /Kept 3\/14 skills, Kept 5\/13 tools · Saved 2080 tokens/);
+  assert.match(messageHtml, /aria-label="Kept 3\/14 skills, Kept 5\/13 tools · ~2080 est\. tokens saved"/);
+  assert.match(messageHtml, /Kept 3\/14 skills, Kept 5\/13 tools · ~2080 est\. tokens saved/);
   assert.doesNotMatch(messageHtml, /Skills pruned/);
 
   const chipHtml = renderToString(h(PruningHeaderButton, {

@@ -1,10 +1,8 @@
 import type { ActiveRunSummary } from '../../lib/protocol/index.js';
 import {
-  type PersistedSessionRunState,
   type RunSnapshot,
-  type TaskBoundaryIntent,
 } from '../../../analytics/legacy/run-analytics/types.js';
-export { appendUnique, summarizeInputs, workspaceHash } from '../../../analytics/legacy/stats-service/helpers.js';
+export { appendUnique, summarizeInputs } from '../../../analytics/legacy/stats-service/helpers.js';
 
 export function defaultNow(): Date {
   return new Date();
@@ -32,24 +30,6 @@ export function toActiveRunSummary(
         runId: run.runId,
         status: run.status,
       };
-}
-
-interface PersistableSessionState {
-  currentRun: RunSnapshot | null;
-  lastRun: RunSnapshot | null;
-  nextTaskIntent: TaskBoundaryIntent;
-  queuedUnsupportedInputCount: number;
-  busyStartedAt: string | null;
-}
-
-export function toPersistedSessionState(state: PersistableSessionState): PersistedSessionRunState {
-  return {
-    currentRun: state.currentRun,
-    lastRun: state.lastRun,
-    nextTaskIntent: state.nextTaskIntent,
-    queuedUnsupportedInputCount: state.queuedUnsupportedInputCount,
-    busyStartedAt: state.busyStartedAt,
-  };
 }
 
 export function areStringArraysEqual(left: string[] | undefined, right: string[] | undefined): boolean {

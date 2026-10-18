@@ -100,15 +100,11 @@ function startService(
   const statsService = {
     getAnalyticsReadModel: () => readModel,
     getOpenRuns: () => [],
-    getPendingCompletedRuns: () => [],
-    getStorageDir: () => tmpdir(),
-    queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+
   };
   const service = new AggregateStatsService({
     getArchState: () => archState,
     statsService: statsService as never,
-    tokenRateService: { getRates: () => ({}) } as never,
-    getAgentDir: () => null,
     fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
     onChanged: () => undefined,
     now: () => new Date(options.nowMs),

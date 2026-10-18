@@ -7,7 +7,7 @@ import { StatsService } from '../../analytics-views/service';
 import { createInitialArchState } from '../../conversation-state/arch-state';
 import { CanonicalAnalyticsCapture } from '../../../../analytics/capture/canonical-capture';
 import { legacyPrivacyStorageDirs } from '../../../../analytics/usage-accounting/canonical-accounting';
-import { RunAnalyticsStorage } from '../../../../analytics/legacy/stats-service/storage';
+import { createHash } from 'node:crypto';
 
 test('canonical lifecycle has no legacy persistence owners and preserves retired files', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-canonical-accounting-'));
@@ -39,13 +39,12 @@ test('canonical lifecycle has no legacy persistence owners and preserves retired
       inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 3, reportedCostUsd: 0,
     });
     assert.ok(observations.length > 0);
-    assert.deepEqual(await stats.queryRunAnalytics(), { completedRuns: [], openRuns: [] });
-    assert.deepEqual(await stats.queryPersistedRunAnalytics(), { completedRuns: [], openRuns: [] });
-    assert.deepEqual(stats.getActivityIntervals(), []);
-    assert.deepEqual(stats.getBillableInvocationRecords(), []);
-    assert.deepEqual(stats.getPendingCompletedRuns(), []);
+    assert.equal('queryRunAnalytics' in stats, false);
+    assert.equal('queryPersistedRunAnalytics' in stats, false);
+    assert.equal('getActivityIntervals' in stats, false);
+    assert.equal('getBillableInvocationRecords' in stats, false);
+    assert.equal('getPendingCompletedRuns' in stats, false);
     stats.getSessionUsage(sessionPath);
-    await stats.flush();
     await stats.shutdown();
     for (const name of ['billable-invocations.jsonl', 'activity-intervals.json', 'run-snapshots.jsonl']) {
       assert.equal(await fs.readFile(path.join(dirs[0]!, name), 'utf8'), 'retired bytes\n');
@@ -57,8 +56,19 @@ test('canonical lifecycle has no legacy persistence owners and preserves retired
   }
 });
 
-test('path-only privacy selectors match legacy store without starting it', () => {
+test('path-only privacy selectors retain exact retired side-channel locations', () => {
   const options = { dataOutcomesRootPath: path.join(os.tmpdir(), 'unused-outcomes'), legacyUsageDataRootPath: path.join(os.tmpdir(), 'unused-legacy'), workspaceId: 'main', legacyWorkspaceIds: ['old', 'main'] };
-  const storage = new RunAnalyticsStorage({ ...options, now: () => new Date(0), serializeSessions: () => ({}) });
-  assert.deepEqual(legacyPrivacyStorageDirs(options), storage.getGlobalSideChannelStorageDirs());
+  const hashes = ['main', 'old'].map((id) => createHash('sha256').update(id).digest('hex').slice(0, 16));
+  const roots = [
+    path.join(options.legacyUsageDataRootPath, 'runs'),
+    path.join(options.legacyUsageDataRootPath, 'usage-data'),
+    path.join(options.legacyUsageDataRootPath, 'data', 'outcomes'),
+    path.join(options.dataOutcomesRootPath, 'runs'),
+    path.join(options.dataOutcomesRootPath, 'usage-data'),
+    options.dataOutcomesRootPath,
+  ];
+  assert.deepEqual(legacyPrivacyStorageDirs(options), [...new Set([
+    path.join(options.dataOutcomesRootPath, hashes[0]!),
+    ...roots.flatMap((root) => hashes.map((hash) => path.join(root, hash))),
+  ])]);
 });

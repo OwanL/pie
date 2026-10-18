@@ -10,39 +10,16 @@ import {
   type ProviderGateStats,
 } from '../../../analytics/contracts/aggregate-stats.js';
 import type { ArchState } from '../conversation-state/arch-state';
-import type { TokenRateService } from './token-rate-service';
 import type { StatsServicePort } from './';
-import {
-  accumulateAggregateStats,
-  buildCumulativeSeries,
-  finalizeAggregateStatsLayers,
-  localDateString,
-  mergeAccumulatorInto,
-  prepareAggregateStatsLayer,
-  type AggregateStatsAccumulator,
-  type PreparedAggregateStatsLayer,
-} from './aggregate-stats';
+import { buildCumulativeSeries } from './aggregate-stats';
 import {
   addLocalCalendarDaysMs,
   localCalendarDayStartMs,
   localCalendarDayKey,
   CANONICAL_COST_BUCKET_WIDTH_MS,
 } from '../../../analytics/projections/metrics.js';
-import type {
-  RunSnapshot,
-} from '../../../analytics/legacy/run-analytics/types.js';
-import type { TokenRateIndicatorState } from './token-rate';
-import type { ModelPricingRecord } from '../../../harness/model-providers/pricing/pricing-core.js';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../../lib/structured-logging/error-message';
-import type { BillableInvocationRecord } from '../../../analytics/usage-accounting/billable-invocation';
-import {
-  applyLedgerUsageOverlay,
-  buildLedgerUsageProjection,
-  type LedgerUsageOverlay,
-} from '../../../analytics/legacy/billable-invocation-ledger/aggregate';
-import { AggregatePricingCache } from '../../../harness/model-providers/pricing/aggregate-pricing-cache.js';
-import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from '../../../analytics/legacy/completed-history-cache';
 import type { CanonicalAnalyticsReadModel } from '../../../analytics/queries/query-entry.js';
 import type {
   ProviderAccountingSummary,
@@ -64,15 +41,11 @@ import type { CanonicalExecutionLatestRun } from '../../../analytics/capture/exe
  *
  * ## Refresh model
  *
- * A {@link RECOMPUTE_MS} interval refreshes history and backend metrics.
- * Completed-run history and pricing live in {@link CompletedHistoryCache} and
- * {@link AggregatePricingCache}; this service owns only the refresh cadence,
- * the open-run layer, and ledger projection. Independently, TokenRateService
- * signals aggregate-relevant changes every 200 ms; that path rebuilds only the
- * small in-memory open-run layer and reuses completed history. Live counts,
- * token totals, and charts therefore move during active streams without
- * rereading completed history or rebuilding ledger snapshots at the fast
- * cadence; the ledger authority check remains cheap and signature-gated.
+ * A {@link RECOMPUTE_MS} interval refreshes the bounded canonical read model
+ * and backend metrics. TokenRateService independently signals changes every
+ * 200 ms; that path refreshes only live session/tab counts. Durable usage,
+ * charts, and execution counts always come from the canonical snapshot, never
+ * from transient run snapshots or a legacy persistence fallback.
  *
  * Side-effectful (wall-clock + `setInterval` + disk reads) by design — it lives
  * outside the pure reducer, mirroring `TokenRateService`.
@@ -83,11 +56,6 @@ export interface AggregateStatsServiceDeps {
   statsService: StatsServicePort;
   /** Optional process-local disable gate; normal operation is enabled by default. */
   enabled?: boolean;
-  tokenRateService: TokenRateService;
-  /** Resolve the agent dir containing `models.json` and the generated
-   *  historical pricing catalog. Called each tick so a runtime `pie.agentDir`
-   *  change is picked up. Returns null when unresolved. */
-  getAgentDir: () => string | null;
   /** Poll live provider-gate concurrency metrics from the backend
    *  (in-memory `ProviderGate` read via the `provider_gate.metrics` RPC).
    *  Resolves to {@link EMPTY_PROVIDER_GATE_STATS} on any failure so the
@@ -96,26 +64,13 @@ export interface AggregateStatsServiceDeps {
   /** Called when the posted aggregate changed, so the host can schedule a
    *  debounced snapshot post to the webview. */
   onChanged: () => void;
-  /** File-system stat callback used by the completed-history cache-mutation
-   *  detector. Defaults to `fs.stat` in production; tests inject a mock to
-   *  control mtime values. `size` is optional for backward-compatible mocks;
-   *  when absent the incremental append path is disabled (every change falls
-   *  back to a full re-read), which keeps mocked tests on the deterministic
-   *  full path. */
-  mtimeFn?: CompletedHistoryMtimeFn;
-  /** Test/benchmark seam for proving which run set was accumulated. */
-  onAccumulatorBuilt?: (scope: 'completed' | 'open', runCount: number) => void;
-  /** Test/benchmark seam proving unbounded completed-history entries are only
-   * visited while preparing a new completed layer, never on open-run ticks. */
-  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample') => void;
   /** Clock seam for deterministic date-boundary tests. */
   now?: () => Date;
   /** Stable canonical local-day zone selected by AnalyticsRuntime. */
   analyticsTimeZone?: string;
 }
 
-/** Recompute interval. Trades responsiveness vs disk read frequency; the mtime
- *  fast-path makes idle nearly free. */
+/** Recompute interval for bounded canonical reads and live gate metrics. */
 const RECOMPUTE_MS = 1000;
 
 /** Delay before the first compute after `start()`. The cold-start critical
@@ -123,30 +78,11 @@ const RECOMPUTE_MS = 1000;
  *  `ready:false` until the first compute lands. */
 const FIRST_TICK_DELAY_MS = 3000;
 
-interface LedgerOverlayCacheEntry {
-  records: readonly BillableInvocationRecord[];
-  overlay: LedgerUsageOverlay;
-  validFromMs: number;
-  validUntilMs: number;
-}
-
-interface LedgerOverlayCacheState {
-  entry: LedgerOverlayCacheEntry | null;
-}
-
 export class AggregateStatsService {
   private readonly deps: AggregateStatsServiceDeps;
   private readonly enabled: boolean;
   private cached: AggregateStats = EMPTY_AGGREGATE_STATS;
-  private readonly pricing: AggregatePricingCache;
-  private readonly completedHistory: CompletedHistoryCache<AggregateStatsAccumulator, PreparedAggregateStatsLayer>;
-  private openAccumulator: AggregateStatsAccumulator | null = null;
-  private liveRunIds = new Set<string>();
   private liveRevision = 0;
-  private lastFinalizedDate: string | null = null;
-  /** Only ledger-owned arrays/totals are cached. The surrounding aggregate is
-   * rebuilt so live working/time productivity fields never become stale. */
-  private readonly ledgerOverlayCache: LedgerOverlayCacheState = { entry: null };
   private timer?: ReturnType<typeof setInterval>;
   private firstTickTimer?: ReturnType<typeof setTimeout>;
   private inFlight = false;
@@ -155,20 +91,6 @@ export class AggregateStatsService {
   constructor(deps: AggregateStatsServiceDeps) {
     this.deps = deps;
     this.enabled = deps.enabled ?? true;
-    this.pricing = new AggregatePricingCache({ getAgentDir: deps.getAgentDir });
-    this.completedHistory = new CompletedHistoryCache({
-      aggregation: {
-        accumulateAggregateStats,
-        mergeAccumulatorInto,
-        prepareAggregateStatsLayer,
-        localDateString,
-      },
-      source: {
-        getStorageDir: () => deps.statsService.getStorageDir(),
-        queryPersistedRunAnalytics: () => deps.statsService.queryPersistedRunAnalytics(),
-      },
-      mtimeFn: deps.mtimeFn,
-    });
   }
 
   start(): void {
@@ -205,74 +127,38 @@ export class AggregateStatsService {
     return this.cached;
   }
 
-  /**
-   * Refresh mutable open-run analytics from the token-rate service's 200 ms
-   * tick. This path is synchronous and bounded by the number of open runs: it
-   * never stats/reads history and never polls backend metrics.
-   */
+  /** Refresh bounded live counts on the token-rate service's 200 ms tick.
+   * Usage and charts retain their canonical snapshot references. */
   refreshLive(): void {
     if (!this.enabled) return;
     this.liveRevision += 1;
-    const archState = this.deps.getArchState();
-    const ratesBySession = this.deps.tokenRateService.getRates();
-    const nowMs = (this.deps.now?.() ?? new Date()).getTime();
-    const openRuns = this.deps.statsService.getOpenRuns();
-    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
-    const completedLayer = this.completedHistory.currentLayer();
-    if (completedLayer === null || this.lastFinalizedDate === null) return;
-
-    const runningSessionPaths = archState.sessions.runningSessionPaths;
-    const openTabCount = archState.sessions.openTabPaths.length;
-    const currentDate = localDateString(nowMs);
-    if (currentDate !== this.lastFinalizedDate) {
-      void this.tick();
+    if (!this.deps.statsService.getAnalyticsReadModel?.()) {
+      this.publishUnknown();
       return;
     }
+    if (!this.cached.ready) return;
+    const archState = this.deps.getArchState();
+    this.publish({
+      ...this.cached,
+      runningSessionCount: new Set(archState.sessions.runningSessionPaths).size,
+      openTabCount: archState.sessions.openTabPaths.length,
+    });
+  }
 
-    const pricingCatalog = this.pricing.cached;
-    if (!pricingCatalog) return;
-    const nextLiveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
-    // A run that just moved pending → persisted is not in the cached completed
-    // layer until the slow mtime refresh lands. Keep the last good aggregate
-    // instead of briefly dropping the whole run from every total/chart.
-    for (const runId of this.liveRunIds) {
-      if (!nextLiveRunIds.has(runId) && !this.completedHistory.completedRunIds.has(runId)) {
-        void this.tick();
-        return;
-      }
-    }
-    const nextOpenAccumulator = this.buildOpenAccumulator(
-      pricingCatalog.map,
-      ratesBySession,
-      openRuns,
-      pendingCompletedRuns,
-    );
-    this.deps.onAccumulatorBuilt?.('open', openRuns.length + pendingCompletedRuns.length);
-    this.openAccumulator = nextOpenAccumulator;
-    this.liveRunIds = nextLiveRunIds;
+  private publish(next: AggregateStats): void {
+    if (aggregateStatsEqual(this.cached, next)) return;
+    this.cached = next;
+    this.deps.onChanged();
+  }
 
-    const next = finalizeAggregateStatsLayers(
-      completedLayer,
-      nextOpenAccumulator,
-      nowMs,
-      runningSessionPaths,
-      ratesBySession,
-      openTabCount,
-    );
-    next.providerGate = this.cached.providerGate;
-    // Preserve the cheap live path: it does not rebuild the ledger projection.
-    // The authority getter still runs so its lock/signature/privacy fence is
-    // honored; an immutable records identity reuses the small ledger overlay.
-    const nextWithLedger = projectLedgerIfAvailable(
-      this.deps.statsService,
-      next,
-      nowMs,
-      this.ledgerOverlayCache,
-    );
-    if (!aggregateStatsEqual(this.cached, nextWithLedger)) {
-      this.cached = nextWithLedger;
-      this.deps.onChanged();
-    }
+  private publishUnknown(providerGate = this.cached.providerGate): void {
+    const archState = this.deps.getArchState();
+    this.publish({
+      ...EMPTY_AGGREGATE_STATS,
+      runningSessionCount: new Set(archState.sessions.runningSessionPaths).size,
+      openTabCount: archState.sessions.openTabPaths.length,
+      providerGate,
+    });
   }
 
   private async tick(): Promise<void> {
@@ -282,13 +168,12 @@ export class AggregateStatsService {
     try {
       await this.recompute();
     } catch (error) {
-      // Transient I/O / parse failures (EACCES, EIO, a coerce throw) must not
-      // crash the timer loop or orphan the `inFlight` guard. Retain the last
-      // good cached value (assigned only after a successful compute) so the
-      // strip keeps showing stale-but-valid data and self-heals next tick.
-      appendPieLog('warn', 'aggregate-stats', 'recompute failed; retaining cached stats', {
+      // No alternate history or ledger projection may stand in for an
+      // unavailable canonical read. Keep readiness explicitly unknown.
+      appendPieLog('warn', 'aggregate-stats', 'canonical recompute failed; stats unavailable', {
         error: toErrorMessage(error),
       });
+      this.publishUnknown();
     } finally {
       this.inFlight = false;
     }
@@ -299,14 +184,7 @@ export class AggregateStatsService {
     const archState = this.deps.getArchState();
     const runningSessionPaths = archState.sessions.runningSessionPaths;
     const openTabCount = archState.sessions.openTabPaths.length;
-    const ratesBySession = this.deps.tokenRateService.getRates();
     const nowMs = (this.deps.now?.() ?? new Date()).getTime();
-    const currentDate = localDateString(nowMs);
-    const openRuns = this.deps.statsService.getOpenRuns();
-    // Finalization stages the authoritative closed snapshot synchronously before
-    // the open run disappears. Use that snapshot as the persistence bridge so
-    // status, outcome, finalizedAt, and day bucketing are never stale.
-    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const canonicalReadModel = this.deps.statsService.getAnalyticsReadModel?.();
     if (canonicalReadModel) {
       await this.recomputeCanonical(
@@ -319,83 +197,7 @@ export class AggregateStatsService {
       return;
     }
 
-    const pricing = await this.pricing.load();
-    const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
-
-    const { rebuilt: completedRebuilt, effectiveCompletedRunCount } =
-      await this.completedHistory.refresh(pricing, pendingRunIds);
-    if (completedRebuilt) {
-      this.deps.onAccumulatorBuilt?.('completed', effectiveCompletedRunCount);
-    }
-
-    // Live accumulation is intentionally rebuilt every tick from only the
-    // small mutable set plus authoritative finalized snapshots awaiting append.
-    // Historical runs are not walked when an open run changes. While a turn is
-    // streaming, add its tokenizer estimate; provider-reported usage replaces
-    // the estimate as soon as the turn/tool completes.
-    const nextOpenAccumulator = this.buildOpenAccumulator(
-      pricing.map,
-      ratesBySession,
-      openRuns,
-      pendingCompletedRuns,
-    );
-    this.deps.onAccumulatorBuilt?.('open', openRuns.length + pendingCompletedRuns.length);
-    const openChanged = this.openAccumulator === null
-      || !deepEqualValue(this.openAccumulator, nextOpenAccumulator);
-    this.openAccumulator = nextOpenAccumulator;
-    this.liveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
-
-    let providerGate = this.cached.providerGate;
-    try {
-      providerGate = await this.deps.fetchProviderGateStats();
-    } catch (error) {
-      appendPieLog('warn', 'aggregate-stats', 'provider_gate.metrics poll failed; retaining cached', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
-    const historicalChanged = completedRebuilt
-      || openChanged
-      || this.lastFinalizedDate !== currentDate
-      || !this.cached.ready;
-    let next: AggregateStats;
-    if (historicalChanged) {
-      const completedLayer = this.completedHistory.ensureLayer(nowMs, {
-        force: completedRebuilt,
-        onCompletedSourceEntryVisited: this.deps.onCompletedSourceEntryVisited,
-      });
-      next = finalizeAggregateStatsLayers(
-        completedLayer,
-        nextOpenAccumulator,
-        nowMs,
-        runningSessionPaths,
-        ratesBySession,
-        openTabCount,
-      );
-      next.providerGate = providerGate;
-      this.lastFinalizedDate = currentDate;
-    } else {
-      // Live-only refresh: preserve every historical array/object reference.
-      next = {
-        ...this.cached,
-        runningSessionCount: new Set(runningSessionPaths).size,
-        openTabCount,
-        providerGate,
-      };
-    }
-
-    // A token-rate tick may have refreshed live inputs while this slow path was
-    // awaiting disk/backend metrics. Never overwrite that newer projection
-    // with the stale rates/open-run snapshot captured above.
-    if (this.liveRevision !== liveRevisionAtStart) {
-      this.refreshLive();
-      return;
-    }
-    next = projectLedgerIfAvailable(this.deps.statsService, next, nowMs, this.ledgerOverlayCache);
-    if (!aggregateStatsEqual(this.cached, next)) {
-      this.cached = next;
-      this.deps.onChanged();
-    }
+    this.publishUnknown(await this.fetchProviderGate());
   }
 
   /** Canonical authority has durable provider settlements and a bounded root
@@ -410,17 +212,9 @@ export class AggregateStatsService {
     openTabCount: number,
     liveRevisionAtStart: number,
   ): Promise<void> {
-    let providerGate = this.cached.providerGate;
-    try {
-      // Poll the live gate before the durable read. The aggregate transaction
-      // is then the last slow await in this path, so a steady stream of gate
-      // updates cannot make every otherwise-consistent snapshot stale.
-      providerGate = await this.deps.fetchProviderGateStats();
-    } catch (error) {
-      appendPieLog('warn', 'aggregate-stats', 'provider_gate.metrics poll failed; retaining cached', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // Poll before the durable snapshot so a slow live gate cannot starve
+    // publication by making an otherwise coherent canonical read stale.
+    const providerGate = await this.fetchProviderGate();
 
     // The revision refresher already performs the bounded cross-host poll.
     // Use its last observed value as a synchronous fence around this read;
@@ -446,11 +240,17 @@ export class AggregateStatsService {
       maxGroups: CANONICAL_AGGREGATE_MAX_GROUP_ROWS,
       maxResultBytes: CANONICAL_AGGREGATE_MAX_RESULT_BYTES,
     });
+    // A previously admitted query cannot publish after its reader is withheld
+    // or replaced, even if its revision also falls behind the refresher.
+    if (this.deps.statsService.getAnalyticsReadModel?.() !== readModel) {
+      this.publishUnknown(providerGate);
+      return;
+    }
     if (aggregate.truncation.rowLimit || aggregate.truncation.byteLimit || aggregate.truncation.cellLimit) {
       throw new Error('Canonical aggregate provider grouping exceeded its bounded read limit.');
     }
     const { accounting, groups, executionSummary } = aggregate;
-    const overlay = canonicalAccountingOverlay(
+    const usage = canonicalAccountingFields(
       accounting,
       groups,
       aggregate.series,
@@ -459,8 +259,9 @@ export class AggregateStatsService {
     );
     const sessionCount = metricInteger(aggregate.sessionCount, 'global session count');
     const runningSessionCount = new Set(runningSessionPaths).size;
-    const next = applyLedgerUsageOverlay({
+    const next: AggregateStats = {
       ...EMPTY_AGGREGATE_STATS,
+      ...usage,
       runningSessionCount,
       openTabCount,
       // Count only maintained root agent-run execution identities. Provider
@@ -469,8 +270,8 @@ export class AggregateStatsService {
       sessionCount,
       lastRun: canonicalLastRunToAggregate(aggregate.latestRun),
       ready: true,
-      providerGate: this.cached.providerGate,
-    }, overlay);
+      providerGate,
+    };
     applyCanonicalExecutionMetrics(
       next,
       aggregate.series?.executions ?? [],
@@ -483,7 +284,6 @@ export class AggregateStatsService {
       nowMs,
       timeZone,
     );
-    next.providerGate = providerGate;
     const observedRevisionAfterRead = this.observedCanonicalRevision();
     const observedRevision = observedRevisionAfterRead ?? observedRevisionBeforeRead;
     if (observedRevision !== null && !canonicalRevisionAtLeast(aggregate.revision, observedRevision)) {
@@ -497,41 +297,27 @@ export class AggregateStatsService {
       // The durable canonical result remains internally consistent even when
       // a 200 ms token-rate tick ran while it was loading. Merge the latest
       // bounded live fields synchronously instead of discarding the historical
-      // snapshot (canonical mode has no completed-history layer for
-      // refreshLive() to rebuild).
+      // snapshot; refreshLive() never rebuilds historical usage.
       const latestArchState = this.deps.getArchState();
       next.runningSessionCount = new Set(latestArchState.sessions.runningSessionPaths).size;
       next.openTabCount = latestArchState.sessions.openTabPaths.length;
     }
-    if (!aggregateStatsEqual(this.cached, next)) {
-      this.cached = next;
-      this.deps.onChanged();
-    }
+    this.publish(next);
   }
 
   private observedCanonicalRevision(): string | null {
     return this.deps.statsService.getAnalyticsRevisionRefreshStats?.()?.revision ?? null;
   }
 
-  private buildOpenAccumulator(
-    pricing: Map<string, ModelPricingRecord[]>,
-    ratesBySession: Record<string, TokenRateIndicatorState>,
-    openRuns: RunSnapshot[],
-    pendingCompletedRuns: RunSnapshot[],
-  ): AggregateStatsAccumulator {
-    const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
-    const effectiveOpenById = new Map<string, RunSnapshot>();
-    for (const run of openRuns) {
-      if (this.completedHistory.completedRunIds.has(run.runId) || pendingRunIds.has(run.runId)) continue;
-      const liveOutputTokens = ratesBySession[run.sessionPath]?.liveOutputTokens ?? 0;
-      effectiveOpenById.set(run.runId, liveOutputTokens > 0
-        ? { ...run, outputTokens: run.outputTokens + liveOutputTokens }
-        : run);
+  private async fetchProviderGate(): Promise<ProviderGateStats> {
+    try {
+      return await this.deps.fetchProviderGateStats();
+    } catch (error) {
+      appendPieLog('warn', 'aggregate-stats', 'provider_gate.metrics poll failed; retaining cached', {
+        error: toErrorMessage(error),
+      });
+      return this.cached.providerGate;
     }
-    // Pending finalized snapshots are authoritative until their append lands,
-    // including when a stale snapshot with the same runId is already persisted.
-    for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
-    return accumulateAggregateStats([...effectiveOpenById.values()], pricing);
   }
 }
 
@@ -580,13 +366,13 @@ function canonicalLastRunToAggregate(run: CanonicalExecutionLatestRun | null): A
 const CANONICAL_AGGREGATE_MAX_GROUP_ROWS = 10_000;
 const CANONICAL_AGGREGATE_MAX_RESULT_BYTES = 2 * 1024 * 1024;
 
-function canonicalAccountingOverlay(
+function canonicalAccountingFields(
   accounting: ProviderAccountingSummary,
   rows: Array<Record<string, unknown>>,
   series: ProviderAggregateSeries | undefined,
   nowMs: number,
   timeZone: string,
-): LedgerUsageOverlay {
+) {
   const allByProvider = providerGroups(rows, 'all');
   const todayByProvider = providerGroups(rows, 'today');
   const weekByProvider = providerGroups(rows, 'week');
@@ -706,11 +492,11 @@ function canonicalAccountingOverlay(
     todayCostSeries,
     todayInputTokenSeries,
     todayTokenSeries,
-    todayProductivityInputTokens: today.input,
+    todayProductivity: { ...EMPTY_AGGREGATE_STATS.todayProductivity, inputTokens: today.input },
     weekCost: week.cost,
     weekCostByProvider: weekByProvider,
     weekCostSeries,
-    weekProductivityInputTokens: week.input,
+    weekProductivity: { ...EMPTY_AGGREGATE_STATS.weekProductivity, inputTokens: week.input },
     dailyCost,
     totalCost,
     costByProvider: allByProvider,
@@ -1141,43 +927,9 @@ function canonicalRevisionAtLeast(left: number | string, right: number | string)
 }
 
 
-/** Complete structural equality for protocol aggregates and accumulator caches. */
+/** Complete structural equality for protocol aggregates. */
 export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boolean {
   return deepEqualValue(a, b);
-}
-
-function projectLedgerIfAvailable(
-  statsService: StatsServicePort,
-  aggregate: AggregateStats,
-  nowMs: number,
-  cache: LedgerOverlayCacheState,
-): AggregateStats {
-  // Some embedding/test adapters implement a StatsService shape without the
-  // invocation-ledger getter. Preserve their legacy projection; production
-  // always supplies the ledger. When present, the getter is called on every
-  // refresh so its authority lock/signature/privacy fence cannot be bypassed.
-  const getter = (statsService as StatsServicePort & {
-    getBillableInvocationRecords?: () => ReturnType<StatsServicePort['getBillableInvocationRecords']>;
-  }).getBillableInvocationRecords;
-  if (!getter) return aggregate;
-
-  const records = getter.call(statsService);
-  const cached = cache.entry;
-  if (cached
-    && cached.records === records
-    && nowMs >= cached.validFromMs
-    && nowMs < cached.validUntilMs) {
-    return applyLedgerUsageOverlay(aggregate, cached.overlay);
-  }
-
-  const projection = buildLedgerUsageProjection(records, nowMs);
-  cache.entry = {
-    records,
-    overlay: projection.overlay,
-    validFromMs: projection.validFromMs,
-    validUntilMs: projection.validUntilMs,
-  };
-  return applyLedgerUsageOverlay(aggregate, projection.overlay);
 }
 
 function deepEqualValue(a: unknown, b: unknown): boolean {
@@ -1217,8 +969,4 @@ function deepEqualValue(a: unknown, b: unknown): boolean {
       || !deepEqualValue(aRecord[key], bRecord[key])) return false;
   }
   return true;
-}
-
-function liveRunIdSet(openRuns: RunSnapshot[], pendingCompletedRuns: RunSnapshot[]): Set<string> {
-  return new Set([...openRuns, ...pendingCompletedRuns].map((run) => run.runId));
 }

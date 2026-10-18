@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -22,11 +22,8 @@ function accountingWithCapture(
 ): AccountingPort {
   const deps: CanonicalAccountingDeps = {
     now: now ?? (() => new Date(Date.parse('2026-01-01T00:00:00.000Z'))),
-    scheduleRender: () => undefined,
-    dispatchArchEvent: () => undefined,
     getCapturedPricingFacts: () => undefined,
     resolveInvocationPricing: () => undefined,
-    isPrivateSession: () => false,
     sessionIdentity: () => ({ sessionId: 'session-id-1' }),
     currentRunId: () => null,
     activeOperationId: () => null,
@@ -76,18 +73,16 @@ test('canonical accounting submits exact settlements without a host history proj
     const captured: CanonicalProviderSettlement[] = [];
     const accounting = accountingWithCapture(temp, 'submitted', captured);
 
-    const before = accounting.projectSessionUsage('/sessions/a.jsonl');
-    assert.deepEqual(before, { samples: [], authority: 'unknown' });
 
     accounting.observeAuxiliaryLlmUsage('/sessions/a', assistantSample);
     assert.equal(captured.length, 1);
 
     // Canonical adaptation does not even construct a legacy persistence owner.
     assert.equal('invocationLedger' in accounting, false);
-    assert.throws(() => accounting.activityTimeline, /unavailable under canonical authority/);
-    assert.equal(accounting.exportRecords().length, 0);
+    assert.equal('activityTimeline' in accounting, false);
+    assert.equal('exportRecords' in accounting, false);
 
-    assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
+    assert.equal('projectSessionUsage' in accounting, false);
     const sample = captured[0]!;
     assert.equal(sample.sourceId, 'assistant:op-1');
     assert.equal(sample.kind, 'conversation');
@@ -99,7 +94,7 @@ test('canonical accounting submits exact settlements without a host history proj
     assert.equal(sample.provenance, 'exact');
     // Close does not introduce a legacy fallback.
     accounting.onSessionClosed('/sessions/a');
-    assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
+    assert.equal('projectSessionUsage' in accounting, false);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -242,7 +237,7 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
       ['canonical-disabled', 'canonical-disabled'],
       'explicitly disabled fallback retains its canonical invocation identity on replay',
     );
-    assert.deepEqual(accounting.projectSessionUsage('/sessions/mixed.jsonl'), { samples: [], authority: 'unknown' });
+    assert.equal('projectSessionUsage' in accounting, false);
     assert.equal(captured[0]?.providerReportedCostUsd, 0.03);
     assert.equal('invocationLedger' in accounting, false);
   } finally {
@@ -309,12 +304,14 @@ test('canonical capture keeps declared-unknown channels unknown instead of fabri
   }
 });
 
-test('rejected canonical capture is not projected and empty sessions stay honestly unknown', () => {
+test('rejected canonical capture never selects legacy persistence', () => {
   const temp = tempDir();
   try {
     const accounting = accountingWithCapture(temp, 'rejected');
-    accounting.observeAuxiliaryLlmUsage('/sessions/a', assistantSample);
-    assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
+    const result = accounting.observeAuxiliaryLlmUsage('/sessions/a', assistantSample);
+    assert.equal(result.canonicalAccepted, false);
+    assert.equal('invocationLedger' in accounting, false);
+    assert.deepEqual(readdirSync(temp), []);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -335,11 +332,9 @@ test('canonical capture preserves unknown channels without retaining settlements
       instrumentationGapReason: 'The provider response exposed no complete token-channel usage.',
       outcome: 'failed',
     });
-    const snapshot = accounting.projectSessionUsage('/sessions/b');
-    assert.deepEqual(snapshot, { samples: [], authority: 'unknown' });
 
     accounting.replaceSessionPath('/sessions/a', '/sessions/b');
-    assert.deepEqual(accounting.projectSessionUsage('/sessions/b'), { samples: [], authority: 'unknown' });
+    assert.equal('projectSessionUsage' in accounting, false);
     assert.equal(captured.length, 1);
     const sample = captured[0]!;
     assert.equal(sample.sourceId, 'assistant:op-2');
@@ -356,17 +351,15 @@ test('canonical capture preserves unknown channels without retaining settlements
 
 test('unavailable capture stays canonical without persistence or snapshot replay', () => {
  const accounting = createCanonicalAccounting({
- now: () => new Date(0), scheduleRender: () => {}, dispatchArchEvent: () => {},
- getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined,
- isPrivateSession: () => true, sessionIdentity: () => ({ sessionId: 'private' }),
+ now: () => new Date(0),
+ getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined, sessionIdentity: () => ({ sessionId: 'private' }),
  currentRunId: () => null, activeOperationId: () => null, canonicalCapture: null,
  });
  const result = accounting.observeAuxiliaryLlmUsage('/private', assistantSample);
  assert.equal(result.canonicalAccepted, false);
  assert.equal(result.record?.inputTokens, 100);
  accounting.observeSessionUsageSnapshot('/private', 'private', { samples: [] });
- accounting.markSessionPrivate('/private');
- accounting.forgetSession('/private');
- assert.deepEqual(accounting.projectSessionUsage('/private'), { samples: [], authority: 'unknown' });
+ accounting.onSessionClosed('/private');
+    assert.equal('projectSessionUsage' in accounting, false);
  assert.equal('invocationLedger' in accounting, false);
 });

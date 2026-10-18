@@ -81,9 +81,7 @@ test('canonical aggregate fences a snapshot older than the host-observed revisio
   const statsService = {
     getAnalyticsReadModel: () => readModel,
     getOpenRuns: () => [],
-    getPendingCompletedRuns: () => [],
-    getStorageDir: () => root,
-    queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+
     getAnalyticsRevisionRefreshStats: () => ({
       checks: 1,
       changes: 1,
@@ -95,8 +93,6 @@ test('canonical aggregate fences a snapshot older than the host-observed revisio
   const service = new AggregateStatsService({
     getArchState: () => archState,
     statsService: statsService as never,
-    tokenRateService: { getRates: () => ({}) } as never,
-    getAgentDir: () => null,
     fetchProviderGateStats: () => {
       gateStarted();
       return gate;
@@ -155,15 +151,11 @@ test('canonical aggregate uses exact daily rollups when temporal evidence is tru
   const statsService = {
     getAnalyticsReadModel: () => readModel,
     getOpenRuns: () => [],
-    getPendingCompletedRuns: () => [],
-    getStorageDir: () => root,
-    queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+
   };
   const service = new AggregateStatsService({
     getArchState: () => archState,
     statsService: statsService as never,
-    tokenRateService: { getRates: () => ({}) } as never,
-    getAgentDir: () => null,
     fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
     onChanged: () => undefined,
     now: () => new Date(nowMs),
@@ -236,9 +228,7 @@ test('canonical aggregate publishes after a live tick and does not launch a post
   const statsService = {
     getAnalyticsReadModel: () => readModel,
     getOpenRuns: () => [],
-    getPendingCompletedRuns: () => [],
-    getStorageDir: () => root,
-    queryPersistedRunAnalytics: async () => ({ completedRuns: [], openRuns: [] }),
+
     getAnalyticsRevisionRefreshStats: () => ({
       checks: 1,
       changes: 0,
@@ -251,8 +241,6 @@ test('canonical aggregate publishes after a live tick and does not launch a post
   const service = new AggregateStatsService({
     getArchState: () => archState,
     statsService: statsService as never,
-    tokenRateService: { getRates: () => ({}) } as never,
-    getAgentDir: () => null,
     fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
     onChanged: () => { changed += 1; },
     now: () => new Date(1_750_000_000_000),

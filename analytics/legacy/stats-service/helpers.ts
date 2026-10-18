@@ -1,12 +1,5 @@
-import * as crypto from 'node:crypto';
-
 import type { AnalyticsInputKind, RunInputObservation } from '../../contracts/run-observation-inputs.js';
 import type { RunSnapshot } from '../run-analytics/types.js';
-
-/** Stable workspace directory key used by the legacy analytics store. */
-export function workspaceHash(workspaceId: string): string {
-  return crypto.createHash('sha256').update(workspaceId).digest('hex').slice(0, 16);
-}
 
 /** Capture privacy-safe input-kind and attachment-size facts for a run. */
 export function summarizeInputs(run: RunSnapshot, inputs: RunInputObservation[]): void {

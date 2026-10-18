@@ -8,6 +8,29 @@ export type PruningHeaderState =
   | { kind: 'pending'; label: string; prepassStartedAt?: number | null }
   | { kind: 'result'; details: PruningDetails; fallbackText?: string };
 
+/**
+ * Label a prepass savings figure. The prepass computes these counts from the
+ * pre-filter catalog, not from the actual outgoing request, so the figure is
+ * always approximate and explicitly labelled estimated. In shadow mode
+ * pruning is evaluated but never applied, so nothing is actually saved — the
+ * figure is potential savings only and must not say "saved".
+ *
+ * `format` supplies each surface's token formatting (compact chip, grouped
+ * summary, etc.); history-safe numeric totals stay out of this module:
+ * `pruningTotals` owns the numbers, this helper only shapes wording.
+ */
+export function pruningSavingsLabel(
+  tokensSaved: number,
+  mode: PruningMode,
+  format: (tokens: number) => string,
+): string {
+  if (!(tokensSaved > 0)) return '';
+  const amount = `~${format(tokensSaved)}`;
+  return mode === 'shadow'
+    ? `${amount} potential savings (est.)`
+    : `${amount} est. tokens saved`;
+}
+
 import { isRecord } from '../../../lib/validation/type-guards';
 
 
@@ -100,7 +123,9 @@ export function formatPruningSummary(details: PruningDetails, fallbackText = 'No
   }
 
   const summaryCore = summaryParts.length > 0 ? summaryParts.join(', ') : fallbackText;
-  const tokenSuffix = tokensSaved > 0 ? ` · Saved ${tokensSaved} tokens` : '';
+  const tokenSuffix = tokensSaved > 0
+    ? ` · ${pruningSavingsLabel(tokensSaved, details.mode, (tokens) => String(tokens))}`
+    : '';
 
   return `${summaryCore}${tokenSuffix}`;
 }

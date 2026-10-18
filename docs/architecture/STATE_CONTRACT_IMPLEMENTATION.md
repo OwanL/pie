@@ -78,11 +78,15 @@ Provider-forced overflow compaction is treated as resumable when the provider re
 - The per-session last-compaction chip record expires after a bounded TTL via the `ClearLastCompaction` effect → `LastCompactionCleared` event.
 - `WebviewReadinessProbe` is bounded by `READINESS_PROBE_MAX_ATTEMPTS`; its reload-skip bails for the first ticks of a genuine reload but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale, force-clears it, and probes. The per-renderer reload circuit uses the rolling wall-clock limit, then remains terminally open until a deliberate renderer command or genuinely new/resolved renderer resets it; commits, handshakes, visibility changes, automatic retries, and elapsed time do not clear it.
 
-## Conserved Billable Accounting — file mappings
+## Conserved Billable Accounting — canonical persistence
 
-- The billable invocation ledger is stored as `billable-invocations.jsonl` per workspace analytics store (legacy analytics authority; under canonical authority settlements go to `<data-root>/analytics/analytics.sqlite` and this file is not written).
-- The correlated activity timeline is stored as `activity-intervals.json` (idempotent busy, provider, retry-wait, non-overlapping tool, compaction, and auxiliary intervals).
-- The activity timeline keeps a JSONL delta journal beside that snapshot (`activity-intervals.journal.jsonl`). Routine `start`/`settle`/`recordMany` mutations append fsynced canonical interval records instead of rewriting the snapshot. Explicit background `compact()` stages a replacement outside the lock, then revalidates signatures before committing; a reset-marker recovery journal makes interrupted two-file replacement replayable. Privacy/forget scrubs synchronously remove attributed data from both files under the shared workspace lock. Every access revalidates snapshot/journal/privacy signatures; unchanged snapshots support incremental sibling-journal replay, interval identity and first settlement are immutable, and torn journal lines are skipped. Async `initialize()` parses in bounded slices without holding the lock across yields. Snapshot/privacy replacement can still require a synchronous compatibility reload. Older journal-unaware hosts see only the last compacted snapshot, so all hosts sharing this store should run the same version.
+Fresh analytics history is captured automatically in `<data-root>/analytics/analytics.sqlite`.
+Legacy run JSONL/checkpoints, `billable-invocations.jsonl`, `activity-intervals.json` and its
+journal, exports, history migration/healing, and DuckDB paths are retired. Existing files remain
+in place; privacy scrubbing and explicit forget still remove attributed legacy records. Live
+in-memory run/session projections, browser behavior, and pruning remain unchanged. The
+[analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns
+privacy and the separately gated storage cutoff.
 
 ## Execution Ordering — backend operation ledger fingerprints
 

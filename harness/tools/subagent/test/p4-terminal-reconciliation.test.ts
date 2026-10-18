@@ -12,7 +12,7 @@ import {
 } from '../../../../analytics/contracts/contracts.js';
 import { CanonicalAnalyticsCapture } from '../../../../analytics/capture/canonical-capture.js';
 import { SqliteAnalyticsRecorder } from '../../../../analytics/recording/sqlite-recorder.js';
-import { BillableAccounting } from '../../../../analytics/legacy/billable-accounting/service.js';
+import { CanonicalAccounting } from '../../../../analytics/usage-accounting/canonical-accounting.js';
 import { getSubagentBillingEntries } from '../../../agent-processes/workers/subagent-result.js';
 import { buildSubagentUsageSamples } from '../../../session-storage/transcripts/session-usage-adapter.js';
 import { captureSubagentTerminalResult } from '../analytics-capture.js';
@@ -265,17 +265,13 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
         [nested.analyticsCaptureReceipt],
       ],
     );
-    const accounting = new BillableAccounting({
-      getStorageDir: () => root,
+    const accounting = new CanonicalAccounting({
       now: () => new Date('2027-01-15T08:00:01.000Z'),
-      scheduleRender: () => undefined,
-      dispatchArchEvent: () => undefined,
       getCapturedPricingFacts: () => undefined,
-      isPrivateSession: () => false,
+      resolveInvocationPricing: () => undefined,
       sessionIdentity: () => ({ sessionId: rootSessionId }),
       currentRunId: () => 'root-run',
       activeOperationId: () => null,
-      markDerivedExportDirty: () => assert.fail('canonical reconciliation must not dirty legacy exports'),
       canonicalCapture: hostCapture,
     });
     const terminalTool = {
@@ -316,11 +312,7 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
       recorder.readProviderSettlements(rootSessionId).settlements.map((row) => row.reportedCostUsd).sort(),
       [0.01, 0.02, 0.03, 0.04],
     );
-    assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
-
-    assert.deepEqual(accounting.projectSessionUsage('/fixture/root.jsonl'), {
-      samples: [], authority: 'unknown',
-    }, 'the parent retains no duplicate settlement history; the durable four-invocation oracle above is authoritative');
+    assert.equal('projectSessionUsage' in accounting, false);
 
     // Exact producer redelivery is an idempotent replay. The terminal sideband
     // and inclusive usage are never a second settlement authority.

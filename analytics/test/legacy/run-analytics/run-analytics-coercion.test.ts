@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { coerceSessionAnalyticsFactors } from '../../../legacy/run-analytics/coercion-factors';
 import { coerceFunctionalSettings } from '../../../legacy/run-analytics/coercion-functional-settings';
-import { coerceRunSnapshot } from '../../../legacy/run-analytics/coercion-snapshots';
+import { normalizeExperimentAssignment } from '../../../legacy/run-analytics/coercion-snapshots';
 import {
   coerceFileExtensionRollup,
   coerceFileMutationRollup,
@@ -18,16 +18,11 @@ import {
 import {
   areStringArraysEqual,
   toActiveRunSummary,
-  toPersistedSessionState,
 } from '../../../../application/backend/analytics-views/helpers';
-import { summarizeInputs, workspaceHash } from '../../../legacy/stats-service/helpers.js';
-import { parseCheckpoint } from '../../../legacy/checkpoint-io';
+import { summarizeInputs } from '../../../legacy/stats-service/helpers.js';
+import { workspaceHash } from '../../../legacy/privacy-storage.js';
 import type { ComposerInput } from '../../../../application/lib/protocol/index.js';
-import {
-  MAX_USER_INPUT_SAMPLE_CHARS,
-  type RunSnapshot,
-  type TurnThroughputSample,
-} from '../../../legacy/run-analytics/types.js';
+import type { RunSnapshot } from '../../../legacy/run-analytics/types.js';
 
 function makeRunSnapshot(): RunSnapshot {
   return {
@@ -73,35 +68,6 @@ function makeRunSnapshot(): RunSnapshot {
     verification: createEmptyVerificationRollup(),
   };
 }
-
-test('coerceRunSnapshot preserves harness revision and fingerprint', () => {
-  const base = makeRunSnapshot();
-
-  const stamped = coerceRunSnapshot({
-    ...base,
-    harnessRevision: 'pie-harness-2026-08',
-    harnessFingerprint: 'ab'.repeat(32),
-  });
-  assert.ok(stamped);
-  assert.equal(stamped?.harnessRevision, 'pie-harness-2026-08');
-  assert.equal(stamped?.harnessFingerprint, 'ab'.repeat(32));
-
-  // Historical snapshots without the fields coerce cleanly (absent, not null).
-  const legacy = coerceRunSnapshot(base);
-  assert.ok(legacy);
-  assert.equal(legacy?.harnessRevision, undefined);
-  assert.equal(legacy?.harnessFingerprint, undefined);
-
-  // Non-string values are dropped, not accepted.
-  const malformed = coerceRunSnapshot({
-    ...base,
-    harnessRevision: 42,
-    harnessFingerprint: {},
-  });
-  assert.ok(malformed);
-  assert.equal(malformed?.harnessRevision, undefined);
-  assert.equal(malformed?.harnessFingerprint, undefined);
-});
 
 test('coerceSessionAnalyticsFactors accepts only supported shapes and values', () => {
   assert.equal(coerceSessionAnalyticsFactors(null), null);
@@ -249,7 +215,7 @@ test('rollup coercers normalize invalid nested records and preserve valid values
   assert.deepEqual(coerceVerificationRollup('invalid'), createEmptyVerificationRollup());
 });
 
-test('stats-service helpers summarize inputs, checkpoint parsing, and utility helpers', () => {
+test('stats-service helpers summarize inputs and utility helpers', () => {
   const run = makeRunSnapshot();
   const inputs: ComposerInput[] = [
     { id: 'file-1', kind: 'filesystemPathRef', path: '/repo/a.ts', name: 'a.ts', source: 'picker' },
@@ -271,40 +237,6 @@ test('stats-service helpers summarize inputs, checkpoint parsing, and utility he
   assert.equal(toActiveRunSummary(null), null);
   assert.deepEqual(toActiveRunSummary(run), { runId: 'run-1', status: 'open' });
   assert.deepEqual(toActiveRunSummary(run, true), { runId: 'run-1', status: 'open', nextSendStartsNewTask: true });
-
-  const persisted = toPersistedSessionState({
-    currentRun: run,
-    lastRun: null,
-    nextTaskIntent: 'new_task',
-    queuedUnsupportedInputCount: 2,
-    busyStartedAt: '2026-01-01T00:00:00.000Z',
-  });
-  assert.equal(persisted.currentRun?.runId, 'run-1');
-  assert.equal(persisted.nextTaskIntent, 'new_task');
-
-  const checkpoint = parseCheckpoint(JSON.stringify({
-    schemaVersion: 1,
-    seq: 5,
-    sessions: {
-      '/repo/session.jsonl': {
-        currentRun: run,
-        lastRun: null,
-        nextTaskIntent: 'continue_task',
-        queuedUnsupportedInputCount: 3.9,
-        busyStartedAt: '2026-01-01T00:00:00.000Z',
-      },
-      '/repo/ignored.jsonl': null,
-    },
-  }));
-  assert.equal(checkpoint?.seq, 5);
-  assert.equal(checkpoint?.sessions['/repo/session.jsonl']?.nextTaskIntent, 'continue_task');
-  assert.equal(checkpoint?.sessions['/repo/session.jsonl']?.queuedUnsupportedInputCount, 3);
-  assert.equal(checkpoint?.sessions['/repo/ignored.jsonl'], undefined);
-
-  assert.equal(parseCheckpoint('{not json}'), null);
-  assert.equal(parseCheckpoint(JSON.stringify({ schemaVersion: 999, seq: 1, sessions: {} })), null);
-  assert.equal(parseCheckpoint(JSON.stringify({ schemaVersion: 1, seq: 'bad', sessions: {} })), null);
-  assert.equal(parseCheckpoint(JSON.stringify({ schemaVersion: 1, seq: 1, sessions: null })), null);
 
   assert.equal(areStringArraysEqual(undefined, []), true);
   assert.equal(areStringArraysEqual(['a', 'b'], ['a', 'b']), true);
@@ -347,238 +279,6 @@ test('coerceFunctionalSettings defaults tool-result-pruning fields to null when 
     toolResultPruningEnabled: null,
     toolResultPruningProfile: null,
   });
-});
-
-test('coerceRunSnapshot preserves per-turn provider on throughput samples', () => {
-  const snapshot = makeRunSnapshot();
-  snapshot.turnThroughputSamples = [
-    {
-      endedAt: '2026-01-01T00:00:00.000Z',
-      outputTokens: 10,
-      generationDurationMs: 500,
-      concurrentBusySessions: 1,
-      status: 'completed',
-      provider: 'openai',
-    } as unknown as TurnThroughputSample,
-    {
-      endedAt: '2026-01-01T00:00:01.000Z',
-      outputTokens: 4,
-      generationDurationMs: 200,
-      concurrentBusySessions: 1,
-      status: 'completed',
-    } as unknown as TurnThroughputSample,
-  ];
-
-  const coerced = coerceRunSnapshot(snapshot);
-  assert.equal(coerced?.turnThroughputSamples[0]?.provider, 'openai');
-  assert.equal(coerced?.turnThroughputSamples[1]?.provider, undefined);
-});
-
-test('coerceRunSnapshot rejects removed scoring-era statuses', () => {
-  for (const value of [
-    { ...makeRunSnapshot(), status: 'scored', finalizationReason: 'scored' },
-    { ...makeRunSnapshot(), status: 'closed_unscored', finalizationReason: 'closed_unscored' },
-  ]) {
-    assert.equal(coerceRunSnapshot(value as unknown as RunSnapshot), null);
-  }
-});
-
-test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defaulting missing/malformed ones to null', () => {
-  const snapshot = makeRunSnapshot();
-  snapshot.turnThroughputSamples = [
-    {
-      endedAt: '2026-01-01T00:00:00.000Z',
-      outputTokens: 10,
-      generationDurationMs: 500,
-      concurrentBusySessions: 1,
-      status: 'completed',
-      turnLatencyMs: 800,
-      overheadMs: 100,
-      providerLatencyMs: 700,
-      providerQueueMs: 0,
-      providerQueueAttemptCount: 1,
-    },
-    {
-      // Legacy sample recorded before latency tracking existed.
-      endedAt: '2026-01-01T00:00:01.000Z',
-      outputTokens: 4,
-      generationDurationMs: 200,
-      concurrentBusySessions: 1,
-      status: 'completed',
-    } as unknown as TurnThroughputSample,
-    {
-      // Errored turn with malformed (negative / string) latency values.
-      endedAt: '2026-01-01T00:00:02.000Z',
-      outputTokens: 0,
-      generationDurationMs: 0,
-      concurrentBusySessions: 1,
-      status: 'error',
-      turnLatencyMs: -5,
-      overheadMs: 'fast',
-      providerLatencyMs: null,
-    } as unknown as TurnThroughputSample,
-  ];
-
-  const coerced = coerceRunSnapshot(snapshot);
-  assert.equal(coerced?.turnThroughputSamples.length, 3);
-
-  const [a, b, c] = coerced!.turnThroughputSamples;
-  assert.equal(a.turnLatencyMs, 800);
-  assert.equal(a.overheadMs, 100);
-  assert.equal(a.providerLatencyMs, 700);
-  assert.equal(a.providerQueueMs, 0, 'observed immediate grant remains explicit zero');
-  assert.equal(a.providerQueueAttemptCount, 1);
-
-  assert.equal(b.turnLatencyMs, null, 'missing latency coerces to null');
-  assert.equal(b.overheadMs, null);
-  assert.equal(b.providerLatencyMs, null);
-  assert.equal(b.providerQueueMs, null, 'legacy missing queue timing remains unknown');
-  assert.equal(b.providerQueueAttemptCount, 0);
-
-  assert.equal(c.turnLatencyMs, null, 'negative coerces to null');
-  assert.equal(c.overheadMs, null, 'non-number coerces to null');
-  assert.equal(c.providerLatencyMs, null);
-});
-
-test('coerceRunSnapshot preserves a stable session ID compatibly', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.sessionId;
-  assert.equal(coerceRunSnapshot(legacy)?.sessionId, undefined);
-
-  const current = makeRunSnapshot();
-  current.sessionId = '  stable-session-id  ';
-  assert.equal(coerceRunSnapshot(current)?.sessionId, 'stable-session-id');
-});
-
-test('coerceRunSnapshot preserves privacy-safe initial message size compatibly', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.initialUserMessageChars;
-  assert.equal(coerceRunSnapshot(legacy)?.initialUserMessageChars, undefined);
-
-  const current = makeRunSnapshot();
-  current.initialUserMessageChars = 123;
-  assert.equal(coerceRunSnapshot(current)?.initialUserMessageChars, 123);
-
-  current.initialUserMessageChars = -10;
-  assert.equal(coerceRunSnapshot(current)?.initialUserMessageChars, 0);
-});
-
-test('coerceRunSnapshot preserves bounded timestamped user-input samples and legacy absence', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.userInputCharSamples;
-  assert.equal(coerceRunSnapshot(legacy)?.userInputCharSamples, undefined, 'legacy absence stays unavailable');
-
-  const at = '2026-01-01T00:00:00.000Z';
-  const current = makeRunSnapshot();
-  current.userInputCharSamples = [
-    { occurredAt: at, chars: 12 },
-    { occurredAt: at, chars: null },
-    { occurredAt: at, chars: 4.9 },
-    { occurredAt: at, chars: MAX_USER_INPUT_SAMPLE_CHARS + 500 },
-  ];
-  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [
-    { occurredAt: at, chars: 12 },
-    { occurredAt: at, chars: null },
-    { occurredAt: at, chars: 4 },
-    { occurredAt: at, chars: MAX_USER_INPUT_SAMPLE_CHARS },
-  ]);
-
-  current.userInputCharSamples = [
-    { occurredAt: at, chars: 8 },
-    { occurredAt: 'not-a-date', chars: 5 },
-    { occurredAt: at, chars: -1 },
-    { occurredAt: at, chars: Number.POSITIVE_INFINITY },
-    { occurredAt: at, chars: 'answer text' },
-    {},
-  ] as never;
-  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [
-    { occurredAt: at, chars: 8 },
-    { occurredAt: at, chars: null },
-    { occurredAt: at, chars: null },
-    { occurredAt: at, chars: null },
-  ], 'invalid timestamps are dropped, while timestamp-valid malformed lengths remain explicit coverage gaps');
-
-  current.userInputCharSamples = { malformed: true } as never;
-  assert.equal(coerceRunSnapshot(current)?.userInputCharSamples, undefined, 'malformed collection stays unavailable');
-
-  current.userInputCharSamples = [];
-  assert.deepEqual(coerceRunSnapshot(current)?.userInputCharSamples, [], 'explicit empty tracking evidence is preserved');
-});
-
-test('coerceRunSnapshot preserves the estimated prompt-token size compatibly', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.initialUserMessageTokens;
-  assert.equal(coerceRunSnapshot(legacy)?.initialUserMessageTokens, undefined, 'absent stays untracked');
-
-  const current = makeRunSnapshot();
-  current.initialUserMessageTokens = 41;
-  assert.equal(coerceRunSnapshot(current)?.initialUserMessageTokens, 41);
-
-  current.initialUserMessageTokens = -3;
-  assert.equal(coerceRunSnapshot(current)?.initialUserMessageTokens, 0);
-});
-
-test('coerceRunSnapshot preserves optional ask_user outcome counters compatibly', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.askUserAnsweredCount;
-  delete legacy.askUserCancelledCount;
-  const coercedLegacy = coerceRunSnapshot(legacy);
-  assert.equal(coercedLegacy?.askUserAnsweredCount, undefined, 'absent counters stay untracked, not zero');
-  assert.equal(coercedLegacy?.askUserCancelledCount, undefined);
-
-  const current = makeRunSnapshot();
-  current.askUserAnsweredCount = 2;
-  current.askUserCancelledCount = 1;
-  assert.equal(coerceRunSnapshot(current)?.askUserAnsweredCount, 2);
-  assert.equal(coerceRunSnapshot(current)?.askUserCancelledCount, 1);
-
-  current.askUserAnsweredCount = -1;
-  current.askUserCancelledCount = 2.7;
-  const coerced = coerceRunSnapshot(current);
-  assert.equal(coerced?.askUserAnsweredCount, 0);
-  assert.equal(coerced?.askUserCancelledCount, 2);
-});
-
-test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compatibly', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.auxiliaryLlmUsage;
-  assert.deepEqual(coerceRunSnapshot(legacy)?.auxiliaryLlmUsage, []);
-
-  const snapshot = makeRunSnapshot();
-  snapshot.auxiliaryLlmUsage = [
-    {
-      kind: 'skill_pruning_prepass',
-      sourceId: 'prune-1',
-      occurredAt: '2026-01-01T00:00:00.000Z',
-      modelId: 'openai/pruner',
-      inputTokens: 100,
-      outputTokens: 20,
-      cacheReadTokens: 3,
-      cacheWriteTokens: 4,
-      durationMs: 250,
-    },
-    { kind: 'subagent', sourceId: '', occurredAt: '', inputTokens: 10 } as never,
-    { kind: 'unknown', sourceId: 'bad', occurredAt: '2026-01-01T00:00:00.000Z' } as never,
-  ];
-  const coerced = coerceRunSnapshot(snapshot);
-  assert.deepEqual(coerced?.auxiliaryLlmUsage, [snapshot.auxiliaryLlmUsage[0]]);
-});
-
-test('coerceRunSnapshot defaults retry timing and preserves null measured boundaries', () => {
-  const legacy = makeRunSnapshot();
-  delete legacy.retryTimingSamples;
-  assert.deepEqual(coerceRunSnapshot(legacy)?.retryTimingSamples, []);
-
-  const snapshot = makeRunSnapshot();
-  snapshot.retryTimingSamples = [{
-    sourceId: 'req:1',
-    occurredAt: '2026-01-01T00:00:00.000Z',
-    attempt: 1,
-    scheduledDelayMs: 1_000,
-    measuredDelayMs: null,
-    durationMs: 1_500,
-  }];
-  assert.deepEqual(coerceRunSnapshot(snapshot)?.retryTimingSamples, snapshot.retryTimingSamples);
 });
 
 test('coerceToolUsageRollup preserves per-tool timed call counts and unknown critical-path coverage', () => {
@@ -696,34 +396,11 @@ test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollup
   assert.equal(toolUsage.resultIssueSamples[1]?.resultIssueKind, 'probe_no_match');
 });
 
-test('coerceRunSnapshot preserves lifecycle unknowns and rejects malformed attempt samples', () => {
-  const legacy = makeRunSnapshot();
-  assert.equal(coerceRunSnapshot(legacy)?.subagentAttemptSamples, undefined, 'legacy absence stays unavailable');
-
-  const snapshot = makeRunSnapshot();
-  snapshot.unknownSubagentAttemptRecordSourceIds = ['tool-missing', 'tool-missing'];
-  snapshot.subagentAttemptSamples = [
-    {
-      sourceId: 'tool:0:attempt', attemptId: 'attempt', retryIndex: 1, outcome: 'success',
-      durationMs: 0, durationSource: 'measured', backoffMs: 0, backoffSource: 'reported',
-      phaseDurationsMs: { preparing: 0 }, phaseDurationsSource: 'measured',
-      attemptSettlementOutcome: 'completed', attemptSettlementSource: 'reported', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
-    },
-    {
-      sourceId: 'bad', attemptId: 'bad', retryIndex: 0, outcome: 'wat',
-      durationMs: 20, durationSource: 'measured', backoffMs: 0, backoffSource: 'reported',
-      phaseDurationsMs: null, phaseDurationsSource: 'unknown',
-      attemptSettlementOutcome: null, attemptSettlementSource: 'unknown', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
-    } as never,
-  ];
-  const coerced = coerceRunSnapshot(snapshot)?.subagentAttemptSamples;
-  assert.equal(coerced?.length, 1);
-  assert.deepEqual(coerceRunSnapshot(snapshot)?.unknownSubagentAttemptRecordSourceIds, ['tool-missing'],
-    'explicit mixed-run unknown coverage persists idempotently through coercion');
-  assert.equal(coerced?.[0]?.durationMs, 0, 'measured zero remains a measurement');
-  assert.deepEqual(coerced?.[0]?.phaseDurationsMs, { preparing: 0 }, 'measured phase zero remains evidence');
-  assert.equal(coerced?.[0]?.cleanupSource, 'unknown', 'unset current cleanup is not fabricated');
-
-  snapshot.subagentAttemptSamples = { malformed: true } as never;
-  assert.equal(coerceRunSnapshot(snapshot)?.subagentAttemptSamples, undefined, 'malformed collection stays unavailable');
+test('normalizeExperimentAssignment trims assignments and normalizes empty values', () => {
+  assert.equal(normalizeExperimentAssignment(undefined), null);
+  assert.equal(normalizeExperimentAssignment(null), null);
+  assert.equal(normalizeExperimentAssignment(''), null);
+  assert.equal(normalizeExperimentAssignment(' \t\n '), null);
+  assert.equal(normalizeExperimentAssignment('  experiment-a  '), 'experiment-a');
+  assert.equal(normalizeExperimentAssignment('experiment a'), 'experiment a');
 });

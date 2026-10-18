@@ -55,12 +55,12 @@ test('completed prepass is a compact summary with deliberate expansion', () => w
   const primary = summary.querySelector<HTMLElement>('.pruning-header-label');
   const adjacent = summary.querySelector<HTMLElement>('.panel-chip-label');
   assert.equal(primary?.textContent, 'Prepass');
-  assert.equal(adjacent?.textContent?.trim(), '1.2k tokens saved');
-  assert.match(summary.textContent ?? '', /Prepass 1\.2k tokens saved/);
+  assert.equal(adjacent?.textContent?.trim(), '~1.2k est. tokens saved');
+  assert.match(summary.textContent ?? '', /Prepass ~1\.2k est\. tokens saved/);
   assert.doesNotMatch(summary.textContent ?? '', /skills|tools/);
   assert.equal(summary.getAttribute('aria-expanded'), 'false');
   assert.match(summary.getAttribute('aria-label') ?? '', /Kept 1\/3 skills/);
-  assert.equal(summary.title, 'Kept 1/3 skills, Kept 2/3 tools · Saved 1200 tokens');
+  assert.equal(summary.title, 'Kept 1/3 skills, Kept 2/3 tools · ~1200 est. tokens saved');
   assert.equal(container.querySelector('.pruning-detail-list'), null);
   act(() => summary.click());
   assert.equal(toggles, 1);
@@ -200,13 +200,22 @@ test('expanded diagnostics show counts once, quiet metadata, full tags and neste
   for (const data of ['System diagnostic', 'User diagnostic', 'Raw diagnostic']) assert.ok(container.textContent?.includes(data));
 }));
 
-test('inline diagnostics retain savings because no header summary is assumed', () => withContainer((container) => {
+test('inline diagnostics retain estimated savings because no header summary is assumed', () => withContainer((container) => {
   act(() => render(h(PruningDiagnostics, {
     details: details(), rawExpanded: false, onRawToggle: () => {}, presentation: 'inline',
   }), container));
   const metadata = container.querySelector('.pruning-meta-line')?.textContent ?? '';
-  assert.match(metadata, /1,200 tokens saved/);
+  assert.match(metadata, /~1,200 est\. tokens saved/);
   assert.equal((container.textContent?.match(/tokens saved/g) ?? []).length, 1);
+}));
+
+test('inline diagnostics in shadow mode show potential savings, not saved tokens', () => withContainer((container) => {
+  act(() => render(h(PruningDiagnostics, {
+    details: details({ mode: 'shadow' }), rawExpanded: false, onRawToggle: () => {}, presentation: 'inline',
+  }), container));
+  const metadata = container.querySelector('.pruning-meta-line')?.textContent ?? '';
+  assert.match(metadata, /~1,200 potential savings \(est\.\)/);
+  assert.doesNotMatch(metadata, /tokens saved/);
 }));
 
 test('actual modes and explicit thinking off remain available without badges', () => withContainer((container) => {

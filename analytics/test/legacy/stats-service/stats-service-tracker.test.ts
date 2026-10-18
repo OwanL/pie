@@ -81,7 +81,7 @@ const testSubagentObservationSource: SubagentObservationSource = {
 
 function createHarness() {
   const sessionPath = '/workspace/session.jsonl';
-  const persistCalls: Array<{ snapshot?: unknown }> = [];
+  const changeCalls: Array<{ snapshot?: unknown }> = [];
   let renderCount = 0;
   let idCounter = 0;
   let nowMs = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -113,8 +113,8 @@ function createHarness() {
   const runState = new SessionRunStateManager({
     getArchState,
     dispatchArchEvent,
-    schedulePersist: (snapshot) => {
-      persistCalls.push({ snapshot });
+    onChanged: (snapshot) => {
+      changeCalls.push({ snapshot });
     },
     now: () => new Date(nowMs),
     createId: () => `id-${++idCounter}`,
@@ -135,10 +135,11 @@ function createHarness() {
 
   return {
     tracker,
+    runState,
     get archState() { return archState; },
     getArchState,
     sessionPath,
-    persistCalls,
+    changeCalls,
     get renderCount() {
       return renderCount;
     },
@@ -192,9 +193,9 @@ test('prepareForSend carries queued unsupported inputs and startNewTask closes t
   harness.tracker.startNewTask(harness.sessionPath);
   const secondRunId = harness.tracker.prepareForSend(harness.sessionPath, [], 'next');
 
-  const sessions = harness.tracker.serializeSessions();
-  const currentRun = sessions[harness.sessionPath]?.currentRun;
-  const lastRun = sessions[harness.sessionPath]?.lastRun;
+  const sessions = harness.runState.sessions;
+  const currentRun = sessions.get(harness.sessionPath)?.currentRun;
+  const lastRun = sessions.get(harness.sessionPath)?.lastRun;
 
   assert.equal(firstRunId, 'id-1');
   assert.equal(secondRunId, 'id-3');
@@ -256,7 +257,7 @@ test('terminal ask_user results count answered and cancelled outcomes idempotent
     result: { details: { source: 'disabled', cancelled: true } },
   });
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.askUserAnsweredCount, 1, 'answered ask_user counted exactly once per call');
   assert.equal(run?.askUserCancelledCount, 2, 'cancelled/disabled ask_user outcomes are counted without samples');
   assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, 1], 'cancelled asks add no character sample');
@@ -280,7 +281,7 @@ test('ask_user character samples flatten option/custom answers with Unicode trim
   harness.advance(60_000);
   finishAsk('ask-custom', ' custom answer ', 'custom');
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.deepEqual(run?.userInputCharSamples, [
     { occurredAt: '2026-01-01T00:00:00.000Z', chars: 7 },
     { occurredAt: '2026-01-01T00:01:00.000Z', chars: 2 },
@@ -330,7 +331,7 @@ test('ask_user outcomes read the legacy top-level result shape and ignore malfor
     ...missingAnswer, status: 'completed', result: { details: { answer: 42, cancelled: false } },
   });
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.askUserAnsweredCount, 2);
   assert.equal(run?.askUserCancelledCount, 0, 'malformed and non-ask_user results are not counted as cancelled');
   assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, 3, null, null],
@@ -339,37 +340,12 @@ test('ask_user outcomes read the legacy top-level result shape and ignore malfor
     'known count remains below expected sample count');
 });
 
-test('ask_user counters increment on checkpoint-restored runs that predate the fields', () => {
-  const harness = createHarness();
-  harness.tracker.prepareForSend(harness.sessionPath, []);
-  // Simulate a checkpoint-restore whose snapshot predates ask_user tracking.
-  const sessions = harness.tracker.serializeSessions();
-  const restored = sessions[harness.sessionPath]?.currentRun;
-  assert.ok(restored);
-  delete (restored as { askUserAnsweredCount?: number }).askUserAnsweredCount;
-  delete (restored as { askUserCancelledCount?: number }).askUserCancelledCount;
-  delete (restored as { userInputCharSamples?: unknown[] }).userInputCharSamples;
-  harness.tracker.restore(JSON.parse(JSON.stringify(sessions)));
-
-  const ask: ToolCall = { id: 'ask-5', name: 'ask_user', input: {}, status: 'running' };
-  harness.tracker.onToolStarted(harness.sessionPath, ask);
-  harness.tracker.onToolFinished(harness.sessionPath, {
-    ...ask, status: 'completed',
-    result: { content: [{ type: 'text', text: 'ok' }], details: { answer: 'ok', source: 'option', cancelled: false } },
-  });
-
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
-  assert.equal(run?.askUserAnsweredCount, 1, 'increment creates the counter instead of assuming an untracked zero');
-  assert.equal(run?.askUserCancelledCount, undefined, 'an unincremented counter stays absent on a legacy run');
-  assert.deepEqual(run?.userInputCharSamples?.map((sample) => sample.chars), [0, null, 2],
-    'known initial prompt is restored and unknown prior ask coverage remains incomplete before the new answer');
-});
 
 test('prepareForSend estimates user prompt tokens with the shared BPE tokenizer', () => {
   const harness = createHarness();
 
   harness.tracker.prepareForSend(harness.sessionPath, [], ' A🙂 ');
-  const firstRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const firstRun = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.ok(firstRun);
   assert.equal(firstRun?.initialUserMessageChars, 2, 'same trimmed Unicode source as initialUserMessageChars');
   assert.ok(
@@ -378,7 +354,7 @@ test('prepareForSend estimates user prompt tokens with the shared BPE tokenizer'
   );
 
   harness.tracker.prepareForSend(harness.sessionPath, [], '');
-  const emptyRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const emptyRun = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(emptyRun?.initialUserMessageTokens, 0, 'empty prompt estimates zero tokens');
 });
 
@@ -391,7 +367,7 @@ test('prepareForSend captures functional settings from ArchState.settings at run
   });
 
   harness.tracker.prepareForSend(harness.sessionPath, []);
-  const currentRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const currentRun = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
 
   assert.deepEqual(currentRun?.functionalSettings, {
     subagentAlwaysParentModel: true,
@@ -406,7 +382,7 @@ test('prepareForSend captures functional settings from ArchState.settings at run
     settings.prefs.extensionToggles.cwd = true;
     settings.prefs.subagentAlwaysParentModel = false;
   });
-  const refetched = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const refetched = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(refetched?.functionalSettings?.extensionToggles.cwd, undefined);
   assert.deepEqual(refetched?.functionalSettings, {
     subagentAlwaysParentModel: true,
@@ -439,7 +415,7 @@ test('assistant turns, busy windows, unsupported inputs, and experiment assignme
   harness.setExperimentAssignment('variant-a');
   harness.tracker.onExperimentAssignmentChanged('variant-a');
 
-  const currentRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const currentRun = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(runId, currentRun?.runId);
   assert.equal(currentRun?.assistantTurnCount, 1);
   assert.equal(currentRun?.assistantTurnDurationMs, 400);
@@ -457,9 +433,9 @@ test('assistant turns, busy windows, unsupported inputs, and experiment assignme
   assert.equal(currentRun?.mixedTreatmentConfig, true);
   assert.deepEqual(currentRun?.treatmentChangeKinds, ['experimentAssignment']);
 
-  const persistCountBefore = harness.persistCalls.length;
+  const persistCountBefore = harness.changeCalls.length;
   harness.tracker.onExperimentAssignmentChanged('control');
-  assert.equal(harness.persistCalls.length, persistCountBefore, 'unchanged assignments should not persist again');
+  assert.equal(harness.changeCalls.length, persistCountBefore, 'unchanged assignments should not persist again');
 });
 
 test('turn throughput samples stamp concurrency, accumulate per turn, and capture errored turns', () => {
@@ -491,7 +467,7 @@ test('turn throughput samples stamp concurrency, accumulate per turn, and captur
   harness.tracker.onBusyChanged(secondSession, false);
   harness.tracker.onBusyChanged(harness.sessionPath, false);
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.turnThroughputSamples.length, 2);
 
   const completed = run?.turnThroughputSamples[0];
@@ -516,7 +492,7 @@ test('duplicate onAssistantTurnEnded calls for the same turn do not double-count
   // A duplicate `message.finished` for the same turn must be ignored.
   harness.tracker.onAssistantTurnEnded(harness.sessionPath, 'dup-turn', 1000, usage, 'completed');
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.assistantTurnDurationMs, 1000, 'duration not double-counted');
   assert.equal(run?.outputTokens, 40, 'tokens not double-counted');
   assert.equal(run?.tokenReportedTurnCount, 1, 'reported-turn count not double-counted');
@@ -536,7 +512,7 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   harness.tracker.onBackendError(undefined, 'MISSING_SESSION');
   harness.tracker.onContextUsageChanged(harness.sessionPath, 10, 100);
   harness.tracker.onBusyChanged(harness.sessionPath, false);
-  assert.equal(harness.persistCalls.length, 0, 'no current run means no persistence side effects');
+  assert.equal(harness.changeCalls.length, 0, 'no current run means no persistence side effects');
 
   harness.setAnalyticsFactors(harness.sessionPath, sampleFactors);
   const runId = harness.tracker.prepareForSend(harness.sessionPath, []);
@@ -548,7 +524,7 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   harness.tracker.onModelConfigChanged(harness.sessionPath, 'claude-test', 'medium');
   harness.tracker.onModelConfigChanged(harness.sessionPath, 'model-b', 'high', 'openai-codex');
 
-  const currentRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const currentRun = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(currentRun?.runId, runId);
   assert.deepEqual(currentRun?.backendErrorCodes, ['MESSAGE_SEND_FAILED']);
   assert.equal(currentRun?.contextTokens, 50);
@@ -566,14 +542,14 @@ test('onSessionClosed and finalizeOpenRunsForShutdown close active runs and clea
 
   harness.tracker.prepareForSend(harness.sessionPath, []);
   harness.tracker.onSessionClosed(harness.sessionPath);
-  assert.equal(harness.tracker.serializeSessions()[harness.sessionPath], undefined);
+  assert.equal(harness.runState.sessions.get(harness.sessionPath), undefined);
   assert.equal(harness.archState.composer.activeRunSummaryBySession[harness.sessionPath], null);
 
   const second = createHarness();
   second.tracker.prepareForSend(second.sessionPath, []);
   second.tracker.finalizeOpenRunsForShutdown();
 
-  const finalized = second.tracker.serializeSessions()[second.sessionPath]?.lastRun;
+  const finalized = second.runState.sessions.get(second.sessionPath)?.lastRun;
   assert.equal(finalized?.status, 'closed');
   assert.equal(finalized?.finalizationReason, 'closed');
 });
@@ -591,7 +567,7 @@ test('turn latency breakdown is recorded on throughput samples', () => {
     { turnLatencyMs: 800, overheadMs: 100, providerLatencyMs: 700 },
   );
 
-  const sample = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples[0];
+  const sample = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.turnThroughputSamples[0];
   assert.equal(sample?.turnLatencyMs, 800);
   assert.equal(sample?.overheadMs, 100);
   assert.equal(sample?.providerLatencyMs, 700);
@@ -603,7 +579,7 @@ test('throughput samples default latency fields to null when unmeasured', () => 
   harness.tracker.onAssistantTurnStarted(harness.sessionPath, 'turn-nolat');
   harness.tracker.onAssistantTurnEnded(harness.sessionPath, 'turn-nolat', 500, undefined, 'completed');
 
-  const sample = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples[0];
+  const sample = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.turnThroughputSamples[0];
   assert.equal(sample?.turnLatencyMs, null);
   assert.equal(sample?.overheadMs, null);
   assert.equal(sample?.providerLatencyMs, null);
@@ -622,7 +598,7 @@ test('turn throughput samples preserve per-turn provider attribution', () => {
     'completed',
   );
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.provider, 'openai');
   assert.equal(run?.turnThroughputSamples[0]?.provider, 'openai');
 });
@@ -642,7 +618,7 @@ test('a turn with measurable latency still records a sample even with negligible
     { turnLatencyMs: 250, overheadMs: 30, providerLatencyMs: 220 },
   );
 
-  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples ?? [];
+  const samples = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.turnThroughputSamples ?? [];
   assert.equal(samples.length, 1);
   assert.equal(samples[0]?.turnLatencyMs, 250);
   assert.equal(samples[0]?.generationDurationMs, 0);
@@ -660,7 +636,7 @@ test('an explicit immediate provider-gate grant is preserved as zero with attemp
     { providerQueueMs: 0, providerQueueAttemptCount: 1 },
   );
 
-  const sample = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples[0];
+  const sample = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.turnThroughputSamples[0];
   assert.equal(sample?.providerQueueMs, 0);
   assert.equal(sample?.providerQueueAttemptCount, 1);
 });
@@ -681,7 +657,7 @@ test('an overhead-only turn (no content delta) still records its measured overhe
     { overheadMs: 120 },
   );
 
-  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples ?? [];
+  const samples = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.turnThroughputSamples ?? [];
   assert.equal(samples.length, 1);
   assert.equal(samples[0]?.overheadMs, 120);
   assert.equal(samples[0]?.turnLatencyMs, null);
@@ -704,7 +680,7 @@ test('duplicate tool.started and tool.finished events do not double-count', () =
   harness.tracker.onToolFinished(harness.sessionPath, { ...toolCall, status: 'completed', durationMs: 100 });
   harness.tracker.onToolFinished(harness.sessionPath, { ...toolCall, status: 'completed', durationMs: 100 }); // duplicate
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.toolUsage.totalCount, 1, 'duplicate tool.started must not double-count totalCount');
   assert.equal(run?.toolUsage.countsByName['bash'], 1, 'duplicate tool.started must not double-count per-name count');
   assert.equal(run?.toolUsage.timedCallCount, 1, 'duplicate tool.finished must not double-count timedCallCount');
@@ -717,14 +693,14 @@ test('untimed tools leave critical-path coverage unknown and reconcile a termina
   harness.tracker.prepareForSend(harness.sessionPath, []);
   harness.tracker.onToolStarted(harness.sessionPath, { id: 'late-name', name: '', input: {}, status: 'running' });
 
-  let usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  let usage = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.toolUsage;
   assert.equal(usage?.criticalPathDurationMs, undefined);
   assert.equal(usage?.countsByName['(unknown)'], 1);
 
   harness.tracker.onToolFinished(harness.sessionPath, {
     id: 'late-name', name: 'bash', input: {}, status: 'completed',
   });
-  usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  usage = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.toolUsage;
   assert.equal(usage?.criticalPathDurationMs, undefined);
   assert.equal(usage?.countsByName['(unknown)'], undefined);
   assert.equal(usage?.countsByName['bash'], 1);
@@ -748,7 +724,7 @@ test('tool critical path is the union of execution intervals and missing timing 
     id: 'missing-start', name: '', input: {}, status: 'completed',
   });
 
-  const usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  const usage = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.toolUsage;
   assert.equal(usage?.totalDurationMs, 220);
   assert.equal(usage?.criticalPathDurationMs, 170);
   assert.equal(usage?.timedCallCount, 3, 'missing timing must not become a zero-duration call');
@@ -777,7 +753,7 @@ test('tool wall coverage unions staggered mixed-provenance intervals while addit
     harness.tracker.onToolFinished(harness.sessionPath, call);
   }
 
-  const usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  const usage = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.toolUsage;
   assert.equal(usage?.criticalPathDurationMs, 3_500,
     'wall coverage uses the exact staggered interval union');
   assert.equal(usage?.totalDurationMs, 5_000,
@@ -808,7 +784,7 @@ test('assistant turn usage with NaN or negative values does not corrupt counters
     { turnLatencyMs: NaN, overheadMs: Infinity, providerLatencyMs: -Infinity },
   );
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.inputTokens, 0);
   assert.equal(run?.outputTokens, 0);
   assert.equal(run?.cacheReadTokens, 0);
@@ -855,7 +831,7 @@ test('subagent tool call forwards turnThroughputSamples into the parent run', ()
   harness.tracker.onToolStarted(harness.sessionPath, subagentToolCall);
   harness.tracker.onToolFinished(harness.sessionPath, subagentToolCall);
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.toolUsage.subagentCallCount, 1);
   assert.equal(run?.turnThroughputSamples.length, 1);
   const sample = run?.turnThroughputSamples[0];
@@ -898,7 +874,7 @@ test('subagent retry usage remains attributed to each attempt provider', () => {
 
   harness.tracker.onToolStarted(harness.sessionPath, toolCall);
   harness.tracker.onToolFinished(harness.sessionPath, toolCall);
-  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage ?? [];
+  const samples = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.auxiliaryLlmUsage ?? [];
   assert.deepEqual(samples.map((sample) => ({
     provider: sample.provider,
     modelId: sample.modelId,
@@ -933,7 +909,7 @@ test('bounded subagent billing sideband includes recursive child usage without n
 
   harness.tracker.onToolStarted(harness.sessionPath, toolCall);
   harness.tracker.onToolFinished(harness.sessionPath, toolCall);
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.toolUsage.subagentInputTokens, 300);
   assert.equal(run?.toolUsage.subagentOutputTokens, 30);
   assert.deepEqual(run?.auxiliaryLlmUsage?.map((sample) => [sample.sourceId, sample.provider, sample.inputTokens]), [
@@ -966,7 +942,7 @@ test('skill-pruning usage records the actual model and ignores duplicate CustomM
     details,
   );
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.deepEqual(run?.auxiliaryLlmUsage, [{
     kind: 'skill_pruning_prepass',
     sourceId: 'pruning-message-1',
@@ -990,7 +966,7 @@ test('skill-pruning duration is retained even when the provider reports no token
   );
 
   assert.deepEqual(
-    harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage,
+    harness.runState.sessions.get(harness.sessionPath)?.currentRun?.auxiliaryLlmUsage,
     [{
       kind: 'skill_pruning_prepass',
       sourceId: 'pruning-duration-only',
@@ -1016,7 +992,7 @@ test('skill-pruning preserves an explicit zero provider cost without tokens', ()
   );
 
   assert.deepEqual(
-    harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage,
+    harness.runState.sessions.get(harness.sessionPath)?.currentRun?.auxiliaryLlmUsage,
     [{
       kind: 'skill_pruning_prepass',
       sourceId: 'pruning-free',
@@ -1044,7 +1020,7 @@ test('retry timing keeps scheduled delay and updates measured delay/duration ide
   harness.tracker.onAutoRetry(harness.sessionPath, timing);
   harness.tracker.onAutoRetryMeasured(harness.sessionPath, timing.sourceId, 4_025, 5_200);
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.autoRetryCount, 1);
   assert.deepEqual(run?.retryTimingSamples, [{
     ...timing,
@@ -1085,7 +1061,7 @@ test('subagent tool call stamps modelId from result.model when sample lacks mode
   harness.tracker.onToolStarted(harness.sessionPath, subagentToolCall);
   harness.tracker.onToolFinished(harness.sessionPath, subagentToolCall);
 
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.turnThroughputSamples.length, 1);
   assert.equal(run?.turnThroughputSamples[0]?.modelId, 'anthropic/claude-sub');
 });
@@ -1109,7 +1085,7 @@ test('terminal subagent attempt records are parsed safely and remain idempotent'
   harness.tracker.onToolFinished(harness.sessionPath, tool);
   harness.tracker.onToolFinished(harness.sessionPath, tool);
 
-  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.subagentAttemptSamples;
+  const samples = harness.runState.sessions.get(harness.sessionPath)?.currentRun?.subagentAttemptSamples;
   assert.equal(samples?.length, 2, 'duplicate terminal delivery and malformed records must not inflate samples');
   assert.deepEqual(samples?.map((sample) => ({
     sourceId: sample.sourceId, durationMs: sample.durationMs, durationSource: sample.durationSource,
@@ -1118,7 +1094,7 @@ test('terminal subagent attempt records are parsed safely and remain idempotent'
     { sourceId: 'subagent-attempts:0:first', durationMs: 150, durationSource: 'measured', backoffMs: 0, phaseDurationsMs: { preparing: 50, waiting_provider: 100 }, phaseDurationsSource: 'measured', cleanupSource: 'unknown' },
     { sourceId: 'subagent-attempts:0:retry', durationMs: 400, durationSource: 'measured', backoffMs: 250, phaseDurationsMs: { waiting_provider: 400 }, phaseDurationsSource: 'measured', cleanupSource: 'unknown' },
   ]);
-  assert.deepEqual(harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.unknownSubagentAttemptRecordSourceIds,
+  assert.deepEqual(harness.runState.sessions.get(harness.sessionPath)?.currentRun?.unknownSubagentAttemptRecordSourceIds,
     ['subagent-attempts'], 'partially malformed child records leave this call explicitly incomplete');
 });
 
@@ -1139,17 +1115,10 @@ test('subagent lifecycle retains explicit unknown coverage for a malformed termi
     harness.tracker.onToolStarted(harness.sessionPath, { ...terminal, status: 'running' });
     harness.tracker.onToolFinished(harness.sessionPath, terminal);
   }
-  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  const run = harness.runState.sessions.get(harness.sessionPath)?.currentRun;
   assert.equal(run?.subagentAttemptSamples?.length, 1);
   assert.deepEqual(run?.unknownSubagentAttemptRecordSourceIds, ['subagent-malformed'],
     'one malformed call remains explicitly unknown beside one parsed call');
 
-  const restored = createHarness();
-  restored.tracker.restore(harness.tracker.serializeSessions());
-  restored.tracker.onToolFinished(restored.sessionPath, malformed);
-  assert.deepEqual(
-    restored.tracker.serializeSessions()[restored.sessionPath]?.currentRun?.unknownSubagentAttemptRecordSourceIds,
-    ['subagent-malformed'],
-    'checkpoint restore plus terminal replay remains idempotent',
-  );
+
 });

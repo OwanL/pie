@@ -140,75 +140,41 @@ const SNAPSHOT = {
   samples: [gapSnapshotSample()],
 };
 
-test('accounting adaptation lives in the billable-accounting module, not the StatsService façade', async () => {
-  const [facade, accounting] = await Promise.all([
+test('canonical accounting keeps adaptation and injected pricing without legacy persistence', async () => {
+  const [facade, accounting, adaptation] = await Promise.all([
     readSource('application/backend/analytics-views/service.ts'),
-    readSource('analytics/legacy/billable-accounting/service.ts'),
+    readSource('analytics/usage-accounting/canonical-accounting.ts'),
+    readSource('analytics/usage-accounting/invocation-adaptation.ts'),
   ]);
-
-  // The façade delegates accounting to the settlement owner and keeps the
-  // RunObserver/query surface.
-  assert.match(facade, /from '\.\.\/\.\.\/\.\.\/analytics\/legacy\/billable-accounting\/service'/);
-  assert.match(facade, /this\.accounting\./);
-  // Captured-rate handoff: the application composition constructs the
-  // provider-owned loader; analytics never loads the catalog itself.
-  assert.match(facade, /new CapturedPricingFactsLoader\(/);
-  assert.match(facade, /resolveInvocationPricing: resolveCapturedInvocationPricing/);
-  assert.match(facade, /buildSubagentUsageSamples\(toolCall\)/);
-  // Ownership: the adaptation logic lives in BillableAccounting, not the façade.
-  assert.doesNotMatch(facade, /private (?:async )?(?:appendUsageSample|migrateHistoricalRunUsage|pricingFor|recordInvocationActivity|persistInvocationRecord)\b/);
-  assert.doesNotMatch(facade, /function (?:pruningUsageSamples|stableInvocationId|calculatedCost)\b/);
-  assert.doesNotMatch(facade, /pendingInvocationWrites/);
-  assert.doesNotMatch(facade, /loadModelPricing/);
-  for (const kept of [
-    'queryRunAnalytics',
-    'queryPersistedRunAnalytics',
-    'getSessionUsage',
-    'getBillableInvocationRecords',
-    'getPendingCompletedRuns',
-    'getWorkingTimeBySession',
-    'setSessionPrivacy',
-  ]) {
-    assert.match(facade, new RegExp(kept), `façade must keep ${kept}`);
+  assert.ok(facade.includes('createCanonicalAccounting('));
+  assert.ok(facade.includes('new CapturedPricingFactsLoader('));
+  assert.ok(facade.includes('resolveInvocationPricing: resolveCapturedInvocationPricing'));
+  assert.ok(facade.includes('buildSubagentUsageSamples(toolCall)'));
+  assert.ok(accounting.includes('adaptInvocationRecord('));
+  assert.ok(accounting.includes('captureProviderSettlement('));
+  assert.ok(accounting.includes('getCapturedPricingFacts(sessionPath)'));
+  assert.ok(adaptation.includes('resolveInvocationPricing('));
+  for (const source of [facade, accounting, adaptation]) {
+    assert.doesNotMatch(source, /new (?:BillableInvocationLedger|ActivityTimeline|RunSnapshotStorage)/);
+    assert.ok(importStatements(source).every((target) => !/billable-accounting|billable-invocation-ledger|activity-timeline|completed-history-cache|run-analytics\/(query|storage|checkpoint)/.test(target)));
   }
-
-  // The accounting module owns the durable ledger/timeline and stays acyclic.
-  assert.match(accounting, /new BillableInvocationLedger/);
-  assert.match(accounting, /new ActivityTimeline/);
-  assert.doesNotMatch(accounting, /buildSubagentUsageSamples|message-contract\.js/);
-  // Pricing ownership is explicit: settlement keeps the captured-facts
-  // callback and delegates through the injected provider-owned resolver.
-  assert.match(accounting, /getCapturedPricingFacts\(sessionPath\)/);
-  assert.match(accounting, /resolveInvocationPricing\(/);
-  assert.doesNotMatch(accounting, /pricingForPromptTokens|resolveApplicablePricing|capturedModelFact|function evidenceInterval\b|function calculatedCost\b/);
-  assert.doesNotMatch(accounting, /harness\/model-providers\/pricing/);
-  assert.doesNotMatch(accounting, /loadModelPricing/);
-  assert.doesNotMatch(accounting, /model-pricing-history/);
-  assert.doesNotMatch(accounting, /node:fs'/);
-  const accountingImports = importStatements(accounting);
-  assert.ok(accountingImports.some((target) => target.endsWith('billable-invocation-ledger/service')));
-  assert.ok(accountingImports.every((target) => !target.includes('stats-service')),
-    'billable accounting must not import the run-observation façade');
-  assert.ok(accountingImports.every((target) => !target.includes('aggregate-stats-service')));
-  assert.ok(accountingImports.every((target) => !target.includes('harness/model-providers/pricing')),
-    'analytics accounting must not import provider pricing runtime modules');
+  for (const source of [accounting, adaptation]) {
+    assert.doesNotMatch(source, /loadModelPricing|model-pricing-history|harness\/model-providers\/pricing|node:fs/);
+  }
 });
 
 test('analytics production owners do not import application implementation modules', async () => {
   const owners = [
-    'analytics/legacy/completed-history-cache.ts',
-    'analytics/legacy/billable-accounting/service.ts',
-    'analytics/legacy/billable-invocation-ledger/aggregate.ts',
     'analytics/legacy/working-time-service.ts',
     'analytics/legacy/stats-service/helpers.ts',
     'analytics/legacy/stats-service/session-run-state.ts',
-    'analytics/legacy/stats-service/storage.ts',
-    'analytics/legacy/stats-service/service.ts',
     'analytics/legacy/stats-service/tracker.ts',
     'analytics/legacy/run-analytics/coercion-functional-settings.ts',
     'analytics/legacy/run-analytics/coercion-factors.ts',
     'analytics/legacy/run-analytics/coercion-snapshots.ts',
     'analytics/legacy/run-analytics/coercion-utils.ts',
+    'analytics/usage-accounting/canonical-accounting.ts',
+    'analytics/usage-accounting/invocation-adaptation.ts',
     'analytics/capture/canonical-capture.ts',
     'analytics/capture/tool-call-analysis/index.ts',
     'analytics/capture/tool-call-analysis/summary.ts',
@@ -227,46 +193,12 @@ test('analytics production owners do not import application implementation modul
   }
 });
 
-test('completed history and pricing caches are owned by focused aggregate modules', async () => {
-  const [service, cache, pricing] = await Promise.all([
-    readSource('application/backend/analytics-views/aggregate-stats-service.ts'),
-    readSource('analytics/legacy/completed-history-cache.ts'),
-    fs.readFile(
-      path.join(repoRoot, 'harness/model-providers/pricing/aggregate-pricing-cache.ts'),
-      'utf8',
-    ),
-  ]);
-
-  assert.match(service, /new CompletedHistoryCache/);
-  assert.match(service, /new AggregatePricingCache/);
-  for (const moved of [
-    'runAccumulators',
-    'loadPricingCached',
-    'parseSnapshotLines',
-    'completedRunsCache',
-    'lastDataSignature',
-    'readDataSignature',
-    'loadModelPricing',
-    'private .*completedLayer',
-  ]) {
-    assert.doesNotMatch(service, new RegExp(moved), `AggregateStatsService must not own ${moved}`);
-  }
-  // Refresh cadence, open-run layer, and ledger projection stay.
-  for (const kept of ['refreshLive', 'buildOpenAccumulator', 'projectLedgerIfAvailable', 'RECOMPUTE_MS']) {
-    assert.match(service, new RegExp(kept), `AggregateStatsService must keep ${kept}`);
-  }
-
-  assert.match(cache, /incrementalAppendCompletedRuns/);
-  assert.match(cache, /fullReloadCompletedRuns/);
-  assert.match(cache, /ensureLayer/);
-  assert.match(pricing, /loadModelPricing/);
-  for (const [source, name] of [[cache, 'completed-history-cache'], [pricing, 'aggregate-pricing-cache']] as const) {
-    const imports = importStatements(source);
-    assert.ok(
-      imports.every((target) => !target.includes('aggregate-stats-service') && !target.includes('stats-service/service') && !target.includes('analytics-views/service')),
-      `${name} must not import the façades it was extracted from`,
-    );
-  }
+test('aggregate statistics use canonical reads, not legacy history or pricing caches', async () => {
+  const service = await readSource('application/backend/analytics-views/aggregate-stats-service.ts');
+  assert.match(service, /readProviderAggregateSummary/);
+  assert.match(service, /publishUnknown/);
+  assert.doesNotMatch(service, /new CompletedHistoryCache|new AggregatePricingCache|loadModelPricing|projectLedgerIfAvailable/);
+  assert.ok(importStatements(service).every((target) => !target.includes('analytics/legacy/')));
 });
 
 test('StatsService façade forwards accounting events with the same evidence as direct adaptation', async () => {
@@ -339,24 +271,15 @@ test('StatsService façade forwards accounting events with the same evidence as 
     );
     accounting.observeSessionUsageSnapshot(SESSION_PATH, 'session-parity', SNAPSHOT);
 
-    const facadeRecords = facadeStats.getBillableInvocationRecords();
-    const directRecords = (directStats as unknown as {
-      accounting: { exportRecords(): readonly unknown[] };
-    }).accounting.exportRecords();
-    assert.deepEqual(facadeRecords, directRecords);
-    assert.deepEqual(
-      facadeStats.getActivityIntervals(),
-      (directStats as unknown as { accounting: { activityTimeline: { projectAll(): readonly unknown[] } } }).accounting.activityTimeline.projectAll(),
-    );
+    assert.equal('getBillableInvocationRecords' in facadeStats, false);
+    assert.equal('exportRecords' in accounting, false);
+    assert.equal('getActivityIntervals' in facadeStats, false);
     assert.deepEqual(facadeStats.getSessionUsage(SESSION_PATH), directStats.getSessionUsage(SESSION_PATH));
 
-    // The scripted evidence covers every adaptation seam: conversation/retry
-    // classification, auxiliary kinds, pruning, subagent, and snapshot
-    // migration gaps.
-    const kinds = facadeRecords.map((record) => record.kind as string);
-    for (const expected of ['conversation', 'history_compaction', 'skill_pruning_prepass', 'subagent']) {
-      assert.ok(kinds.includes(expected), `missing adapted kind ${expected}`);
-    }
+    // Observations without canonical authority cannot resurrect legacy history.
+    assert.equal(facadeStats.getSessionUsage(SESSION_PATH).authority, 'unknown');
+    assert.deepEqual(await fs.readdir(tempDirA), []);
+    assert.deepEqual(await fs.readdir(tempDirB), []);
   } finally {
     await Promise.allSettled([facadeStats.shutdown(), directStats.shutdown()]);
     await fs.rm(tempDirA, { recursive: true, force: true });
@@ -364,7 +287,7 @@ test('StatsService façade forwards accounting events with the same evidence as 
   }
 });
 
-test('accounting clamps reversed provider timestamps before ledger persistence', async () => {
+test('accounting without canonical capture does not persist reversed timestamps', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-accounting-reversed-time-'));
   const stats = new StatsService(tempOptions(tempDir, () => stateFor(SESSION_PATH), 'workspace-reversed-time'));
   try {
@@ -382,12 +305,8 @@ test('accounting clamps reversed provider timestamps before ledger persistence',
       outcome: 'succeeded',
     });
 
-    const record = stats.getBillableInvocationRecords().find(
-      (candidate) => candidate.sourceId === 'reversed-provider-time',
-    );
-    assert.ok(record);
-    assert.equal(record.startedAt, at(1_000));
-    assert.equal(record.endedAt, at(1_000));
+    assert.equal('getBillableInvocationRecords' in stats, false);
+    assert.deepEqual(await fs.readdir(tempDir), []);
   } finally {
     await stats.shutdown();
     await fs.rm(tempDir, { recursive: true, force: true });
