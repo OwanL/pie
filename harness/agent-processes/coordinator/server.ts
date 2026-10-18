@@ -11,6 +11,7 @@ import { resolveSessionIdentity } from '../../session-storage/ownership/session-
 import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
 import { cleanupSessionTempOutputManifests } from '../../../lib/temporary-files/session-temp-output-lifecycle.js';
 import { BackendAnalyticsActivation } from '../../../analytics/authority/backend-analytics-activation.js';
+import type { AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../lib/rpc/jsonl.js';
 import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-logging/error-message';
@@ -745,6 +746,7 @@ export class BackendServer {
     sessionCatalog?: SessionCatalog;
     /** Canonical analytics descriptor from the extension host. */
     analyticsActivation?: AnalyticsBackendDescriptor;
+    analyticsContext?: AnalyticsBackendContext;
     /** Injected coordinator budgets for the typed host close bridge (tests). */
     hostCloseAcceptTimeoutMs?: number;
     hostCloseCompleteTimeoutMs?: number;
@@ -764,7 +766,7 @@ export class BackendServer {
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
       throw new Error('backendGeneration must be a positive safe integer.');
     }
-    this.analyticsAuthority = options.analyticsActivation
+    this.analyticsAuthority = options.analyticsActivation || options.analyticsContext
       ? new BackendAnalyticsActivation(
           {
             agentDir: () => this.agentDir,
@@ -772,7 +774,7 @@ export class BackendServer {
             hostPid: () => this.hostPid,
             openWriterStore: canonicalSQLiteSessionLifecycleStore,
           },
-          { descriptor: options.analyticsActivation },
+          { descriptor: options.analyticsActivation, context: options.analyticsContext },
         )
       : undefined;
     this.hostPid = options.hostPid;
@@ -1078,12 +1080,12 @@ export class BackendServer {
     this.workerRuntimeRouter = new WorkerRuntimeRouter({
         supervisor: this.workerSupervisor!,
         coordinatorGeneration: this.backendGeneration,
-        ...(this.analyticsAuthority?.descriptor
+        ...(this.analyticsAuthority?.captureDescriptor
           ? {
               analyticsActivation: {
-                generationId: this.analyticsAuthority.descriptor.generationId,
-                buildId: this.analyticsAuthority.descriptor.buildId,
-                workspaceId: this.analyticsAuthority.descriptor.workspaceId,
+                generationId: this.analyticsAuthority.captureDescriptor.generationId,
+                buildId: this.analyticsAuthority.captureDescriptor.buildId,
+                workspaceId: this.analyticsAuthority.captureDescriptor.workspaceId,
               },
               ...(this.analyticsAuthority.admission && this.analyticsAuthority.identity && this.analyticsAuthority.stateDir
                 ? {
@@ -1236,6 +1238,7 @@ export class BackendServer {
       protocolVersion: PROTOCOL_VERSION,
       authPath,
       ...(this.analyticsAuthority?.descriptor ? { analyticsActivation: this.analyticsAuthority.descriptor } : {}),
+      ...(this.analyticsAuthority?.context ? { analyticsContext: this.analyticsAuthority.context } : {}),
     });
 
     this.startSessionCatalogPolling();

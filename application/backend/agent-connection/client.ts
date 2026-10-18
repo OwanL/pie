@@ -27,6 +27,7 @@ import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../conversation-state/effects/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
+import { assertAnalyticsBackendContext, sameAnalyticsBackendContext, type AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
 import { assertProtocolVersion, isEventEnvelope, isResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
@@ -44,6 +45,7 @@ export interface BackendStartOptions {
   sdkRuntimeSelection?: WorkspaceDevelopmentSdkSelection;
   /** Immutable canonical analytics authority snapshot for this generation. */
   analyticsActivation?: AnalyticsBackendDescriptor;
+  analyticsContext?: AnalyticsBackendContext;
 }
 
 export interface BackendClientOptions {
@@ -128,6 +130,7 @@ function validateBackendReadyPayload(
   payload: BackendReadyPayload,
   generation: number,
   expectedAnalyticsActivation: AnalyticsBackendDescriptor | undefined,
+  expectedAnalyticsContext: AnalyticsBackendContext | undefined,
 ): Error | undefined {
   try {
     assertProtocolVersion('backend.ready', payload.protocolVersion);
@@ -140,6 +143,9 @@ function validateBackendReadyPayload(
           ? 'Backend analytics activation descriptor mismatch.'
           : 'Backend unexpectedly advertised an analytics activation descriptor.',
       );
+    }
+    if (!sameAnalyticsBackendContext(payload.analyticsContext, expectedAnalyticsContext)) {
+      throw new Error('Backend analytics context mismatch.');
     }
     return undefined;
   } catch (error) {
@@ -545,7 +551,13 @@ export class BackendClient implements Disposable {
     const sdkRuntimeSelectionArgs = options.sdkRuntimeSelection
       ? ['--sdkRuntimeSelection', JSON.stringify(options.sdkRuntimeSelection)]
       : [];
-    const analyticsArgs = options.analyticsActivation
+    if (options.analyticsContext !== undefined) {
+      assertAnalyticsBackendContext(options.analyticsContext);
+      if (options.analyticsActivation !== undefined) throw new Error('Analytics context and activation descriptor are mutually exclusive.');
+    }
+    const analyticsArgs = options.analyticsContext
+      ? ['--analyticsContext', JSON.stringify(options.analyticsContext)]
+      : options.analyticsActivation
       ? [
           '--analyticsGenerationId', options.analyticsActivation.generationId,
           '--analyticsBuildId', options.analyticsActivation.buildId,
@@ -714,7 +726,7 @@ export class BackendClient implements Disposable {
       this.readyValidation = {
         generation,
         process: proc,
-        validate: (payload) => validateBackendReadyPayload(payload, generation, options.analyticsActivation),
+        validate: (payload) => validateBackendReadyPayload(payload, generation, options.analyticsActivation, options.analyticsContext),
         reject: (error) => {
           finishReject(error);
           this.forceStopProcess();
@@ -729,7 +741,7 @@ export class BackendClient implements Disposable {
 
         try {
           const payload = event.payload as BackendReadyPayload;
-          const validationError = validateBackendReadyPayload(payload, generation, options.analyticsActivation);
+          const validationError = validateBackendReadyPayload(payload, generation, options.analyticsActivation, options.analyticsContext);
           if (validationError) throw validationError;
           finishResolve(payload);
         } catch (error) {

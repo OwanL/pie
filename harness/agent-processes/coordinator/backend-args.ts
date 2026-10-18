@@ -1,3 +1,4 @@
+import { assertAnalyticsBackendContext, type AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import path from 'node:path';
 import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
@@ -22,6 +23,7 @@ interface BackendArgsCommon {
   /** Immutable canonical analytics authority snapshot, supplied only by the
    * production host after its readiness probe succeeds. */
   analyticsActivation?: AnalyticsBackendDescriptor;
+  analyticsContext?: AnalyticsBackendContext;
 }
 
 export type BackendArgs = BackendArgsCommon & (
@@ -55,6 +57,7 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
   let lifetimeFd: number | undefined;
   let backendGeneration = 1;
   const analyticsValues: Record<string, string> = {};
+  let analyticsContext: AnalyticsBackendContext | undefined;
   let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
   let sourceArtifactDescriptorSeen = false;
   let sdkRuntimeSelection: SdkRuntimeSelection | undefined;
@@ -63,6 +66,15 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
+    if (arg === '--analyticsContext') {
+      if (analyticsContext !== undefined) throw new Error('Duplicate --analyticsContext argument.');
+      if (!value || value.startsWith('--')) throw new Error('Missing value for --analyticsContext.');
+      const parsed: unknown = JSON.parse(value);
+      assertAnalyticsBackendContext(parsed);
+      analyticsContext = parsed;
+      index += 1;
+      continue;
+    }
     if (arg === '--sourceArtifactDescriptor') {
       if (sourceArtifactDescriptorSeen) throw new Error('Duplicate --sourceArtifactDescriptor argument.');
       if (sdkRuntimeSelectionSeen) throw new Error('Duplicate SDK runtime selection argument.');
@@ -205,6 +217,9 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
     };
   }
 
+  if (analyticsContext && suppliedAnalyticsFlags.length > 0) {
+    throw new Error('Analytics context and activation descriptor are mutually exclusive.');
+  }
   const common: BackendArgsCommon = {
     sdkPath,
     cwd,
@@ -212,6 +227,7 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
     ...(hostPid === undefined ? {} : { hostPid }),
     ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
     ...(analyticsActivation === undefined ? {} : { analyticsActivation }),
+    ...(analyticsContext === undefined ? {} : { analyticsContext }),
   };
   if (sourceArtifactDescriptor !== undefined) return { ...common, sourceArtifactDescriptor };
   return { ...common, sdkRuntimeSelection: sdkRuntimeSelection! };

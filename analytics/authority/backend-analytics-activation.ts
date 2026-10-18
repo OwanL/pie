@@ -13,6 +13,7 @@
  */
 
 import { resolvePieDataPaths } from '../../lib/data-root/pie-data-root.js';
+import { assertAnalyticsBackendContext, type AnalyticsBackendContext } from './backend-analytics-context.js';
 import { ActivationStore } from './activation-store.js';
 import type { AnalyticsBackendDescriptor } from './activation.js';
 import {
@@ -42,6 +43,7 @@ export interface BackendAnalyticsActivationOptions {
    * When present, startup validates it against the active manifest before any
    * writer admission is installed. */
   readonly descriptor?: AnalyticsBackendDescriptor;
+  readonly context?: AnalyticsBackendContext;
 }
 
 /**
@@ -66,6 +68,14 @@ export class BackendAnalyticsActivation {
     return this.options.descriptor;
   }
 
+  get context(): AnalyticsBackendContext | undefined {
+    return this.options.context;
+  }
+
+  get captureDescriptor(): AnalyticsBackendDescriptor | AnalyticsBackendContext | undefined {
+    return this.options.context ?? this.options.descriptor;
+  }
+
   get admission(): SessionLifecycleWriterAdmission | undefined {
     return this.writerAdmission;
   }
@@ -84,6 +94,11 @@ export class BackendAnalyticsActivation {
    * worker. Legacy direct callers remain valid while no canonical authority
    * is active. */
   validate(): void {
+    if (this.options.context !== undefined) {
+      if (this.options.descriptor !== undefined) throw new Error('Analytics context and activation descriptor are mutually exclusive.');
+      assertAnalyticsBackendContext(this.options.context);
+      return;
+    }
     const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: this.ports.agentDir(),
@@ -128,7 +143,8 @@ export class BackendAnalyticsActivation {
    * lifecycle registry identifies the extension-host boot; the analytics
    * generation is a separate authority identity). */
   openWriterAdmission(): void {
-    const descriptor = this.options.descriptor;
+    this.validate();
+    const descriptor = this.captureDescriptor;
     if (!descriptor) return;
     const hostPid = this.ports.hostPid();
     if (typeof hostPid !== 'number' || !Number.isSafeInteger(hostPid) || hostPid <= 0) {

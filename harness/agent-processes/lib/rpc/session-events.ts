@@ -143,6 +143,7 @@ export interface BackendReadyPayload {
   /** Echo of the immutable canonical analytics authority snapshot, when the
    * host started this backend under canonical analytics authority. */
   analyticsActivation?: import('../../../../analytics/authority/activation.js').AnalyticsBackendDescriptor;
+  analyticsContext?: import('../../../../analytics/authority/backend-analytics-context.js').AnalyticsBackendContext;
 }
 
 import type { SessionCapabilityFacts } from './session-capability-facts.js';

@@ -57,6 +57,7 @@ import { resolveLiveDetail } from '../transcript-delivery/detail-retrieval';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../../harness/agent-processes/lib/rpc/subagent-detail';
 import { DetailSubscriptionService } from '../transcript-delivery/detail-subscriptions';
 import { PrivateSessionCleanup } from './private-session-cleanup';
+import type { AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import type { ProviderManagementRequest, ProviderManagementResponse } from '../../../harness/model-providers/management/contracts.js';
 import type { HostDisposable, SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
@@ -120,6 +121,7 @@ export class SessionService implements HostDisposable {
     private readonly detailHostInfo: DetailHostInfo = DEFAULT_DETAIL_HOST_INFO,
     private readonly getAnalyticsBackendDescriptor: () => AnalyticsBackendDescriptor | undefined = () => undefined,
     onQuestionRequested?: () => void,
+    private readonly getAnalyticsBackendContext: () => AnalyticsBackendContext | undefined = () => undefined,
   ) {
     this.getArchState = getArchState;
     this.dispatchArch = dispatchArch;
@@ -287,6 +289,7 @@ export class SessionService implements HostDisposable {
         ? { ...event, backendGeneration: this.backend.getGeneration() }
         : event),
       getAnalyticsBackendDescriptor: this.getAnalyticsBackendDescriptor,
+      getAnalyticsBackendContext: this.getAnalyticsBackendContext,
     });
   }
 

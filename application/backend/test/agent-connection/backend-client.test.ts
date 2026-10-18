@@ -23,7 +23,7 @@ test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => 
 class ImmediateReadyStream extends PassThrough {
   private emitted = false;
 
-  constructor(private readonly analyticsActivation?: Record<string, unknown>) {
+  constructor(private readonly analyticsActivation?: Record<string, unknown>, private readonly analyticsContext?: Record<string, unknown>) {
     super();
   }
 
@@ -40,6 +40,7 @@ class ImmediateReadyStream extends PassThrough {
           protocolVersion: PROTOCOL_VERSION,
           authPath: '/mock/auth.json',
           ...(this.analyticsActivation ? { analyticsActivation: this.analyticsActivation } : {}),
+          ...(this.analyticsContext ? { analyticsContext: this.analyticsContext } : {}),
         },
       }) + '\n'));
     }
@@ -53,9 +54,9 @@ class FakeChildProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   killCount = 0;
 
-  constructor(analyticsActivation?: Record<string, unknown>) {
+  constructor(analyticsActivation?: Record<string, unknown>, analyticsContext?: Record<string, unknown>) {
     super();
-    this.stdout = new ImmediateReadyStream(analyticsActivation);
+    this.stdout = new ImmediateReadyStream(analyticsActivation, analyticsContext);
   }
 
   kill(): boolean {
@@ -262,6 +263,22 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(mismatchedProc.killCount, 1, 'the mismatched child is stopped before it can rearm consumers');
     mismatchedEvents.dispose();
     mismatchedClient.dispose();
+
+    const context = { mode: 'canonical-only' as const, generationId: 'capture', buildId: 'capture-build', workspaceId: 'workspace', hostInstanceId: 'host' };
+    nextProc = new FakeChildProcess(undefined, context) as unknown as cp.ChildProcess;
+    const contextClient = new BackendClient({ orphanReaper: noOrphans });
+    const ready = await contextClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context });
+    assert.deepEqual(ready.analyticsContext, context);
+    assert.deepEqual(spawnArgs?.slice(-2), ['--analyticsContext', JSON.stringify(context)]);
+    contextClient.dispose();
+    for (const received of [{ ...context, hostInstanceId: 'other' }, { mode: 'canonical-only', generationId: 'capture' }]) {
+      const proc = new FakeChildProcess(undefined, received);
+      nextProc = proc as unknown as cp.ChildProcess;
+      const rejectedClient = new BackendClient({ orphanReaper: noOrphans });
+      await assert.rejects(rejectedClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context }), /analytics context mismatch/);
+      assert.equal(proc.killCount, 1);
+      rejectedClient.dispose();
+    }
 
     const correlatedFailures: any[] = [];
     const failureSubscription = client.onDidCorrelatedRequestFail((failure) => correlatedFailures.push(failure));

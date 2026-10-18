@@ -137,6 +137,20 @@ test('BackendServer direct workspace-development selection also requires the exp
   }
 });
 
+test('parseArgs carries canonical-only context without activation evidence and rejects partial context', () => {
+  const context = { mode: 'canonical-only', generationId: 'capture', buildId: 'build', workspaceId: 'workspace', hostInstanceId: 'host' };
+  const args = [...sourceArgs, '--analyticsContext', JSON.stringify(context)];
+  assert.deepEqual(parseArgs(args).analyticsContext, context);
+  assert.equal(parseArgs(args).analyticsActivation, undefined);
+  assert.equal(parseArgs(sourceArgs).analyticsContext, undefined);
+  assert.throws(() => parseArgs([...args, '--analyticsContext', JSON.stringify(context)]), /Duplicate/);
+  for (const field of Object.keys(context)) {
+    const partial = { ...context } as Record<string, unknown>;
+    delete partial[field];
+    assert.throws(() => parseArgs([...sourceArgs, '--analyticsContext', JSON.stringify(partial)]), /context/);
+  }
+});
+
 test('parseArgs carries a complete analytics descriptor and rejects partial or malformed snapshots', () => {
   const args = [
     ...sourceArgs, '--cwd', '/work',
@@ -155,6 +169,7 @@ test('parseArgs carries a complete analytics descriptor and rejects partial or m
     workspaceId: 'workspace-1',
     hostInstanceId: 'host-1',
   });
+  assert.throws(() => parseArgs([...args, '--analyticsContext', JSON.stringify({ mode: 'canonical-only', generationId: 'capture', buildId: 'build', workspaceId: 'workspace', hostInstanceId: 'host' })]), /mutually exclusive/);
   assert.throws(
     () => parseArgs(args.slice(0, -2)),
     /must provide every field/,
