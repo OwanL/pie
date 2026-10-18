@@ -248,8 +248,6 @@ test('ordinary Moon inputs cover declared consumer closures without downstream t
   const projects = workspaceProjects();
   assert.deepEqual(projects.analytics.config.dependsOn, ['root'], 'test fixtures must not create analytics → harness');
   assert.ok(projects.vscode.config.dependsOn.includes('frontend'), 'the renderer build is an explicit host dependency');
-  assert.deepEqual(projects.analysis.config.dependsOn, ['analytics', 'harness', 'root'],
-    'analysis imports analytics contracts and harness pricing at runtime');
   for (const [id, { config }] of Object.entries(projects)) {
     const inputs = config.tasks.test.inputs;
     if (explicitNativeTestTsconfigs(config).length > 0) assertExplicitTsconfigInputs(id, config);
@@ -260,9 +258,6 @@ test('ordinary Moon inputs cover declared consumer closures without downstream t
     assert.ok(inputs.includes('/lib/**/*'), `${id}:test conservatively covers neutral root libraries`);
     assert.ok(inputs.includes('@globs(lifecycle)'));
     assert.ok(inputs.includes('@globs(protected)'));
-    if (id !== 'analysis' && inputs.includes('/analytics/**/*')) {
-      assert.ok(inputs.includes('!/analytics/analysis/**/*'), `${id} does not own analysis`);
-    }
     if (id !== 'pi') assert.ok((config.tasks.test.deps ?? []).every((dep) => dep === 'pi:build'),
       `${id}:test has compilation prerequisites only, never dependency tests`);
   }
@@ -295,7 +290,7 @@ test('pinned Moon executes affected input cases with NOOP tasks and no artifact 
   const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-moon-inputs-'));
   const all = Object.keys(projects).sort();
   const common = ['analytics', 'app-common', 'backend', 'browser', 'frontend', 'host-common', 'scripts', 'standalone', 'vscode'];
-  const sdk = ['analysis', 'analytics', 'app-common', 'backend', 'browser', 'computer-use', 'frontend', 'harness', 'host-common', 'pi', 'playwright', 'scripts', 'standalone', 'vscode'];
+  const sdk = ['analytics', 'app-common', 'backend', 'browser', 'computer-use', 'frontend', 'harness', 'host-common', 'pi', 'playwright', 'scripts', 'standalone', 'vscode'];
   const cases = [
     ...LIFECYCLE_PIN_FILES.map((file) => [file, all]),
     ['scripts/verification/test-node.mjs', all],
@@ -305,8 +300,6 @@ test('pinned Moon executes affected input cases with NOOP tasks and no artifact 
     ['harness/pi/packages/coding-agent/src/index.ts', sdk],
     ['harness/pi/packages/ai/src/index.ts', sdk],
     ['analytics/contracts/tool-call-analysis-input.ts', sdk.filter((id) => id !== 'pi')],
-    ['analytics/analysis/test/duckdb-query.test.ts', ['analysis']],
-    ['analytics/analysis/scripts/source.ts', ['analysis', 'analytics']],
     ['harness/tools/subagent/selection.ts', sdk.filter((id) => id !== 'pi')],
     ['application/hosts/vscode/tsconfig.json', ['analytics', 'app-common', 'backend', 'browser', 'computer-use', 'frontend', 'harness', 'host-common', 'playwright', 'scripts', 'standalone', 'vscode']],
     ['harness/agent-processes/lib/rpc/jsonl.ts', [...sdk.filter((id) => id !== 'pi'), 'root']],

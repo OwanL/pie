@@ -13,8 +13,8 @@ import { DEFAULT_CHILD_PROCESS_TIMEOUT_MS } from '../../lib/process-watchdog.mjs
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 test('parseArgs accepts repeatable projects and concurrency', () => {
-  assert.deepEqual(parseArgs(['--project', 'extension', '--project=analysis', '--concurrency', '2']), {
-    ids: ['extension', 'analysis'], concurrency: 2, list: false, help: false,
+  assert.deepEqual(parseArgs(['--project', 'extension', '--project=analytics-runtime', '--concurrency', '2']), {
+    ids: ['extension', 'analytics-runtime'], concurrency: 2, list: false, help: false,
   });
 });
 
@@ -55,10 +55,6 @@ test('resolveProjectCompiler resolves the registry-declared compiler owner-relat
   const extensionTsc = resolveProjectCompiler({ compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' });
   assert.equal(extensionTsc, resolveTypeScriptCompiler());
   assert.equal(path.isAbsolute(extensionTsc), true);
-  assert.equal(
-    resolveProjectCompiler({ compiler: 'analytics/analysis/node_modules/typescript/bin/tsc' }),
-    resolveTypeScriptCompiler({ dependencyOwnerRoot: path.join(repoRoot, 'analytics/analysis') }),
-  );
 
   // Absolute declarations (future-root proof projects) pass through unchanged.
   const absolute = path.join(os.tmpdir(), 'pie-tsc-proof', 'tsc');
@@ -232,7 +228,7 @@ test('one awaited tooling verification supplies every project before overlays or
   let signalDisposed = false;
   let completionConfirmed = false;
   const target = {};
-  const pending = main(['--project', 'extension', '--project', 'analysis'], {
+  const pending = main(['--project', 'extension', '--project', 'analytics-runtime'], {
     ...fixture.dependencies,
     process: target,
     abortOnProcessSignals: () => ({ signal: new AbortController().signal, dispose: () => { signalDisposed = true; } }),

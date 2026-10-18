@@ -1,7 +1,6 @@
 packages:
   - '.'
   - application/hosts/vscode
-  - analytics/analysis
   - extensions/computer-use
   - extensions/playwright
   - harness/pi/packages/ai

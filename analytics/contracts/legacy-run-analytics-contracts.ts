@@ -1,15 +1,7 @@
 /**
  * Shared run-analytics contracts: the canonical type definitions for the
- * run-analytics schema exchanged between the extension host (producer) and the
- * analysis tree (consumer).
- *
- * Previously these types were duplicated across
- * `extension/src/host/run-analytics/types.ts` (producer, canonical) and
- * `analytics/analysis/scripts/contracts.ts` (consumer, stale mirror), with leaf
- * primitives scattered across `extension/src/shared/protocol/*.ts` and
- * `extension/src/shared/tool-call-analysis/verification.ts`. They are now
- * hoisted here as the single source of truth; both consumers re-export from
- * this module so existing import sites stay unchanged.
+ * legacy run-analytics schema. Producers and readers import/re-export these
+ * definitions from this single contract owner.
  *
  * The four kind unions (`ToolFailureKind`, `ToolResultIssueKind`,
  * `TreatmentChangeKind`, `VerificationCommandKind`) remain canonical in
@@ -511,7 +503,7 @@ export interface RunSnapshot {
    * Stable identifier of the harness (extension + agent stack) that recorded
    * this run, stamped at run start. Absent on historical runs recorded before
    * stamping existed; consumers attribute runs to the current harness vs.
-   * other harnesses via the cohort classifier (see `analysis/scripts/cohorts.ts`).
+   * other harnesses via their cohort classifiers.
    */
   harnessRevision?: string;
   /**

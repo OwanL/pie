@@ -224,7 +224,7 @@ export function generateModelsJson(source) {
 
 /**
  * Generate the historical/retired model pricing catalog consumed by analysis
- * (`analytics/analysis/model-pricing-history.json`). Each entry mirrors the models.json
+ * (`model-pricing-history.json`). Each entry mirrors the models.json
  * model shape (`cost` block) plus its `provider` so the analysis pricing/family
  * loaders can merge retired identities as a fallback behind active pricing.
  * Retired models are deliberately excluded from `models.json`, `profileOrder`,
@@ -349,7 +349,7 @@ const DERIVED_PATHS = {
   modelsJson: 'models.json',
   modelProfilesYaml: 'model-profiles.yaml',
   settingsJson: 'settings.json',
-  pricingHistoryJson: 'analytics/analysis/model-pricing-history.json',
+  pricingHistoryJson: 'model-pricing-history.json',
 };
 
 /** Parse a derived file (JSON or YAML) into a JS value for semantic compare. */

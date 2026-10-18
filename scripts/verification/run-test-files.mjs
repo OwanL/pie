@@ -11,7 +11,6 @@ import { OWNERSHIP_STARTUP_TOKEN } from './ownership-startup.mjs';
 // testCwd metadata, routing over every registered source/test root (including
 // declared distributed future roots, which classify like any package dir):
 //  - application/hosts/vscode/ -> cwd application/hosts/vscode/, tsx = registry-selected local/root CLI
-//  - analytics/analysis/       -> cwd analytics/analysis/,        tsx = analytics/analysis/node_modules/tsx
 //  - scripts/**/test/ -> cwd repoRoot,            tsx = node_modules/tsx (root)
 //  - extensions/* and tools/* -> cwd repoRoot, tsx = node_modules/tsx (root)
 //
@@ -184,8 +183,8 @@ export function classifyTestFile(repoRoot, input) {
     );
   }
   const { id } = directive;
-  // Repo-root packages declare no testCwd; application/hosts/vscode and
-  // analytics/analysis run with their package-local cwd. This also lets
+  // Repo-root packages declare no testCwd; application/hosts/vscode runs
+  // with its package-local cwd. This also lets
   // harness/tools/ask-user remain in the extensions test group without
   // pretending its tests live in extensions/.
   const packageEntry = resolvePackageEntry(id);
@@ -333,7 +332,7 @@ function printHelp() {
     `Usage: node scripts/verification/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
       `(fast mode: parallel files, no coverage; up to ${DEFAULT_GROUP_CONCURRENCY} package groups at once). Classifies each path into\n` +
-      `application/hosts/vscode/, analytics/analysis/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
+      `application/hosts/vscode/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
       `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
       `Options:\n` +
       `  --help, -h          Show this help.\n` +
@@ -343,7 +342,7 @@ function printHelp() {
       `  --                  Treat the rest of the args as file paths.\n\n` +
       `Examples:\n` +
       `  node scripts/verification/run-test-files.mjs application/frontend/test/components/app-smoke.test.ts\n` +
-      `  node scripts/verification/run-test-files.mjs harness/tools/subagent/test/schema.test.ts analytics/analysis/test/pricing.test.ts\n`,
+      `  node scripts/verification/run-test-files.mjs harness/tools/subagent/test/schema.test.ts\n`,
   );
 }
 

@@ -142,9 +142,8 @@ test('inferRepoRoot resolves to the pie repo root', () => {
 });
 
 test('resolveLocalTsx finds the package-local tsx cli for each cwd', () => {
-  // The host owns extension test dependencies; analytics/analysis ships its own tsx, extensions/* use root.
+  // The host owns extension test dependencies; extensions/* use root.
   assert.match(fwd(resolveLocalTsx(path.join(repoRoot, 'application', 'hosts', 'vscode'))), /application\/hosts\/vscode\/node_modules\/tsx\/dist\/cli\.mjs$/);
-  assert.match(fwd(resolveLocalTsx(path.join(repoRoot, 'analytics/analysis'))), /analytics\/analysis\/node_modules\/tsx\/dist\/cli\.mjs$/);
   assert.match(fwd(resolveLocalTsx(repoRoot)), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
@@ -164,8 +163,8 @@ test('normalizeRepoRelative converts absolute and relative inputs to repo-relati
   assert.equal(rel.repoRel, 'extension/test/webview/components/app-smoke.test.ts');
   assert.ok(path.isAbsolute(rel.abs));
 
-  const abs = normalizeRepoRelative(repoRoot, path.join(repoRoot, 'analytics/analysis', 'test', 'pricing.test.ts'));
-  assert.equal(abs.repoRel, 'analytics/analysis/test/pricing.test.ts');
+  const abs = normalizeRepoRelative(repoRoot, path.join(repoRoot, 'scripts', 'verification', 'test', 'run-test-files.test.mjs'));
+  assert.equal(abs.repoRel, 'scripts/verification/test/run-test-files.test.mjs');
 });
 
 test('normalizeRepoRelative rejects paths outside the repo', () => {
@@ -211,14 +210,6 @@ test('classifyTestFile routes application host composition tests through analyti
   assert.equal(d.id, 'analytics-runtime');
   assert.equal(d.includeOwnerDependencies, true);
   assert.equal(d.tsxConfig, 'application/hosts/vscode/tsconfig.json');
-});
-
-test('classifyTestFile classifies the retained analytics workspace (cwd=analytics/analysis/)', () => {
-  const d = classifyTestFile(repoRoot, 'analytics/analysis/test/pricing.test.ts');
-  assert.equal(d.id, 'analysis');
-  assert.equal(fwd(d.cwd), fwd(path.join(repoRoot, 'analytics/analysis')));
-  assert.equal(d.relativeFilePath, 'test/pricing.test.ts');
-  assert.match(fwd(d.tsxBin), /analytics\/analysis\/node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
 test('classifyTestFile keeps script tests repo-rooted like the scripts package gate', () => {
@@ -283,9 +274,8 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
     'test/integration/dynamic-tool-activation.artifact.test.ts',
     'harness/tools/subagent/test/schema.test.ts',
     'harness/agent-instructions/agent-discovery/test/agents.test.ts',
-    'analytics/analysis/test/pricing.test.ts',
   ]);
-  assert.deepEqual(groups.map((g) => g.id), ['analysis', 'analytics-runtime', 'extension', 'skill-pruner', 'subagent']);
+  assert.deepEqual(groups.map((g) => g.id), ['analytics-runtime', 'extension', 'skill-pruner', 'subagent']);
   const analytics = groups.find((g) => g.id === 'analytics-runtime');
   assert.equal(analytics.includeOwnerDependencies, true);
   assert.equal(analytics.tsxConfig, 'application/hosts/vscode/tsconfig.json');

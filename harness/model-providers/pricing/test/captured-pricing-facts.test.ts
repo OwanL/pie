@@ -22,9 +22,8 @@ test('loader captures rates from the relocated generated historical pricing cata
   const agentDir = fixtureAgentDir();
   try {
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(CATALOG));
-    // The generated history catalog moved with the tracked analysis
-    // workspace (B6); the retired top-level analysis path must not be read.
-    const historyPath = path.join(agentDir, 'analytics', 'analysis', 'model-pricing-history.json');
+    // Generated history lives at the config root, independent of analysis.
+    const historyPath = path.join(agentDir, 'model-pricing-history.json');
     mkdirSync(path.dirname(historyPath), { recursive: true });
     writeFileSync(historyPath, JSON.stringify({
       models: [{ provider: 'provider-a', id: 'retired-model', cost: { input: 5, output: 6, cacheRead: 7, cacheWrite: 8 } }],
@@ -78,7 +77,7 @@ test('loader ignores a malformed or missing relocated history catalog', () => {
   const agentDir = fixtureAgentDir();
   try {
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(CATALOG));
-    const historyPath = path.join(agentDir, 'analytics', 'analysis', 'model-pricing-history.json');
+    const historyPath = path.join(agentDir, 'model-pricing-history.json');
     mkdirSync(path.dirname(historyPath), { recursive: true });
     writeFileSync(historyPath, 'not json');
 

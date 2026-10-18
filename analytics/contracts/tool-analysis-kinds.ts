@@ -3,15 +3,9 @@
  * verification commands, tool failures, non-success result issues, and
  * treatment changes.
  *
- * This is the single source of truth for the four kind unions that were
- * previously duplicated across the extension host tree
- * (`extension/src/shared/tool-call-analysis/` + `extension/src/host/run-analytics/types.ts`)
- * and the retained analysis workspace (`analytics/analysis/scripts/contracts.ts`). Both consumers
- * import/re-export from here, so this remains the single contract owner.
- *
- * Only the type unions live here — the `*_KINDS` enumerated-value arrays and
- * the coercion functions remain in their per-package consumers (they are not
- * byte-identical across trees and were intentionally left duplicated).
+ * Consumers import/re-export the four kind unions from this single contract
+ * owner. Enumerated-value arrays and coercion functions remain with their
+ * consumers.
  *
  * This module is pure TypeScript (no Node- or browser-only APIs) and is
  * authored under `verbatimModuleSyntax` so it is portable to all consumers

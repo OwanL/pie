@@ -5,8 +5,7 @@
 // `lib/structured-logging/jsonl-writer.ts` (JsonlWriter); this module defines the event shape
 // and recording API.
 //
-// The analysis pipeline (analytics/analysis/scripts/source.ts readToolResultPruningLog)
-// ingests this file. Each event records which rules fired and the before/after
+// Each event records which rules fired and the before/after
 // token counts, so §9.3 ("instrument before/after token counts per rule") is
 // answered per-result — the foundation for deciding which lossy rules are worth
 // shipping and whether any starved the agent.

@@ -15,10 +15,6 @@
  *     attribution would need baseline+delta + a host-side RPC and is deliberately
  *     out of scope).
  *
- * The analytics pipeline reads this with `readWarmBashLog` (analysis/scripts/
- * source.ts) and joins rewrite events to runs via `hashToPrefix(sessionId, 16)`,
- * the same mechanism pruning signals use.
- *
  * Note: before/after command text may include sensitive search patterns/paths —
  * the same trade-off existing pruning/tool-result-pruning logs already accept.
  */

@@ -1,11 +1,8 @@
 /**
  * Shared model token-pricing core: types, parser, and normalization.
  *
- * This is the IDENTICAL core extracted from the three previously-triplicated
- * pricing modules (`harness/tools/subagent/pricing.ts`, `harness/model-providers/pricing/pricing.ts`,
- * `analytics/analysis/scripts/pricing.ts`). Only the behavior-preserving common core lives
- * here; per-package loaders and cost functions (which differ by consumer policy)
- * remain as thin shims in each consumer.
+ * Provider and subagent pricing share this core. Per-package loaders and cost
+ * functions remain separate where consumer policies differ.
  *
  * ## Units & semantics
  *

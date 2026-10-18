@@ -26,7 +26,7 @@ export interface CapturedPricingFactsLoaderDeps {
 
 /** Generated historical pricing catalog, relocated with the tracked analysis
  *  workspace (B6). Optional for portable/custom agent dirs. */
-const HISTORICAL_PRICING_RELATIVE_PATH = path.join('analytics', 'analysis', 'model-pricing-history.json');
+const HISTORICAL_PRICING_RELATIVE_PATH = path.join('model-pricing-history.json');
 
 /** Stat-signature cached, synchronous loader for captured pricing facts. The
  *  signature covers the active catalog stat so repeated settlements do not

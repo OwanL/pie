@@ -11,7 +11,6 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 | [`harness/tools/`](harness/tools/README.md) | Explicit Pie-owned tool catalog, tool implementations, and package integrations | Extension discovery adapters or backend-injected factories; backend composition lives in [`harness/agent-processes/coordinator/backend-tools.ts`](harness/agent-processes/coordinator/backend-tools.ts) |
 | [`harness/session-storage/`](harness/session-storage), [`harness/model-providers/`](harness/model-providers), [`harness/agent-processes/`](harness/agent-processes) | Owner packages for session persistence, provider catalogs/policies, and agent-process workers/helpers; cross-owner integration gates remain under [`test/integration/`](test/integration) | Internal runtime and test owners |
 | [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills) | Pi discovery adapters and middleware; the skill-pruner implementation lives in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Auto-discovered by `pi` from the agent directory's `extensions/` directory |
-| [`analytics/analysis/`](analytics/analysis) | Retained local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
 | [`harness/agent-instructions/`](harness/agent-instructions) — authored [`agents/`](harness/agent-instructions/agents), [`skills/`](harness/agent-instructions/skills), and [`APPEND_SYSTEM.md`](harness/agent-instructions/APPEND_SYSTEM.md), plus [`settings.json`](settings.json) | Maintainer's personal pi config; selector policy/state is in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Reference / example only |
 | [`data/`](data), [`auth.json`](#) | Local runtime/auth data | Local-only; excluded from the portable config |
 | [`docs/`](docs) | Architecture, contracts, plans, operations, and research | Internal |
@@ -308,17 +307,7 @@ Scope and limits: the coordinator is loopback-only (never reachable over LAN) an
 
 ### Query local analytics
 
-Named batch queries run against the retained local DuckDB workspace, which reads privacy-safe legacy run-analytics exports and storage stores:
-
-```bash
-# from repo root
-npm run analytics:build-db
-npm run analytics:query -- --name core_runs
-```
-
-Other analytics helpers from the repo root: `analytics:typecheck`, `analytics:test`, and `analytics:validate`.
-
-Runtime usage/cost questions are answered from the canonical SQLite store instead (see [Persistence and storage](#persistence-and-storage) and the [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md)); the DuckDB workspace never reads or writes it.
+For runtime usage/cost questions under canonical authority, use the [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md). See [Persistence and storage](#persistence-and-storage) for authority selection. The legacy DuckDB batch-query workspace is retired; local databases and exports are not removed.
 
 ## Persistence and storage
 
@@ -354,4 +343,3 @@ The host logs resolved storage paths in its `backend` log channel entry, `starti
 - [docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
 - [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md) — querying the canonical analytics store
 - [UI design philosophy](docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](docs/operations/GUI-DEVELOPMENT.md)
-- [analytics/analysis/README.md](analytics/analysis/README.md) — local DuckDB analytics workspace

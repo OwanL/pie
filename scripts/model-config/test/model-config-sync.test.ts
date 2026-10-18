@@ -76,7 +76,7 @@ test('generated model-profiles.yaml matches the committed file', async () => {
 test('generated historical pricing matches the committed analysis artifact', async () => {
   const mod = await loadSyncModule();
   const out = await mod.loadAndGenerate(repoRoot);
-  const committed = parseCommitted('analytics/analysis/model-pricing-history.json');
+  const committed = parseCommitted('model-pricing-history.json');
   assert.deepStrictEqual(out.pricingHistoryJson, committed, 'historical pricing drift');
 });
 

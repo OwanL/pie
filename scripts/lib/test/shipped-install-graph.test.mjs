@@ -42,7 +42,7 @@ test('main production deploy lock resolves all four Pi packages from the workspa
 
 test('main owners use shared pnpm importers, not secondary npm locks', () => {
   const lock = parseYaml(readFileSync(path.join(repositoryRoot, 'pnpm-lock.yaml'), 'utf8'));
-  for (const owner of ['.', 'application/hosts/vscode', 'analytics/analysis', 'extensions/computer-use', 'extensions/playwright']) {
+  for (const owner of ['.', 'application/hosts/vscode', 'extensions/computer-use', 'extensions/playwright']) {
     assert.equal(existsSync(path.join(repositoryRoot, owner, 'package-lock.json')), false, `${owner} must not have a secondary npm lock`);
     const manifest = readJson(`${owner}/package.json`);
     const importer = lock.importers?.[owner];
@@ -55,6 +55,25 @@ test('main owners use shared pnpm importers, not secondary npm locks', () => {
       }
     }
   }
+});
+
+test('retired query workspace leaves no DuckDB importer or lock records and all dependency edges resolve', () => {
+  const lock = parseYaml(readFileSync(path.join(repositoryRoot, 'pnpm-lock.yaml'), 'utf8'));
+  assert.equal(lock.importers['analytics/analysis'], undefined);
+  for (const records of [lock.packages, lock.snapshots]) {
+    assert.ok(Object.keys(records).every((key) => !key.startsWith('@duckdb/')));
+  }
+  const checkEdges = (owner, record, importer = false) => {
+    for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+      for (const [name, dependency] of Object.entries(record[section] ?? {})) {
+        const version = importer ? dependency.version : dependency;
+        if (version.startsWith('link:')) continue;
+        assert.ok(lock.snapshots[`${name}@${version}`], `${owner}: ${name}@${version} has a snapshot`);
+      }
+    }
+  };
+  for (const [owner, importer] of Object.entries(lock.importers)) checkEdges(owner, importer, true);
+  for (const [owner, snapshot] of Object.entries(lock.snapshots)) checkEdges(owner, snapshot);
 });
 
 test('tool extension peers stay optional and are not independently installed by their importers', () => {

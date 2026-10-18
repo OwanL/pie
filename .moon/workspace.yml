@@ -14,7 +14,6 @@ projects:
     harness: 'harness'
     computer-use: 'extensions/computer-use'
     playwright: 'extensions/playwright'
-    analysis: 'analytics/analysis'
     scripts: 'scripts'
 hasher:
   ignorePatterns:

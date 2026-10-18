@@ -34,7 +34,7 @@ export class AggregatePricingCache {
     const modelsJsonPath = path.join(agentDir, 'models.json');
     // The generated historical pricing catalog moved with the tracked
     // analysis workspace (B6).
-    const historicalPricingPath = path.join(agentDir, 'analytics', 'analysis', 'model-pricing-history.json');
+    const historicalPricingPath = path.join(agentDir, 'model-pricing-history.json');
     let signature: string;
     try {
       const stat = await fsAsync.stat(modelsJsonPath);

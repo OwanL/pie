@@ -60,7 +60,7 @@ function loadCatalog(agentDir: string): PricingCatalogCache | undefined {
   const modelsPath = path.join(agentDir, 'models.json');
   // The generated historical pricing catalog moved with the tracked analysis
   // workspace (B6).
-  const historyPath = path.join(agentDir, 'analytics', 'analysis', 'model-pricing-history.json');
+  const historyPath = path.join(agentDir, 'model-pricing-history.json');
   let stat: fs.Stats;
   try {
     stat = fs.statSync(modelsPath);

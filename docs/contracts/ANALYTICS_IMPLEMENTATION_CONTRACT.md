@@ -150,13 +150,10 @@ reads remain visibly stale, while deletion/privacy/identity fences remain fail-c
 scopes, coverage, and example SQL belong to
 [`skills/query-analytics/SKILL.md`](../../harness/agent-instructions/skills/query-analytics/SKILL.md).
 
-## 6. Retained local analysis tooling
+## 6. Legacy exports
 
-[`analytics/analysis/`](../../analytics/analysis/README.md) is a separate, retained local workspace: it reads privacy-safe
-run-analytics exports, legacy storage stores, and the legacy side-channel JSONL sinks, and builds a
-DuckDB database for named batch queries. It has no dashboard or static-site pipeline, is not the
-runtime query path, and never writes the canonical store. Removing it is not required for the
-canonical authority to be active.
+The local DuckDB batch-query workspace is retired. This does not activate canonical authority,
+change capture or accounting, or delete local databases, exports, or legacy stores.
 
 The legacy run store automatically refreshes a `run-analytics.json` export alongside its
 JSONL/checkpoint files. The optional VS Code setting `pie.experimentAssignment` labels new

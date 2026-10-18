@@ -2056,7 +2056,7 @@ providers:
 #
 # These entries are NOT added to `profileOrder` or the active picker — they are
 # read-only pricing/attribution metadata. `scripts/model-config/sync-models.mjs` emits them
-# to `analytics/analysis/model-pricing-history.json`, which the analysis pricing/family
+# to `model-pricing-history.json`, which the analysis pricing/family
 # loaders merge as a fallback: active provider-specific pricing always wins;
 # historical entries only fill identities missing from the active catalog.
 #

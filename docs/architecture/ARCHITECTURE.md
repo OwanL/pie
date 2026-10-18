@@ -89,7 +89,7 @@ Transcript JSONL is durable session truth. Session catalog indexes and browse ca
 
 Analytics have exactly one active authority: legacy stores by default, or the canonical SQLite store selected by a validated activation manifest. Capture is never duplicated across those authorities. Analytics persistence does not block agent execution; usage, pricing provenance, and activity timing remain separate facts rather than estimates reconstructed from transcript display.
 
-The [analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns authority selection, data-root resolution, privacy, and the separately gated session-storage cutoff. Source support does not establish that an installation has activated either gate. The [local analysis workspace](../../analytics/analysis/README.md) reads legacy exports, not the canonical store.
+The [analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns authority selection, data-root resolution, privacy, and the separately gated session-storage cutoff. Source support does not establish that an installation has activated either gate.
 
 ## Where to make changes
 

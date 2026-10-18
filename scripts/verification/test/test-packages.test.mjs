@@ -19,7 +19,7 @@ import {
 
 test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and routed test roots', () => {
   const expected = [
-    'extension', 'analysis', 'scripts', 'lib',
+    'extension', 'scripts', 'lib',
     'cwd-skills', 'safeguard', 'skill-pruner', 'model-provider-authentication', 'model-provider-concurrency', 'model-provider-pricing', 'model-provider-traffic-observation', 'agent-processes-coordinator', 'session-control', 'tool-catalog', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-guard', 'tool-result-pruner',
     'deferred-triggers', 'session-changes', 'computer-use',
@@ -31,7 +31,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 221, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  assert.equal(PACKAGE_DIRECTIVES.length, 218, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
   for (const file of [
     'application/lib/composer/local-message-id.ts',
     'application/lib/session-tabs/tab-behavior.ts',
@@ -86,15 +86,7 @@ test('SDK-independent focused tests are an exact file allowlist owned by extensi
   ]) assert.equal(isSdkIndependentTestFile(file), false, file);
 });
 
-test('analysis owns the relocated workspace and keeps the retired source path routable', () => {
-  const analysis = resolvePackageEntry('analysis');
-  assert.deepEqual(packageSourceRoots(analysis), ['analytics/analysis', 'analysis']);
-  assert.deepEqual(packageTestRoots(analysis), ['analytics/analysis/test']);
-  // The retired path still routes changed/deleted files to the same verification id.
-  assert.equal(classifyFileToPackage('analysis/test/pricing.test.ts'), 'analysis');
-  assert.equal(classifyFileToPackage('analytics/analysis/test/pricing.test.ts'), 'analysis');
-  assert.equal(classifyFileToPackage('analytics/analysis/scripts/build-db.ts'), 'analysis');
-  assert.equal(classifyFileToPackage('analytics/analysis/README.md'), 'analysis');
+test('shared integration suites retain their distinct owners', () => {
   // Shared root integration suites route by exact file to their distinct owners.
   assert.equal(classifyFileToPackage('test/integration/dynamic-tool-activation.artifact.test.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('test/integration/tool-catalog.test.ts'), 'tool-catalog');
@@ -155,8 +147,6 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('test/integration/backend-expected-cancellation-log.test.ts'), 'agent-processes-coordinator');
   assert.equal(classifyFileToPackage('test/integration/real-sdk-image-persistence.artifact.test.ts'), 'session-storage-transcripts');
   assert.equal(classifyFileToPackage('test/integration/sdk-terminal-durability.artifact.test.ts'), 'session-storage-transcripts');
-  assert.equal(classifyFileToPackage('analytics/analysis/test/pricing.test.ts'), 'analysis');
-  assert.equal(classifyFileToPackage('analytics/analysis/scripts/build-db.ts'), 'analysis');
   assert.equal(classifyFileToPackage('scripts/verification/test/run-tests.test.mjs'), 'scripts');
   assert.equal(classifyFileToPackage('harness/tools/subagent/test/schema.test.ts'), 'subagent');
   assert.equal(classifyFileToPackage('tools/subagent/test/schema.test.ts'), 'subagent');

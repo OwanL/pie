@@ -74,7 +74,6 @@ proto run pnpm -- run delivery:qualify      # uncached private delivery + reloca
 proto run pnpm -- run extension:package     # package a VSIX; does not install or publish
 proto run pnpm -- run extension:publish     # explicit --delivery --publish publication
 proto run pnpm -- run extension:test:browser
-proto run pnpm -- run analytics:query -- --name core_runs
 proto run pnpm -- run doctor                # non-destructive installation/config check
 ```
 

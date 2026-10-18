@@ -134,15 +134,6 @@ export const PACKAGE_REGISTRY = [
     fastConcurrency: 8,
   },
   {
-    id: 'analysis',
-    dir: 'analytics/analysis',
-    aliases: ['analytics'],
-    retiredSourceDirs: ['analysis'], // Retired source identity remains routable for changed/deleted paths.
-    testCwd: 'analytics/analysis',
-    typecheck: { config: 'analytics/analysis/tsconfig.json', compiler: 'analytics/analysis/node_modules/typescript/bin/tsc' },
-    fastConcurrency: 2,
-  },
-  {
     id: 'scripts',
     dir: 'scripts',
     sdkIndependentTestFiles: [
@@ -496,8 +487,7 @@ export const PACKAGE_REGISTRY = [
   {
     // B6: the analytics runtime tree (contracts/capture/recording/storage/
     // queries/projections/usage-accounting/authority) with its distributed
-    // test roots. The retained `analytics` alias stays on `analysis`; the
-    // standalone DuckDB workspace remains its own `analysis` package.
+    // test roots.
     id: 'analytics-runtime',
     dir: 'analytics/contracts',
     sourceRoots: [

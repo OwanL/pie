@@ -280,7 +280,6 @@ test('retained coverage ownership rejects a mask that drops a relocated implemen
 test('explicit retired source roots remain routed for rename/delete analysis', () => {
   const expectedRetiredRoots = [
     { id: 'extension', root: 'extension' },
-    { id: 'analysis', root: 'analysis' },
     { id: 'subagent', root: 'tools/subagent' },
     { id: 'ask-user', root: 'tools/ask-user' },
     { id: 'warm-bash', root: 'tools/warm-bash' },
@@ -329,8 +328,7 @@ test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, alia
     assert.equal(config.fastConcurrency, entry.fastConcurrency, `${config.id} fastConcurrency`);
     assert.ok(config.testGlobs.length > 0, `${config.id} must declare testGlobs`);
   }
-  // The alias flag path (`--package analytics`) must resolve through PACKAGE_CONFIGS.
-  assert.ok(PACKAGE_CONFIGS.some((config) => config.id === 'analysis' && config.aliases?.includes('analytics')));
+  assert.ok(!PACKAGE_CONFIGS.some((config) => config.id === 'analysis'), 'retired workspace is not a verification package');
 });
 
 test('root ownership guard rejects nested roots across ids but allows same-owner ancestors', () => {
@@ -484,10 +482,6 @@ test('registry tsx configs preserve base paths without synthesizing unselected S
 
 test('typecheck compiler selection agrees with the owner-relative helper resolution', () => {
   assert.equal(resolveTypeScriptCompiler(), path.join(repoRoot, 'application/hosts/vscode/node_modules/typescript/bin/tsc'));
-  assert.equal(
-    resolveTypeScriptCompiler({ dependencyOwnerRoot: path.join(repoRoot, 'analytics/analysis') }),
-    path.join(repoRoot, 'analytics/analysis/node_modules/typescript/bin/tsc'),
-  );
   for (const project of TYPECHECK_PROJECTS) {
     assert.equal(resolveProjectCompiler(project), path.join(repoRoot, project.compiler), `compiler for ${project.id}`);
   }

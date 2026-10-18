@@ -1150,10 +1150,9 @@ test('AggregateStatsService pricing signature invalidates completed cost accumul
 test('AggregateStatsService attributes retired Ollama cloud models from historical pricing and invalidates on history changes', async () => {
   await withTempDir(async (root) => {
     const agentDir = path.join(root, 'agent');
-    const analysisDir = path.join(agentDir, 'analytics', 'analysis');
-    await fs.mkdir(analysisDir, { recursive: true });
+    await fs.mkdir(agentDir, { recursive: true });
     await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: {} }), 'utf8');
-    const historyPath = path.join(analysisDir, 'model-pricing-history.json');
+    const historyPath = path.join(agentDir, 'model-pricing-history.json');
     const writeHistory = async (input: number, mtimeMs: number): Promise<void> => {
       await fs.writeFile(historyPath, JSON.stringify({
         models: [{

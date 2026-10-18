@@ -69,8 +69,8 @@ production telemetry.
 
 **Measurement** (§9.3): `logger.ts` writes a `tool_result_pruned`
 JSONL event per pruned result (rules fired + before/after token counts) to
-`data/tool-result-pruning.jsonl`. The [analytics/analysis pipeline](../../../analytics/analysis/README.md)
-ingests these events into its `tool_result_pruning` DuckDB table.
+`data/tool-result-pruning.jsonl`. The former DuckDB batch-query consumer is retired;
+existing local logs are retained.
 
 ## Safety (enforced in `pipeline.ts`)
 

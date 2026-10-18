@@ -164,7 +164,7 @@ test('changing only the generated history file invalidates rates and catalogVers
       },
     }));
     mkdirSync(path.join(dir, 'analytics', 'analysis'), { recursive: true });
-    const historyPath = path.join(dir, 'analytics', 'analysis', 'model-pricing-history.json');
+    const historyPath = path.join(dir, 'model-pricing-history.json');
     const resolve = subagentSettlementPricingResolver(dir);
     const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 };
     // No history yet: the history-only model stays unpriced.
