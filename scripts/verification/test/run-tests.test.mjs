@@ -60,6 +60,29 @@ test('internal native execution uses the same owner accountant and retention lif
   }
 });
 
+test('skill-pruner internal native adapter explicitly retains single-process coverage', async () => {
+  const owner = PACKAGE_CONFIGS.find(config => config.id === 'skill-pruner');
+  let accounted = false;
+  const result = await runPackage(owner, false, false, ['--test-name-pattern=fixture'], undefined, { sdkPath: '/fixture' }, {
+    execution: 'native',
+    createOverlay: () => ({ configPath: '/fixture/overlay', dispose() {} }),
+    createCoverageScope: () => ({ directory: '/private/evidence', dispose() {} }),
+    runChild: async (_command, args) => {
+      const config = JSON.parse(readFileSync(args.at(-1), 'utf8'));
+      assert.equal(config.options.isolation, 'none');
+      assert.equal(config.options.concurrency, 1);
+      assert.deepEqual(config.options.testNamePatterns, ['fixture']);
+      assert.ok(args.includes('--test-name-pattern=fixture'));
+      assert.ok(config.files.length > 1);
+      return { ...reporterResult(0), teardownConfirmed: true };
+    },
+    collectCoverage: async () => { accounted = true; return qualifiedCoverage; },
+  });
+  assert.equal(accounted, true);
+  assert.equal(result.teardownConfirmed, true);
+  assert.equal(result.retainedInvocation, undefined);
+});
+
 test('parseArgs forwards name filters without requiring a second separator', () => {
   assert.deepEqual(
     parseArgs(['--fast', '--package', 'extension', '--test-name-pattern=streamed text']),

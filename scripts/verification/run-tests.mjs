@@ -901,8 +901,8 @@ export async function runPackage(config, fast = false, integration = false, test
     : owner.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(owner.cwd),
 } = {}) {
   if (!['retained', 'native'].includes(execution)) throw new Error(`Unknown test execution: ${execution}`);
-  if (!fast && execution === 'native' && config.singleProcessCoverage) {
-    throw new Error('Native qualification requires process isolation; single-process coverage is not qualified');
+  if (!fast && execution === 'native' && config.singleProcessCoverage && config.id !== 'skill-pruner') {
+    throw new Error('Native single-process qualification is limited to skill-pruner');
   }
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
@@ -935,6 +935,9 @@ export async function runPackage(config, fast = false, integration = false, test
       // This lane uses the retained runner's existing watchdog/lifetime owner,
       // not the native CLI's stdin authorization driver. Join/retain below.
       nativeInvocation = prepareNodeTestInvocation(files, { cwd: config.cwd, waitForOwnership: false,
+        loaderMode: 'retained-esm',
+        isolation: config.singleProcessCoverage ? 'none' : 'process',
+        startupArgs: [resolveTsx(config), `--tsconfig=${tsxOverlay.configPath}`],
         nodeFlags: ['--test-concurrency=1', `--test-reporter=${path.join(__dirname, 'test-reporter.mjs')}`, ...testArgs] });
     }
     const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : nativeInvocation?.args ?? [

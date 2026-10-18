@@ -93,7 +93,7 @@ const testStream = run({
   ...options,
   files,
   cwd,
-  isolation: 'process',
+  isolation: options.isolation ?? 'process',
   execArgv: workerExecArgv(),
 });
 const fileNames = new Set(files);

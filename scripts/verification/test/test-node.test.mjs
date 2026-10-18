@@ -14,6 +14,7 @@ import {
   discoverTrackedTests,
   parseArgs,
   parseNodeTestFlags,
+  prepareNodeTestInvocation,
   createNodeTestEntries,
   main,
   resolveTestFiles,
@@ -26,6 +27,36 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const testEnvironmentPreload = pathToFileURL(path.join(repoRoot, 'scripts', 'verification', 'test-environment.mjs')).href;
+
+test('internal retained ESM none shares modules and registration environment while forwarding filters', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-shared-runner-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(path.join(root, 'shared.mjs'), 'export const state = { count: 0 };');
+  const files = ['first', 'second'].map((name, index) => {
+    const file = path.join(root, `${name}.test.mjs`);
+    writeFileSync(file, `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { state } from './shared.mjs';
+assert.equal(state.count++, ${index});
+${index === 0 ? "process.env.PIE_SHARED_REGISTRATION = 'first';" : "assert.equal(process.env.PIE_SHARED_REGISTRATION, 'first');"}
+test('selected ${name}', () => {});
+test('excluded ${name}', () => { throw new Error('filter was not forwarded'); });
+`);
+    return file;
+  });
+  assert.throws(() => prepareNodeTestInvocation(files, { isolation: 'none' }), /internal retained ESM/);
+  assert.throws(() => parseNodeTestFlags(['--test-isolation=none']), /requires --test-isolation=process/);
+  const invocation = prepareNodeTestInvocation(files, {
+    cwd: root, loaderMode: 'retained-esm', isolation: 'none', waitForOwnership: false,
+    startupArgs: ['--import', testEnvironmentPreload],
+    nodeFlags: ['--test-name-pattern=selected', '--test-concurrency=1', '--test-reporter=tap'],
+  });
+  t.after(() => invocation.dispose());
+  const output = execFileSync(process.execPath, invocation.args, { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 });
+  assert.match(output, /selected first/);
+  assert.match(output, /selected second/);
+  assert.match(output, /# fail 0/);
+});
 
 function makeGitRepo() {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-node-discovery-'));

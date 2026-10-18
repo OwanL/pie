@@ -401,19 +401,27 @@ export function createTestEnvironment(source = process.env, { fixtureRoot } = {}
 }
 
 /** Shared config, entries and argument generation for both lifetime drivers. */
-export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot, waitForOwnership = true } = {}) {
+export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot, waitForOwnership = true,
+  loaderMode = 'compatibility-cjs', isolation = 'process', startupArgs } = {}) {
+  if (!['compatibility-cjs', 'retained-esm'].includes(loaderMode)) throw new Error(`Unknown test loader mode: ${loaderMode}`);
+  if (loaderMode === 'retained-esm' && !startupArgs?.length) throw new Error('Retained ESM mode requires the owner-pinned tsx startup.');
+  if (!['process', 'none'].includes(isolation) || (isolation === 'none' && loaderMode !== 'retained-esm')) {
+    throw new Error('Isolation none requires internal retained ESM mode.');
+  }
   assertCoverageQualification(files, nodeFlags);
   const parsedFlags = parseNodeTestFlags(nodeFlags);
   const configRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-node-runner-'));
   const configPath = path.join(configRoot, 'runner.json');
   let testEntries;
   try {
-    testEntries = createNodeTestEntries(files, path.join(configRoot, 'entries'));
+    testEntries = loaderMode === 'retained-esm'
+      ? { files: files.map(file => path.resolve(file)), sourceFileByEntry: {} }
+      : createNodeTestEntries(files, path.join(configRoot, 'entries'));
     writeFileSync(configPath, JSON.stringify({
       files: testEntries.files,
       sourceFileByEntry: testEntries.sourceFileByEntry,
       cwd,
-      options: parsedFlags.options,
+      options: { ...parsedFlags.options, isolation },
       reporterNames: parsedFlags.reporterNames,
       reporterDestinations: parsedFlags.reporterDestinations,
       waitForOwnership,
@@ -424,7 +432,11 @@ export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoo
   }
 
   return {
-    configRoot, configPath, args: buildNodeArgs(configPath, nodeFlags),
+    configRoot, configPath, args: loaderMode === 'retained-esm'
+      // With isolation none, Node registers tests in this process: its global
+      // harness reads CLI flags (run() options alone do not apply name filters).
+      ? [...startupArgs, ...(isolation === 'none' ? nodeFlags.filter(flag => flag !== '--test') : parsedFlags.processFlags), RUNNER_MODULE, configPath]
+      : buildNodeArgs(configPath, nodeFlags),
     dispose() { rmSync(configRoot, { recursive: true, force: true }); },
   };
 }
