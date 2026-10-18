@@ -7,15 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_DUCKDB_PATH, DEFAULT_STAGING_EXPORTS_DIR } from '../scripts/source.ts';
 import {
   buildLocalDefaultRebuildInputs,
-  buildWorkspaceAnalyticsIdFromRoot,
-  detectLatestStorageDir,
-  detectPreferredStorageDir,
   listStorageDirCandidates,
-  normalizeFileSystemPathForWorkspaceKey,
   readLatestLocalAnalyticsInputMs,
   shouldRebuildLocalDefaultDuckDb,
-  workspaceStorageHash,
-  workspaceStorageHashCandidates,
 } from '../scripts/source-auto.ts';
 import { withTempDir } from './helpers.ts';
 
@@ -51,96 +45,28 @@ async function writeArtifact(storageDir: string, fileName: string, mtimeMs: numb
   await fs.utimes(filePath, timestamp, timestamp);
 }
 
-test('buildWorkspaceAnalyticsIdFromRoot and workspaceStorageHash are deterministic', () => {
-  const workspaceRoot = 'D:\\Projects\\StandAloneProjects\\pi-config';
-  const workspaceId = buildWorkspaceAnalyticsIdFromRoot(workspaceRoot, 'win32');
-  assert.equal(workspaceId, JSON.stringify({ folders: ['file:d:/projects/standaloneprojects/pi-config'] }));
-  assert.equal(workspaceStorageHash(workspaceId), '7161a5ef2dd349b4');
-});
-
-test('detectPreferredStorageDir picks workspace-matching storage hash when present', async () => {
-  await withTempDir(async (outcomesRoot) => {
-    const workspaceRoot = 'D:\\Repo\\preferred-workspace';
-    const preferredHash = workspaceStorageHash(buildWorkspaceAnalyticsIdFromRoot(workspaceRoot, 'win32'));
-
-    const preferredDir = path.join(outcomesRoot, preferredHash);
-    const newerOtherDir = path.join(outcomesRoot, 'ffffffffffffffff');
-
-    await writeArtifact(preferredDir, 'run-snapshots.jsonl', 1_000);
-    await writeArtifact(newerOtherDir, 'run-snapshots.jsonl', 2_000);
-
-    const selected = await detectPreferredStorageDir(outcomesRoot, workspaceRoot, 'win32');
-    assert.equal(selected, preferredDir);
-  });
-});
-
-test('detectPreferredStorageDir returns null when no workspace-hash match exists', async () => {
-  await withTempDir(async (outcomesRoot) => {
-    const olderDir = path.join(outcomesRoot, '1111111111111111');
-    const newerDir = path.join(outcomesRoot, '2222222222222222');
-
-    await writeArtifact(olderDir, 'open-runs.b.json', 5_000);
-    await writeArtifact(newerDir, 'run-snapshots.jsonl', 9_000);
-
-    const selected = await detectPreferredStorageDir(outcomesRoot, '/tmp/unrelated-workspace', 'linux');
-    assert.equal(selected, null);
-  });
-});
-
-test('detectLatestStorageDir returns the most recently active storage dir', async () => {
-  await withTempDir(async (outcomesRoot) => {
-    const olderDir = path.join(outcomesRoot, '1111111111111111');
-    const newerDir = path.join(outcomesRoot, '2222222222222222');
-
-    await writeArtifact(olderDir, 'open-runs.b.json', 5_000);
-    await writeArtifact(newerDir, 'run-snapshots.jsonl', 9_000);
-
-    const selected = await detectLatestStorageDir(outcomesRoot);
-    assert.equal(selected, newerDir);
-  });
-});
-
-test('workspaceStorageHashCandidates includes workspace-file hashes', async () => {
-  await withTempDir(async (workspaceRoot) => {
-    const workspaceFilePath = path.join(workspaceRoot, 'team.code-workspace');
-    await fs.writeFile(workspaceFilePath, '{"folders":[]}', 'utf8');
-
-    const platform = process.platform;
-    const hashes = await workspaceStorageHashCandidates(workspaceRoot, platform);
-    const workspaceFileId = JSON.stringify({
-      workspaceFile: `file:${normalizeFileSystemPathForWorkspaceKey(workspaceFilePath, platform)}`,
-    });
-    assert.ok(hashes.has(workspaceStorageHash(workspaceFileId)));
-  });
-});
-
 test('listStorageDirCandidates ignores directories without analytics artifacts', async () => {
   await withTempDir(async (outcomesRoot) => {
     const ignoredDir = path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa');
     const includedDir = path.join(outcomesRoot, 'bbbbbbbbbbbbbbbb');
+    const olderDir = path.join(outcomesRoot, 'cccccccccccccccc');
 
     await fs.mkdir(ignoredDir, { recursive: true });
     await writeArtifact(includedDir, 'open-runs.a.json', 7_000);
+    await writeArtifact(olderDir, 'open-runs.b.json', 5_000);
 
     const candidates = await listStorageDirCandidates(outcomesRoot);
-    assert.equal(candidates.length, 1);
-    assert.equal(candidates[0]?.storageDir, includedDir);
+    assert.deepEqual(candidates, [
+      { storageDir: includedDir, latestActivityMs: 7_000 },
+      { storageDir: olderDir, latestActivityMs: 5_000 },
+    ]);
   });
 });
 
-test('workspace and outcomes discovery tolerate missing directories', async () => {
+test('outcomes discovery tolerates missing directories', async () => {
   await withTempDir(async (root) => {
-    const missingWorkspaceRoot = path.join(root, 'missing-workspace');
-    const expectedRootHash = workspaceStorageHash(buildWorkspaceAnalyticsIdFromRoot(missingWorkspaceRoot, 'linux'));
-
-    const hashes = await workspaceStorageHashCandidates(missingWorkspaceRoot, 'linux');
-    assert.equal(hashes.size, 1);
-    assert.ok(hashes.has(expectedRootHash));
-
     const missingOutcomesRoot = path.join(root, 'missing-outcomes');
     assert.deepEqual(await listStorageDirCandidates(missingOutcomesRoot), []);
-    assert.equal(await detectLatestStorageDir(missingOutcomesRoot), null);
-    assert.equal(await detectPreferredStorageDir(missingOutcomesRoot, missingWorkspaceRoot, 'linux'), null);
   });
 });
 
