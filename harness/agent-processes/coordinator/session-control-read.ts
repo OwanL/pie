@@ -158,7 +158,7 @@ function stringify(value: unknown): string {
 }
 
 function toolInput(tool: ToolCall): string {
-  return tool.argumentsText ?? stringify(tool.input);
+  return stringify(tool.input);
 }
 
 function toolResultContent(content: MessageLike['content']): unknown {
