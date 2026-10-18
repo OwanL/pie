@@ -84,7 +84,7 @@ test('history compaction missing metrics stay truthful, never invented', () => {
 });
 
 test('composer edge fade stays fixed, short and transparent to input', () => {
-  const css = readFileSync('application/frontend/styles/transcript.css', 'utf8');
+  const css = readFileSync(new URL('../../styles/transcript.css', import.meta.url), 'utf8');
   const fade = css.match(/\.transcript-viewport::after\s*\{([^}]+)\}/)?.[1];
   assert.ok(fade);
   assert.match(fade, /position: absolute/);
@@ -97,14 +97,14 @@ test('composer edge fade stays fixed, short and transparent to input', () => {
 });
 
 test('status CSS is readable, detail shrinks first and spinner is compact inline', () => {
-  const css = readFileSync('application/frontend/styles/transcript.css', 'utf8');
+  const css = readFileSync(new URL('../../styles/transcript.css', import.meta.url), 'utf8');
   const block = (selector: string) => css.slice(css.indexOf(`${selector} {`)).split('}')[0];
   assert.match(block('.turn-activity-strip'), /font-family: var\(--panel-font-sans\)/);
   assert.match(block('.turn-activity-strip'), /font-size: 11px/);
   assert.match(block('.turn-activity-strip-label'), /flex: 0 0 auto/);
   assert.match(block('.message-activity-footer'), /margin-top: 0/);
   assert.match(block('.transcript'), /\) var\(--panel-gap-lg\) var\(--panel-gap-lg\)/);
-  const listSource = readFileSync('application/frontend/transcript/virtual-list.tsx', 'utf8');
+  const listSource = readFileSync(new URL('../../transcript/virtual-list.tsx', import.meta.url), 'utf8');
   assert.match(listSource, /row === lastRow \? 'pb-0'/);
   assert.match(listSource, /aria-label="Jump to latest"/);
   assert.match(block('.turn-activity-strip-detail'), /flex: 0 1 auto/);

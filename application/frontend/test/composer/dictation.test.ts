@@ -84,10 +84,10 @@ test('transcript root never renders the dictation edge', () => {
   for (const overrides of [{ commandsAvailable: false }, { activeSessionPath: '/other' }, { hasActiveTabs: false }, { panelSurface: 'loading' }]) {
     assert.doesNotMatch(html(recording, overrides), /dictation-edge/);
   }
-  const panelSource = readFileSync('application/frontend/shell/panel-main.tsx', 'utf8');
+  const panelSource = readFileSync(new URL('../../shell/panel-main.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(panelSource, /dictation/);
-  assert.doesNotMatch(readFileSync('application/frontend/styles/transcript.css', 'utf8'), /dictation-edge/);
-  const css = readFileSync('application/frontend/styles/composer.css', 'utf8');
+  assert.doesNotMatch(readFileSync(new URL('../../styles/transcript.css', import.meta.url), 'utf8'), /dictation-edge/);
+  const css = readFileSync(new URL('../../styles/composer.css', import.meta.url), 'utf8');
   assert.match(css, /position: absolute;\n {2}inset: 0;/);
   assert.match(css, /pointer-events: none/);
   assert.match(css, /position: relative;\n {2}isolation: isolate/);
@@ -95,8 +95,8 @@ test('transcript root never renders the dictation edge', () => {
   assert.match(css, /transparent 12px/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   const edgeCss = css.match(/\.dictation-edge \{[^}]+\}/)![0];
-  const micCss = readFileSync('application/frontend/styles/composer.css', 'utf8').match(/\.composer-action-mic\.is-active:not\(:disabled\) \{[^}]+\}/)![0];
-  const themeCss = readFileSync('application/frontend/styles/index.css', 'utf8');
+  const micCss = readFileSync(new URL('../../styles/composer.css', import.meta.url), 'utf8').match(/\.composer-action-mic\.is-active:not\(:disabled\) \{[^}]+\}/)![0];
+  const themeCss = readFileSync(new URL('../../styles/index.css', import.meta.url), 'utf8');
   assert.match(themeCss, /--panel-accent:/);
   for (const activeCss of [edgeCss, micCss]) {
     assert.match(activeCss, /var\(--panel-accent\)/);
@@ -216,7 +216,7 @@ test('real composer confines sample-reactive recording edge to input and toolbar
 });
 
 test('dictation edge drifts continuously independent of RMS and respects reduced motion', () => {
-  const css = readFileSync('application/frontend/styles/composer.css', 'utf8');
+  const css = readFileSync(new URL('../../styles/composer.css', import.meta.url), 'utf8');
   const edgeCss = css.match(/\.composer-shell > \.dictation-edge \{[^}]+\}/)?.[0];
   assert.ok(edgeCss, 'composer dictation edge rule exists');
   assert.match(edgeCss, /animation:\s*dictation-drift\s+8s\s+ease-in-out\s+infinite/);
@@ -461,9 +461,9 @@ test('matching preparing acknowledgement clears deadline during model download',
 });
 
 test('token rate chip is absent while phase and error feedback remain', () => {
-  const toolbar = readFileSync('application/frontend/composer/toolbar.tsx', 'utf8');
+  const toolbar = readFileSync(new URL('../../composer/toolbar.tsx', import.meta.url), 'utf8');
   assert.ok(!toolbar.includes("key: 'token-rate'"));
-  const ui = readFileSync('application/frontend/shell/ui.tsx', 'utf8');
+  const ui = readFileSync(new URL('../../shell/ui.tsx', import.meta.url), 'utf8');
   assert.ok(ui.includes('visibleDictation.error ||'));
   assert.ok(!ui.includes('Listening —'));
   assert.ok(!ui.includes("'Finalizing dictation…'"));

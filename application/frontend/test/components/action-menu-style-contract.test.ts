@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-const source = (path: string) => readFileSync(`application/frontend/${path}`, 'utf8');
+const source = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 
 test('action rows omit placeholder checks while preference toggles retain state', () => {
   const transcript = source('lib/components/context-menu.tsx');

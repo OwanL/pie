@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { isTextOnlyToolResult, textFromToolResult } from '../../../transcript/tool-result-text';
 
 test('plain tool-result text imports only the browser-safe ANSI helper', () => {
-  const source = readFileSync('application/frontend/transcript/tool-result-text.ts', 'utf8');
+  const source = readFileSync(new URL('../../../transcript/tool-result-text.ts', import.meta.url), 'utf8');
   const imports = source.match(/^import .*$/gm);
   assert.deepEqual(imports, ["import { stripAnsiEscapes } from './tool-call-analysis';"]);
   assert.doesNotMatch(source, /\b(?:require|import)\s*\(/);

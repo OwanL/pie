@@ -198,8 +198,8 @@ test('manage and restore early remain accessible with every tab snoozed; members
 }));
 
 test('tab action menus bound long titles to the compact viewport width', () => {
-  const css = readFileSync('application/frontend/styles/tabs.css', 'utf8');
-  const imports = readFileSync('application/frontend/styles/index.css', 'utf8');
+  const css = readFileSync(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
+  const imports = readFileSync(new URL('../../styles/index.css', import.meta.url), 'utf8');
   assert.ok(imports.indexOf("'./composer.css'") > imports.indexOf("'./tabs.css'"));
   // Compound selectors must beat the generic/single-class minimums loaded later.
   assert.match(css, /\.block-context-menu\.session-tab-context-menu\s*\{[^}]*min-width:\s*min\(190px, calc\(100vw - 8px\)\)/);
