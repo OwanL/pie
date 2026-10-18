@@ -697,12 +697,15 @@ function projectViewState(state: ArchState, reusableTranscript?: ChatMessage[]):
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;
   const activeSessionUsage = activePath ? transcript.sessionUsageBySession?.[activePath] ?? null : null;
-  const activeInitialContextEstimate: InitialContextEstimate | null = activePath
+  const initialContextEstimate = activePath
+    ? settings.initialContextEstimateBySession[activePath] ?? null
+    : null;
+  const activeInitialContextEstimate: InitialContextEstimate | null = initialContextEstimate !== null
     && activeContextUsage === null
     && (activeSessionUsage?.samples.length ?? 0) === 0
     && !activeTranscriptWindow.hasUserMessages
     && !activeTranscript.some((message) => message.role === 'user')
-    ? settings.initialContextEstimateBySession[activePath] ?? null
+    ? initialContextEstimate
     : null;
 
   const activeFileChanges: FileChangeEntry[] =

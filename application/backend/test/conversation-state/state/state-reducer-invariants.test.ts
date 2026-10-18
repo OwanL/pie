@@ -593,6 +593,29 @@ test('selectViewState: contextUsage is null when no active session', () => {
   assert.equal(vs.initialContextEstimate, null);
 });
 
+test('selectViewState skips transcript eligibility scan when no initial estimate exists', () => {
+  const sessionPath = '/cold-without-estimate';
+  let roleReads = 0;
+  const assistantMessage = {
+    id: 'assistant', createdAt: '', markdown: '', status: 'completed' as const,
+    get role() { roleReads++; return 'assistant' as const; },
+  };
+  const state = produce(initialArchState, (draft) => {
+    draft.sessions.activeSessionPath = sessionPath;
+    draft.sessions.sessions = [{ path: sessionPath, name: 'Cold', cwd: '/', modifiedAt: '', messageCount: 1 }];
+    draft.transcript.bySession[sessionPath] = [assistantMessage];
+  });
+
+  const first = selectViewState(state);
+  const changed = produce(state, (draft) => { draft.composer.draftTextBySession[sessionPath] = 'typing'; });
+  roleReads = 0;
+  const next = selectViewState(changed);
+  assert.notEqual(next, first);
+  assert.equal(next.transcript, first.transcript, 'isolate eligibility from transcript projection');
+  assert.equal(next.initialContextEstimate, null);
+  assert.equal(roleReads, 0);
+});
+
 test('selectViewState exposes a cold initial estimate only before user/provider usage', () => {
   const sessionPath = '/cold';
   const base = produce(initialArchState, (draft) => {

@@ -4,57 +4,27 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFi
 import os from 'node:os';
 import path from 'node:path';
 import {
-  PI_RUNTIME_PACKAGES,
   PI_RUNTIME_SDK_RELATIVE_PATH,
-  writePiRuntimeManifest,
 } from '../../../../scripts/lib/pi-runtime-artifact.mjs';
 import {
   GenerationPiRuntimePolicyError,
   resolveGenerationPiRuntime,
   type ResolveGenerationPiRuntimeOptions,
 } from '../pi-runtime-resolution';
+import { writeRuntimeArtifactFixture } from '../../test/helpers/runtime-artifact';
 
 const target = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules };
-const provenance = {
-  upstreamVersion: '0.80.6',
-  upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
-  sourceTreeSha256: 'a'.repeat(64),
-  lockSha256: 'b'.repeat(64),
-  target,
-};
-const sdkAssets = [
-  'dist/cli.js', 'dist/rpc-entry.js',
-  'dist/modes/interactive/theme/dark.json',
-  'dist/modes/interactive/theme/light.json',
-  'dist/modes/interactive/theme/theme-schema.json',
-  'dist/modes/interactive/assets/clankolas.png',
-  'dist/core/export-html/template.html',
-  'dist/core/export-html/template.css',
-  'dist/core/export-html/template.js',
-  'dist/core/export-html/vendor/marked.min.js',
-  'dist/core/export-html/vendor/highlight.min.js',
-];
-
 async function put(root: string, relative: string, contents: string): Promise<void> {
   const file = path.join(root, relative);
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, contents);
 }
 
-async function fixture(t: TestContext, name = 'pi-runtime') {
+async function fixture(t: TestContext, name = 'pi-runtime', artifactTarget = target) {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'pie-generation-pi-runtime-'));
   t.after(() => rm(parent, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   const artifactDir = path.join(parent, name);
-  for (const packageName of PI_RUNTIME_PACKAGES) {
-    const prefix = `node_modules/${packageName}/`;
-    await put(artifactDir, `${prefix}package.json`, JSON.stringify({ name: packageName, version: '0.80.6' }));
-    await put(artifactDir, `${prefix}dist/index.js`, 'export {}\n');
-    await put(artifactDir, `${prefix}LICENSE`, 'fixture license\n');
-  }
-  for (const relative of sdkAssets) {
-    await put(artifactDir, `${PI_RUNTIME_SDK_RELATIVE_PATH}/${relative}`, `fixture:${relative}\n`);
-  }
-  await writePiRuntimeManifest(artifactDir, provenance);
+  await writeRuntimeArtifactFixture(artifactDir, artifactTarget);
   return { parent, artifactDir };
 }
 
@@ -75,10 +45,9 @@ async function snapshot(root: string): Promise<Record<string, { mtimeMs: number;
 }
 
 test('generation resolver defaults only to runtimeOutDir/pi-runtime and returns a portable descriptor', async (t) => {
-  const { parent, artifactDir } = await fixture(t);
   // Model the backend Node ABI explicitly; it need not equal the editor process ABI.
   const backendTarget = { ...target, nodeAbi: target.nodeAbi === '99999' ? '99998' : '99999' };
-  await writePiRuntimeManifest(artifactDir, { ...provenance, target: backendTarget });
+  const { parent, artifactDir } = await fixture(t, 'pi-runtime', backendTarget);
   const before = await snapshot(artifactDir);
 
   const descriptor = await resolveGenerationPiRuntime({ runtimeOutDir: parent, target: backendTarget });

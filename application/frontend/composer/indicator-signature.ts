@@ -1,54 +1,12 @@
 import type { ChatMessage, SystemPromptEntry, ToolCall } from '../../lib/protocol/index.js';
-import { getSubagentResultEntries } from '../../../harness/agent-processes/workers/subagent-result';
-import { isRecord } from '../../../lib/validation/type-guards';
 
-/**
- * Bounded fingerprints that gate the O(transcript) indicator walks in
- * {@link useComposerIndicators}. The host posts a structured-cloned `ViewState`
- * ~7×/sec while streaming, so the transcript array (and every nested object)
- * gets a fresh reference even when byte-identical. Usage/cost fingerprints use
- * lifecycle fields and revisions; the context-breakdown fingerprint also hashes
- * legacy body-only records, retaining only fixed-size signatures in memo keys.
- *
- * The guarded data is append-only or immutable under the host protocol: usage
- * lands at `MessageFinished`, tool previews advance their seq, and completed
- * durable records do not mutate. Streaming message text is represented by its
- * append-only length. Legacy tool records without those revisions use content
- * hashes so same-length result replacements still invalidate correctly.
- */
+/** Content fingerprints preserve indicator memoization across structured-cloned
+ * host snapshots. Revisions identify live tools; legacy bodies use hashes so
+ * same-length replacements invalidate without retaining large bodies in keys. */
 
-/**
- * O(trailing queued follow-ups). Guards {@link buildSessionTokenUsage} and
- * {@link buildCompletedCostSummary}, which sum per-message usage. Usage lands
- * only at `MessageFinished` and is immutable afterwards, so
- * `length + last-non-queued-message id/status/usage-total` captures every
- * transition: appends/removes (length) and a turn finishing (status flips +
- * `usage` appears). Queued follow-ups project after the active assistant turn,
- * so they are skipped to keep that turn in the fingerprint.
- */
-export function transcriptUsageSignature(transcript: readonly ChatMessage[]): string {
-  const last = lastNonQueuedMessage(transcript);
-  return `${transcript.length}|${last?.id ?? ''}|${last?.status ?? ''}|${last?.usage?.totalTokens ?? ''}`;
-}
-
-/**
- * O(streaming messages) — in practice O(1) (one streaming message). A
- * fingerprint of the streaming message's growing prose and provisional tool
- * calls. Used by memos whose result legitimately changes as the streaming
- * content grows: the context-window breakdown's ESTIMATED branch (when no live
- * `contextUsage.tokens` is reported) and the live cost estimate. Empty when
- * nothing is streaming.
- *
- * Uses `markdown.length` + `thinking.length` (not a BPE estimate) deliberately:
- * streaming prose is APPEND-ONLY (the reducer concatenates deltas), so its
- * length strictly grows every delta and the signature changes every delta —
- * exactly when the gated result (an `estimateTextTokens` estimate of that same
- * prose) legitimately changes. The live cost estimate also includes transient
- * tool-call names and argument JSON, so those fields must invalidate the memo
- * when they advance even if no prose delta arrived. Tool-call revisions avoid
- * retaining the argument body in the memo key; the bounded argument digest is
- * the fallback for legacy snapshots without a live revision.
- */
+/** Scans the transcript for streaming rows. Prose uses append-only lengths;
+ * draft tool revisions (or legacy argument digests) also invalidate tool-only
+ * updates. The retained key is bounded, not the traversal cost. */
 export function streamingContentSignature(transcript: readonly ChatMessage[]): string {
   const parts: string[] = [];
   for (const m of transcript) {
@@ -74,27 +32,13 @@ export function streamingContentSignature(transcript: readonly ChatMessage[]): s
   return parts.join(',');
 }
 
-/**
- * O(total prompt text) — prompts are few and usually small. Guards the
- * context-window breakdown's system-prompt contributor, whose value is
- * `estimateTextTokens(prompt.text)` (a real cl100k_base BPE count, which is
- * CONTENT-dependent, not length-dependent). A `text.length` proxy would be
- * unsound: two same-length prompts can tokenize to different token counts, so
- * a same-length system-prompt edit would change the breakdown but not the
- * signature → a stale tooltip. The fixed-size text hash detects any edit while
- * avoiding a copy of the prompt body in every key; availability and disabled
- * state are included because both determine whether the prompt contributes.
- */
+// Prompt fingerprints must include content, not just length: same-length edits
+// can change BPE counts. Availability/disabled state also affects contributions.
 const FINGERPRINT_OFFSET = 2166136261;
 const FINGERPRINT_PRIME = 16777619;
 const SECOND_FINGERPRINT_OFFSET = 0x9e3779b9;
 
-/**
- * Fixed-size content fingerprint. The signature callers use as a memo key must
- * not retain prompt/tool bodies: a long-lived session can contain megabytes of
- * tool output. Include the source length alongside two small hashes so equal
- * length edits do not look unchanged while keeping the resulting key bounded.
- */
+/** Full-content fingerprint with fixed-size storage, including same-length edits. */
 function boundedStringSignature(value: string): string {
   let first = FINGERPRINT_OFFSET;
   let second = SECOND_FINGERPRINT_OFFSET;
@@ -220,94 +164,4 @@ export function systemPromptsSignature(systemPrompts: readonly SystemPromptEntry
     acc += `|${p.availability}:${p.disabled === true ? 1 : 0}:${boundedStringSignature(p.text)}`;
   }
   return acc;
-}
-
-/**
- * O(trailing queued follow-ups + active message tool calls). Guards
- * the parent-session cost indicator, which snapshots reported or priced
- * subagent usage across the transcript. Terminal results are immutable once landed;
- * typed live previews update their child usage as turns finish. The active
- * tool's monotonic revision gates this fingerprint, and the usage fields below
- * make it change only when accounting changes rather than whenever live prose
- * grows. Mirrors
- * `toolCallsFromMessage` (prefers authoritative ordered `parts`, with the
- * legacy `toolCalls` mirror as fallback) so the fingerprint tracks exactly the
- * calls the walk sees even when renderer transport omits that mirror.
- */
-function subagentResultCostFingerprint(rawResult: unknown, depth = 0): string {
-  if (depth >= 6 || !isRecord(rawResult)) return '';
-  const results = getSubagentResultEntries(rawResult);
-  return results.map((result, index) => {
-    if (!isRecord(result)) return `${index}:`;
-    const usage = isRecord(result.usage) ? result.usage : undefined;
-    const model = typeof result.model === 'string' ? result.model : (typeof result.selectedModel === 'string' ? result.selectedModel : '');
-    const own = `${index}:${result.exitCode ?? ''}:${model}:${usage?.cost ?? ''}:${usage?.input ?? ''}:${usage?.output ?? ''}:${usage?.cacheRead ?? ''}:${usage?.cacheWrite ?? ''}`;
-    if (!Array.isArray(result.messages)) return own;
-    const nested: string[] = [];
-    for (const message of result.messages) {
-      if (!isRecord(message) || message.role !== 'assistant' || !Array.isArray(message.content)) continue;
-      for (const part of message.content) {
-        if (!isRecord(part) || part.type !== 'toolCall' || part.name !== 'subagent') continue;
-        nested.push(`${part.id ?? ''}:${subagentResultCostFingerprint(part.result, depth + 1)}`);
-      }
-    }
-    return nested.length > 0 ? `${own}>${nested.join(',')}` : own;
-  }).join(';');
-}
-
-function lastNonQueuedMessage(transcript: readonly ChatMessage[]): ChatMessage | undefined {
-  for (let index = transcript.length - 1; index >= 0; index -= 1) {
-    const message = transcript[index];
-    if (message?.status !== 'queued') return message;
-  }
-  return undefined;
-}
-
-/**
- * Cheap O(toolCalls) revision of the last non-queued message's subagent tool
- * calls, used to gate the O(result-tree) {@link subagentCostSignature} walk.
- *
- * The host posts a structured-cloned `ViewState` ~7×/sec while streaming, so the
- * `transcript` array (and every nested object) is a fresh reference on every
- * snapshot even when byte-identical. Keying the `subagentCostSignature` memo on
- * the `transcript` ref recomputes the recursive fingerprint walk on every
- * snapshot. This revision is a cheap surrogate built from each tool call's
- * monotonic `seq` (projected from the live `LiveToolRecord.seq`, which advances
- * on every progress AND terminal event). The backend assembles the complete
- * recursively-renderable child preview and emits a progress event whenever it
- * structurally changes — including nested completions, usage/cost updates, and
- * streaming-text appends — so the parent tool's `seq` captures every
- * transition that could change the cost fingerprint.
- *
- * The revision is STABLE while only the streaming prose grows (no `seq` advance
- * → no structural preview change → same fingerprint), and CHANGES exactly when
- * the fingerprint could change. Using it as the `useMemo` dependency for
- * `subagentCostSignature` skips the recursive walk on unchanged snapshots
- * without weakening correctness for nested completion changes (a nested
- * subagent completing advances the parent's `seq`, invalidating the revision).
- */
-export function subagentToolCallRevision(transcript: readonly ChatMessage[]): string {
-  const last = lastNonQueuedMessage(transcript);
-  if (!last) return `${transcript.length}|`;
-  const partTcs = last.parts
-    ?.filter((p) => p.kind === 'toolCall')
-    .map((p) => p.toolCall) ?? [];
-  const calls = partTcs.length ? partTcs : (last.toolCalls ?? []);
-  const rev = calls
-    .map((tc) => `${tc.id}:${tc.status}:${tc.name ?? ''}:${tc.seq ?? 0}:${tc.result !== undefined ? 1 : 0}`)
-    .join(',');
-  return `${transcript.length}|${rev}`;
-}
-
-export function subagentCostSignature(transcript: readonly ChatMessage[]): string {
-  const last = lastNonQueuedMessage(transcript);
-  if (!last) return `${transcript.length}|`;
-  const partTcs = last.parts
-    ?.filter((p) => p.kind === 'toolCall')
-    .map((p) => p.toolCall) ?? [];
-  const calls = partTcs.length ? partTcs : (last.toolCalls ?? []);
-  const fp = calls
-    .map((tc) => `${tc.id}:${tc.status}:${tc.name ?? ''}:${tc.result !== undefined ? 1 : 0}:${subagentResultCostFingerprint(tc.result)}`)
-    .join(',');
-  return `${transcript.length}|${fp}`;
 }

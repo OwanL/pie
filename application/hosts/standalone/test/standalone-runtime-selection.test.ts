@@ -5,11 +5,10 @@ import { once } from 'node:events';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import { writeRuntimeArtifactFixture } from '../../test/helpers/runtime-artifact';
 
 import {
-  PI_RUNTIME_PACKAGES,
   PI_RUNTIME_SDK_RELATIVE_PATH,
-  writePiRuntimeManifest,
 } from '../../../../scripts/lib/pi-runtime-artifact.mjs';
 import {
   publishRuntimeGeneration,
@@ -39,26 +38,6 @@ import {
 
 const IDENTITY: RuntimeIdentity = { publisher: 'pie-test', name: 'standalone', version: '1.0.0' };
 const TARGET = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules };
-const PROVENANCE = {
-  upstreamVersion: '0.80.6',
-  upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
-  sourceTreeSha256: 'a'.repeat(64),
-  lockSha256: 'b'.repeat(64),
-  target: TARGET,
-};
-const SDK_ASSETS = [
-  'dist/cli.js', 'dist/rpc-entry.js',
-  'dist/modes/interactive/theme/dark.json',
-  'dist/modes/interactive/theme/light.json',
-  'dist/modes/interactive/theme/theme-schema.json',
-  'dist/modes/interactive/assets/clankolas.png',
-  'dist/core/export-html/template.html',
-  'dist/core/export-html/template.css',
-  'dist/core/export-html/template.js',
-  'dist/core/export-html/vendor/marked.min.js',
-  'dist/core/export-html/vendor/highlight.min.js',
-];
-
 async function put(root: string, relative: string, contents: string): Promise<void> {
   const file = path.join(root, relative);
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -81,16 +60,7 @@ async function makeOutput(outDir: string, options: { artifact?: boolean; tamper?
 
   if (options.artifact === false) return;
   const artifactDir = path.join(outDir, 'pi-runtime');
-  for (const packageName of PI_RUNTIME_PACKAGES) {
-    const prefix = `node_modules/${packageName}/`;
-    await put(artifactDir, `${prefix}package.json`, JSON.stringify({ name: packageName, version: '0.80.6' }));
-    await put(artifactDir, `${prefix}dist/index.js`, 'export {}\n');
-    await put(artifactDir, `${prefix}LICENSE`, 'fixture license\n');
-  }
-  for (const relative of SDK_ASSETS) {
-    await put(artifactDir, `${PI_RUNTIME_SDK_RELATIVE_PATH}/${relative}`, `fixture:${relative}\n`);
-  }
-  await writePiRuntimeManifest(artifactDir, { ...PROVENANCE, target: options.target ?? TARGET });
+  await writeRuntimeArtifactFixture(artifactDir, options.target ?? TARGET);
   if (options.tamper) await put(artifactDir, `${PI_RUNTIME_SDK_RELATIVE_PATH}/dist/cli.js`, 'tampered\n');
 }
 
