@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
+import { createBrowserAssetDir } from './browser-assets.fixture';
 
 import {
   BrowserStaticAssets,
@@ -18,41 +19,22 @@ import {
   toAssetUrl,
 } from '../../browser/static-assets/static-assets';
 
-async function createAssetDir(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-static-assets-'));
-  await fs.mkdir(path.join(dir, '.vite'), { recursive: true });
-  await fs.mkdir(path.join(dir, 'assets'), { recursive: true });
+async function createAssetDir(t: TestContext): Promise<string> {
+  const dir = await createBrowserAssetDir(t);
   await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.js'), 'new Worker("/assets/breakdown-worker-worker123.js");\n');
-  await fs.writeFile(path.join(dir, 'assets', 'panel-abc123.css'), 'body {}\n');
   await fs.writeFile(path.join(dir, 'assets', 'chunk-xyz789.js'), 'export {};\n');
-  await fs.writeFile(path.join(dir, 'assets', 'transcript-host-xyz789.js'), 'export {};\n');
   await fs.writeFile(path.join(dir, 'assets', 'breakdown-worker-worker123.js'), 'self.onmessage = () => {};\n');
   await fs.writeFile(path.join(dir, 'assets', 'logo-1a2b3c.svg'), '<svg/>\n');
   await fs.writeFile(path.join(dir, 'secret.txt'), 'not servable\n');
-  await fs.writeFile(
-    path.join(dir, '.vite', 'manifest.json'),
-    JSON.stringify({
-      'index.html': {
-        file: 'assets/panel-abc123.js',
-        isEntry: true,
-        css: ['assets/panel-abc123.css'],
-        imports: ['chunk-xyz789.js'],
-        // Mirrors the real panel: the transcript host is lazy-loaded.
-        dynamicImports: ['transcript-host.tsx'],
-      },
-      'chunk-xyz789.js': { file: 'assets/chunk-xyz789.js', assets: ['assets/logo-1a2b3c.svg'] },
-      'transcript-host.tsx': {
-        file: 'assets/transcript-host-xyz789.js',
-        isDynamicEntry: true,
-        imports: ['index.html'],
-      },
-    }),
-  );
+  const manifest = await loadViteManifest(dir);
+  manifest['index.html'].imports = ['chunk-xyz789.js'];
+  manifest['chunk-xyz789.js'] = { file: 'assets/chunk-xyz789.js', assets: ['assets/logo-1a2b3c.svg'] };
+  await fs.writeFile(path.join(dir, '.vite', 'manifest.json'), JSON.stringify(manifest));
   return dir;
 }
 
-test('load(): resolves the entry, css, and transitively imported chunks into the allowlist', async () => {
-  const dir = await createAssetDir();
+test('load(): resolves the entry, css, and transitively imported chunks into the allowlist', async (t) => {
+  const dir = await createAssetDir(t);
   const assets = new BrowserStaticAssets(dir);
   await assets.load();
 
@@ -70,11 +52,10 @@ test('load(): resolves the entry, css, and transitively imported chunks into the
   // Vite's ?worker&url output is referenced by the trusted entry but omitted
   // from manifest.json; it remains explicitly allowlisted from that reference.
   assert.equal(assets.resolveRequest('/assets/breakdown-worker-worker123.js')?.contentType, 'text/javascript; charset=utf-8');
-  await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('resolveRequest(): only allowlisted files under the asset dir are served', async () => {
-  const dir = await createAssetDir();
+test('resolveRequest(): only allowlisted files under the asset dir are served', async (t) => {
+  const dir = await createAssetDir(t);
   const assets = new BrowserStaticAssets(dir);
   await assets.load();
 
@@ -94,11 +75,10 @@ test('resolveRequest(): only allowlisted files under the asset dir are served', 
   assert.equal(assets.resolveRequest('/'), null);
   assert.equal(assets.resolveRequest('/assets/'), null);
   assert.equal(assets.resolveRequest('/nope'), null);
-  await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async () => {
-  const dir = await createAssetDir();
+test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (t) => {
+  const dir = await createAssetDir(t);
   const assets = new BrowserStaticAssets(dir);
   await assets.load();
   const { html, csp } = assets.renderHtml({
@@ -130,18 +110,17 @@ test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (
   const nonce = /script-src 'nonce-([0-9a-f]{32})'/.exec(csp)?.[1];
   assert.ok(nonce);
   assert.ok(html.includes(`<script nonce="${nonce}"`));
-  await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('load(): a missing manifest or missing entry chunk is a terminal failure', async () => {
+test('load(): a missing manifest or missing entry chunk is a terminal failure', async (t) => {
   const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-static-assets-'));
+  t.after(() => fs.rm(empty, { recursive: true, force: true }));
   const assets = new BrowserStaticAssets(empty);
   await assert.rejects(assets.load(), /ENOENT/);
 
   await fs.mkdir(path.join(empty, '.vite'), { recursive: true });
   await fs.writeFile(path.join(empty, '.vite', 'manifest.json'), JSON.stringify({ 'index.html': { file: 'assets/x.js' } }));
   await assert.rejects(assets.load(), /No Vite entry chunk/);
-  await fs.rm(empty, { recursive: true, force: true });
 });
 
 test('helpers: entry discovery, MIME mapping, and asset URLs', () => {

@@ -9,7 +9,7 @@
  *  - no retry after auth/client failures or partial output/tool side effects
  *  - bounded per-attempt analytics persisted on the final result
  *
- * Approach: drive executeSingleMode with an injected runAttempt seam and a
+ * Approach: drive executeSingleTask with an injected runAttempt seam and a
  * deterministic retry clock so no real SDK, network, or wall-clock delay is
  * needed. A fake SDK module hook is shared with modes.test.ts.
  */
@@ -74,12 +74,11 @@ if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_RE
 }
 
 const __require = createRequire(import.meta.url);
-const __modesPath = path.resolve("harness/tools/subagent/modes.ts");
-const { executeSingleMode } = __require(__modesPath) as typeof import("../modes.js");
+const __singlePath = path.resolve("harness/tools/subagent/single.ts");
+const { executeSingleTask } = __require(__singlePath) as typeof import("../single.js");
 const { subagentRuntime } = __require(
 	path.resolve("harness/tools/subagent/runner.ts"),
 ) as typeof import("../runner.js");
-const execSingle = executeSingleMode as any;
 
 const agentDir = mkdtempSync(path.join(tmpdir(), "retry-agents-"));
 const agentsSubdir = path.join(agentDir, "agents");
@@ -121,7 +120,27 @@ function selCtx(over: Record<string, unknown> = {}): any {
 	};
 }
 const noSignal = () => new AbortController().signal;
-const noOpDetails = (mode: any, results: any[]) => ({ mode, agentScope: "user" as const, projectAgentsDir: null, results });
+const noOpDetails = (results: any[]) => ({ mode: "single" as const, agentScope: "user" as const, projectAgentsDir: null, results });
+
+function makeSingleTaskArgs(
+	overrides: Partial<Parameters<typeof executeSingleTask>[0]>,
+): Parameters<typeof executeSingleTask>[0] {
+	return {
+		params: { agent: "worker", task: "do work" },
+		ctx: makeCtx(),
+		agents: makeAgents(),
+		runtimeCtx: { depth: 0, trail: [] },
+		makeDetails: noOpDetails,
+		onUpdate: undefined,
+		signal: noSignal(),
+		selectionCtx: selCtx(),
+		toolCallId: "t1",
+		parentUiBridge: undefined,
+		parentSessionId: undefined,
+		allToolNames: undefined,
+		...overrides,
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Pure helper tests
@@ -302,31 +321,22 @@ test.after(() => {
 test("the dispatched child runtime carries the effective selected bucket", async () => {
 	const models = [{ id: "model-small", provider: "provider-a", family: "family-a" }];
 	let observedBucket: string | undefined;
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			bucketAssignments: { small: assignedModels("model-small"), medium: [], frontier: [] },
 			registryModels: models,
 		}),
-		"t-effective-bucket-context",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-effective-bucket-context",
+		_internal: {
 			runAttempt: () => {
 				observedBucket = subagentRuntime.getStore()?.bucket;
 				return Promise.resolve(syntheticResult({ exitCode: 0, stopReason: "completed" }));
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	assert.equal(observedBucket, "small");
@@ -339,31 +349,23 @@ test("active-parent fallback inherits the caller bucket and leaves root children
 		{ depth: 1, trail: ["worker"], bucket: "medium" },
 		{ depth: 0, trail: [] },
 	]) {
-		await execSingle(
-			{ agent: "worker", task: "do work", bucket: "small" },
-			makeCtx(models),
-			makeAgents(),
-			() => undefined,
-			runtimeCtx,
-			noOpDetails,
-			undefined,
-			noSignal(),
-			selCtx({
+		await executeSingleTask(makeSingleTaskArgs({
+			params: { agent: "worker", task: "do work", bucket: "small" },
+			ctx: makeCtx(models),
+			runtimeCtx: runtimeCtx,
+			selectionCtx: selCtx({
 				alwaysParentModel: true,
 				bucketAssignments: { small: [], medium: [], frontier: [] },
 				registryModels: models,
 			}),
-			`t-parent-fallback-${observed.length}`,
-			undefined,
-			undefined,
-			undefined,
-			{
+			toolCallId: `t-parent-fallback-${observed.length}`,
+			_internal: {
 				runAttempt: () => {
 					observed.push(subagentRuntime.getStore()?.bucket);
 					return Promise.resolve(syntheticResult({ exitCode: 0, stopReason: "completed" }));
 				},
 			},
-		);
+		}));
 	}
 
 	assert.deepEqual(observed, ["medium", undefined]);
@@ -376,26 +378,17 @@ test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", a
 	];
 	const attempts: Array<{ model: string; attemptId: string; error?: Error }> = [];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-retry-after",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-retry-after",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -434,7 +427,7 @@ test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", a
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	assert.equal(attempts.length, 2);
@@ -459,26 +452,17 @@ test("bounded exponential backoff is used when no Retry-After hint is present", 
 		{ id: "model-b", provider: "provider-b" },
 	];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-backoff",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-backoff",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -509,7 +493,7 @@ test("bounded exponential backoff is used when no Retry-After hint is present", 
 				);
 			},
 		},
-	);
+	}));
 
 	const records = response.details.results[0].attemptRecords;
 	assert.equal(records?.length, 2);
@@ -525,26 +509,18 @@ test("retry wait is immediately abortable", async () => {
 	const clock = new PendingClock();
 	let secondAttemptStarted = false;
 
-	const responsePromise = execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		controller.signal,
-		selCtx({
+	const responsePromise = executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		signal: controller.signal,
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-abort-wait",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-abort-wait",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -578,7 +554,7 @@ test("retry wait is immediately abortable", async () => {
 				);
 			},
 		},
-	);
+	}));
 
 	const response = await responsePromise;
 	assert.equal(secondAttemptStarted, false, "abort during backoff must prevent the retry attempt");
@@ -593,29 +569,21 @@ test("retry wait publishes a running snapshot with advanced progressGeneration",
 	const clock = new PendingClock();
 	const snapshots: SingleResult[] = [];
 
-	const responsePromise = execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		(partial: any) => {
+	const responsePromise = executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		onUpdate: (partial: any) => {
 			const result = partial.details?.results?.[0];
 			if (result) snapshots.push(result);
 		},
-		noSignal(),
-		selCtx({
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-retry-wait-gen",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-retry-wait-gen",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -647,7 +615,7 @@ test("retry wait publishes a running snapshot with advanced progressGeneration",
 				);
 			},
 		},
-	);
+	}));
 
 	// Flush the synchronous retry-wait snapshot emission.
 	for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -674,26 +642,17 @@ test("provider-aware failover excludes every configured model of the failed prov
 	];
 	const attempts: string[] = [];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b", "model-c"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-same-provider",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-same-provider",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				attempts.push(resolved.modelOverride);
@@ -711,7 +670,7 @@ test("provider-aware failover excludes every configured model of the failed prov
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, true);
 	assert.deepEqual(attempts, ["model-a", "model-c"], "model-b must not be retried because it belongs to the failed provider; model-c (different provider) is still eligible");
@@ -725,16 +684,10 @@ test("provider-aware failover preserves a qualified duplicate on another provide
 		{ id: "gpt-5.4", provider: "openai-codex" },
 	];
 	const attempts: string[] = [];
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: {
@@ -749,11 +702,8 @@ test("provider-aware failover preserves a qualified duplicate on another provide
 			]),
 			registryModels: models,
 		}),
-		"t-qualified-duplicate",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-qualified-duplicate",
+		_internal: {
 			clock: new ImmediateClock(),
 			runAttempt: (resolved: any) => {
 				const spec = resolved.modelOverride as string;
@@ -772,7 +722,7 @@ test("provider-aware failover preserves a qualified duplicate on another provide
 				}));
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	assert.equal(attempts.length, 2);
@@ -790,26 +740,17 @@ test("auth failures are never retried", async () => {
 	];
 	const attempts: string[] = [];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-auth",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-auth",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				attempts.push(resolved.modelOverride);
@@ -827,7 +768,7 @@ test("auth failures are never retried", async () => {
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, true);
 	assert.deepEqual(attempts, ["model-a"]);
@@ -841,26 +782,17 @@ test("partial output prevents retry", async () => {
 	];
 	const attempts: string[] = [];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-partial",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-partial",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				attempts.push(resolved.modelOverride);
@@ -878,7 +810,7 @@ test("partial output prevents retry", async () => {
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, true);
 	assert.deepEqual(attempts, ["model-a"]);
@@ -895,26 +827,18 @@ test("shared tree budget is charged per actual dispatched attempt including retr
 	];
 	const budget = { sessions: 0 };
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [], budget },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		runtimeCtx: { depth: 0, trail: [], budget },
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-budget",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-budget",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -943,7 +867,7 @@ test("shared tree budget is charged per actual dispatched attempt including retr
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	assert.equal(budget.sessions, 2, "tree budget must be charged for both attempts");
@@ -956,26 +880,18 @@ test("tree budget exhaustion stops further attempts without synthetic undispatch
 	];
 	const budget = { sessions: 9 }; // one slot below default limit of 10
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [], budget },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		runtimeCtx: { depth: 0, trail: [], budget },
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-budget-exhaust",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-budget-exhaust",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -993,7 +909,7 @@ test("tree budget exhaustion stops further attempts without synthetic undispatch
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, true);
 	assert.equal(budget.sessions, 10, "the undispatched blocked retry must not consume tree budget");
@@ -1014,26 +930,17 @@ test("per-attempt analytics records are bounded and include attempt identity", a
 		{ id: "model-c", provider: "provider-c" },
 	];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b", "model-c"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-analytics",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-analytics",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -1053,7 +960,7 @@ test("per-attempt analytics records are bounded and include attempt identity", a
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	const records = response.details.results[0].attemptRecords;
@@ -1080,26 +987,17 @@ test("attempt records satisfy the host-analytics extraction contract", async () 
 		{ id: "model-b", provider: "provider-b" },
 	];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-extraction-contract",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-extraction-contract",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -1130,7 +1028,7 @@ test("attempt records satisfy the host-analytics extraction contract", async () 
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, undefined);
 	const records = response.details.results[0].attemptRecords;
@@ -1172,26 +1070,17 @@ test("provider exclusion prefers result.provider over model-id registry lookup",
 	];
 	const attempts: string[] = [];
 	const clock = new ImmediateClock();
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		undefined,
-		noSignal(),
-		selCtx({
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("shared-id", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-provider-preference",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-provider-preference",
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string) => {
 				const model = resolved.modelOverride;
@@ -1212,7 +1101,7 @@ test("provider exclusion prefers result.provider over model-id registry lookup",
 				);
 			},
 		},
-	);
+	}));
 
 	assert.equal(response.isError, true);
 	assert.deepEqual(attempts, ["shared-id", "model-b"], "retry uses a model from a different provider");

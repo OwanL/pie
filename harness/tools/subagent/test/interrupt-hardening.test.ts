@@ -197,12 +197,8 @@ function mockState(): Record<string, number> {
 resetMockState();
 afterEach(() => { setMockBehavior(undefined); resetMockState(); });
 
-/** Poll until `mockState()[key] >= min` (with a timeout). The first `execute()`
- *  in a process pays the tsx on-the-fly TS→CJS compile of modes.ts (~1s on a
- *  cold start); subsequent calls hit the cached module. Under the parallel
- *  fast suite the same cold compile can take far longer on a CPU-saturated
- *  machine, so the default timeout is a generous failure bound (the counter
- *  increments on its own; this only caps a never-started child). */
+/** Poll for child progress. The generous failure bound accommodates cold TS
+ * compilation under parallel load; success resolves as soon as the counter advances. */
 async function waitForCounter(key: string, min: number, timeoutMs = 15000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {

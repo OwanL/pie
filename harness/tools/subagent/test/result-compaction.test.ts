@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactSingleResult, compactSubagentDetails, readRecursiveProjectionCounters } from "../result-compaction.js";
+import { compactSingleResult, readRecursiveProjectionCounters } from "../result-compaction.js";
 import type { SingleResult } from "../types.js";
 
 function result(messages: any[], over: Partial<SingleResult> = {}): SingleResult {
@@ -147,20 +147,4 @@ test("terminal recursive traversal accumulates exact child, message, and depth c
 		counters,
 		"content-free counters and duration survive the provenance-style result spread",
 	);
-});
-
-test("compactSubagentDetails measures one duration segment per top-level result without double counting", () => {
-	const nested = result([{ role: "assistant", content: [{ type: "text", text: "nested" }] }]);
-	const first = result([{
-		role: "toolResult",
-		toolCallId: "sa-1",
-		toolName: "subagent",
-		details: { mode: "single", results: [nested] },
-	}]);
-	const second = result([{ role: "assistant", content: [{ type: "text", text: "sibling" }] }]);
-	const counters = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0, durationMs: 0 };
-	compactSubagentDetails({ mode: "single", agentScope: "both", projectAgentsDir: null, results: [first, second] }, counters);
-	assert.equal(counters.childCount, 3, "both top-level results plus the nested result");
-	assert.equal(counters.maxRecursiveDepth, 2);
-	assert.ok(Number.isFinite(counters.durationMs) && counters.durationMs >= 0);
 });

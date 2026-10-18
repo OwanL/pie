@@ -212,16 +212,6 @@ function terminalizeDetails(
 	};
 }
 
-export function compactSubagentDetails(
-	details: SubagentDetails,
-	counters?: RecursiveProjectionCounters,
-): SubagentDetails {
-	const activeCounters = counters ?? (isRuntimeTraceEnabled()
-		? { childCount: 0, messageCount: 0, maxRecursiveDepth: 0, durationMs: 0 }
-		: undefined);
-	return { ...details, results: details.results.map((result) => compactSingleResult(result, activeCounters, 1)) };
-}
-
 /** Read counters maintained by the terminal projection itself. No fallback
  * traversal is performed when a result did not pass through that projection. */
 export function readRecursiveProjectionCounters(details: SubagentDetails | undefined): RecursiveProjectionCounters | undefined {

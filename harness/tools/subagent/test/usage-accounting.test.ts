@@ -24,7 +24,7 @@ import type { AgentConfig } from "../../../agent-instructions/agent-discovery/ag
 import type { SingleResult } from "../types.js";
 
 // -----------------------------------------------------------------------------
-// Mock SDK loader hook. Required only for importing executeSingleMode (via
+// Mock SDK loader hook. Required only for importing executeSingleTask (via
 // src/modes.js), whose transitive import graph reaches the pi SDK. The hook
 // matches the pattern in retry.test.ts; runner tests below pass an explicit
 // _internal.sdk so they are not affected by the mock session shape.
@@ -72,8 +72,7 @@ if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_RE
 
 const __require = createRequire(import.meta.url);
 const { runSingleAgent } = __require(path.resolve("harness/tools/subagent/runner.js")) as typeof import("../runner.js");
-const { executeSingleMode } = __require(path.resolve("harness/tools/subagent/modes.js")) as typeof import("../modes.js");
-const execSingle = executeSingleMode as any;
+const { executeSingleTask } = __require(path.resolve("harness/tools/subagent/single.js")) as typeof import("../single.js");
 
 // -----------------------------------------------------------------------------
 // Shared test fixtures
@@ -192,7 +191,7 @@ function selCtx(over: Record<string, unknown> = {}): any {
 	};
 }
 
-const noOpDetails = (mode: any, results: any[]) => ({ mode, agentScope: "user" as const, projectAgentsDir: null, results });
+const noOpDetails = (results: any[]) => ({ mode: "single" as const, agentScope: "user" as const, projectAgentsDir: null, results });
 const noSignal = () => new AbortController().signal;
 
 function syntheticResult(over: Partial<SingleResult>): SingleResult {
@@ -414,7 +413,7 @@ test("runSingleAgent preserves depth >= 2 results without mixing child usage int
 // -----------------------------------------------------------------------------
 // 4. Failed retry attempt usage preservation
 // -----------------------------------------------------------------------------
-test("executeSingleMode accumulates usage from two retry attempts into the final result and attempt records", async () => {
+test("executeSingleTask accumulates usage from two retry attempts into the final result and attempt records", async () => {
 	const models = [
 		{ id: "model-a", provider: "provider-a" },
 		{ id: "model-b", provider: "provider-b" },
@@ -422,14 +421,13 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 	const clock = new ImmediateClock();
 	const attempts: string[] = [];
 	const liveUsages: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number }> = [];
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" },
-		makeCtx(models),
-		makeAgents(),
-		() => undefined,
-		{ depth: 0, trail: [] },
-		noOpDetails,
-		(partial: any) => {
+	const response: any = await executeSingleTask({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(models),
+		agents: makeAgents(),
+		runtimeCtx: { depth: 0, trail: [] },
+		makeDetails: noOpDetails,
+		onUpdate: (partial: any) => {
 			const usage = partial.details?.results?.[0]?.usage;
 			if (usage) liveUsages.push({
 				input: usage.input,
@@ -438,18 +436,18 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 				cacheWrite: usage.cacheWrite,
 			});
 		},
-		noSignal(),
-		selCtx({
+		signal: noSignal(),
+		selectionCtx: selCtx({
 			alwaysParentModel: false,
 			fallbackOnProviderFailure: true,
 			bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 			registryModels: models,
 		}),
-		"t-usage-accum",
-		undefined,
-		undefined,
-		undefined,
-		{
+		toolCallId: "t-usage-accum",
+		parentUiBridge: undefined,
+		parentSessionId: undefined,
+		allToolNames: undefined,
+		_internal: {
 			clock,
 			runAttempt: (resolved: any, _attemptId: string, onAttemptUpdate?: (partial: any) => void) => {
 				const model = resolved.modelOverride;
@@ -472,12 +470,12 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 				});
 				onAttemptUpdate?.({
 					content: [{ type: "text", text: "attempt running" }],
-					details: noOpDetails("single", [attemptResult]),
+					details: noOpDetails([attemptResult]),
 				});
 				return Promise.resolve(attemptResult);
 			},
 		},
-	);
+	});
 
 	assert.equal(response.isError, true);
 	const result = response.details.results[0] as SingleResult;

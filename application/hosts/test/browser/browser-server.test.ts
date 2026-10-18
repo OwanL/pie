@@ -12,7 +12,8 @@ import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
+import { createBrowserAssetDir } from './browser-assets.fixture';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
@@ -40,34 +41,12 @@ interface Harness {
   stop: () => Promise<void>;
 }
 
-async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Promise<Harness> {
-  const assetDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-browser-server-'));
-  await fs.mkdir(path.join(assetDir, '.vite'), { recursive: true });
-  await fs.mkdir(path.join(assetDir, 'assets'), { recursive: true });
-  await fs.writeFile(path.join(assetDir, 'assets', 'panel-abc123.js'), 'console.log("pie");\n');
-  await fs.writeFile(path.join(assetDir, 'assets', 'panel-abc123.css'), 'body {}\n');
-  await fs.writeFile(path.join(assetDir, 'assets', 'transcript-host-xyz789.js'), 'export {};\n');
-  await fs.writeFile(
-    path.join(assetDir, '.vite', 'manifest.json'),
-    JSON.stringify({
-      'index.html': {
-        file: 'assets/panel-abc123.js',
-        isEntry: true,
-        css: ['assets/panel-abc123.css'],
-        // Mirrors the real panel: the transcript host is lazy-loaded.
-        dynamicImports: ['transcript-host.tsx'],
-      },
-      'transcript-host.tsx': {
-        file: 'assets/transcript-host-xyz789.js',
-        isDynamicEntry: true,
-        imports: ['index.html'],
-      },
-    }),
-  );
-
+async function createHarness(t: TestContext, overrides: Partial<BrowserServerOptions> = {}): Promise<Harness> {
+  let server: BrowserServer;
+  const assetDir = await createBrowserAssetDir(t, async () => { await server?.stop(); });
   const events: BrowserServerLifecycleEvent[] = [];
   const routed: Array<{ msg: WebviewToHostMessage; context: RendererCommandContext }> = [];
-  const server = new BrowserServer({
+  server = new BrowserServer({
     hostInstanceId: 'shared-host-test',
     getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: false }),
     getViewState: () => EMPTY_VIEW_STATE,
@@ -92,7 +71,6 @@ async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Pro
     assetDir,
     stop: async () => {
       await server.stop();
-      await fs.rm(assetDir, { recursive: true, force: true });
     },
   };
 }
@@ -166,8 +144,8 @@ function connectWs(port: number, options: { host?: string; origin?: string; path
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('start binds loopback and serves the HTML shell, health, and allowlisted assets', async () => {
-  const { server, stop } = await createHarness();
+test('start binds loopback and serves the HTML shell, health, and allowlisted assets', async (t) => {
+  const { server, stop } = await createHarness(t);
   const outcome = await server.start();
   assert.equal(outcome.kind, 'started');
   if (outcome.kind !== 'started') return;
@@ -216,9 +194,9 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   await stop();
 });
 
-test('LAN opt-in binds IPv4 all interfaces and reports/accepts only advertised private IPv4 URLs', async () => {
+test('LAN opt-in binds IPv4 all interfaces and reports/accepts only advertised private IPv4 URLs', async (t) => {
   const lanAddress = '192.168.1.44';
-  const { server, events, stop } = await createHarness({
+  const { server, events, stop } = await createHarness(t, {
     getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: true }),
     getLanIPv4Addresses: () => [lanAddress, '10.2.3.4', '203.0.113.5', '127.0.0.1'],
   });
@@ -273,7 +251,7 @@ test('LAN report click command returns a real nonloopback origin with relative s
   if (!address) return t.skip('No private IPv4 interface available for genuine LAN socket test');
   const reports = createLocalFileOpenService();
   let harness: Harness;
-  harness = await createHarness({
+  harness = await createHarness(t, {
     getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: true }),
     getLanIPv4Addresses: () => [address],
     routeMessage: async (msg, context) => {
@@ -333,8 +311,8 @@ test('LAN report click command returns a real nonloopback origin with relative s
   }
 });
 
-test('HTML requests refresh a replaced asset manifest and retain prior assets', async () => {
-  const { server, assetDir, stop } = await createHarness();
+test('HTML requests refresh a replaced asset manifest and retain prior assets', async (t) => {
+  const { server, assetDir, stop } = await createHarness(t);
   const outcome = await server.start();
   assert.equal(outcome.kind, 'started');
   if (outcome.kind !== 'started') return;
@@ -367,7 +345,7 @@ test('HTML requests refresh a replaced asset manifest and retain prior assets', 
   await stop();
 });
 
-test('only an explicit development profile reloads connected browser renderers after a completed renderer build', async () => {
+test('only an explicit development profile reloads connected browser renderers after a completed renderer build', async (t) => {
   const child = spawnSync(process.execPath, [
     '--import', 'tsx',
     fileURLToPath(new URL('./browser-server-development-reload.fixture.ts', import.meta.url)),
@@ -384,12 +362,13 @@ test('only an explicit development profile reloads connected browser renderers a
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
 });
 
-test('an occupied preferred port falls back to an OS-assigned port (info-only)', async () => {
+test('an occupied preferred port falls back to an OS-assigned port (info-only)', async (t) => {
   const blocker = http.createServer();
+  t.after(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
   await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
   const blockedPort = (blocker.address() as { port: number }).port;
 
-  const { server, events, stop } = await createHarness({
+  const { server, events, stop } = await createHarness(t, {
     getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: false, allowLan: false }),
   });
   const outcome = await server.start();
@@ -404,12 +383,13 @@ test('an occupied preferred port falls back to an OS-assigned port (info-only)',
   await new Promise<void>((resolve) => blocker.close(() => resolve()));
 });
 
-test('requirePreferredPort: an occupied preferred port is a terminal bind failure', async () => {
+test('requirePreferredPort: an occupied preferred port is a terminal bind failure', async (t) => {
   const blocker = http.createServer();
+  t.after(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
   await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
   const blockedPort = (blocker.address() as { port: number }).port;
 
-  const { server, events, stop } = await createHarness({
+  const { server, events, stop } = await createHarness(t, {
     getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: true, allowLan: false }),
   });
   const outcome = await server.start();
@@ -421,8 +401,8 @@ test('requirePreferredPort: an occupied preferred port is a terminal bind failur
   await new Promise<void>((resolve) => blocker.close(() => resolve()));
 });
 
-test('disabled settings produce a disabled outcome without binding', async () => {
-  const { server, stop } = await createHarness({
+test('disabled settings produce a disabled outcome without binding', async (t) => {
+  const { server, stop } = await createHarness(t, {
     getSettings: () => ({ enabled: false, port: 0, requirePreferredPort: false, allowLan: false }),
   });
   const outcome = await server.start();
@@ -431,8 +411,8 @@ test('disabled settings produce a disabled outcome without binding', async () =>
   await stop();
 });
 
-test('upgrade validation: foreign Host/Origin are rejected, the exact origin is accepted', async () => {
-  const { server, stop } = await createHarness();
+test('upgrade validation: foreign Host/Origin are rejected, the exact origin is accepted', async (t) => {
+  const { server, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 
@@ -446,8 +426,8 @@ test('upgrade validation: foreign Host/Origin are rejected, the exact origin is 
   await stop();
 });
 
-test('a browser socket receives rendererHello and a full snapshot after ready', async () => {
-  const { server, stop } = await createHarness();
+test('a browser socket receives rendererHello and a full snapshot after ready', async (t) => {
+  const { server, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 
@@ -474,8 +454,8 @@ test('a browser socket receives rendererHello and a full snapshot after ready', 
   await stop();
 });
 
-test('a validated browser command routes with the trusted renderer context and gets exactly one ack', async () => {
-  const { server, routed, stop } = await createHarness();
+test('a validated browser command routes with the trusted renderer context and gets exactly one ack', async (t) => {
+  const { server, routed, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 
@@ -510,8 +490,8 @@ test('a validated browser command routes with the trusted renderer context and g
   await stop();
 });
 
-test('fail-closed ingress: malformed frames are never routed; the rate bound closes the socket', async () => {
-  const { server, routed, stop } = await createHarness();
+test('fail-closed ingress: malformed frames are never routed; the rate bound closes the socket', async (t) => {
+  const { server, routed, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 
@@ -542,8 +522,8 @@ test('fail-closed ingress: malformed frames are never routed; the rate bound clo
   await stop();
 });
 
-test('the client cap closes the 5th concurrent browser socket', async () => {
-  const { server, stop } = await createHarness();
+test('the client cap closes the 5th concurrent browser socket', async (t) => {
+  const { server, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 
@@ -560,9 +540,9 @@ test('the client cap closes the 5th concurrent browser socket', async () => {
   await stop();
 });
 
-test('handshake bound: a socket that never sends ready is closed by the deterministic clock', async () => {
+test('handshake bound: a socket that never sends ready is closed by the deterministic clock', async (t) => {
   const timers: Array<() => void> = [];
-  const { server, stop } = await createHarness({
+  const { server, stop } = await createHarness(t, {
     clock: {
       now: () => 0,
       setTimeout: (callback) => {
@@ -588,20 +568,16 @@ test('handshake bound: a socket that never sends ready is closed by the determin
   await stop();
 });
 
-test('stop releases the port; restart rebinds atomically', async () => {
-  const { server, stop } = await createHarness();
+test('stop releases the port; restart rebinds atomically', async (t) => {
+  const { server, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
   await server.stop();
   assert.equal(server.isRunning(), false);
 
   // The port is free again: a fresh server binds the same preferred port.
-  const second = new BrowserServer({
+  const { server: second } = await createHarness(t, {
     getSettings: () => ({ enabled: true, port, requirePreferredPort: false, allowLan: false }),
-    getViewState: () => EMPTY_VIEW_STATE,
-    getRunningSessionCount: () => 0,
-    routeMessage: async () => undefined,
-    assetDir: (await createHarness()).assetDir,
   });
   const outcome = await second.start();
   assert.equal(outcome.kind, 'started');
@@ -623,8 +599,8 @@ test('stop releases the port; restart rebinds atomically', async () => {
   await stop();
 });
 
-test('a browser disconnect deregisters the renderer and cancels pending confirmations', async () => {
-  const { server, stop } = await createHarness();
+test('a browser disconnect deregisters the renderer and cancels pending confirmations', async (t) => {
+  const { server, stop } = await createHarness(t);
   await server.start();
   const port = getPort(server);
 

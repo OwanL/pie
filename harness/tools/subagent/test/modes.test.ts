@@ -1,14 +1,4 @@
-/**
- * Direct unit tests for the pure chain/parallel helpers in
- * harness/tools/subagent/modes.ts:
- *   formatParallelResult, formatChainSuccessResult,
- *   buildChainStepFailureResponse, checkChainPreFlight.
- *
- * modes.ts only type-imports `@mariozechner/pi-agent-core` / `pi-coding-agent`
- * (erased at runtime), so a plain ESM import resolves under tsx — no SDK-mock
- * bootstrap needed. These helpers take already-built SingleResult[] / plain
- * step data, so they run sub-ms with no LLM or network.
- */
+/** Behavioral coverage for the production executeSingleTask object API. */
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
@@ -50,7 +40,7 @@ function assistantMsg(text: string): any {
 // ---------------------------------------------------------------------------
 // execute* mode tests
 // ---------------------------------------------------------------------------
-// modes.ts execute* functions call `runSingleAgent` (../runner.js), which lazily
+// single.ts executeSingleTask call `runSingleAgent` (../runner.js), which lazily
 // imports the SDK. The shared TSX config maps canonical and legacy SDK
 // specifiers to the selected artifact's same dist/index.js, so the ESM resolve
 // hook must match that exact configured path as well as intentional bare SDK
@@ -108,15 +98,13 @@ writeFileSync(
 	].join("\n"),
 	"utf-8",
 );
-// Register the hook before requiring modes.ts via createRequire: modes.ts imports
+// Register the hook before requiring single.ts via createRequire: single.ts imports
 // runner.js (CJS), whose loadSubagentSdk() does a dynamic import() of the SDK —
 // native import() is intercepted by the registered ESM resolve hook.
 Module.register(pathToFileURL(__hookPath));
 const __require = createRequire(import.meta.url);
-const __modesPath = path.resolve("harness/tools/subagent/modes.ts");
-const { executeSingleMode } = __require(__modesPath) as typeof import("../modes.js");
-// Loose aliases so the many-arg orchestration calls read cleanly.
-const execSingle = executeSingleMode as any;
+const __singlePath = path.resolve("harness/tools/subagent/single.ts");
+const { executeSingleTask } = __require(__singlePath) as typeof import("../single.js");
 
 function makeCtx(): any {
 	return {
@@ -162,7 +150,27 @@ function successBehavior(text: string): any {
 }
 
 const noSignal = () => new AbortController().signal;
-const noOpDetails = (mode: any, results: any[]) => ({ mode, agentScope: "user" as const, projectAgentsDir: null, results });
+const noOpDetails = (results: any[]) => ({ mode: "single" as const, agentScope: "user" as const, projectAgentsDir: null, results });
+
+function makeSingleTaskArgs(
+	overrides: Partial<Parameters<typeof executeSingleTask>[0]>,
+): Parameters<typeof executeSingleTask>[0] {
+	return {
+		params: { agent: "worker", task: "do work" },
+		ctx: makeCtx(),
+		agents: makeAgents(),
+		runtimeCtx: { depth: 0, trail: [] },
+		makeDetails: noOpDetails,
+		onUpdate: undefined,
+		signal: noSignal(),
+		selectionCtx: selCtx(),
+		toolCallId: "t1",
+		parentUiBridge: undefined,
+		parentSessionId: undefined,
+		allToolNames: undefined,
+		...overrides,
+	};
+}
 
 /** Deterministic retry clock: timers resolve immediately when advanced by 0. */
 class FakeClock {
@@ -173,14 +181,16 @@ class FakeClock {
 	}
 }
 
-// --- executeSingleMode ------------------------------------------------------
+// --- executeSingleTask ------------------------------------------------------
 
-test("executeSingleMode: success returns the final assistant output", async () => {
+test("executeSingleTask: success returns the final assistant output", async () => {
 	setMockBehavior(successBehavior("all done"));
-	const r: any = await execSingle(
-		{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
+	const r: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work" },
+		ctx: makeCtx(),
+		selectionCtx: selCtx(),
+		toolCallId: "t1",
+	}));
 	assert.equal(r.isError, undefined);
 	assert.equal(r.content[0].text, "all done");
 	assert.equal(r.details.mode, "single");
@@ -195,40 +205,47 @@ test("executeSingleMode: success returns the final assistant output", async () =
 	assert.equal(r.details.results[0].parentToolCallId, "t1");
 });
 
-test("executeSingleMode: error result returns isError with 'Agent <stopReason>: <message>'", async () => {
+test("executeSingleTask: error result returns isError with 'Agent <stopReason>: <message>'", async () => {
 	setMockBehavior({ onPrompt: async (emit: any) => { emit(messageEnd("partial", "error")); } });
-	const r: any = await execSingle(
-		{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
+	const r: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work" },
+		ctx: makeCtx(),
+		selectionCtx: selCtx(),
+		toolCallId: "t1",
+	}));
 	assert.equal(r.isError, true);
 	assert.match(r.content[0].text, /Agent error: partial/);
 	assert.equal(r.details.results[0].exitCode, 1);
 	assert.equal(r.details.results[0].stopReason, "error");
 });
 
-test("executeSingleMode: trail loop short-circuits before runSingleAgent", async () => {
+test("executeSingleTask: trail loop short-circuits before runSingleAgent", async () => {
 	let called = false;
 	setMockBehavior({ onPrompt: async () => { called = true; } });
 	await assert.rejects(
-		() => execSingle(
-			{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
-			() => undefined, { depth: 0, trail: ["worker", "worker"] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-		),
+		() => executeSingleTask(makeSingleTaskArgs({
+			params: { agent: "worker", task: "do work" },
+			ctx: makeCtx(),
+			runtimeCtx: { depth: 0, trail: ["worker", "worker"] },
+			selectionCtx: selCtx(),
+			toolCallId: "t1",
+		})),
 		/Trail loop detected: agent "worker"/,
 	);
 	assert.equal(called, false, "trail loop must not reach runSingleAgent");
 });
 
-test("executeSingleMode: an unclassified task/model error is not replayed on another model", async () => {
+test("executeSingleTask: an unclassified task/model error is not replayed on another model", async () => {
 	// A non-zero exit alone is not retry-safe. Without a transient provider
 	// classification, failover could duplicate prose or external tool effects.
 	let attempts = 0;
 	setMockBehavior({ onPrompt: async (emit: any) => { attempts++; emit(messageEnd("partial", "error")); } });
-	const r: any = await execSingle(
-		{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx({ alwaysParentModel: false, bucketAssignments: {} }), "t1", undefined,
-	);
+	const r: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work" },
+		ctx: makeCtx(),
+		selectionCtx: selCtx({ alwaysParentModel: false, bucketAssignments: {} }),
+		toolCallId: "t1",
+	}));
 	assert.equal(r.isError, true);
 	assert.match(r.content[0].text, /Agent error: partial/);
 	assert.equal(attempts, 1);
@@ -273,12 +290,13 @@ test("transient provider timeout retries on another model in the same bucket", a
 	Math.random = () => 0;
 	const clock = new FakeClock();
 	try {
-		const response: any = await execSingle(
-			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
-			() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
-			"t-retry", undefined, undefined, undefined, { clock },
-		);
+		const response: any = await executeSingleTask(makeSingleTaskArgs({
+			params: { agent: "worker", task: "do work", bucket: "medium" },
+			ctx: ctx,
+			selectionCtx: selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
+			toolCallId: "t-retry",
+			_internal: { clock },
+		}));
 
 		assert.equal(response.isError, undefined);
 		assert.equal(response.content[0].text, "recovered");
@@ -337,13 +355,14 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 	const originalRandom = Math.random;
 	Math.random = () => 0;
 	try {
-		const response: any = await execSingle(
-			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
-			() => undefined, { depth: 0, trail: [] }, noOpDetails,
-			(update: any) => publishedModels.push(update.details.results[0]?.selectedModel), noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
-			"t-retry-terminal-fence", undefined, undefined, undefined, { clock: new FakeClock() },
-		);
+		const response: any = await executeSingleTask(makeSingleTaskArgs({
+			params: { agent: "worker", task: "do work", bucket: "medium" },
+			ctx: ctx,
+			onUpdate: (update: any) => publishedModels.push(update.details.results[0]?.selectedModel),
+			selectionCtx: selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] }, registryModels: models }),
+			toolCallId: "t-retry-terminal-fence",
+			_internal: { clock: new FakeClock() },
+		}));
 		assert.equal(response.isError, undefined);
 		assert.equal(attempts, 2);
 		const retryStart = publishedModels.indexOf("model-b");
@@ -377,12 +396,13 @@ test("exhausted bucket does not fall back outside the bucket or report an unstar
 			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
 		},
 	};
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("bucket-model"), frontier: [] }, registryModels: models }),
-		"t-exhausted", undefined, undefined, undefined, { clock: new FakeClock() },
-	);
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: ctx,
+		selectionCtx: selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: assignedModels("bucket-model"), frontier: [] }, registryModels: models }),
+		toolCallId: "t-exhausted",
+		_internal: { clock: new FakeClock() },
+	}));
 	assert.equal(response.isError, true);
 	assert.equal(attempts, 1);
 	assert.equal(response.details.results[0].selectedModel, "bucket-model");
@@ -396,18 +416,18 @@ test("provider fallback toggle off surfaces the first transient failure", async 
 		attempts++;
 		throw Object.assign(new Error("provider timed out"), { code: "ETIMEDOUT" });
 	} });
-	const response: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: false, bucketAssignments: { small: [], medium: assignedModels("active-model", "other-model"), frontier: [] } }),
-		"t-no-retry", undefined,
-	);
+	const response: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: makeCtx(),
+		selectionCtx: selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: false, bucketAssignments: { small: [], medium: assignedModels("active-model", "other-model"), frontier: [] } }),
+		toolCallId: "t-no-retry",
+	}));
 	assert.equal(response.isError, true);
 	assert.equal(attempts, 1);
 	assert.equal(response.details.results[0].retryCount, undefined);
 });
 
-test("executeSingleMode: parent abort is terminal and never starts a fallback model attempt", async () => {
+test("executeSingleTask: parent abort is terminal and never starts a fallback model attempt", async () => {
 	const controller = new AbortController();
 	let attempts = 0;
 	setMockBehavior({
@@ -435,10 +455,13 @@ test("executeSingleMode: parent abort is terminal and never starts a fallback mo
 		bucketAssignments: { small: [], medium: assignedModels("model-a", "model-b"), frontier: [] },
 	});
 
-	const r: any = await execSingle(
-		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, controller.signal, selection, "t-abort", undefined,
-	);
+	const r: any = await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "do work", bucket: "medium" },
+		ctx: ctx,
+		signal: controller.signal,
+		selectionCtx: selection,
+		toolCallId: "t-abort",
+	}));
 
 	assert.equal(r.isError, true);
 	assert.equal(attempts, 1, "Stop must not launch a fresh fallback session");
@@ -462,17 +485,20 @@ function createStampCaptureBridge() {
 	} as any;
 }
 
-test("executeSingleMode stamps the bare tool-call id (single result -> bare id)", async () => {
+test("executeSingleTask stamps the bare tool-call id (single result -> bare id)", async () => {
 	const bridge = createStampCaptureBridge();
 	setMockBehavior({ onPrompt: async (emit: any) => {
 		const proxy = (globalThis as any).__MOCK_PROXIES__.at(-1);
 		await proxy.select("q", ["a"]);
 		emit(messageEnd("ok", "completed"));
 	} });
-	await execSingle(
-		{ agent: "worker", task: "s" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "callD", bridge,
-	);
+	await executeSingleTask(makeSingleTaskArgs({
+		params: { agent: "worker", task: "s" },
+		ctx: makeCtx(),
+		selectionCtx: selCtx(),
+		toolCallId: "callD",
+		parentUiBridge: bridge,
+	}));
 	assert.equal(bridge.calls.select[0].opts.subagentCallId, "callD");
 
 	const capturedProxy = (globalThis as any).__MOCK_PROXIES__[0];

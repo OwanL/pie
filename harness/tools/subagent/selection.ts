@@ -1,17 +1,5 @@
-/**
- * Model-selection primitives shared by execute.ts and modes.ts.
- *
- * These symbols previously lived in execute.ts. They were extracted into this
- * leaf module to break a circular import: execute.ts dynamically imported
- * modes.ts, while modes.ts statically imported these helpers back from
- * execute.ts. Under pi's on-the-fly TS→CJS transpilation that static
- * back-import could resolve to `undefined` when multiple AgentSessions loaded
- * the extension concurrently (parallel subagent dispatch), surfacing as
- * `Cannot read properties of undefined (reading 'checkTrailLoop')`.
- *
- * Both execute.ts and modes.ts now import from here; nothing in this file
- * imports either of them, so there is no cycle.
- */
+/** Model-selection primitives shared by execute.ts and single.ts.
+ * Keep this a leaf module to avoid circular orchestration imports. */
 
 import type { AgentConfig } from "../../agent-instructions/agent-discovery/agents.js";
 import type { ModelRequirements, SingleResult } from "./types.js";

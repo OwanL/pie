@@ -464,8 +464,7 @@ export async function executeSingleTask(args: {
 	};
 }): Promise<SingleResultEnvelope> {
 	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, _internal } = args;
-	// This boundary owns both the immutable packet and its effective constraint,
-	// including callers using the direct/modes compatibility route.
+	// This execution boundary owns both the immutable packet and its effective constraint.
 	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
 	const requestedRequirements = params.modelRequirements ?? args.selectionCtx.modelRequirements;
 	const effectiveRequirements = effectiveRequirementsForContext(requestedRequirements, parentUserContext);

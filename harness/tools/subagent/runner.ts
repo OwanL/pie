@@ -1349,7 +1349,7 @@ export async function runSingleAgent(
 	//   shared child guidance first, selected role second, never main appends.
 	// - noExtensions is intentionally false so the subagent extension (and others)
 	//   load into nested sessions, enabling further delegation. Nesting is bounded
-	//   by the depth/trail/tree-budget guards in execute()/modes.ts, not by hiding
+	//   by the depth/trail/tree-budget guards in execute.ts/single.ts, not by hiding
 	//   the tool.
 	// Skills are discovered independently for each child and pruned against the
 	// child's own assignment plus this agent's definition.
