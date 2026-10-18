@@ -42,8 +42,6 @@ export function resolvePieDataRoot(options: PieDataRootResolutionOptions = {}): 
 export function resolvePieDataPaths(options: PieDataRootResolutionOptions = {}): PieDataRootPaths {
   return core.resolvePieDataPaths(options) as PieDataRootPaths;
 }
-export const resolvePieDataRootFromEnvironment = resolvePieDataRoot;
-export const resolvePieDataRootPaths = resolvePieDataPaths;
 export function resolvePieDataSubdirectory(
   rootDir: string,
   subdirectory: PieDataSubdirectory,

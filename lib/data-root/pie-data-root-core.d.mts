@@ -30,6 +30,4 @@ export class PieDataRootResolutionError extends Error {
 }
 export function resolvePieDataRoot(options?: PieDataRootResolutionOptions): string;
 export function resolvePieDataPaths(options?: PieDataRootResolutionOptions): PieDataRootPaths;
-export const resolvePieDataRootFromEnvironment: typeof resolvePieDataRoot;
-export const resolvePieDataRootPaths: typeof resolvePieDataPaths;
 export function resolvePieDataSubdirectory(rootDir: string, subdirectory: PieDataSubdirectory, platform?: NodeJS.Platform): string;

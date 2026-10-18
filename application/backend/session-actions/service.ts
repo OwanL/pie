@@ -1087,11 +1087,6 @@ export class SessionService implements HostDisposable {
     const storage = this.createPruningSettingsStorage();
     await savePruningSettings(
       storage,
-      // SET path: the reducer already applied the update optimistically, so do
-      // not re-dispatch PruningSettingsChanged (avoids a lost-update flicker
-      // under rapid sequential changes). Persistence still writes-or-mirrors and
-      // notifies on disk failure. The LOAD path keeps its own dispatch.
-      undefined,
       () => this.getArchState().settings.pruningSettings,
       updates,
       (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
@@ -1117,11 +1112,6 @@ export class SessionService implements HostDisposable {
     const storage = this.createToolResultPruningSettingsStorage();
     await saveToolResultPruningSettings(
       storage,
-      // SET path: the reducer already applied the update optimistically, so do
-      // not re-dispatch ToolResultPruningSettingsChanged (avoids a lost-update
-      // flicker under rapid sequential changes). Persistence still writes-or-
-      // mirrors and notifies on disk failure. The LOAD path keeps its own dispatch.
-      undefined,
       () => this.getArchState().settings.toolResultPruningSettings,
       updates,
       (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
@@ -1147,11 +1137,6 @@ export class SessionService implements HostDisposable {
     const storage = this.createSessionTitlesSettingsStorage();
     await saveSessionTitlesSettings(
       storage,
-      // SET path: the reducer already applied the update optimistically, so do
-      // not re-dispatch SessionTitlesSettingsChanged (avoids a lost-update
-      // flicker under rapid sequential changes). Persistence still writes-or-
-      // mirrors and notifies on disk failure. The LOAD path keeps its own dispatch.
-      undefined,
       () => this.getArchState().settings.sessionTitlesSettings,
       updates,
       (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),

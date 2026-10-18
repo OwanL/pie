@@ -314,7 +314,3 @@ export function createStandaloneHostRuntimePlatform(
     createFileDiffViewer: (_service: FileDiffCoreLike) => new StandaloneFileDiffViewer(),
   };
 }
-
-export function standaloneUnsupportedEditorMessage(): string {
-  return UNSUPPORTED_EDITOR_MESSAGE;
-}

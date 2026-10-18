@@ -46,17 +46,14 @@ test('saves session-title settings to host storage as a fail-soft fallback', asy
   delete process.env.PI_CODING_AGENT_DIR;
   try {
     const storage = storageWith();
-    const values: SessionTitlesSettings[] = [];
     await saveSessionTitlesSettings(
       storage,
-      (value) => values.push(value),
       () => DEFAULT_SESSION_TITLES_SETTINGS,
       { provider: 'ollama', model: 'qwen3.5:4b' },
       () => undefined,
     );
     const expected = { ...DEFAULT_SESSION_TITLES_SETTINGS, provider: 'ollama', model: 'qwen3.5:4b' };
     assert.deepEqual(storage.get(), expected);
-    assert.deepEqual(values, [expected]);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;

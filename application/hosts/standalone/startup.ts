@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 
@@ -415,12 +414,4 @@ export async function resolveStandaloneEnvironment(
     await runtimeSelection.runtimeLease?.release().catch(() => undefined);
     throw error;
   }
-}
-
-/** Stable workspace key used by smoke tests and diagnostics without exposing
- * the path itself in a host-storage filename. */
-export function standaloneWorkspaceKey(workspaceCwd: string): string {
-  const normalizedPath = path.resolve(workspaceCwd).replaceAll('\\', '/');
-  const normalized = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
-  return createHash('sha256').update(normalized).digest('hex').slice(0, 32);
 }

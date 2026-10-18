@@ -72,13 +72,11 @@ test('savePruningSettings persists to storage when PI_CODING_AGENT_DIR is absent
   const previous = process.env.PI_CODING_AGENT_DIR;
   delete process.env.PI_CODING_AGENT_DIR;
   try {
-    const dispatched: PruningSettings[] = [];
     const errors: string[] = [];
     const storage = createStorage();
 
     await savePruningSettings(
       storage,
-      (settings) => dispatched.push(settings),
       () => DEFAULT_PRUNING_SETTINGS,
       { mode: 'shadow', skillCeiling: 2 },
       (message) => errors.push(message),
@@ -89,7 +87,6 @@ test('savePruningSettings persists to storage when PI_CODING_AGENT_DIR is absent
       mode: 'shadow',
       skillCeiling: 2,
     };
-    assert.deepEqual(dispatched, [expected]);
     assert.deepEqual(storage.get(), expected);
     assert.equal(errors.length, 1);
     assert.match(errors[0]!, /Failed to update pruning settings/);
@@ -145,13 +142,11 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
   process.env.PI_CODING_AGENT_DIR = tempDir;
   try {
     writeFileSync(path.join(tempDir, 'settings.json'), '{}\n', 'utf8');
-    const dispatched: PruningSettings[] = [];
     const errors: string[] = [];
     const storage = createStorage();
 
     await savePruningSettings(
       storage,
-      (settings) => dispatched.push(settings),
       () => DEFAULT_PRUNING_SETTINGS,
       { mode: 'off', toolCeiling: 7, mainAgentEnabled: false, subagentEnabled: false },
       (message) => errors.push(message),
@@ -164,7 +159,6 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
       mainAgentEnabled: false,
       subagentEnabled: false,
     };
-    assert.deepEqual(dispatched, [expected]);
     assert.deepEqual(storage.get(), expected);
     assert.deepEqual(errors, []);
 
@@ -243,18 +237,15 @@ test('savePruningSettings persists prepassTimeoutSec to settings.json (set then 
   process.env.PI_CODING_AGENT_DIR = tempDir;
   try {
     writeFileSync(path.join(tempDir, 'settings.json'), '{}\n', 'utf8');
-    const dispatched: PruningSettings[] = [];
     const storage = createStorage();
 
     // Set a timeout override.
     await savePruningSettings(
       storage,
-      (settings) => dispatched.push(settings),
       () => DEFAULT_PRUNING_SETTINGS,
       { prepassTimeoutSec: 60 },
       () => {},
     );
-    assert.equal(dispatched[0]?.prepassTimeoutSec, 60);
     assert.equal(storage.get()?.prepassTimeoutSec, 60);
     let written = JSON.parse(readFileSync(path.join(tempDir, 'settings.json'), 'utf8'));
     assert.equal(written.pruning.prepassTimeoutSec, 60, 'timeout must be written to disk');
@@ -262,12 +253,10 @@ test('savePruningSettings persists prepassTimeoutSec to settings.json (set then 
     // Clear the override: null is a real value, distinct from omitted.
     await savePruningSettings(
       storage,
-      (settings) => dispatched.push(settings),
       () => ({ ...DEFAULT_PRUNING_SETTINGS, prepassTimeoutSec: 60 }),
       { prepassTimeoutSec: null },
       () => {},
     );
-    assert.equal(dispatched[1]?.prepassTimeoutSec, null, 'clearing produces null in state');
     assert.equal(storage.get()?.prepassTimeoutSec, null);
     written = JSON.parse(readFileSync(path.join(tempDir, 'settings.json'), 'utf8'));
     assert.equal(written.pruning.prepassTimeoutSec, null, 'null must be written to disk (clear)');
