@@ -1,7 +1,7 @@
 # Tests
 
-Tests live beside their owning application, harness, analytics, or script package. The root `test/integration/` directory is reserved for cross-owner contracts and repository-level checks; `test/integration/perf/` holds performance tests where `*.perf.ts` files are opt-in and excluded from the registered fast suites, while the directory’s `*.test.ts` files are registered fast tests.
+Tests live beside their owning application, harness, analytics, script, or shared-library code. The root `test/integration/` directory is reserved for cross-owner contracts and repository-level checks. Prefer the narrowest owner directory matching the behavior under test; shared fixtures belong in the nearest owner’s `test/` tree.
 
-Use the package registry in `scripts/lib/test-packages.mjs` as the source of truth for test discovery, focused-file routing, and ownership. Add a new test root or explicit integration file there when introducing a new test location. Prefer the narrowest owner directory matching the behavior under test; shared fixtures belong in the nearest owner’s `test/` tree.
+Ordinary test selection is owned by each project’s `moon.yml` test task and Moon’s affected-input graph, not the package registry. Add new ordinary test locations to the owning Moon selectors and inputs. Artifact-only `*.artifact.test.*` suites remain excluded from ordinary tasks; browser, performance (`*.perf.ts`), and end-to-end suites remain opt-in.
 
-The root test runners and each owner’s TypeScript/lint configuration discover only their registered paths. Keep opt-in browser, performance, and end-to-end suites separately registered rather than silently adding them to the default fast test run.
+`scripts/lib/test-packages.mjs` owns focused-file routing and the retained legacy package/coverage inventory. Register new test roots or explicit integration files there as well; registry membership alone does not add a test to ordinary Moon selection. TypeScript and lint configurations have their own scopes. See the root [test guidance](../README.md#test-and-validate) for commands and coverage limits.

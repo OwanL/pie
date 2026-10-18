@@ -110,6 +110,7 @@ const PACKAGE_TEST_METADATA = {
   lib: {
     testGlobs: [
       'lib/data-root/test/**/*.test.ts',
+      'lib/process-lifecycle/test/**/*.test.mjs',
       'lib/sensitive-data/test/**/*.test.ts',
       'lib/structured-logging/test/**/*.test.ts',
       'lib/temporary-files/test/**/*.test.ts',
@@ -478,6 +479,7 @@ const PACKAGE_TEST_METADATA = {
       'harness/tools/computer-use/dependency-owner.mjs',
       'harness/tools/computer-use/*.ts',
       'harness/tools/computer-use/*.mjs',
+      'harness/tools/png-image.mjs',
     ],
     thresholds: { lines: 80, branches: 60 },
   },

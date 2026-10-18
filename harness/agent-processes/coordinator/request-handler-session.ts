@@ -182,8 +182,7 @@ async function handleSessionCreate(
   if (params.operationId !== undefined) {
     // §6.3 idempotent create: dedupe concurrent/retried RPCs by the stable
     // host-generated operation identity. A retry can never create a second
-    // durable session; a completed result is reused, and a durable path left
-    // behind by a failed publication is resumed instead of recreated.
+    // durable session; committed results are reused even if publication failed.
     const result = await getCreateOperationLedger(deps).run({
       operationId: params.operationId,
       intentFingerprint: createOperationIntentFingerprint(
@@ -203,13 +202,6 @@ async function handleSessionCreate(
           throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome.error ?? 'Title assignment failed.');
         }
         return await publishCreatedSession(deps, created.sessionPath, params, request.id);
-      },
-      resume: async (durablePath) => {
-        ledgerTitleOutcome = await assignCreatedSessionTitle(deps, durablePath, params.title, request.id);
-        if (ledgerTitleOutcome && !ledgerTitleOutcome.assigned) {
-          throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome.error ?? 'Title assignment failed.');
-        }
-        return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
         // A titled retry first confirms its assignment below; never emit a
@@ -431,10 +423,6 @@ async function handleSessionDuplicate(
         registerDurablePath(duplicate.sessionPath);
         await deps.admitOpenedSessionTitle?.(duplicate.sessionPath);
         return await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
-      },
-      resume: async (durablePath) => {
-        await deps.admitOpenedSessionTitle?.(durablePath);
-        return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
         // Best-effort: the durable result is committed; a lost first

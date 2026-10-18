@@ -4,7 +4,7 @@ tasks:
     command: 'proto run node -- scripts/model-config/sync-models.mjs --check'
     inputs: ['models.yaml', 'models.json', 'model-profiles.yaml', 'settings.json', 'scripts/model-config/**/*', '@globs(lifecycle)', '@globs(protected)']
   test:
-    command: 'proto run node -- scripts/verification/test-node.mjs --exclude "**/*.artifact.test.*" lib/test lib/data-root/test lib/development-runtime/test lib/sensitive-data/test lib/structured-logging/test lib/temporary-files/test lib/transcript/test'
+    command: 'proto run node -- scripts/verification/test-node.mjs --exclude "**/*.artifact.test.*" lib/test lib/data-root/test lib/development-runtime/test lib/process-lifecycle/test lib/sensitive-data/test lib/structured-logging/test lib/temporary-files/test lib/transcript/test'
     # Exact compatibility facade imports from lib-owned tests.
     inputs: ['/lib/**/*', '/harness/agent-processes/lib/rpc/jsonl.ts', '/harness/session-storage/ownership/session-identity.ts', '@globs(lifecycle)', '@globs(protected)']
     options: {cache: false}

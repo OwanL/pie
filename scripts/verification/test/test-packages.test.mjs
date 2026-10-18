@@ -31,7 +31,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 220, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  assert.equal(PACKAGE_DIRECTIVES.length, 221, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
   for (const file of [
     'application/lib/composer/local-message-id.ts',
     'application/lib/session-tabs/tab-behavior.ts',
@@ -53,6 +53,12 @@ test('source/test root defaults keep single-root enumeration identical', () => {
   const scripts = resolvePackageEntry('scripts');
   assert.deepEqual(packageSourceRoots(scripts), ['scripts']);
   assert.deepEqual(packageTestRoots(scripts), ['scripts/test', ...scripts.testRoots]);
+});
+
+test('lib registry discovers Windows ownership tests for focused and legacy runners', () => {
+  const file = 'lib/process-lifecycle/test/windows-owned-tree.test.mjs';
+  assert.ok(packageTestRoots(resolvePackageEntry('lib')).includes('lib/process-lifecycle/test'));
+  assert.equal(classifyFileToPackage(file), 'lib');
 });
 
 test('SDK-independent focused tests are an exact file allowlist owned by extension and scripts', () => {

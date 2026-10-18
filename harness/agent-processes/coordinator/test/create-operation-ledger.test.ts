@@ -395,7 +395,6 @@ test('ledger: an intent mismatch cannot join an in-flight operation', async () =
       await gate;
       return { sessionPath: '/sessions/created.jsonl' };
     },
-    resume: async () => ({ sessionPath: '/sessions/created.jsonl' }),
   });
 
   await assert.rejects(
@@ -403,7 +402,6 @@ test('ledger: an intent mismatch cannot join an in-flight operation', async () =
       operationId: 'op-pending-mismatch',
       intentFingerprint: 'session.create:/workspace-b',
       execute: async () => ({ sessionPath: '/sessions/wrong.jsonl' }),
-      resume: async () => ({ sessionPath: '/sessions/wrong.jsonl' }),
     }),
     (error: unknown) => (error as { code?: string }).code === 'OPERATION_INTENT_MISMATCH',
   );
@@ -421,9 +419,6 @@ test('ledger: failed operation without a durable path retries as a fresh attempt
       attempts += 1;
       if (attempts === 1) throw new Error('durable create failed');
       return { sessionPath: '/sessions/retried.jsonl' };
-    },
-    resume: async () => {
-      throw new Error('resume must not run without a durable path');
     },
   });
 
@@ -445,9 +440,6 @@ test('ledger: an error after durable-path registration settles as committed succ
       registerDurablePath('/sessions/committed.jsonl');
       throw new Error('publication failed');
     },
-    resume: async () => {
-      throw new Error('a committed operation is never resumed/recreated');
-    },
     republish: async () => { republishes += 1; },
   });
 
@@ -467,9 +459,6 @@ test('ledger: completed retry reuses the result and swallows republish errors', 
     execute: async () => {
       executes += 1;
       return { sessionPath: '/sessions/done.jsonl' };
-    },
-    resume: async () => {
-      throw new Error('resume must not run for a completed operation');
     },
     republish: async () => {
       republishes += 1;
@@ -491,9 +480,6 @@ test('ledger: a synchronously throwing republish still cannot fail the completed
     operationId: 'op-sync-republish',
     intentFingerprint: 'session.create:/workspace',
     execute: async () => ({ sessionPath: '/sessions/done.jsonl' }),
-    resume: async () => {
-      throw new Error('resume must not run for a completed operation');
-    },
     republish: () => {
       throw new Error('sync republish failure');
     },

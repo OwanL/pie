@@ -428,6 +428,11 @@ test('root package.json extension scripts are the group adapter and all ids stay
   }
 });
 
+test('shared PNG processing stays in computer-use coverage', () => {
+  const owner = PACKAGE_CONFIGS.find(({ id }) => id === 'computer-use');
+  assert.ok(owner.coverageIncludes.includes('harness/tools/png-image.mjs'));
+});
+
 test('extension group membership remains stable', () => {
   for (const id of ['subagent', 'warm-bash', 'deferred-triggers', 'session-changes', 'computer-use', 'playwright']) {
     assert.ok(PACKAGE_GROUPS.extensions.includes(id), `${id} remains in the extensions test/typecheck group`);

@@ -8,10 +8,9 @@
  * concurrent and retried RPCs by that `operationId` so a retry can never
  * create a second durable session.
  *
- * Entry lifecycle mirrors the plan's
- * `pending → delayed-awaiting-outcome → succeeded(path) | failed`:
+ * Entry lifecycle is `pending → succeeded(path) | failed`:
  *
- * - `pending` — a durable attempt is in flight (or a retry is resuming one);
+ * - `pending` — a durable attempt is in flight;
  *   concurrent/retried callers join the same promise instead of starting a
  *   second durable creation.
  * - `succeeded(path)` — the durable result is retained for the generation; a
@@ -30,7 +29,6 @@
  * process-local cold manager is retained (`registerDurablePath`).
  */
 
-import { toErrorMessage } from '../../../lib/structured-logging/error-message.js';
 import { BackendError } from './server-io.js';
 
 /** Outcome of one create/duplicate operation handled through the ledger. */
@@ -49,9 +47,6 @@ export interface CreateOperationRunOptions {
    * synchronously immediately after both succeed, so a later publication failure cannot create a
    * second session or lose the one-use manager handoff. */
   execute(registerDurablePath: (sessionPath: string) => void): Promise<CreateOperationResult>;
-  /** Resume publication for an already-created durable path after a previous
-   * attempt retained its manager but failed before the cold snapshot completed. */
-  resume(durablePath: string): Promise<CreateOperationResult>;
   /** Best-effort re-publication for a retry of a completed operation: rebuilds
    *  and emits `session.opened` (with the operation identity) so a first
    *  emission the host missed inside its timeout window is recovered. Errors
@@ -63,7 +58,7 @@ export interface CreateOperationRunOptions {
 type LedgerEntry =
   | { state: 'pending'; intentFingerprint: string; promise: Promise<CreateOperationResult>; durablePath?: string }
   | { state: 'succeeded'; intentFingerprint: string; sessionPath: string }
-  | { state: 'failed'; intentFingerprint: string; error: string; durablePath?: string };
+  | { state: 'failed'; intentFingerprint: string };
 
 export class CreateOperationLedger {
   private readonly entries = new Map<string, LedgerEntry>();
@@ -101,21 +96,15 @@ export class CreateOperationLedger {
     return this.startAttempt(options);
   }
 
-  private startAttempt(
-    options: CreateOperationRunOptions,
-    durablePath?: string,
-  ): Promise<CreateOperationResult> {
+  private startAttempt(options: CreateOperationRunOptions): Promise<CreateOperationResult> {
     const pending: Extract<LedgerEntry, { state: 'pending' }> = {
       state: 'pending',
       intentFingerprint: options.intentFingerprint,
       promise: undefined as never,
-      ...(durablePath !== undefined ? { durablePath } : {}),
     };
     const promise = (async (): Promise<CreateOperationResult> => {
       try {
-        const result = durablePath !== undefined
-          ? await options.resume(durablePath)
-          : await options.execute((path) => { pending.durablePath = path; });
+        const result = await options.execute((path) => { pending.durablePath = path; });
         this.entries.set(options.operationId, {
           state: 'succeeded',
           intentFingerprint: options.intentFingerprint,
@@ -139,7 +128,6 @@ export class CreateOperationLedger {
         this.entries.set(options.operationId, {
           state: 'failed',
           intentFingerprint: options.intentFingerprint,
-          error: toErrorMessage(error),
         });
         throw error;
       }

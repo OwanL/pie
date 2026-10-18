@@ -155,6 +155,8 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
 
   const rootFiles = resolveMoonTestFiles('moon.yml');
   assert.ok(rootFiles.has('lib/development-runtime/test/lifetime.test.mjs'));
+  const windowsOwnershipTest = 'lib/process-lifecycle/test/windows-owned-tree.test.mjs';
+  assert.ok(rootFiles.has(windowsOwnershipTest), 'root ordinary selectors retain Windows ownership coverage');
 
   const scriptFiles = resolveMoonTestFiles('scripts/moon.yml');
   assert.ok(scriptFiles.has('scripts/development/test/launch.test.mjs'));
@@ -203,6 +205,8 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
     'SDK independence is not inferred from a directory or filename pattern');
 
   const registryFiles = resolveRegistryTestFiles();
+  assert.ok(registryFiles.has(windowsOwnershipTest), 'Windows ownership stays in the registered lib inventory');
+  assert.equal(artifactFiles.has(windowsOwnershipTest), false, 'Windows ownership is not artifact-only');
   const autonomousModeTest = 'harness/tool-and-skill-selection/test/autonomous-mode.test.ts';
   assert.ok(registryFiles.has(autonomousModeTest), 'autonomous mode stays in the registered selector test root');
   assert.ok(fastFiles.has(autonomousModeTest), 'Moon native selectors retain autonomous mode coverage');

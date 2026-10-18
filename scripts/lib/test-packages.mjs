@@ -168,6 +168,7 @@ export const PACKAGE_REGISTRY = [
     dir: 'lib',
     testRoots: [
       'lib/data-root/test',
+      'lib/process-lifecycle/test',
       'lib/sensitive-data/test',
       'lib/structured-logging/test',
       'lib/temporary-files/test',
