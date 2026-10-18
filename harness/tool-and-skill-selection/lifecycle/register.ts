@@ -1,5 +1,5 @@
 import type { ExtensionAPI, BeforeAgentStartEvent, InputEvent, ToolCallEvent, Skill } from "@earendil-works/pi-coding-agent";
-import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "./logger.ts";
+import { appendDecision, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "./logger.ts";
 import {
 	getFormatSkillsForPromptImpl,
 	getAllowedChildTools,
@@ -11,6 +11,7 @@ import {
 	state,
 	PROCESS_SESSION_ID,
 } from "../state/selector-state.ts";
+import { estimateRequestPrefixTokens } from "../../../lib/request-token-estimate.ts";
 import { toErrorMessage } from "../../../lib/structured-logging/error-message.ts";
 import { rootSessionAttribution } from "../../../lib/session-attribution.ts";
 import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.ts";
@@ -26,7 +27,7 @@ import {
 } from "../state/prepass-cache.ts";
 import { pruningResultRenderer } from "./render.ts";
 import type { PrepassInvocation, PrepassRunResult, PrepassUsage, SkillPruningResult, ToolPruningResult } from "../prepass/types.js";
-import { buildReplacement, buildDecision, buildFeedbackMessage, estimateToolTokens } from "../prepass/message-builders.ts";
+import { buildReplacement, buildDecision, buildFeedbackMessage } from "../prepass/message-builders.ts";
 import { shouldSkipPruning, getSessionId, getSessionPath, getConfig } from "./pruning-lifecycle.ts";
 import { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } from "../../agent-instructions/skill-selection/skill-policy.ts";
 import { applyToolSelection, RECOVERY_TOOL_NAME } from "../../tools/selection/tool-policy.ts";
@@ -435,6 +436,10 @@ export default function register(pi: ExtensionAPI) {
 				// Apply the tool decision first. Pi synchronously rebuilds its base prompt
 				// in setActiveTools; the Pie-only context seam then lets us rebase the
 				// chained prompt before filtering its skills block.
+				const beforeToolPrompt = modifiedSystemPrompt;
+				const beforeToolNames = new Set(toolSeams.getActiveTools());
+				const beforeToolDefinitions = toolsManuallyDisabled ? [] : configuredTools.filter((tool) => beforeToolNames.has(tool.name));
+				const beforeToolTokens = estimateRequestPrefixTokens(beforeToolPrompt, beforeToolDefinitions);
 				const toolSelection = applyToolSelection(
 					availableTools,
 					prunedTools,
@@ -456,10 +461,18 @@ export default function register(pi: ExtensionAPI) {
 					toolResult = {
 						included: toolSelection.includedToolNames,
 						excluded: toolSelection.excludedToolNames,
-						tokensSaved: estimateToolTokens(availableTools, toolSelection.excludedToolNames),
+						tokensSaved: 0,
 					};
 				}
 
+				// Shadow cannot rebuild counterfactual tool prose without mutating Pi.
+				// Estimate schemas only there; auto counts the actual rebased prompt.
+				const afterToolNames = new Set(activeConfig.mode === "shadow"
+					? toolSelection.includedToolNames : toolSeams.getActiveTools());
+				const afterToolDefinitions = toolsManuallyDisabled ? [] : configuredTools.filter((tool) => afterToolNames.has(tool.name));
+				const afterToolTokens = estimateRequestPrefixTokens(modifiedSystemPrompt, afterToolDefinitions);
+				if (toolResult) toolResult.tokensSaved = beforeToolTokens - afterToolTokens;
+				let afterSkillTokens = afterToolTokens;
 				const toolsRemain = toolSelection.includedToolNames.length > 0;
 				let skillSelection = applySkillSelection(visibleSkills, prunedSkills, effectivePinned, activeConfig, toolsRemain);
 				const staleToolProseCannotBeRebased = toolPromptRefreshFailed
@@ -488,8 +501,13 @@ export default function register(pi: ExtensionAPI) {
 					skillResult = {
 						included: skillSelection.includedSkillNames,
 						excluded: skillSelection.excludedSkillNames,
-						tokensSaved: estimateTokens(originalSkillBlock) - estimateTokens(newSkillBlock),
+						tokensSaved: 0,
 					};
+
+					const estimatedSkillPrompt = staleToolProseCannotBeRebased && activeConfig.mode === "auto"
+						? modifiedSystemPrompt : modifiedSystemPrompt.replace(SKILLS_BLOCK_RE, replacement);
+					afterSkillTokens = estimateRequestPrefixTokens(estimatedSkillPrompt, afterToolDefinitions);
+					skillResult.tokensSaved = afterToolTokens - afterSkillTokens;
 
 					const excludedSkillPaths = skillSelection.excludedSkillNames.map((name) => visibleSkills.find((skill) => skill.name === name)?.filePath).filter(Boolean) as string[];
 					if (activeConfig.mode === "shadow") {
@@ -526,8 +544,10 @@ export default function register(pi: ExtensionAPI) {
 						pinned: effectivePinned, newBlock: newSkillBlock, originalBlock: originalSkillBlock,
 						toolIncluded: toolsConsidered ? toolSelection.includedToolNames : undefined,
 						toolExcluded: toolsConsidered ? toolSelection.excludedToolNames : undefined,
-						toolBlockTokens: toolsConsidered ? estimateToolTokens(availableTools, toolSelection.includedToolNames) : undefined,
-						originalToolBlockTokens: toolsConsidered ? estimateToolTokens(availableTools, availableTools.map((t) => t.name)) : undefined,
+						toolBlockTokens: toolsConsidered ? afterToolTokens : undefined,
+						originalToolBlockTokens: toolsConsidered ? beforeToolTokens : undefined,
+						skillBlockTokens: afterSkillTokens,
+						originalBlockTokens: afterToolTokens,
 						keptAllDueToParseFailure,
 						cacheHit,
 						prepassUsage,

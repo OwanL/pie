@@ -14,6 +14,8 @@ import {
 import { INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION } from '../initial-context-estimate-protocol.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation.js';
+import { countTokens } from '../../../../lib/tokenization.js';
+import { estimateRequestPrefixTokens, estimateToolDefinitionsTokens, type RequestEstimateTool } from '../../../../lib/request-token-estimate.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -268,17 +270,16 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   );
   assert.match(expectedPiePrompt, /^You are a coding assistant operating inside Pie/);
   assert.ok(!expectedPiePrompt.includes('Traversal safety:'), 'inventory uses the approved base without traversal prose');
-  const expectedToolCatalog = session.getAllTools().map((tool: any) => {
-    let entry = `## ${tool.name}\n\n${tool.description || '(no description)'}`;
-    if (tool.parameters !== undefined) {
-      entry += '\n\n**Parameters:**\n```json\n' + JSON.stringify(tool.parameters, null, 2) + '\n```';
-    }
-    return entry;
-  }).join('\n\n---\n\n');
+  const expectedTools = session.getAllTools() as ReadonlyArray<RequestEstimateTool>;
   assert.equal(
     inventory.estimate.tokens,
-    estimateTextTokens(expectedPiePrompt) + estimateTextTokens(expectedToolCatalog),
-    'initial estimate counts the same shared Pie prompt plus the separate tool catalog',
+    countTokens(expectedPiePrompt) + estimateToolDefinitionsTokens(expectedTools),
+    'initial estimate counts the shared Pie prompt (whitespace preserved) plus provider tool definitions exactly once as one compact JSON array',
+  );
+  assert.equal(
+    inventory.estimate.tokens,
+    estimateRequestPrefixTokens(expectedPiePrompt, expectedTools),
+    'inventory totals and the shared estimator use the same request-prefix basis',
   );
   assert.equal(builtPromptOptions.toolSnippets.hidden_inventory, inactiveSnippet);
   assert.ok(builtPromptOptions.promptGuidelines.includes(inactiveGuideline));

@@ -1,7 +1,7 @@
 import type { MessageRenderOptions, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import type { PruningResult } from "../settings/config-types.js";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { formatLatencyNote } from "../prepass/message-builders.ts";
+import { formatLatencyNote, formatTokenSavingsNote } from "../prepass/message-builders.ts";
 
 /** The message shape Pi passes to this customType's registered renderer. */
 type PruningFeedbackMessageShape = Parameters<MessageRenderer<PruningResult>>[0];
@@ -36,7 +36,7 @@ export const pruningResultRenderer = {
 			: "";
 		const parts = [skillSummary, toolSummary].filter(Boolean);
 		const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
-		const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
+		const tokenNote = formatTokenSavingsNote(tokensSaved, details.mode);
 		const latencyNote = formatLatencyNote(details.prepassLatencyMs);
 		const cacheNote = details.cacheHit ? " · cached" : "";
 		const hasError = !!details.prepassError;

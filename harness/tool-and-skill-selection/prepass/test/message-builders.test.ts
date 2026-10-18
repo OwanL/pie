@@ -14,6 +14,7 @@
  * but the deletion is cheap insurance and matches the repo convention.)
  */
 import test from "node:test";
+import { estimateToolDefinitionsTokens } from "../../../../lib/request-token-estimate.ts";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
@@ -125,6 +126,37 @@ test("buildDecision: empty blocks yield zero tokens", () => {
 	});
 	assert.equal(decision.skillBlockTokens, 0);
 	assert.equal(decision.originalBlockTokens, 0);
+});
+
+test("buildDecision: marks request-prefix token basis when both full-prefix overrides are supplied", () => {
+	const decision = buildDecision({
+		sessionId: "s", sessionPath: "p", mode: "auto", query: "q",
+		llmModel: "m", llmThinkingLevel: "minimal", llmResponse: "", llmLatencyMs: 0,
+		included: ["a"], excluded: ["b"], pinned: [], newBlock: "short", originalBlock: "longer",
+		skillBlockTokens: 1234,
+		originalBlockTokens: 5678,
+		toolBlockTokens: 900,
+		originalToolBlockTokens: 1200,
+	});
+	assert.equal(decision.skillBlockTokens, 1234);
+	assert.equal(decision.originalBlockTokens, 5678);
+	assert.equal(decision.toolBlockTokens, 900);
+	assert.equal(decision.originalToolBlockTokens, 1200);
+	assert.equal(decision.tokenEstimateBasis, "request-prefix-v1");
+});
+
+test("buildDecision: legacy block estimates leave the request-prefix marker absent", () => {
+	const newBlock = "x";
+	const originalBlock = "xx";
+	const decision = buildDecision({
+		sessionId: "s", sessionPath: "p", mode: "auto", query: "q",
+		llmModel: "m", llmThinkingLevel: "minimal", llmResponse: "", llmLatencyMs: 0,
+		included: ["a"], excluded: ["b"], pinned: [], newBlock, originalBlock,
+	});
+	assert.equal(decision.skillBlockTokens, estimateTokens(newBlock));
+	assert.equal(decision.originalBlockTokens, estimateTokens(originalBlock));
+	assert.equal(decision.tokenEstimateBasis, undefined);
+	assert.ok(!("tokenEstimateBasis" in decision), "legacy rows should not claim the request-prefix basis");
 });
 
 test("buildDecision: contextFile omitted when not provided", () => {
@@ -239,11 +271,11 @@ test("estimateToolTokens: positive for a single excluded tool", () => {
 	assert.ok(estimateToolTokens(allTools, ["read"]) > 0);
 });
 
-test("estimateToolTokens: additive across excluded tools", () => {
-	const one = estimateToolTokens(allTools, ["read"]);
-	const two = estimateToolTokens(allTools, ["edit"]);
-	const both = estimateToolTokens(allTools, ["read", "edit"]);
-	assert.equal(both, one + two);
+test("estimateToolTokens: compact schema array subset uses shared estimator", () => {
+
+	const tools = allTools.map((tool) => ({ ...tool, parameters: { type: "object", properties: { payload: { type: "string", enum: Array.from({ length: 100 }, (_, i) => `value-${i}`) } } } }));
+	assert.equal(estimateToolTokens(tools, ["read", "edit"]), estimateToolDefinitionsTokens(tools.slice(0, 2)));
+	assert.ok(estimateToolTokens(tools, ["read"]) > estimateToolTokens(allTools, ["read"]) + 100);
 });
 
 test("estimateToolTokens: ignores tools not in the excluded set", () => {
@@ -319,7 +351,18 @@ test("buildFeedbackMessage: includes mode/model/latency and fail-open reason whe
 	assert.equal(msg!.details.toolTokensSaved, 50);
 	assert.match(msg!.content, /Kept 1\/2 skills/);
 	assert.match(msg!.content, /Kept 1\/2 tools/);
-	assert.match(msg!.content, /Saved ~150 tokens/);
+	assert.match(msg!.content, /Saved ~150 tokens \(estimated\)/);
+});
+
+test("buildFeedbackMessage: shadow labels estimated potential savings", () => {
+	const msg = buildFeedbackMessage(
+		skillResult({ included: ["a"], excluded: ["b"], tokensSaved: 100 }),
+		toolResult({ included: ["read"], excluded: ["edit"], tokensSaved: 50 }),
+		"shadow",
+	);
+	assert.ok(msg);
+	assert.match(msg!.content, /Potential savings ~150 tokens \(estimated\)/);
+	assert.doesNotMatch(msg!.content, /Saved ~/);
 });
 
 test("buildFeedbackMessage: omits fail-open reason when absent", () => {
@@ -381,7 +424,7 @@ test("buildFeedbackMessage: pruned -> surfaces prepass latency alongside token s
 	);
 	assert.ok(msg);
 	assert.match(msg!.content, /Kept 1\/2 skills/);
-	assert.match(msg!.content, /Saved ~150 tokens/);
+	assert.match(msg!.content, /Saved ~150 tokens \(estimated\)/);
 	assert.match(msg!.content, /· prepass 450ms/);
 });
 

@@ -12,7 +12,7 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 
 import { estimateTokens } from "../lifecycle/logger.js";
-import { countTokens } from "../../../lib/tokenization.js";
+import { estimateToolDefinitionsTokens } from "../../../lib/request-token-estimate.ts";
 import type { PruningConfig, PruningDecision, PruningResult } from "../settings/config-types.js";
 
 import type { PrepassInvocation, PrepassUsage, SkillPruningResult, ToolPruningResult } from "./types.js";
@@ -61,6 +61,16 @@ export function formatLatencyNote(latencyMs: number | undefined): string {
 	return ` · prepass ${latencyMs}ms`;
 }
 
+/**
+ * Render the user-visible token note. These counts are estimates, and shadow
+ * mode only projects what an auto-mode turn would have saved.
+ */
+export function formatTokenSavingsNote(tokensSaved: number, mode: PruningConfig["mode"]): string {
+	if (tokensSaved <= 0) return "";
+	const label = mode === "shadow" ? "Potential savings" : "Saved";
+	return ` · ${label} ~${tokensSaved} tokens (estimated)`;
+}
+
 /** Display shape returned from `buildFeedbackMessage`. */
 export interface PruningFeedbackMessage {
 	customType: "pruning-result";
@@ -79,9 +89,10 @@ export function buildReplacement(newBlock: string): string {
 }
 
 /**
- * Capture a PruningDecision for the audit log. Token counts come from the
- * real cl100k_base BPE tokenizer shared with the logger (chars/4 fallback
- * only when the tokenizer cannot be resolved in the current runtime).
+ * Capture a PruningDecision for the audit log. Full request-prefix stage
+ * overrides take precedence; otherwise token counts come from the real
+ * cl100k_base BPE tokenizer shared with the logger (chars/4 fallback only when
+ * the tokenizer cannot be resolved in the current runtime).
  */
 export function buildDecision(input: {
 	sessionId: string;
@@ -98,13 +109,16 @@ export function buildDecision(input: {
 	pinned: string[];
 	newBlock: string;
 	originalBlock: string;
+	/** Full request-prefix stage estimates when supplied by the hook. */
+	skillBlockTokens?: number;
+	originalBlockTokens?: number;
 	/** Tool names kept this turn (undefined when tool pruning did not run). */
 	toolIncluded?: string[];
 	/** Tool names pruned this turn (undefined when tool pruning did not run). */
 	toolExcluded?: string[];
-	/** Estimated tokens of the kept tool descriptions. */
+	/** Tool-stage request-prefix estimate after selection. */
 	toolBlockTokens?: number;
-	/** Estimated tokens of the original (pre-prune) tool descriptions. */
+	/** Tool-stage request-prefix estimate before selection. */
 	originalToolBlockTokens?: number;
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;
@@ -133,8 +147,13 @@ export function buildDecision(input: {
 		pinned: input.pinned,
 		included: input.included,
 		excluded: input.excluded,
-		skillBlockTokens: estimateTokens(input.newBlock),
-		originalBlockTokens: estimateTokens(input.originalBlock),
+		skillBlockTokens: input.skillBlockTokens ?? estimateTokens(input.newBlock),
+		originalBlockTokens: input.originalBlockTokens ?? estimateTokens(input.originalBlock),
+		// Only claim the full request-prefix basis when both block counts were
+		// overridden; a partial override leaves a mixed legacy/prefix row.
+		...(input.skillBlockTokens !== undefined && input.originalBlockTokens !== undefined
+			? { tokenEstimateBasis: "request-prefix-v1" as const }
+			: {}),
 		toolIncluded: input.toolIncluded,
 		toolExcluded: input.toolExcluded,
 		toolBlockTokens: input.toolBlockTokens,
@@ -157,25 +176,13 @@ export function buildDecision(input: {
 	};
 }
 
-/** Per-tool JSON framing overhead (name + description wrapper): ~50 chars ≈ 13 tokens. */
-const TOOL_FRAMING_TOKENS = 13;
-
 /**
- * Total tokens for the descriptions of the tools whose names appear in `names`
- * (kept, pruned, or all — the caller chooses the subset). Used both for "tokens
- * saved" reporting (the pruned subset) and for the skill-parallel block-token
- * accounting (the kept / all subsets). Counts name + description via the real
- * BPE tokenizer plus a small per-tool framing constant for the JSON wrapper.
+ * Estimate a selected subset as one compact provider tool-definition array.
+ * Array tokenization is not additive; stage savings use before/after deltas.
  */
 export function estimateToolTokens(allTools: ToolInfo[], names: string[]): number {
 	const nameSet = new Set(names);
-	let tokens = 0;
-	for (const tool of allTools) {
-		if (nameSet.has(tool.name)) {
-			tokens += countTokens(tool.name) + countTokens(tool.description ?? "") + TOOL_FRAMING_TOKENS;
-		}
-	}
-	return tokens;
+	return estimateToolDefinitionsTokens(allTools.filter((tool) => nameSet.has(tool.name)));
 }
 
 /**
@@ -271,7 +278,7 @@ export function buildFeedbackMessage(
 	}
 
 	const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
-	const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
+	const tokenNote = formatTokenSavingsNote(tokensSaved, mode);
 	const latencyNote = formatLatencyNote(prepass?.latencyMs);
 	const cacheNote = prepass?.cacheHit ? " · cached" : "";
 

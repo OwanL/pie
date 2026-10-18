@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream';
 import { attachJsonlLineReader } from '../lib/rpc/jsonl.js';
 import type { InitialContextEstimate } from '../lib/rpc/session-events.js';
 import type { SystemPromptEntry } from '../lib/rpc/session-events.js';
-import { estimateTextTokens } from '../../../lib/token-estimation.js';
+import { estimateRequestPrefixTokens } from '../../../lib/request-token-estimate.js';
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files.js';
 import type {
   SdkBuildSystemPromptOptions,
@@ -259,10 +259,11 @@ function buildInitialContextInventoryProjection(
     promptGuidelines: inventoryPromptOptions.promptGuidelines,
   }));
 
-  // Count the exact Pie-owned prompt text used by runtime requests.
-  // Provider tool descriptions/schemas are separate request metadata and are
-  // added exactly once below.
-  const tokens = estimateTextTokens(fullSystemPrompt) + estimateTextTokens(buildToolCatalogText(tools));
+  // Count the exact Pie-owned prompt text used by runtime requests (literal
+  // whitespace-preserving cl100k basis). Provider tool descriptions/schemas are
+  // separate request metadata and are added exactly once by the shared
+  // estimator below, as one compact JSON array — no Markdown catalog text.
+  const tokens = estimateRequestPrefixTokens(fullSystemPrompt, tools);
   const contextWindow = session.model?.contextWindow;
   if (!Number.isSafeInteger(tokens) || tokens < 0
     || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {
@@ -308,16 +309,6 @@ function buildAllRegisteredPromptOptions(
     toolSnippets,
     promptGuidelines,
   };
-}
-
-function buildToolCatalogText(tools: readonly SdkToolInfo[]): string {
-  return tools.map((tool) => {
-    let entry = `## ${tool.name}\n\n${tool.description || '(no description)'}`;
-    if (tool.parameters !== undefined) {
-      entry += `\n\n**Parameters:**\n\`\`\`json\n${JSON.stringify(tool.parameters, null, 2)}\n\`\`\``;
-    }
-    return entry;
-  }).join('\n\n---\n\n');
 }
 
 export function installInventoryProviderDenyBoundary(): {

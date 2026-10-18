@@ -118,6 +118,16 @@ compaction are separate mechanisms. Successful history compaction schedules one 
 
 A `pruning-result` custom message is rendered in the transcript showing what was kept/pruned and estimated tokens saved; the agent turn then proceeds normally (no input handler is needed to continue).
 
+### Token accounting
+
+Cold inventory and skill-pruning savings share `lib/request-token-estimate.ts`: literal system-prompt text plus compact JSON tool definitions, including parameter schemas. The cold inventory is still the **full registered catalog before Pie filters**, not a prediction of the outgoing request. It excludes conversation history and provider-specific framing.
+
+Applied savings are sequential before/after prefix differences: tool selection (including rebased tool guidance), then skill selection. Their sum is the net prefix reduction, not the sum of independently counted removed fragments. Restoring tools may make a stage negative. Shadow mode never changes the request and reports **potential** savings; its tool estimate covers definitions only because rebuilding counterfactual tool guidance would mutate the session. Missing fresh-base access likewise limits tool-prose attribution. Later extension hooks may still change the request.
+
+These are local `cl100k_base` estimates, not the active provider's exact tokenizer or billing counters. Provider-reported input plus cached-input usage remains authoritative. Prepass usage/cost is separate, and savings are not net billed savings. Audit records with `tokenEstimateBasis: "request-prefix-v1"` contain sequential full-prefix stage counts in the legacy block-count fields; subtract each pair, but do not sum the absolute stage counts. Older records retain their original semantics.
+
+Native preflight counting is provider-specific: the pinned SDK exposes direct OpenAI Responses `responses.inputTokens.count`, Anthropic `messages.countTokens`, and Google `models.countTokens`. That does not establish support through Copilot, Codex subscription routes, or compatible gateways. Cold discovery deliberately forbids network calls, so it uses the labelled local estimate rather than sending prompts to counting endpoints. No fixed-overhead calibration is used: tool selection changes that overhead, and model/tokenizer mismatch is content-dependent.
+
 ## Recovery
 
 Call `request_capability({})` only after checking the active tools and skills and finding no suitable capability. Never poll merely to verify, supplement, or replace a suitable active capability. The result lists hidden tool and skill names without descriptions or schemas. Then select exactly one listed capability:

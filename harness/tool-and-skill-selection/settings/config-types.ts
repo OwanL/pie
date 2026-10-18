@@ -156,11 +156,26 @@ export interface PruningDecision {
 	pinned: string[];
 	included: string[];
 	excluded: string[];
+	/**
+	 * Skill-stage request-prefix tokens after selection. In rows marked with
+	 * `tokenEstimateBasis: "request-prefix-v1"` this is the full request prefix;
+	 * in historical rows it is only the replaced skills-block text estimate.
+	 */
 	skillBlockTokens: number;
+	/**
+	 * Request-prefix tokens before the skill stage (after tool selection). In rows
+	 * marked with `tokenEstimateBasis: "request-prefix-v1"` this is the full
+	 * request prefix; in historical rows it is only the original skills-block
+	 * text estimate.
+	 */
 	originalBlockTokens: number;
+	/** Marks that the block token fields above (and tool-stage fields when present) are full request-prefix stage estimates rather than historical block-text estimates. Absent on legacy rows. */
+	tokenEstimateBasis?: "request-prefix-v1";
 	toolIncluded?: string[];
 	toolExcluded?: string[];
+	/** Tool-stage request-prefix estimate after selection. */
 	toolBlockTokens?: number;
+	/** Tool-stage request-prefix estimate before selection. */
 	originalToolBlockTokens?: number;
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;

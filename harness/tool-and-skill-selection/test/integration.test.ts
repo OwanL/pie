@@ -613,6 +613,8 @@ test("ceiling is guidance only: pruning nothing keeps all skills even above the 
 		// 3 skills, ceiling 2, but the LLM pruned nothing → keep all 3 (no hard clamp).
 		const matches = result.systemPrompt.match(/<name>[^<]+<\/name>/g) ?? [];
 		assert.equal(matches.length, 3, "ceiling is no longer hard-enforced; keep-all is honored");
+		assert.equal(result.message.details.skillTokensSaved, 0);
+		assert.equal(result.message.details.toolTokensSaved, 0);
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -1273,6 +1275,11 @@ test("tool_call catches unexpected context errors and continues", async () => {
 });
 
 test("actual SDK hook chain applies tools before skills, preserves foreign prose, and restores next turn", async () => {
+	const { estimateRequestPrefixTokens } = require("../../../lib/request-token-estimate.ts") as typeof import("../../../lib/request-token-estimate.ts");
+	const schemaTools = mockToolInfo.map((tool) => ({ ...tool, parameters: { type: "object", properties: { payload: { type: "string", enum: Array.from({ length: 200 }, (_, i) => `schema-heavy-${i}`) } } } }));
+	let pruningFeedback: any;
+	let hookInput = "";
+	let hookOutput = "";
 	let scorerCalls = 0;
 	let setActiveToolsCalls = 0;
 	let rebuildCalls = 0;
@@ -1308,7 +1315,13 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 		});
 		const sdkRunner = new ExtensionRunner([
 			{ path: "<earlier>", handlers: new Map([["before_agent_start", [earlierHandler]]]) },
-			{ path: "<skill-pruner>", handlers: new Map([["before_agent_start", [pruningHandler]]]) },
+			{ path: "<skill-pruner>", handlers: new Map([["before_agent_start", [async (event: any, ctx: any) => {
+				hookInput = event.systemPrompt;
+				const result = await pruningHandler(event, ctx) as any;
+				pruningFeedback = result?.message?.details;
+				hookOutput = result?.systemPrompt ?? event.systemPrompt;
+				return result;
+			}]]]) },
 			{ path: "<later>", handlers: new Map([["before_agent_start", [laterHandler]]]) },
 		], {}, "/repo", { getSessionId: () => "sdk-hook-session", getSessionFile: () => undefined }, {});
 
@@ -1334,7 +1347,7 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 		};
 		installPieSystemPromptRebuildGuard(promptState, "/pie");
 		__setToolSeams({
-			getAllTools: () => mockToolInfo as any[],
+			getAllTools: () => schemaTools as any[],
 			getActiveTools: () => activeTools,
 			setActiveTools: (names) => {
 				setActiveToolsCalls++;
@@ -1356,6 +1369,9 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 			initialBase,
 			promptOptions,
 		);
+		assert.equal(pruningFeedback.toolTokensSaved + pruningFeedback.skillTokensSaved,
+			estimateRequestPrefixTokens(hookInput, schemaTools) - estimateRequestPrefixTokens(hookOutput, schemaTools.filter((tool) => activeTools.includes(tool.name))));
+		assert.ok(pruningFeedback.toolTokensSaved > 500, "schema-heavy savings include definitions and changed tool guidance");
 		assert.equal(scorerCalls, 1, "selection uses exactly one scorer call");
 		assert.equal(setActiveToolsCalls, 1, "selection applies tools exactly once");
 		assert.equal(rebuildCalls, 1, "selection reuses setActiveTools' one synchronous rebuild");
@@ -1436,6 +1452,7 @@ test("standalone Pi without the fresh-base seam does not return stale tool prose
 		assert.equal(setActiveToolsCalls, 1);
 		assert.equal(result?.systemPrompt, undefined, "the stale event copy must not override Pi's rebuilt base");
 		assert.deepEqual(result?.message?.details.excludedSkills, []);
+		assert.equal(result?.message?.details.skillTokensSaved, 0, "unapplied stale-prose skill edits save nothing");
 		assert.match(result?.message?.details.prepassSafeguardReason ?? "", /fresh-base accessor unavailable/u);
 	} finally {
 		__setCompleteFn(null);
@@ -1506,7 +1523,10 @@ test("tool pruning in shadow mode does not call setActiveTools", async () => {
 			getActiveTools: () => mockToolInfo.map((t) => t.name),
 			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
 		});
-		await runBeforeAgentStart(handlers, "edit some code", realisticSkills);
+		const result = await runBeforeAgentStart(handlers, "edit some code", realisticSkills);
+		assert.equal(result?.systemPrompt, systemPrompt(realisticSkills));
+		assert.match(result?.message?.content ?? "", /Potential savings/u);
+		assert.doesNotMatch(result?.message?.content ?? "", /Saved ~/u);
 		assert.equal(setActiveToolsCalls.length, 0, "setActiveTools should NOT be called in shadow mode");
 	} finally {
 		__setCompleteFn(null);
@@ -2277,6 +2297,40 @@ test("message renderer compact view renders skill summary", async () => {
 	);
 	const rendered = box.render(80);
 	assert.ok(rendered.some((line: string) => line.includes("Kept 1/3 skills")));
+	assert.ok(rendered.some((line: string) => line.includes("Saved ~300 tokens (estimated)")));
+	assert.doesNotMatch(rendered.join("\n"), /Potential savings/);
+});
+
+test("message renderer compact shadow view reports potential estimated savings", async () => {
+	const { registeredRenderers } = register(config());
+	const renderer = registeredRenderers.get("pruning-result");
+	assert.ok(renderer);
+
+	const themeMock = {
+		fg: (_color: string, text: string) => text,
+		bg: (_color: string, text: string) => text,
+	};
+
+	const box = renderer(
+		{
+			content: "Pruned",
+			display: true,
+			details: {
+				includedSkills: ["code-simplification"],
+				excludedSkills: ["duckdb-query-optimization", "frontend-design"],
+				includedTools: [],
+				excludedTools: [],
+				mode: "shadow",
+				skillTokensSaved: 300,
+				toolTokensSaved: 0,
+			},
+		},
+		{ expanded: false },
+		themeMock,
+	);
+	const allText = box.render(80).join("\n");
+	assert.match(allText, /Potential savings ~300 tokens \(estimated\)/);
+	assert.doesNotMatch(allText, /Saved ~/);
 });
 
 test("message renderer expanded view renders skill details", async () => {
@@ -2311,6 +2365,8 @@ test("message renderer expanded view renders skill details", async () => {
 	assert.ok(allText.includes("code-simplification"));
 	assert.ok(allText.includes("duckdb-query-optimization"));
 	assert.ok(allText.includes("web_search"));
+	assert.match(allText, /Potential savings ~250 tokens \(estimated\)/);
+	assert.doesNotMatch(allText, /Saved ~/);
 });
 
 test("message renderer with no details renders raw content", async () => {

@@ -9,9 +9,9 @@ export type PruningHeaderState =
   | { kind: 'result'; details: PruningDetails; fallbackText?: string };
 
 /**
- * Label a prepass savings figure. The prepass computes these counts from the
- * pre-filter catalog, not from the actual outgoing request, so the figure is
- * always approximate and explicitly labelled estimated. In shadow mode
+ * Label a prepass savings figure. Local prefix counting does not include
+ * provider-specific tokenization or framing, so the figure is always
+ * approximate and explicitly labelled estimated. In shadow mode
  * pruning is evaluated but never applied, so nothing is actually saved — the
  * figure is potential savings only and must not say "saved".
  *
