@@ -28,7 +28,6 @@ import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../conversation-state/effects/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import { assertAnalyticsBackendContext, sameAnalyticsBackendContext, type AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
-import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
 import { assertProtocolVersion, isEventEnvelope, isResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import type { EventEnvelope, ResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
@@ -44,7 +43,6 @@ export interface BackendStartOptions {
   /** Explicit development-only route to a compiled local Pi source workspace. */
   sdkRuntimeSelection?: WorkspaceDevelopmentSdkSelection;
   /** Immutable canonical analytics authority snapshot for this generation. */
-  analyticsActivation?: AnalyticsBackendDescriptor;
   analyticsContext?: AnalyticsBackendContext;
 }
 
@@ -102,47 +100,15 @@ interface NewlyAcquiredDevelopmentReader {
   reader: DevelopmentReader;
 }
 
-const ANALYTICS_DESCRIPTOR_KEYS = [
-  'buildId', 'generationId', 'hostInstanceId', 'manifestRevision',
-  'manifestSha256', 'workspaceId',
-].sort();
-
-function sameAnalyticsBackendDescriptor(
-  left: AnalyticsBackendDescriptor | undefined,
-  right: AnalyticsBackendDescriptor | undefined,
-): boolean {
-  if (!left || !right) return left === right;
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  if (leftKeys.length !== ANALYTICS_DESCRIPTOR_KEYS.length
-    || rightKeys.length !== ANALYTICS_DESCRIPTOR_KEYS.length
-    || leftKeys.some((key, index) => key !== ANALYTICS_DESCRIPTOR_KEYS[index])
-    || rightKeys.some((key, index) => key !== ANALYTICS_DESCRIPTOR_KEYS[index])) return false;
-  return left.generationId === right.generationId
-    && left.buildId === right.buildId
-    && left.manifestRevision === right.manifestRevision
-    && left.manifestSha256 === right.manifestSha256
-    && left.workspaceId === right.workspaceId
-    && left.hostInstanceId === right.hostInstanceId;
-}
-
 function validateBackendReadyPayload(
   payload: BackendReadyPayload,
   generation: number,
-  expectedAnalyticsActivation: AnalyticsBackendDescriptor | undefined,
   expectedAnalyticsContext: AnalyticsBackendContext | undefined,
 ): Error | undefined {
   try {
     assertProtocolVersion('backend.ready', payload.protocolVersion);
     if (payload.backendGeneration !== undefined && payload.backendGeneration !== generation) {
       throw new Error(`Backend generation mismatch: expected ${generation}, received ${payload.backendGeneration}.`);
-    }
-    if (!sameAnalyticsBackendDescriptor(payload.analyticsActivation, expectedAnalyticsActivation)) {
-      throw new Error(
-        expectedAnalyticsActivation
-          ? 'Backend analytics activation descriptor mismatch.'
-          : 'Backend unexpectedly advertised an analytics activation descriptor.',
-      );
     }
     if (!sameAnalyticsBackendContext(payload.analyticsContext, expectedAnalyticsContext)) {
       throw new Error('Backend analytics context mismatch.');
@@ -553,19 +519,9 @@ export class BackendClient implements Disposable {
       : [];
     if (options.analyticsContext !== undefined) {
       assertAnalyticsBackendContext(options.analyticsContext);
-      if (options.analyticsActivation !== undefined) throw new Error('Analytics context and activation descriptor are mutually exclusive.');
     }
     const analyticsArgs = options.analyticsContext
       ? ['--analyticsContext', JSON.stringify(options.analyticsContext)]
-      : options.analyticsActivation
-      ? [
-          '--analyticsGenerationId', options.analyticsActivation.generationId,
-          '--analyticsBuildId', options.analyticsActivation.buildId,
-          '--analyticsManifestRevision', String(options.analyticsActivation.manifestRevision),
-          '--analyticsManifestSha256', options.analyticsActivation.manifestSha256,
-          '--analyticsWorkspaceId', options.analyticsActivation.workspaceId,
-          '--analyticsHostInstanceId', options.analyticsActivation.hostInstanceId,
-        ]
       : [];
     const proc = cp.spawn(
       options.nodePath,
@@ -726,7 +682,7 @@ export class BackendClient implements Disposable {
       this.readyValidation = {
         generation,
         process: proc,
-        validate: (payload) => validateBackendReadyPayload(payload, generation, options.analyticsActivation, options.analyticsContext),
+        validate: (payload) => validateBackendReadyPayload(payload, generation, options.analyticsContext),
         reject: (error) => {
           finishReject(error);
           this.forceStopProcess();
@@ -741,7 +697,7 @@ export class BackendClient implements Disposable {
 
         try {
           const payload = event.payload as BackendReadyPayload;
-          const validationError = validateBackendReadyPayload(payload, generation, options.analyticsActivation, options.analyticsContext);
+          const validationError = validateBackendReadyPayload(payload, generation, options.analyticsContext);
           if (validationError) throw validationError;
           finishResolve(payload);
         } catch (error) {

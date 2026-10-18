@@ -91,7 +91,7 @@ async function makeColdServer(
   let catalogManagerOpens = 0;
   let inspectingProviderRuntime = false;
   let nextEntryId = 0;
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js',
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js',
     sdkPath: sdkRuntime.descriptor.sdkPath,
     sourceArtifactDescriptor: sdkRuntime.descriptor,
     cwd: dir,
@@ -128,7 +128,8 @@ async function makeColdServer(
       open(openedPath: string) {
         managerOpens += 1;
         if (inspectingProviderRuntime) catalogManagerOpens += 1;
-        const snapshot = [...durableBranch];
+        const snapshot: any[] = fsSync.readFileSync(openedPath, 'utf8').trim().split('\n')
+          .map((line) => JSON.parse(line)).filter((row) => row.type !== 'session');
         const appendRows = (rows: ReadonlyArray<Record<string, unknown>>): string[] => {
           let parentId = (snapshot.at(-1) as { id?: string } | undefined)?.id ?? null;
           const entries = rows.map((row) => {
@@ -151,7 +152,7 @@ async function makeColdServer(
           getCwd: () => dir,
           getSessionId: () => 'stable-session-id',
           getSessionFile: () => openedPath,
-          getSessionName: () => sessionName,
+          getSessionName: () => snapshot.filter((row) => row.type === 'session_info').at(-1)?.name,
           getBranch: () => snapshot,
           getEntries: () => snapshot,
           buildSessionContext: () => {
@@ -171,6 +172,14 @@ async function makeColdServer(
               },
             };
           },
+          appendSessionInfo: (name: string) => {
+            const id = append({ type: 'session_info', name });
+            if (openedPath === sessionPath) sessionName = name;
+            return id;
+          },
+          appendCustomEntry: (customType: string, data: unknown) => append({
+            type: 'custom', customType, data,
+          }),
           appendModelChange: (provider: string, modelId: string) => append({
             type: 'model_change', provider, modelId,
           }),
@@ -366,7 +375,7 @@ test('public cold session.open acknowledges with transcript before deferred prom
     assert.deepEqual(acknowledgement, { ok: true, sessionPath: h.sessionPath });
     const openEvents = events.filter(({ event }) => event === 'session.opened' || event === 'session.promptInventory');
     assert.deepEqual(openEvents.map(({ event }) => event), ['session.opened']);
-    const opened = events[0]!.payload;
+    const opened = openEvents[0]!.payload;
     assert.equal(opened.selectionToken, 'cold-open-selection');
     assert.equal(opened.runtimeReady, false);
     assert.deepEqual(opened.transcript.map((message: { id: string; markdown: string }) => ({
@@ -858,6 +867,12 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     let duplicateHot = false;
     let duplicateCalls = 0;
     let snapshotCalls = 0;
+    const managerOpenPaths: string[] = [];
+    const originalOpen = h.server.sdk.SessionManager.open.bind(h.server.sdk.SessionManager);
+    h.server.sdk.SessionManager.open = (sessionPath: string) => {
+      managerOpenPaths.push(sessionPath);
+      return originalOpen(sessionPath);
+    };
     const privateRequestIds: string[] = [];
     const opened: any[] = [];
     h.server.emit = (event: string, payload: unknown) => {
@@ -891,6 +906,13 @@ test('duplicate of a hot session forks through its owner and retains coordinator
         sourceHot = false;
         duplicateHot = true;
         return { sessionPath: duplicatePath };
+      },
+      assignSessionTitle: async (sessionPath: string, title: string, _requestId: string, expected: string) => {
+        assert.equal(sessionPath, duplicatePath);
+        const manager = h.server.sdk.SessionManager.open(sessionPath);
+        assert.equal(manager.getSessionName(), expected);
+        manager.appendSessionInfo(title);
+        return { assigned: true };
       },
       buildHotSessionOpenedPayload: async (
         sessionPath: string,
@@ -941,7 +963,8 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     assert.deepEqual(await duplicating, { ok: true, sessionPath: duplicatePath });
     assert.equal(duplicateCalls, 1);
     assert.equal(snapshotCalls, 1);
-    assert.equal(h.counts().managerOpens, 0, 'the coordinator never opens the hot source');
+    assert.ok(managerOpenPaths.length > 0, 'title admission reads and persists the destination title');
+    assert.ok(managerOpenPaths.every((sessionPath) => sessionPath === duplicatePath), 'the coordinator never opens the hot source');
     assert.equal(opened.length, 1);
     assert.equal(opened[0].session.path, duplicatePath);
     assert.equal(opened[0].selectionToken, 'hot-duplicate-selection');
@@ -1015,6 +1038,13 @@ test('distinct concurrent duplicate requests serialize at a hot source and creat
         hotDuplicateReady = true;
         return { sessionPath: hotDuplicatePath };
       },
+      assignSessionTitle: async (sessionPath: string, title: string, _requestId: string, expected: string) => {
+        assert.equal(sessionPath, hotDuplicatePath);
+        const manager = originalOpen(sessionPath);
+        assert.equal(manager.getSessionName(), expected);
+        manager.appendSessionInfo(title);
+        return { assigned: true };
+      },
       buildHotSessionOpenedPayload: async (
         sessionPath: string,
         params: Record<string, unknown>,
@@ -1065,8 +1095,23 @@ test('distinct concurrent duplicate requests serialize at a hot source and creat
       coldDuplicatePath,
     ]));
     assert.equal(await fs.readFile(h.sessionPath, 'utf8'), sourceBefore, 'the source remains unchanged');
-    assert.equal(await fs.readFile(hotDuplicatePath, 'utf8'), sourceBefore, 'the hot copy is complete');
-    assert.equal(await fs.readFile(coldDuplicatePath, 'utf8'), sourceBefore, 'the cold copy is complete');
+    const titles = new Set<string>();
+    for (const copyPath of [hotDuplicatePath, coldDuplicatePath]) {
+      const copy = await fs.readFile(copyPath, 'utf8');
+      assert.ok(copy.startsWith(sourceBefore), 'the complete source history is preserved byte-for-byte');
+      const appended = copy.slice(sourceBefore.length).trim().split('\n').map((line) => JSON.parse(line));
+      assert.equal(appended[0].type, 'session_info');
+      titles.add(appended[0].name);
+      const sourceLeaf = JSON.parse(sourceBefore.trim().split('\n').at(-1)!);
+      assert.equal(appended[0].parentId, sourceLeaf.id, 'title extends the copied lineage');
+      assert.equal(appended.length, copyPath === coldDuplicatePath ? 2 : 1);
+      if (copyPath === coldDuplicatePath) {
+        assert.equal(appended[1].parentId, appended[0].id);
+        assert.equal(appended[1].customType, 'pie.session-title-admission-fallback');
+        assert.deepEqual(appended[1].data, { version: 1, titleEntryId: appended[0].id, name: appended[0].name });
+      }
+    }
+    assert.deepEqual(titles, new Set(['New Session (2)', 'New Session (3)']));
     assert.deepEqual(new Set(opened.map((payload) => payload.session.path)), new Set([
       hotDuplicatePath,
       coldDuplicatePath,

@@ -1,58 +1,26 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-
-import {
-  ACTIVATION_SCHEMA_VERSION,
-  ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
-  ActivationManifestError,
-  validateAnalyticsLoadedGenerationReceipt,
-} from '../../../../analytics/authority/activation.js';
-import { ActivationStore } from '../../../../analytics/authority/activation-store.js';
 import { createSessionLifecycleWriterAdmission } from '../../../../analytics/authority/session-lifecycle-writer-store.js';
 import { SessionLifecycleStore } from '../../../../harness/session-storage/lifecycle/session-lifecycle-store.js';
 import { AnalyticsRuntime } from '../../composition/analytics-runtime.js';
-import {
-  analyticsWorkspaceId,
-  LOADED_GENERATION_FILENAME,
-  writeLoadedGenerationReceiptAtomically,
-} from '../../../../analytics/authority/analytics-runtime.js';
-
+import { AnalyticsRuntimeError, analyticsWorkspaceId } from '../../../../analytics/authority/analytics-runtime.js';
 const GENERATION_ID = '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f';
-const SHA = 'a'.repeat(64);
-const SHA_B = 'b'.repeat(64);
-const ACTIVATED_AT = '2026-09-12T04:00:00.000Z';
-
-function tempRuntime(
-  activationSnapshot?: ReturnType<ActivationStore['read']>,
-  timeZone = 'UTC',
-  manifestBuildId?: string,
-) {
+function canonicalContext(workspaceId = 'workspace-1', hostInstanceId = 'process-1') {
+  return { mode: 'canonical-only' as const, generationId: GENERATION_ID, buildId: 'build-1', workspaceId, hostInstanceId };
+}
+function tempRuntime(timeZone = 'UTC') {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-'));
-  const stateDir = path.join(root, 'state');
-  const analyticsDir = path.join(root, 'analytics');
   const runtime = new AnalyticsRuntime({
-    stateDir,
-    analyticsDir,
-    // The workers are never started under legacy authority, so the paths only
-    // need to be plausible; a canonical start is covered by the failure tests.
+    canonicalContext: canonicalContext(), writerAdmission: { acquire: () => () => {} },
+    stateDir: path.join(root, 'state'), analyticsDir: path.join(root, 'analytics'),
     recorderWorkerScript: path.join(root, 'missing-recorder-worker.js'),
     queryWorkerScript: path.join(root, 'missing-query-worker.js'),
-    buildId: 'build-1',
-    ...(manifestBuildId === undefined ? {} : { manifestBuildId }),
-    workspaceId: 'workspace-1',
-    processGeneration: 'process-1',
-    activationSnapshot,
-    timeZone,
+    buildId: 'build-1', workspaceId: 'workspace-1', processGeneration: 'process-1', timeZone,
   });
-  return { root, stateDir, analyticsDir, runtime };
-}
-
-async function writeManifest(stateDir: string, manifest: unknown): Promise<void> {
-  const store = new ActivationStore({ stateDir });
-  await store.update(() => manifest as never, { expectedSha256: null });
+  return { root, runtime };
 }
 
 test('canonical runtime reaches readiness with real recorder and query workers', { timeout: 30_000 }, async () => {
@@ -76,26 +44,11 @@ test('canonical runtime reaches readiness with real recorder and query workers',
     buildId: 'build-1',
     workspaceId: 'workspace-real',
     processGeneration: 'process-real',
-    restartNonce: 'real-runtime-test',
+    canonicalContext: canonicalContext('workspace-real', 'process-real'),
+    writerAdmission: { acquire: () => () => {} },
     timeZone: 'UTC',
   });
   try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: null,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
     const readiness = await runtime.start();
     assert.equal(readiness.authority, 'canonical');
     assert.equal(readiness.recorderReady, true);
@@ -104,11 +57,8 @@ test('canonical runtime reaches readiness with real recorder and query workers',
     assert.equal(readiness.projectionRevision, '0');
     const stats = await runtime.sink!.workerStats();
     assert.equal(stats?.recorder.databaseSchemaVersion, readiness.recorderSchemaVersion);
-    assert.equal(runtime.backendDescriptor()?.generationId, GENERATION_ID);
-    runtime.recordLoadedGeneration();
-    const receipt = validateAnalyticsLoadedGenerationReceipt(JSON.parse(readFileSync(path.join(stateDir, LOADED_GENERATION_FILENAME), 'utf8')));
-    assert.equal(receipt.generationId, GENERATION_ID);
-    assert.equal(receipt.restartNonce, 'real-runtime-test');
+    assert.equal(readiness.generationId, GENERATION_ID);
+    assert.equal(await runtime.fenceWriters(), 0, 'the real recorder drains before acknowledging its fence');
   } finally {
     await runtime.stop();
     assert.equal(runtime.isStopped, true);
@@ -165,30 +115,14 @@ test('stop joins gated real-worker startup and releases its lifecycle startup le
     buildId: 'build-1',
     workspaceId: writerIdentity.workspaceId,
     processGeneration: 'process-stop-race',
+    canonicalContext: canonicalContext(writerIdentity.workspaceId, 'process-stop-race'),
     writerAdmission,
     timeZone: 'UTC',
   });
 
   let startup: Promise<unknown> | undefined;
   try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: null,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
-
-    const startupPromise = runtime.start();
+   const startupPromise = runtime.start();
     startup = startupPromise;
     assert.equal(runtime.start(), startupPromise, 'concurrent start calls join the same startup operation');
     const gateDeadline = Date.now() + 5_000;
@@ -217,7 +151,7 @@ test('stop joins gated real-worker startup and releases its lifecycle startup le
     assert.equal(runtime.sink, undefined);
     assert.equal(runtime.getReadiness(), undefined, 'stopped startup must not publish readiness');
 
-    await assert.rejects(runtime.start(), ActivationManifestError,
+    await assert.rejects(runtime.start(), AnalyticsRuntimeError,
       'a terminally stopped runtime cannot re-enable helper startup');
     assert.equal(readFileSync(spawnLog, 'utf8').trim().split(/\\r?\\n/u).length, 1,
       'a post-stop start attempt must not spawn another recorder worker');
@@ -230,301 +164,27 @@ test('stop joins gated real-worker startup and releases its lifecycle startup le
   }
 });
 
-test('under legacy authority the runtime starts no helper and creates no database', async () => {
-  const { root, runtime, analyticsDir } = tempRuntime();
-  try {
-    const readiness = await runtime.start();
-    assert.equal(readiness.authority, 'legacy', 'an absent manifest must select legacy');
-    assert.equal(readiness.recorderReady, false, 'no recorder may start under legacy authority');
-    assert.equal(readiness.queryReady, false);
-    assert.equal(readiness.generationId, null);
-    assert.equal(readiness.manifestRevision, null);
-    assert.equal(
-      existsSync(analyticsDir),
-      false,
-      'legacy authority must not create the canonical analytics directory',
-    );
-    assert.deepEqual(runtime.backendDescriptorArguments(), [], 'no descriptor under legacy authority');
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a candidate or ready manifest still selects legacy and starts nothing', async () => {
-  const { root, runtime, stateDir } = tempRuntime();
-  try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: false,
-      activeGeneration: null,
-      successor: {
-        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'ready',
-        activatedAt: null,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: null,
-      },
-      retiredHistory: [],
-    });
-    const readiness = await runtime.start();
-    assert.equal(readiness.authority, 'legacy', 'only an active generation switches authority');
-    assert.equal(readiness.recorderReady, false);
-    assert.equal(readiness.manifestRevision, 1, 'the revision is still reported for observability');
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a malformed manifest fails startup closed rather than selecting legacy', async () => {
-  const { root, runtime, stateDir } = tempRuntime();
-  try {
-    const store = new ActivationStore({ stateDir });
-    const { mkdirSync, writeFileSync } = await import('node:fs');
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(store.manifestPath, '{ "schemaVersion": 1 }', 'utf8');
-    await assert.rejects(() => runtime.start(), ActivationManifestError);
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a manifest transition between host construction and runtime start fails closed', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-transition-'));
-  const stateDir = path.join(root, 'state');
-  const activationSnapshot = new ActivationStore({ stateDir }).read();
-  const runtime = new AnalyticsRuntime({
-    stateDir,
-    analyticsDir: path.join(root, 'analytics'),
-    recorderWorkerScript: path.join(root, 'missing-recorder-worker.js'),
-    queryWorkerScript: path.join(root, 'missing-query-worker.js'),
-    buildId: 'build-1',
-    workspaceId: 'workspace-1',
-    processGeneration: 'process-1',
-    activationSnapshot,
-  });
-  try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: SHA_B,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
-    await assert.rejects(
-      () => runtime.start(),
-      /changed during host startup/u,
-      'legacy construction must not become canonical after the descriptor was captured',
-    );
-    assert.equal(runtime.backendDescriptorArguments().length, 0);
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('an active manifest naming a different build refuses to start capture', async () => {
-  const { root, runtime, stateDir } = tempRuntime();
-  try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'a-different-build', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: SHA_B,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
-    await assert.rejects(
-      () => runtime.start(),
-      /does not match the loaded build/u,
-      'running code that differs from the recorded generation must fail closed',
-    );
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a distinguished manifest build id is compared in the manifest identity space', async () => {
-  // Production shape under the two-space convention: the compiled marker
-  // (candidate space) differs from the qualification's coordinated build id the
-  // manifest commits. Binding a source-equivalence receipt makes this the normal
-  // case, so the startup gate must compare against the manifest identity rather
-  // than the loaded marker. The worker scripts are deliberately absent, so the
-  // start still fails -- but it must get PAST the build gate to do so.
-  const { root, runtime, stateDir } = tempRuntime(undefined, 'UTC', 'qualification-build');
-  try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'qualification-build', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: null,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
-    await assert.rejects(
-      () => runtime.start(),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.doesNotMatch(
-          error.message,
-          /does not match the loaded build/u,
-          'the candidate marker must not be compared against the manifest identity',
-        );
-        return true;
-      },
-    );
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('a distinguished manifest build id still fails closed when the manifest diverges from it', async () => {
-  // The two-space allowance must not weaken the gate: a manifest that names a
-  // build other than the one the host was told the manifest carries is exactly
-  // the unknowable state the gate exists to refuse.
-  const { root, runtime, stateDir } = tempRuntime(undefined, 'UTC', 'qualification-build');
-  try {
-    await writeManifest(stateDir, {
-      schemaVersion: ACTIVATION_SCHEMA_VERSION,
-      revision: 1,
-      previousSha256: null,
-      everActive: true,
-      activeGeneration: {
-        identity: { generationId: GENERATION_ID, buildId: 'an-unexpected-build', qualificationSha256: SHA, trialSha256: SHA_B },
-        state: 'active',
-        activatedAt: ACTIVATED_AT,
-        retiredAt: null,
-        predecessorGenerationId: null,
-        cutoffReceiptSha256: null,
-      },
-      successor: null,
-      retiredHistory: [],
-    });
-    await assert.rejects(
-      () => runtime.start(),
-      /does not match the loaded build/u,
-      'a diverging manifest identity must still fail closed',
-    );
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('activeDescriptor throws rather than inventing an identity', () => {
+test('helper failure fails closed without fallback capture', async () => {
   const { root, runtime } = tempRuntime();
   try {
-    assert.throws(() => runtime.activeDescriptor(), ActivationManifestError);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('stop is idempotent and terminal', async () => {
-  const { root, runtime } = tempRuntime();
-  try {
-    await runtime.start();
-    await runtime.stop();
-    await runtime.stop();
+    assert.equal(runtime.sink, undefined);
+    assert.equal(runtime.reads, undefined);
+    await assert.rejects(runtime.start());
+    assert.equal(runtime.getReadiness(), undefined);
+    assert.equal(runtime.getCanonicalContext(), undefined);
+    assert.equal(runtime.sink, undefined);
+    assert.equal(runtime.reads, undefined);
     assert.equal(runtime.isStopped, true);
   } finally {
+    await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
 test('analyticsWorkspaceId is deterministic and fixed length', () => {
-  const first = analyticsWorkspaceId('seed-a');
-  assert.equal(first, analyticsWorkspaceId('seed-a'));
-  assert.equal(first.length, 32);
-  assert.notEqual(first, analyticsWorkspaceId('seed-b'));
-});
-
-test('loaded-generation receipts use the shared bounded schema and atomic replacement', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-loaded-receipt-'));
-  const payload = {
-    schemaVersion: ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
-    generationId: GENERATION_ID,
-    buildId: 'build-1',
-    manifestRevision: 4,
-    manifestSha256: SHA,
-    workspaceId: 'workspace-1',
-    hostInstanceId: 'host-1',
-    restartNonce: 'restart-1',
-    loadedAt: '2026-09-12T04:00:00.000Z',
-  } as const;
-  try {
-    writeLoadedGenerationReceiptAtomically(root, payload);
-    const file = path.join(root, LOADED_GENERATION_FILENAME);
-    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), payload);
-    assert.deepEqual(readdirSync(root), [LOADED_GENERATION_FILENAME]);
-    assert.deepEqual(validateAnalyticsLoadedGenerationReceipt(payload), payload);
-    assert.throws(
-      () => validateAnalyticsLoadedGenerationReceipt({ ...payload, restartNonce: 'bad nonce' }),
-      /restartNonce is invalid/u,
-    );
-    assert.throws(
-      () => validateAnalyticsLoadedGenerationReceipt({ ...payload, loadedAt: '2026-09-12' }),
-      /loadedAt is not a canonical/u,
-    );
-    const scopedPath = path.join(root, 'scoped', 'loaded-generation.json');
-    writeLoadedGenerationReceiptAtomically(root, payload, scopedPath);
-    assert.deepEqual(JSON.parse(readFileSync(scopedPath, 'utf8')), payload);
-    assert.equal(existsSync(path.join(root, LOADED_GENERATION_FILENAME)), true);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('the sink and reads accessors stay undefined until a helper is actually started', async () => {
-  const { root, runtime } = tempRuntime();
-  try {
-    // Before start, and under legacy authority afterwards, there is no helper to
-    // hand to capture. The host relies on this: it passes a forwarding sink that
-    // resolves the recorder lazily, and an early producer must fail loudly rather
-    // than have its record dropped into a helper that was never started.
-    assert.equal(runtime.sink, undefined, 'no sink before start');
-    assert.equal(runtime.reads, undefined, 'no reads before start');
-
-    await runtime.start();
-    assert.equal(runtime.getReadiness()?.authority, 'legacy');
-    assert.equal(runtime.sink, undefined, 'legacy authority must not expose a sink');
-    assert.equal(runtime.reads, undefined, 'legacy authority must not expose reads');
-  } finally {
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-  }
+  assert.equal(analyticsWorkspaceId('seed-a'), analyticsWorkspaceId('seed-a'));
+  assert.equal(analyticsWorkspaceId('seed-a').length, 32);
+  assert.notEqual(analyticsWorkspaceId('seed-a'), analyticsWorkspaceId('seed-b'));
 });
 
 test('daily projection preparation is writer-owned, stable-zone, and rechecks a queued window', async () => {
@@ -564,7 +224,7 @@ test('daily projection preparation is writer-owned, stable-zone, and rechecks a 
     assert.equal(calls.length, 2, 'the same window is coalesced after completion');
     await assert.rejects(
       () => runtime.prepareProviderDailyProjection(request(1_700_086_400_000, 1_700_691_200_000, 'America/New_York')),
-      ActivationManifestError,
+      AnalyticsRuntimeError,
     );
   } finally {
     await runtime.stop();

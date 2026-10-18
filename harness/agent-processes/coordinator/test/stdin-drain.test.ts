@@ -12,7 +12,7 @@ function deferred<T>() {
 }
 
 function serverForDrain() {
-  return new BackendServer({
+  return new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk',
     sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(path.resolve('/sdk')).descriptor,
     cwd: '/cwd',

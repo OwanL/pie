@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { AnalyticsRuntimeError } from '../../../../analytics/authority/analytics-runtime.js';
 import { AnalyticsRuntime } from '../../composition/analytics-runtime.js';
 import { AnalyticsRecorderSupervisor } from '../../../../analytics/recording/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../../../../analytics/queries/query-client.js';
@@ -47,16 +48,11 @@ test('canonical-only startup publishes the supplied namespace without activation
     const readiness = await first;
     assert.equal(readiness.authority, 'canonical');
     assert.equal(readiness.generationId, 'existing-store-namespace');
-    assert.equal(readiness.manifestSha256, null);
-    assert.equal(readiness.manifestRevision, null);
+    assert.deepEqual(Object.keys(readiness).sort(), ['authority', 'generationId', 'projectionRevision', 'queryReady', 'recorderReady', 'recorderSchemaVersion']);
     assert.equal(readiness.recorderReady && readiness.queryReady, true);
     assert.equal(readiness.projectionRevision, '7');
     assert.equal(path.normalize(runtime.databasePath), path.join(options.analyticsDir, 'analytics.sqlite'));
     assert.equal(Object.isFrozen(runtime.getCanonicalContext()), true);
-    assert.throws(() => runtime.backendDescriptor(), /context-aware backend/);
-    assert.throws(() => runtime.readActivation(), /no activation snapshot/);
-    runtime.recordLoadedGeneration();
-    runtime.recordTerminalRestartReceipt();
     assert.equal(existsSync(options.stateDir), false);
     assert.equal(existsSync(options.analyticsDir), false, 'mocked helpers must not touch any database');
     await runtime.stop();
@@ -72,9 +68,11 @@ test('canonical-only startup publishes the supplied namespace without activation
 test('canonical-only startup requires lifecycle admission and rejects mixed evidence or identities', () => {
   const { root, options } = fixture();
   try {
-    assert.throws(() => new AnalyticsRuntime({ ...options, writerAdmission: undefined }), /writer admission/);
-    assert.throws(() => new AnalyticsRuntime({ ...options, restartNonce: 'restart-1' }), /cannot carry activation/);
-    assert.throws(() => new AnalyticsRuntime({ ...options, buildId: 'other-build' }), /runtime identity/);
+    assert.throws(() => new AnalyticsRuntime({ ...options, writerAdmission: undefined } as never), /writer admission/);
+    assert.throws(() => new AnalyticsRuntime({ ...options, canonicalContext: undefined } as never), AnalyticsRuntimeError);
+    for (const mismatch of [{ buildId: 'other-build' }, { workspaceId: 'other-workspace' }, { processGeneration: 'other-host' }]) {
+      assert.throws(() => new AnalyticsRuntime({ ...options, ...mismatch }), /runtime identity/);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -125,6 +123,30 @@ test('canonical-only stop joins startup and forbids late readiness', async (t) =
     assert.equal(shutdown.mock.callCount(), 1);
   } finally {
     release();
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('old manifests, tombstones and receipts remain inert and byte-for-byte unchanged', async (t) => {
+  const { root, options } = fixture();
+  const files = ['analytics-activation-v1.json', 'analytics-ever-active-v1.json', 'analytics-loaded-generation-v1.json', 'analytics-terminal-restart-v1.json'];
+  mkdirSync(options.stateDir, { recursive: true });
+  const bytes = Buffer.from('invalid obsolete evidence\n');
+  for (const file of files) writeFileSync(path.join(options.stateDir, file), bytes);
+  const start = t.mock.method(AnalyticsRecorderSupervisor.prototype, 'start', async () => {});
+  t.mock.method(AnalyticsRecorderSupervisor.prototype, 'workerStats', async () => ({ recorder: { databaseSchemaVersion: 1 } }));
+  t.mock.method(AnalyticsRecorderSupervisor.prototype, 'shutdown', async () => {});
+  t.mock.method(AnalyticsQueryClient.prototype, 'query', async (request: { type: string }) => request.type === 'schema'
+    ? { databaseSchemaVersion: 1 } : { rows: [] });
+  const runtime = new AnalyticsRuntime(options);
+  try {
+    assert.equal((await runtime.start()).authority, 'canonical');
+    assert.equal(start.mock.callCount(), 1);
+    await runtime.stop();
+    assert.deepEqual(readdirSync(options.stateDir).sort(), files.sort());
+    for (const file of files) assert.deepEqual(readFileSync(path.join(options.stateDir, file)), bytes);
+  } finally {
     await runtime.stop();
     rmSync(root, { recursive: true, force: true });
   }

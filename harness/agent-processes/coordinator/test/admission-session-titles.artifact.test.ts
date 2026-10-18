@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../server.js';
+import { createBackendAnalyticsFixture } from '../../test/fixtures/backend-analytics-context.js';
 import { loadSdk } from '../../lib/sdk-integration/sdk.js';
 import { sourceDescriptor, sourceLoadMode } from '../../lib/sdk-integration/test/source-fixture.js';
 import { ColdSessionStore } from '../../../session-storage/lifecycle/cold-session-store.js';
@@ -13,7 +14,13 @@ import { LiveSessionTitles } from '../live-session-titles.js';
 
 test('real SDK restored untitled sessions are durable, addressable, and replaceable across coordinator generations', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-admission-titles-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const analytics = createBackendAnalyticsFixture(root);
+  const servers: BackendServer[] = [];
+  t.after(async () => {
+    for (const server of servers) await server.dispose();
+    analytics.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   const sdk = await loadSdk(sourceDescriptor.sdkPath, { ...sourceLoadMode, surface: 'cold' });
   const paths = ['a', 'b'].map((id) => path.join(root, `${id}.jsonl`));
   for (const [index, sessionPath] of paths.entries()) {
@@ -22,9 +29,9 @@ test('real SDK restored untitled sessions are durable, addressable, and replacea
   }
   let revision = 0;
   async function restoredServer() {
-    const server = new BackendServer({ sdkPath: sourceDescriptor.sdkPath, sourceArtifactDescriptor: sourceDescriptor,
+    const server = new BackendServer({ analyticsContext: analytics.context, hostPid: analytics.hostPid, sdkPath: sourceDescriptor.sdkPath, sourceArtifactDescriptor: sourceDescriptor,
       cwd: root, workerEntryPath: path.join(root, 'unused-worker.js') });
-    t.after(() => server.dispose());
+    servers.push(server);
     const internal = server as unknown as {
       sdk: typeof sdk;
       coldSessionStore: ColdSessionStore;
@@ -37,7 +44,11 @@ test('real SDK restored untitled sessions are durable, addressable, and replacea
       resolveSessionControlTarget(action: string, payload: object, source: string): { sessionPath: string };
     };
     internal.sdk = sdk;
-    internal.coldSessionStore = new ColdSessionStore({ sdk, coordinatorGeneration: 1, startupCwd: root, agentDir: root, sessionDir: root });
+    const authority = (server as any).analyticsAuthority;
+    (server as any).agentDir = root;
+    authority.openWriterAdmission();
+    internal.coldSessionStore = new ColdSessionStore({ sdk, coordinatorGeneration: 1, startupCwd: root, agentDir: root, sessionDir: root,
+      writerAdmission: authority.admission });
     // Keep this fixture on live-title authority, not unrelated archive discovery.
     internal.emitSessionListChanged = async () => undefined;
     internal.applyHostLiveMembership({ revision: ++revision, timestamp: Date.now(), closing: [],

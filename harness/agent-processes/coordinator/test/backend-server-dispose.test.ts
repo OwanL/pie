@@ -10,7 +10,7 @@ const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/s
 
 test('BackendServer disposal retires cold leases after later backend generations', async () => {
   const leases = new ColdSessionLeaseAuthority(7);
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk',
     sourceArtifactDescriptor,
     cwd: '/workspace',
@@ -40,7 +40,7 @@ test('BackendServer disposal keeps hot ownership fences current through runtime 
   );
   assert.ok(hotFence);
   const order: string[] = [];
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk',
     sourceArtifactDescriptor,
     cwd: '/workspace',
@@ -73,7 +73,7 @@ test('BackendServer disposal keeps hot ownership fences current through runtime 
 
 test('BackendServer disposal still rejects genuine runtime reconciliation failures', async () => {
   const leases = new ColdSessionLeaseAuthority(7);
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk',
     sourceArtifactDescriptor,
     cwd: '/workspace',

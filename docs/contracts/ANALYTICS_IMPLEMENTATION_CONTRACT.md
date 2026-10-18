@@ -13,6 +13,9 @@ evidence that any gate has been activated.
 Production host composition is canonical-only. This describes checked-in source mode, not
 live activation, delivery, or installation evidence. Activation manifests, tombstones, and old
 loaded/terminal receipts are inert historical artifacts: startup neither consults nor updates them.
+Their activation schema/store, descriptor admission, and receipt orchestration have been retired
+from production source. Existing artifacts remain untouched, including malformed or partial ones;
+this retirement authorizes neither cleanup nor any live activation claim.
 
 The host resolves exactly `<data-root>/analytics/analytics.sqlite`. Read-only inspection adopts
 its sole persisted capture namespace; an absent or genuinely empty database uses `canonical`.
@@ -20,9 +23,10 @@ Ambiguous namespaces, unsupported schemas, and inspection failures fail explicit
 searching another root or selecting legacy capture. Recorder admission owns initialization and
 migration. Namespace identity is not activation or qualification evidence.
 
-One canonical context binds host capture, helper startup, and backend construction. Lifecycle
-writer admission remains mandatory. Helpers prove recorder and disposable-query readiness before
-accepting captures; helper failure pauses capture with no legacy fallback. Reads use the canonical
+One strict canonical context binds host capture, helper startup, backend construction, and
+sanitized process-census evidence. The old six descriptor CLI flags and ready echo are retired;
+they cannot admit a writer. Lifecycle writer admission remains mandatory. Helpers prove recorder
+and disposable-query readiness before accepting captures; helper failure pauses capture with no legacy fallback. Reads use the canonical
 read model. Fresh history is captured automatically only in the canonical store; live in-memory
 run/session projections remain available. Browser and pruning behavior are unchanged.
 
@@ -39,7 +43,7 @@ while the primary Pie host remains usable, with a warning, rather than selecting
 
 Capture is exclusive: no legacy ledger append or dual-write. There is no import, backfill, or
 transcript reconstruction of old analytics. Legacy export is retired; privacy scrubbing and
-explicit forget remain. Historical activation tooling is not a production authority selector.
+explicit forget remain. Historical activation artifacts are not a production authority selector.
 
 ## 2. Storage layout
 
@@ -144,6 +148,11 @@ evidence-valued authorization: `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-
 cutoff capability, points the backend's session root at `<data-root>/sessions`, and enables the
 gated lifecycle close/forget paths. Without it, the legacy session root and close behavior remain in
 effect.
+
+Shared authenticated handoff and controlled restart remain for this cutoff; controlled restart
+accepts only `storage-cutoff`. The durable writer-fence `analytics-activation` purpose and its
+admission-reopen semantics remain for persisted lifecycle compatibility, not authority selection.
+They neither consult activation artifacts nor authorize the session-root switch.
 
 Nothing in this repository establishes that any installation sets that value, so the cutoff, 24-hour
 post-closure expiry, and closed-session non-resumption must not be described as active. The settled

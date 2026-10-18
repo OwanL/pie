@@ -18,7 +18,7 @@ import {
 import { readBackendRequestTracePhases } from '../../harness/agent-processes/test/helpers/backend-live-pipeline-trace.js';
 
 test('BackendServer defers diagnostics off until the exact handleLine completion and stops its monitor', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
@@ -87,7 +87,7 @@ test('BackendServer defers diagnostics off until the exact handleLine completion
 });
 
 test('BackendServer keeps pending diagnostics disables keyed by request and clears them on failure/dispose', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const originalWrite = process.stdout.write;
   server.startEventLoopMonitor = () => undefined;
@@ -143,7 +143,7 @@ test('BackendServer keeps pending diagnostics disables keyed by request and clea
 });
 
 test('BackendServer orders concurrent diagnostics toggles by receipt: an older off settling after a newer on never disables tracing or the monitor', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
@@ -234,7 +234,7 @@ test('BackendServer orders concurrent diagnostics toggles by receipt: an older o
 });
 
 test('BackendServer applies a newer off after its own handler_finished even when an older on settles first', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
   server.startEventLoopMonitor = () => { monitorCalls.push('on'); };

@@ -131,6 +131,27 @@ async function leaseEntries(extensionPath: string): Promise<string[]> {
   }
 }
 
+test('historical activation artifacts are inert without package identity while runtime validation stays mandatory', async (t) => {
+  const prepared = await fixture(t);
+  // A flat embedding need not provide a managed-generation identity.
+  await put(prepared.extensionPath, 'package.json', '{}');
+  const dataRoot = path.join(prepared.root, 'data');
+  const stateDir = path.join(dataRoot, 'state');
+  const artifacts = ['analytics-activation-v1.json', 'analytics-ever-active-v1.json'];
+  for (const name of artifacts) await put(stateDir, name, 'malformed historical bytes');
+  const options = {
+    extensionPath: prepared.extensionPath, dataRoot,
+    dependencies: { nodePath: process.execPath, sdkPath: '' },
+    env: {}, exec: artifactProbe(),
+  };
+  const environment = await resolveStandaloneEnvironment(options);
+  assert.equal(environment.runtimeIdentity, undefined);
+  assert.ok(environment.sourceArtifactDescriptor);
+  for (const name of artifacts) assert.equal(await fs.readFile(path.join(stateDir, name), 'utf8'), 'malformed historical bytes');
+  await fs.rm(path.join(prepared.output, 'backend.js'));
+  await assert.rejects(resolveStandaloneEnvironment(options), /Standalone backend bundle is unavailable/);
+});
+
 test('selected standalone generation is leased before SDK probing and released only after confirmed shutdown', async (t) => {
   const prepared = await fixture(t, { selected: true });
   assert.ok(prepared.publication);
@@ -553,6 +574,7 @@ test('standalone platform forwards its independently verified selected artifact 
       nodePath: string;
       sdkPath: string;
       sourceArtifactDescriptor?: unknown;
+      analyticsContext: unknown;
       backendPath: string;
       cwd: string;
     } | undefined;
@@ -574,6 +596,7 @@ test('standalone platform forwards its independently verified selected artifact 
         backendStartEntered();
         parsedCoordinatorArgs = parseCoordinatorBackendArgs([
           '--sdkPath', args.sdkPath,
+          '--analyticsContext', JSON.stringify(args.analyticsContext),
           ...(args.sourceArtifactDescriptor === undefined
             ? []
             : ['--sourceArtifactDescriptor', JSON.stringify(args.sourceArtifactDescriptor)]),
@@ -593,6 +616,7 @@ test('standalone platform forwards its independently verified selected artifact 
     } as unknown as SessionService;
 
     const startup = startSessionBackend({
+      getAnalyticsBackendContext: () => ({ mode: 'canonical-only', generationId: 'test', buildId: 'test', workspaceId: 'test', hostInstanceId: 'test' }),
       platform,
       backend,
       scheduleRender,

@@ -37,7 +37,7 @@ function parseBackendRecords(chunks: readonly string[]): Array<Record<string, un
 }
 
 test('expected pre-ack session cancellation is debug telemetry while the typed RPC rejection is preserved', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   server.handleRequest = async () => {
     throw new BackendError(
       'SESSION_OPERATION_CANCELLED',

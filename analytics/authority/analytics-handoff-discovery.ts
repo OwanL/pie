@@ -104,12 +104,6 @@ export interface AnalyticsHostDiscoveryOptions {
    * registry's `generationId` is the host process generation and must not be
    * compared with this activation generation. */
   analyticsGenerationId?: string;
-  /** True only when the caller has proved from the activation store that no
-   * canonical analytics authority exists yet (first-ever activation). A
-   * backend without the canonical analytics descriptor is then legitimate;
-   * every other host/backend owner and process identity check still applies,
-   * and a descriptor that is present remains unreconcilable. */
-  allowAbsentAnalyticsDescriptor?: boolean;
   readRuntimeLeases?: () => Promise<RuntimeLeaseReadResult>;
   readProcessOwners?: () => Promise<ProcessOwnerReadResult>;
   /** Terminal rows are retained as durable history. A post-restart or later
@@ -438,13 +432,7 @@ export async function discoverAnalyticsHostWriters(
         addHostReason(reason('backend-process-before-host', { processId: backend.backendProcessId }));
       }
       if (!backend.analyticsHostInstanceId || !backend.analyticsGenerationId) {
-        // First-ever activation: no canonical authority exists to reconcile a
-        // descriptor against, so its absence is legitimate. This is the only
-        // waived check; process, lease, and backend-owner identity evidence
-        // above are still fully required.
-        if (options.allowAbsentAnalyticsDescriptor !== true) {
-          addHostReason(reason('backend-analytics-descriptor-missing', { processId: backend.backendProcessId }));
-        }
+        addHostReason(reason('backend-analytics-descriptor-missing', { processId: backend.backendProcessId }));
       } else {
         if (backend.analyticsHostInstanceId !== host.hostInstanceId) {
           addHostReason(reason('backend-analytics-host-mismatch', { processId: backend.backendProcessId }));

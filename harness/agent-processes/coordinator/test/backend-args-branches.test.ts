@@ -10,19 +10,21 @@ import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-run
 // generation-local source artifact descriptor without any real SDK verification.
 const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor;
 const descriptorJson = JSON.stringify(sourceArtifactDescriptor);
+const analyticsContext = { mode: 'canonical-only', generationId: 'test', buildId: 'test', workspaceId: 'test', hostInstanceId: 'test' };
+const contextArgs = ['--analyticsContext', JSON.stringify(analyticsContext)];
 
 test('parseArgs reads sdkPath/cwd plus the required source descriptor and errors when args are missing or invalid', () => {
-  assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--cwd', '/repo', '--sourceArtifactDescriptor', descriptorJson]), {
-    sdkPath: '/sdk', cwd: '/repo', backendGeneration: 1, sourceArtifactDescriptor,
+  assert.deepEqual(parseArgs([...contextArgs, '--sdkPath', '/sdk', '--cwd', '/repo', '--sourceArtifactDescriptor', descriptorJson]), {
+    sdkPath: '/sdk', cwd: '/repo', backendGeneration: 1, sourceArtifactDescriptor, analyticsContext,
   });
-  assert.deepEqual(parseArgs(['--cwd', '/repo', '--sdkPath', '/sdk', '--sourceArtifactDescriptor', descriptorJson]), {
-    sdkPath: '/sdk', cwd: '/repo', backendGeneration: 1, sourceArtifactDescriptor,
+  assert.deepEqual(parseArgs([...contextArgs, '--cwd', '/repo', '--sdkPath', '/sdk', '--sourceArtifactDescriptor', descriptorJson]), {
+    sdkPath: '/sdk', cwd: '/repo', backendGeneration: 1, sourceArtifactDescriptor, analyticsContext,
   });
-  assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--cwd', '/repo', '--hostPid', '1234', '--sourceArtifactDescriptor', descriptorJson]), {
-    sdkPath: '/sdk', cwd: '/repo', hostPid: 1234, backendGeneration: 1, sourceArtifactDescriptor,
+  assert.deepEqual(parseArgs([...contextArgs, '--sdkPath', '/sdk', '--cwd', '/repo', '--hostPid', '1234', '--sourceArtifactDescriptor', descriptorJson]), {
+    sdkPath: '/sdk', cwd: '/repo', hostPid: 1234, backendGeneration: 1, sourceArtifactDescriptor, analyticsContext,
   });
-  assert.deepEqual(parseArgs(['--sdkPath', '/sdk', '--hostPid', 'not-a-pid', '--sourceArtifactDescriptor', descriptorJson]), {
-    sdkPath: '/sdk', cwd: process.cwd(), backendGeneration: 1, sourceArtifactDescriptor,
+  assert.deepEqual(parseArgs([...contextArgs, '--sdkPath', '/sdk', '--hostPid', 'not-a-pid', '--sourceArtifactDescriptor', descriptorJson]), {
+    sdkPath: '/sdk', cwd: process.cwd(), backendGeneration: 1, sourceArtifactDescriptor, analyticsContext,
   });
   assert.throws(() => parseArgs(['--cwd', '/repo']), /Missing required --sdkPath argument/);
   // The verified generation-local source artifact descriptor is required and may

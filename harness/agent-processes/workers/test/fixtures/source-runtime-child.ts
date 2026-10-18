@@ -16,6 +16,7 @@ import { createCoordinatorProviderManagement } from '../../../coordinator/provid
 import { ColdSessionStore } from '../../../../session-storage/lifecycle/cold-session-store.js';
 import { readProviderRuntimeReference } from '../../../../model-providers/runtime/index.js';
 import type { ColdCoordinatorSdkModule } from '../../../lib/sdk-integration/sdk.js';
+import { SessionLifecycleStore } from '../../../../session-storage/lifecycle/session-lifecycle-store.js';
 import { BackendAnalyticsActivation } from '../../../../../analytics/authority/backend-analytics-activation.js';
 
 interface SourceRuntimeChildInput {
@@ -60,21 +61,33 @@ async function main(): Promise<void> {
     const management = await createCoordinatorProviderManagement(sdk as unknown as ColdCoordinatorSdkModule, () => undefined);
     const reference = await management.captureRuntimeProjection([]);
     if (!reference) throw new Error('Private provider configuration did not produce a capture.');
-    // Match coordinator startup's production admission setup for this private,
-    // legacy-authority data root; canonical analytics activation is not in scope.
+    // Match coordinator startup's canonical admission setup in this private root.
     const authority = new BackendAnalyticsActivation({ agentDir: () => input.agentDir,
       buildId: 'offline-source-fixture', hostPid: () => process.pid,
-      openWriterStore: () => { throw new Error('Legacy fixture must not activate canonical analytics.'); } }, {});
+      openWriterStore: (stateDir) => {
+        const store = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+        store.registerAnalyticsHost({ hostInstanceId: 'offline-host', workspaceId: 'offline-workspace',
+          generationId: 'offline-host', buildId: 'offline-source-fixture', processId: process.pid,
+          capabilities: [], registeredAtMs: String(Date.now()) });
+        return store;
+      } }, {
+      context: { mode: 'canonical-only', generationId: 'offline-source-fixture', buildId: 'offline-source-fixture',
+        workspaceId: 'offline-workspace', hostInstanceId: 'offline-host' },
+    });
     authority.validate();
     authority.openWriterAdmission();
     const store = new ColdSessionStore({ sdk: sdk as unknown as ColdCoordinatorSdkModule,
       coordinatorGeneration: 41, startupCwd: input.cwd, agentDir: input.agentDir, sessionDir: input.sessionDir,
       writerAdmission: authority.admission });
-    const handle = store.create({ providerRuntimeReference: reference });
-    await store.setHandleModelSettings(handle, { thinkingLevel: 'high' });
-    const legacy = store.create();
-    process.stdout.write(`${JSON.stringify({ kind: 'source-runtime-session-ready', sdkVersion: sdk.VERSION,
-      sessionPath: handle.sessionPath, legacySessionPath: legacy.sessionPath })}\n`);
+    try {
+      const handle = store.create({ providerRuntimeReference: reference });
+      await store.setHandleModelSettings(handle, { thinkingLevel: 'high' });
+      const legacy = store.create();
+      process.stdout.write(`${JSON.stringify({ kind: 'source-runtime-session-ready', sdkVersion: sdk.VERSION,
+        sessionPath: handle.sessionPath, legacySessionPath: legacy.sessionPath })}\n`);
+    } finally {
+      authority.close();
+    }
     return;
   }
 

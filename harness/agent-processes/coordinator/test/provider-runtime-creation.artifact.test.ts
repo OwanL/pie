@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackendServer } from '../server';
+import { createBackendAnalyticsFixture } from '../../test/fixtures/backend-analytics-context.js';
 import { loadSdk } from '../../lib/sdk-integration/sdk';
 import { sourceDescriptor, sourceLoadMode } from '../../lib/sdk-integration/test/source-fixture.js';
 import { readProviderRuntimeReference, saveProviderRuntimeProjection, type NativeRuntimeModel } from '../../../model-providers/runtime';
@@ -13,10 +14,11 @@ import { createCoordinatorProviderManagement } from '../provider-management';
 for (const mode of ['empty', 'admitted', 'legacy'] as const) {
   test(`actual coordinator cold creation preserves ${mode} model authority`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'pie-cold-admission-'));
+    const analytics = createBackendAnalyticsFixture(root);
     const prior = process.env.PIE_PROVIDER_CONFIG_DIR;
     process.env.PIE_PROVIDER_CONFIG_DIR = root;
     const sdkPath = sourceDescriptor.sdkPath;
-    const server = new BackendServer({ sdkPath, sourceArtifactDescriptor: sourceDescriptor, cwd: root, workerEntryPath: '/unused-worker.js' }) as any;
+    const server = new BackendServer({ analyticsContext: analytics.context, hostPid: analytics.hostPid, sdkPath, sourceArtifactDescriptor: sourceDescriptor, cwd: root, workerEntryPath: '/unused-worker.js' }) as any;
     try {
       await mkdir(join(root, 'sessions'));
       if (mode !== 'legacy') await writeFile(join(root, 'providers.yaml'), 'version: 1\nproviders:\n  openai:\n    enabled: true\n');
@@ -34,6 +36,7 @@ for (const mode of ['empty', 'admitted', 'legacy'] as const) {
         },
       } };
       server.agentDir = root;
+      server.analyticsAuthority.openWriterAdmission();
       server.sessionDir = join(root, 'sessions');
       server.sessionDirResolved = true;
       server.readModelSettings = async () => ({ defaultModel: 'global', defaultProvider: 'outside', defaultThinkingLevel: 'medium' });
@@ -80,6 +83,7 @@ for (const mode of ['empty', 'admitted', 'legacy'] as const) {
       await Promise.all([...server.pendingOpenedTitleAdmissions.values()]);
       await server.titleAdmission;
       await server.dispose();
+      analytics.close();
       if (prior === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR; else process.env.PIE_PROVIDER_CONFIG_DIR = prior;
       await rm(root, { recursive: true, force: true });
     }

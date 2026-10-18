@@ -8,8 +8,8 @@
  * can be catalog-priced with an oracle-v1 rate snapshot instead of remaining
  * unknown-cost.
  *
- * Semantics mirror the host billable-accounting pricing path
- * (`BillableAccounting#pricingFor`): provider-qualified catalog lookup with
+ * Semantics mirror the host captured-invocation pricing path:
+ * provider-qualified catalog lookup with
  * provider-prefix tolerance, the shared applicability resolver (original
  * request timestamps for scheduled pricing; unsupported cache-read usage
  * stays unpriced), long-context tier selection by prompt footprint, and

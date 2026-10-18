@@ -46,7 +46,6 @@ test('canonical-only backend retains durable admission independently of capture 
   authority.validate();
   authority.openWriterAdmission();
   assert.equal(authority.context, context);
-  assert.equal(authority.descriptor, undefined);
   assert.equal(authority.captureDescriptor, context);
   const release = authority.admission!.acquire();
   assert.equal(acquired, 1);

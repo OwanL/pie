@@ -6,6 +6,8 @@ import type {
   AnalyticsDiscoveryReasonCode,
 } from './analytics-handoff-discovery.js';
 
+import { assertAnalyticsBackendContext } from './backend-analytics-context.js';
+
 const execFileAsync = promisify(execFile);
 
 /** Keep both the collected rows and the serialized process output bounded. */
@@ -79,11 +81,47 @@ function duplicateProcessIds<T>(
   return duplicates;
 }
 
-function parseSafeArgument(commandLine: string, name: string): string | undefined {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  const match = new RegExp(`(?:^|\\s)${escaped}(?:=|\\s+)(?:"([^"]*)"|'([^']*)'|([^\\s]+))`, 'u').exec(commandLine);
-  const value = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (!value || value.length > 512 || value.includes('\0')) return undefined;
+/** Decode the CRT/libuv Windows argv quoting rules, not shell quoting. An
+ * unmatched quote is ambiguous evidence and invalidates argument extraction. */
+function windowsArguments(commandLine: string): string[] | undefined {
+  if (commandLine.includes('\0')) return undefined;
+  const args: string[] = [];
+  let index = 0;
+  while (index < commandLine.length) {
+    while (/[ \t]/u.test(commandLine[index] ?? '') && index < commandLine.length) index += 1;
+    if (index === commandLine.length) break;
+    let value = '';
+    let quoted = false;
+    while (index < commandLine.length) {
+      const char = commandLine[index];
+      if (!quoted && (char === ' ' || char === '\t')) break;
+      let slashes = 0;
+      while (commandLine[index] === '\\') { slashes += 1; index += 1; }
+      if (commandLine[index] === '"') {
+        value += '\\'.repeat(Math.floor(slashes / 2));
+        if (slashes % 2) value += '"';
+        else if (quoted && commandLine[index + 1] === '"') { value += '"'; index += 1; }
+        else quoted = !quoted;
+        index += 1;
+      } else {
+        value += '\\'.repeat(slashes);
+        if (slashes === 0) { value += commandLine[index]; index += 1; }
+      }
+    }
+    if (quoted) return undefined;
+    args.push(value);
+  }
+  return args;
+}
+
+function parseSafeArgument(commandLine: string, name: string, maxLength = 512): string | undefined {
+  const args = windowsArguments(commandLine);
+  if (!args) return undefined;
+  const matches = args.flatMap((arg, index) => arg === name
+    ? [args[index + 1]] : arg.startsWith(`${name}=`) ? [arg.slice(name.length + 1)] : []);
+  if (matches.length !== 1) return undefined;
+  const value = matches[0];
+  if (!value || value.startsWith('--') || value.length > maxLength) return undefined;
   return value;
 }
 
@@ -112,7 +150,9 @@ export function parseWindowsProcessCreationDate(value: unknown): number | null {
 
 function isBackendCommand(commandLine: string): boolean {
   return /(?:^|[\\/\s"'])backend\.js(?:$|[\\/\s"'])/iu.test(commandLine)
-    && parseSafeArgument(commandLine, '--sdkPath') !== undefined;
+    // Recognition must survive malformed trailing arguments so a backend
+    // cannot disappear from owner evidence merely because parsing failed.
+    && /(?:^|\s)--sdkPath(?:=|\s)/u.test(commandLine);
 }
 
 function isAnalyticsRecorderWorkerCommand(commandLine: string): boolean {
@@ -178,8 +218,21 @@ export function parseWindowsProcessOwnerRows(
     }
     const backendBirth = byPid.get(processId)?.processCreatedAtMs ?? null;
     const hostBirth = byPid.get(hostProcessId)?.processCreatedAtMs ?? null;
-    const analyticsGenerationId = parseSafeArgument(commandLine, '--analyticsGenerationId');
-    const analyticsHostInstanceId = parseSafeArgument(commandLine, '--analyticsHostInstanceId');
+    let analyticsGenerationId: string | undefined;
+    let analyticsHostInstanceId: string | undefined;
+    try {
+      const raw = parseSafeArgument(commandLine, '--analyticsContext', 16 * 1024);
+      const context: unknown = raw === undefined ? undefined : JSON.parse(raw);
+      assertAnalyticsBackendContext(context);
+      if (Object.values(context).some((value) => value.length > 512 || value.includes('\0'))) {
+        throw new Error('Unbounded context');
+      }
+      // Sanitized capture namespace keys only; these do not authorize writes.
+      analyticsGenerationId = context.generationId;
+      analyticsHostInstanceId = context.hostInstanceId;
+    } catch {
+      reasons.push(reason('backend-analytics-descriptor-missing', { processId }));
+    }
     backendOwners.push({
       backendProcessId: processId,
       hostProcessId,

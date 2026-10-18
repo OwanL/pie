@@ -4,6 +4,7 @@ import {
   existsSync,
   fsyncSync,
   mkdirSync,
+  linkSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -15,7 +16,6 @@ import {
 } from 'node:fs';
 import * as path from 'node:path';
 
-import { isAnalyticsRestartNonce } from './activation.js';
 import { ANALYTICS_HANDOFF_NONCE_WINDOW_MS } from '../contracts/host-status-messages.js';
 
 /** Task-specific terminal-handoff ingress: a signed, one-shot request that
@@ -31,7 +31,7 @@ export const ANALYTICS_CONTROLLED_RESTART_SCHEMA = 1 as const;
 export const PENDING_CONTROLLED_RESTART_FILENAME = 'analytics-pending-controlled-restart-v1.json';
 export const CONTROLLED_RESTART_MAX_RECEIPT_PATH_BYTES = 4_096;
 export const CONTROLLED_RESTART_MAX_OPERATION_ID_BYTES = 256;
-export type ControlledRestartPurpose = 'analytics-activation' | 'storage-cutoff';
+export type ControlledRestartPurpose = 'storage-cutoff';
 
 export interface ControlledRestartRequest {
   readonly protocol: typeof ANALYTICS_CONTROLLED_RESTART_PROTOCOL;
@@ -195,8 +195,16 @@ function validateSuccessorCapabilities(value: unknown): readonly string[] {
   return capabilities;
 }
 
+/** Shared bounded restart correlation grammar, independent of retired
+ * analytics activation manifests and receipts. */
+function isAnalyticsRestartNonce(value: unknown): value is string {
+  return typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= 128
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
+}
+
 function validatePurpose(value: unknown): ControlledRestartPurpose {
-  if (value !== 'analytics-activation' && value !== 'storage-cutoff') {
+  if (value !== 'storage-cutoff') {
     throw new Error('controlled restart purpose is invalid.');
   }
   return value;
@@ -650,6 +658,25 @@ function pendingControlledRestartCandidates(stateDir: string): string[] {
     .map((name) => path.join(stateDir, name));
 }
 
+// Validate before mutation so retired or malformed artifacts remain untouched.
+// Revalidate after rename: a writer may have replaced the slot in between.
+function claimValidatedPendingRestart(source: string): {
+  claim: string;
+  record: PendingControlledRestartRecord;
+} | undefined {
+  if (!readPendingControlledRestartAtPath(source)) return undefined;
+  const claim = `${source}.claim-${process.pid}-${randomUUID()}`;
+  try { renameSync(source, claim); } catch { return undefined; }
+  const record = readPendingControlledRestartAtPath(claim);
+  if (record) return { claim, record };
+  try {
+    // Unlike rename, linking cannot overwrite a superseding pending slot.
+    linkSync(claim, source);
+    unlinkSync(claim);
+  } catch { /* retain claimed bytes as evidence if restoration fails */ }
+  return undefined;
+}
+
 /** Atomically claim one pending record for a successor boot. The successor's
  * new identity is intentionally not assumed in advance: the owner correlates
  * the claimed record's exact evidence path with the actual boot identity. */
@@ -658,15 +685,11 @@ export function claimPendingControlledRestart(
   nowMs = Date.now(),
 ): PendingControlledRestartRecord | undefined {
   for (const source of pendingControlledRestartCandidates(stateDir)) {
-    const claim = `${source}.claim-${process.pid}-${randomUUID()}`;
+    const claimed = claimValidatedPendingRestart(source);
+    if (!claimed) continue;
+    const { claim, record } = claimed;
     try {
-      renameSync(source, claim);
-    } catch {
-      continue;
-    }
-    try {
-      const record = readPendingControlledRestartAtPath(claim);
-      if (record && isPendingControlledRestartConsumable(record, nowMs)) return record;
+      if (isPendingControlledRestartConsumable(record, nowMs)) return record;
     } finally {
       try { rmSync(claim, { force: true }); } catch { /* best-effort single-use cleanup */ }
     }
@@ -674,8 +697,9 @@ export function claimPendingControlledRestart(
   return undefined;
 }
 
-/** Remove one host-scoped pending restart (or all scoped records when no
- * predecessor is supplied). Consumption is best-effort hygiene; the signed
+/** Remove one valid host-scoped pending restart (or all valid scoped records
+ * when no predecessor is supplied). Rejected historical artifacts stay inert.
+ * Consumption is best-effort hygiene; the signed
  * nonce and exact evidence paths own the completion semantics. */
 export function consumePendingControlledRestart(
   stateDir: string,
@@ -685,7 +709,9 @@ export function consumePendingControlledRestart(
     ? [pendingControlledRestartPath(stateDir), ...pendingControlledRestartCandidates(stateDir)]
     : [pendingControlledRestartPath(stateDir, predecessorHostInstanceId)];
   for (const destination of destinations) {
-    try { rmSync(destination, { force: true }); } catch { /* best-effort cleanup */ }
+    const claimed = claimValidatedPendingRestart(destination);
+    if (!claimed) continue;
+    try { rmSync(claimed.claim, { force: true }); } catch { /* best-effort cleanup */ }
   }
 }
 

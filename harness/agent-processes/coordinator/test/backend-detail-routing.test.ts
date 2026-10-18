@@ -37,7 +37,7 @@ const ADDRESS: LiveSubagentDetailAddress = {
 };
 
 function createIsolatedServer() {
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk',
     sourceArtifactDescriptor,
     cwd: '/repo',
@@ -122,7 +122,7 @@ test('isolated server rejects malformed detail payloads with INVALID_PARAMS', as
 });
 
 test('detail RPCs fail closed without an initialized worker router', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
   const port = server as unknown as ServerDetailTestPort;
   // Without `start()` the coordinator has no router; the detail RPCs are not
   // in the coordinator operation catalog, so they fail closed as unavailable

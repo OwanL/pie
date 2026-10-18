@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createConnection } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -17,6 +18,7 @@ import {
   isPendingControlledRestartConsumable,
   PENDING_CONTROLLED_RESTART_FILENAME,
   pendingControlledRestartExists,
+  pendingControlledRestartPath,
   readPendingControlledRestart,
   verifyControlledRestartRequest,
   verifyControlledRestartResponse,
@@ -106,6 +108,52 @@ test('controlled restart requests round-trip, bind to auth, and reject tampering
   assert.throws(() => verifyControlledRestartResponse(JSON.parse(JSON.stringify(error)), 'other-key'), /authentication failed/);
 });
 
+test('retired activation restart requests and pending records are rejected without cleaning files', () => {
+  const root = temporaryRoot('retired-purpose');
+  try {
+    const request = createControlledRestartRequest({
+      workspaceId: identity.workspaceId,
+      purpose: 'storage-cutoff',
+      operationId: 'retired-operation',
+      restartNonce: 'retired-restart-nonce',
+      terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+      ...restartFields(),
+    }, KEY, { issuedAtMs: 100, expiresAtMs: 5_000 });
+    const { mac: _mac, ...unsigned } = { ...request, purpose: 'analytics-activation' };
+    // Sign the retired wire shape correctly: rejection must not depend on a bad MAC.
+    const signingBytes = JSON.stringify(unsigned, Object.keys(unsigned).sort());
+    const retired = { ...unsigned, mac: createHmac('sha256', KEY).update(signingBytes).digest('base64url') };
+    assert.throws(() => verifyControlledRestartRequest(retired, KEY), /purpose is invalid/);
+    assert.throws(() => createControlledRestartRequest({ ...request, purpose: 'analytics-activation' as never }, KEY), /purpose is invalid/);
+
+    const stateDir = path.join(root, 'state');
+    mkdirSync(stateDir);
+    const record = {
+      schemaVersion: 1,
+      purpose: retired.purpose,
+      workspaceId: retired.workspaceId,
+      operationId: retired.operationId,
+      predecessorHostInstanceId: retired.targetHostInstanceId,
+      successorHandoffKey: retired.successorHandoffKey,
+      loadedGenerationPath: retired.loadedGenerationPath,
+      successorCapabilities: retired.successorCapabilities,
+      evidenceOwner: retired.evidenceOwner,
+      restartNonce: retired.restartNonce,
+      terminalRestartReceiptPath: retired.terminalRestartReceiptPath,
+      issuedAtMs: retired.issuedAtMs,
+      expiresAtMs: retired.expiresAtMs,
+    };
+    for (const predecessor of [undefined, identity.hostInstanceId]) {
+      const destination = pendingControlledRestartPath(stateDir, predecessor);
+      writeFileSync(destination, JSON.stringify(record));
+      assert.equal(readPendingControlledRestart(stateDir, predecessor), undefined);
+      assert.equal(existsSync(destination), true, 'validation must not clean retired artifacts');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('controlled restart request bounds fail closed', () => {
   const base = {
     workspaceId: identity.workspaceId,
@@ -133,7 +181,7 @@ test('the host restart handler records a durable pending slot and schedules the 
     });
     const request = createControlledRestartRequest({
       workspaceId: identity.workspaceId,
-      purpose: 'analytics-activation',
+      purpose: 'storage-cutoff',
       operationId: 'operation-2',
       restartNonce: 'restart-nonce-1',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
@@ -144,7 +192,7 @@ test('the host restart handler records a durable pending slot and schedules the 
     assert.ok(record, 'pending restart must be durable before the acknowledgement returns');
     assert.equal(record.restartNonce, 'restart-nonce-1');
     assert.equal(record.terminalRestartReceiptPath, path.join(root, 'receipt.json'));
-    assert.equal(record.purpose, 'analytics-activation');
+    assert.equal(record.purpose, 'storage-cutoff');
     assert.equal(record.workspaceId, identity.workspaceId);
     assert.deepEqual(performed, [], 'no restart may fire before the acknowledgement has flushed');
     await sleep(700);
@@ -164,7 +212,7 @@ test('successor boots claim distinct host-scoped pending records without sharing
     const stateDir = path.join(root, 'state');
     const first = {
       schemaVersion: 1 as const,
-      purpose: 'analytics-activation' as const,
+      purpose: 'storage-cutoff' as const,
       workspaceId: identity.workspaceId,
       operationId: 'operation-claims',
       predecessorHostInstanceId: 'host-predecessor-a',
@@ -208,7 +256,7 @@ test('a newer signed request supersedes the pending slot and re-arms the restart
     });
     const first = createControlledRestartRequest({
       workspaceId: identity.workspaceId,
-      purpose: 'analytics-activation',
+      purpose: 'storage-cutoff',
       operationId: 'operation-3',
       restartNonce: 'restart-nonce-a',
       terminalRestartReceiptPath: path.join(root, 'receipt-a.json'),
@@ -324,7 +372,7 @@ test('the control endpoint without a restart handler rejects restart frames and 
     assert.equal(registered?.capabilities.includes('controlled-restart'), false);
     const request = createControlledRestartRequest({
       workspaceId: absentIdentity.workspaceId,
-      purpose: 'analytics-activation',
+      purpose: 'storage-cutoff',
       operationId: 'operation-6',
       restartNonce: 'restart-nonce-absent',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
@@ -342,6 +390,40 @@ test('the control endpoint without a restart handler rejects restart frames and 
   }
 });
 
+for (const action of ['claim', 'consume'] as const) {
+  test(`${action} preserves historical bytes beside valid storage records`, () => {
+    const root = temporaryRoot(`preserve-${action}`);
+    try {
+      const valid = {
+        schemaVersion: 1 as const, purpose: 'storage-cutoff' as const,
+        workspaceId: identity.workspaceId, operationId: 'operation-preserve',
+        predecessorHostInstanceId: 'valid-host', successorHandoffKey: KEY,
+        loadedGenerationPath: path.join(root, 'loaded.json'), successorCapabilities: [],
+        evidenceOwner: true, restartNonce: 'preserve-nonce',
+        terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+        issuedAtMs: 100, expiresAtMs: 500,
+      };
+      const historical = Buffer.from(JSON.stringify({ ...valid, purpose: 'analytics-activation' }) + '\n');
+      const rejected = [
+        [pendingControlledRestartPath(root), historical],
+        [pendingControlledRestartPath(root, 'historical-host'), historical],
+        [pendingControlledRestartPath(root, 'invalid-host'), Buffer.from('{invalid')],
+      ] as const;
+      for (const [destination, bytes] of rejected) writeFileSync(destination, bytes);
+      writePendingControlledRestartAtomically(root, valid);
+      if (action === 'claim') {
+        assert.deepEqual(claimPendingControlledRestart(root, 200), valid);
+        assert.equal(claimPendingControlledRestart(root, 200), undefined);
+      } else {
+        consumePendingControlledRestart(root, 'historical-host');
+        consumePendingControlledRestart(root);
+      }
+      assert.equal(existsSync(pendingControlledRestartPath(root, 'valid-host')), false);
+      for (const [destination, bytes] of rejected) assert.deepEqual(readFileSync(destination), bytes);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
 test('the pending slot reader treats malformed slots as absent', () => {
   const root = temporaryRoot('malformed');
   try {
@@ -349,7 +431,7 @@ test('the pending slot reader treats malformed slots as absent', () => {
     const destination = path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME);
     const valid = {
       schemaVersion: 1,
-      purpose: 'analytics-activation',
+      purpose: 'storage-cutoff',
       workspaceId: identity.workspaceId,
       operationId: 'operation-6',
       predecessorHostInstanceId: identity.hostInstanceId,

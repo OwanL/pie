@@ -247,8 +247,8 @@ export interface WorkerRuntimeRouterOptions {
     frame: WorkerSessionControlFrame,
     source: { sessionPath: string; rootSessionPath: string; owner: SdkWorkerOwnershipIdentity },
   ) => Promise<WorkerSessionControlOutcome>;
-  /** Inactive until the P7 manifest owner supplies one immutable generation. */
-  analyticsActivation?: {
+  /** Canonical capture identity supplied after host readiness. */
+  analyticsContext?: {
     generationId: string;
     workspaceId?: string;
     buildId: string;
@@ -1627,7 +1627,7 @@ export class WorkerRuntimeRouter {
         if (!this.recordExtensionUiOwner(route, frame.payload)) return;
       }
       const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, frame.payload);
-      if (frame.event === 'session.opened' && this.options.analyticsActivation) {
+      if (frame.event === 'session.opened' && this.options.analyticsContext) {
         route.analyticsCaptureSubject = this.analyticsCaptureSubject(publicPayload);
       }
       if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, publicPayload);
@@ -1635,7 +1635,7 @@ export class WorkerRuntimeRouter {
       return;
     }
     if (frame.kind === 'analytics.capture') {
-      const activation = this.options.analyticsActivation;
+      const activation = this.options.analyticsContext;
       const captureSubject = route.analyticsCaptureSubject;
       const workerPid = route.worker.client.getSnapshot().pid;
       const pending = route.analyticsPendingDeliveries?.get(frame.packet.deliveryId);
@@ -1687,7 +1687,7 @@ export class WorkerRuntimeRouter {
       return;
     }
     if (frame.kind === 'analytics.rebind') {
-      const activation = this.options.analyticsActivation;
+      const activation = this.options.analyticsContext;
       if (!activation || frame.captureSubject.kind !== 'session' || !this.isCurrentOrPromoting(route)) return;
       route.analyticsCaptureSubject = frame.captureSubject;
       route.worker.client.sendFrame?.({
@@ -2038,7 +2038,7 @@ export class WorkerRuntimeRouter {
         currentLeaseRevision: lease.ownershipRevision,
         owner,
         worker,
-        ...(this.options.analyticsActivation
+        ...(this.options.analyticsContext
           ? {
               analyticsCaptureSubject: this.analyticsCaptureSubject(snapshot.openedPayload),
               analyticsPendingDeliveries: new Map(),
@@ -2077,10 +2077,10 @@ export class WorkerRuntimeRouter {
             openedPayload: sessionOpenedMetadataForWorkerIpc(snapshot.openedPayload),
             modelSettings: snapshot.modelSettings,
             ...(snapshot.providerRuntime ? { providerRuntime: snapshot.providerRuntime } : {}),
-            ...(this.options.analyticsActivation && route.analyticsCaptureSubject
+            ...(this.options.analyticsContext && route.analyticsCaptureSubject
               ? {
                 analytics: {
-                  ...this.options.analyticsActivation,
+                  ...this.options.analyticsContext,
                   captureSubject: route.analyticsCaptureSubject,
                   ...(this.options.analyticsWriterAdmission
                     ? { writerAdmission: this.options.analyticsWriterAdmission }
@@ -2724,13 +2724,13 @@ export class WorkerRuntimeRouter {
     acknowledgement: AnalyticsTransportAcknowledgement,
   ): boolean {
     const route = this.workersById.get(routeIdentity.workerId);
-    if (!route || !this.options.analyticsActivation || !route.analyticsCaptureSubject) return false;
+    if (!route || !this.options.analyticsContext || !route.analyticsCaptureSubject) return false;
     const pending = route.analyticsPendingDeliveries?.get(acknowledgement.deliveryId);
     if (!pending || !this.sameAnalyticsRoute(pending.route, routeIdentity)) return false;
     if (route.owner.coordinatorGeneration !== routeIdentity.coordinatorGeneration
         || route.owner.workerGeneration !== routeIdentity.workerGeneration
         || route.worker.client.getSnapshot().pid !== routeIdentity.workerPid
-        || acknowledgement.generationId !== this.options.analyticsActivation.generationId) return false;
+        || acknowledgement.generationId !== this.options.analyticsContext.generationId) return false;
     const accepted = route.worker.client.sendFrame?.({ kind: 'analytics.ack', acknowledgement }) === true;
     if (accepted) {
       route.analyticsPendingDeliveries?.delete(acknowledgement.deliveryId);

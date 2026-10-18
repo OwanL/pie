@@ -80,7 +80,7 @@ function makeServerWithSession(branch: unknown[] = []): { server: any; sessionPa
     JSON.stringify({ type: 'session', id: 'test-session', version: 3, cwd: agentDir }),
     ...branch.map((row) => JSON.stringify(row)),
   ].join('\n') + '\n');
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: agentDir, sourceArtifactDescriptor }) as any;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: agentDir, sourceArtifactDescriptor }) as any;
   server.agentDir = agentDir;
   server.sdk = {
     VERSION: 'test-sdk',

@@ -23,15 +23,18 @@ const sourceArtifactDescriptor = {
   },
 };
 
-const sourceArgs = [
+const context = { mode: 'canonical-only', generationId: 'capture', buildId: 'build', workspaceId: 'workspace', hostInstanceId: 'host' } as const;
+const sourceArgsWithoutContext = [
   '--sdkPath', sourceArtifactDescriptor.sdkPath,
   '--sourceArtifactDescriptor', JSON.stringify(sourceArtifactDescriptor),
 ];
 
+const sourceArgs = [...sourceArgsWithoutContext, '--analyticsContext', JSON.stringify(context)];
+
 test('parseArgs carries the host-authoritative backend generation and validates it', () => {
   assert.deepEqual(
     parseArgs([...sourceArgs, '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123', '--lifetimeFd', '3']),
-    { sdkPath: sourceArtifactDescriptor.sdkPath, sourceArtifactDescriptor, cwd: '/work', backendGeneration: 7, hostPid: 123, lifetimeFd: 3 },
+    { sdkPath: sourceArtifactDescriptor.sdkPath, sourceArtifactDescriptor, cwd: '/work', backendGeneration: 7, hostPid: 123, lifetimeFd: 3, analyticsContext: context },
   );
   assert.equal(parseArgs(sourceArgs).backendGeneration, 1);
   assert.throws(
@@ -47,7 +50,7 @@ test('parseArgs carries the host-authoritative backend generation and validates 
 test('parseArgs carries a source artifact descriptor and rejects missing, duplicate, malformed, or invalid values', () => {
   const encoded = JSON.stringify(sourceArtifactDescriptor);
   assert.deepEqual(
-    parseArgs(['--sdkPath', sourceArtifactDescriptor.sdkPath, '--sourceArtifactDescriptor', encoded]).sourceArtifactDescriptor,
+    parseArgs(sourceArgs).sourceArtifactDescriptor,
     sourceArtifactDescriptor,
   );
   assert.throws(
@@ -86,13 +89,13 @@ test('coordinator boundaries reject missing and legacy artifact input without SD
   );
   for (const descriptor of [undefined, null, {}, legacy]) {
     assert.throws(
-      () => new BackendServer({ sdkPath: '/sdk', cwd: '/work', sourceArtifactDescriptor: descriptor }),
+      () => new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, sdkPath: '/sdk', cwd: '/work', sourceArtifactDescriptor: descriptor }),
       /descriptor is invalid/,
     );
   }
   assert.throws(
     // Exercise an untyped caller omitting the now-required constructor field.
-    () => new BackendServer({ sdkPath: '/sdk', cwd: '/work' } as ConstructorParameters<typeof BackendServer>[0]),
+    () => new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, sdkPath: '/sdk', cwd: '/work' } as ConstructorParameters<typeof BackendServer>[0]),
     /descriptor is invalid/,
   );
 });
@@ -101,9 +104,9 @@ test('coordinator accepts an explicit workspace-development route only with the 
   const workspaceRoot = '/work/pi';
   const sdkPath = '/work/pi/packages/coding-agent';
   const sdkRuntimeSelection = { kind: 'workspace-development', workspaceRoot };
-  const args = ['--sdkPath', sdkPath, '--sdkRuntimeSelection', JSON.stringify(sdkRuntimeSelection)];
+  const args = ['--sdkPath', sdkPath, '--sdkRuntimeSelection', JSON.stringify(sdkRuntimeSelection), '--analyticsContext', JSON.stringify(context)];
   assert.deepEqual(parseArgs(args, { [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1' }), {
-    sdkPath, cwd: process.cwd(), backendGeneration: 1, sdkRuntimeSelection,
+    sdkPath, cwd: process.cwd(), backendGeneration: 1, sdkRuntimeSelection, analyticsContext: context,
   });
   assert.throws(() => parseArgs(args, {}), new RegExp(`${WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV}=1`));
   assert.throws(() => parseArgs(['--sdkPath', '/sdk', '--sdkRuntimeSelection', '{'], {
@@ -125,7 +128,7 @@ test('BackendServer direct workspace-development selection also requires the exp
   const previous = process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV];
   delete process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV];
   try {
-    assert.throws(() => new BackendServer({
+    assert.throws(() => new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
       sdkPath: '/work/pi/packages/coding-agent',
       sdkRuntimeSelection,
       cwd: '/work',
@@ -137,45 +140,28 @@ test('BackendServer direct workspace-development selection also requires the exp
   }
 });
 
+test('retired analytics descriptor flags cannot admit a backend writer', () => {
+  assert.throws(() => parseArgs([
+    ...sourceArgsWithoutContext,
+    '--analyticsGenerationId', 'old-generation',
+    '--analyticsBuildId', 'old-build',
+    '--analyticsManifestRevision', '1',
+    '--analyticsManifestSha256', 'a'.repeat(64),
+    '--analyticsWorkspaceId', 'old-workspace',
+    '--analyticsHostInstanceId', 'old-host',
+  ]), /Missing required --analyticsContext/);
+});
+
 test('parseArgs carries canonical-only context without activation evidence and rejects partial context', () => {
-  const context = { mode: 'canonical-only', generationId: 'capture', buildId: 'build', workspaceId: 'workspace', hostInstanceId: 'host' };
-  const args = [...sourceArgs, '--analyticsContext', JSON.stringify(context)];
+  const args = sourceArgs;
   assert.deepEqual(parseArgs(args).analyticsContext, context);
-  assert.equal(parseArgs(args).analyticsActivation, undefined);
-  assert.equal(parseArgs(sourceArgs).analyticsContext, undefined);
+  assert.throws(() => parseArgs(sourceArgsWithoutContext), /Missing required --analyticsContext/);
+  assert.throws(() => new BackendServer({ sdkPath: '/sdk', cwd: '/work', sourceArtifactDescriptor,
+    workerEntryPath: '/worker.js' } as ConstructorParameters<typeof BackendServer>[0]), /context/i);
   assert.throws(() => parseArgs([...args, '--analyticsContext', JSON.stringify(context)]), /Duplicate/);
   for (const field of Object.keys(context)) {
     const partial = { ...context } as Record<string, unknown>;
     delete partial[field];
-    assert.throws(() => parseArgs([...sourceArgs, '--analyticsContext', JSON.stringify(partial)]), /context/);
+    assert.throws(() => parseArgs([...sourceArgsWithoutContext, '--analyticsContext', JSON.stringify(partial)]), /context/);
   }
-});
-
-test('parseArgs carries a complete analytics descriptor and rejects partial or malformed snapshots', () => {
-  const args = [
-    ...sourceArgs, '--cwd', '/work',
-    '--analyticsGenerationId', '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
-    '--analyticsBuildId', 'build-1',
-    '--analyticsManifestRevision', '4',
-    '--analyticsManifestSha256', 'a'.repeat(64),
-    '--analyticsWorkspaceId', 'workspace-1',
-    '--analyticsHostInstanceId', 'host-1',
-  ];
-  assert.deepEqual(parseArgs(args).analyticsActivation, {
-    generationId: '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
-    buildId: 'build-1',
-    manifestRevision: 4,
-    manifestSha256: 'a'.repeat(64),
-    workspaceId: 'workspace-1',
-    hostInstanceId: 'host-1',
-  });
-  assert.throws(() => parseArgs([...args, '--analyticsContext', JSON.stringify({ mode: 'canonical-only', generationId: 'capture', buildId: 'build', workspaceId: 'workspace', hostInstanceId: 'host' })]), /mutually exclusive/);
-  assert.throws(
-    () => parseArgs(args.slice(0, -2)),
-    /must provide every field/,
-  );
-  assert.throws(
-    () => parseArgs(args.map((value, index) => index === args.indexOf('--analyticsManifestRevision') + 1 ? '0' : value)),
-    /Invalid --analyticsManifestRevision/,
-  );
 });

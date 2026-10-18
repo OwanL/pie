@@ -7,7 +7,7 @@ import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-run
 function fixture(state: 'promoting' | 'hot' | 'retiring') {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk', cwd: '/repo', workerEntryPath: '/worker.js',
     sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor,
   });

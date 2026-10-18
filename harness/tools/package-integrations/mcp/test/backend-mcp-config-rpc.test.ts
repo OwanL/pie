@@ -153,7 +153,7 @@ test('mcp RPCs reach the backend through BackendServer.handleRequest without a h
   // source runtime selection shape; no SDK import or verification runs because
   // these RPCs are runtime-free config reads/writes.
   const sdkPath = path.resolve('/sdk');
-  const server = new BackendServer({
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath,
     sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(sdkPath).descriptor,
     cwd,

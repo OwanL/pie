@@ -48,7 +48,7 @@ test('pending-create replay resolves the already-registered transcript after pro
   try {
     store.registerTranscript('durable-root', 'created.jsonl', 1);
     store.registerPendingCreateOperation('durable-root', 'durable-create-origin', 2);
-    const server = new BackendServer({
+    const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
       workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: root, sourceArtifactDescriptor,
     }) as any;
     server.sessionDir = sessions;
@@ -69,7 +69,7 @@ test('pending-create replay resolves the already-registered transcript after pro
 });
 
 function createPollingTestServer(): PollingTestServer {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace', sourceArtifactDescriptor }) as unknown as PollingTestServer;
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace', sourceArtifactDescriptor }) as unknown as PollingTestServer;
   server.agentDir = path.resolve('/agent');
   server.sessionDir = path.resolve('/configured/sessions');
   server.sessionDirResolved = true;
@@ -98,7 +98,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
       getProgress: () => ({ complete: true, processed: 0, total: 0 }),
       invalidateIfInventoryChanged: async () => false,
     };
-    const server = new BackendServer({
+    const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
       workerEntryPath: '/worker-entry.js',
       sdkPath: '/unused',
       cwd: '/workspace',
@@ -125,7 +125,26 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
         },
         open: (...args: unknown[]) => {
           openCalls.push(args);
-          return { cwd: '/legacy-workspace', sessionPath: String(args[0]) };
+          const sessionPath = String(args[0]);
+          const entries = fs.readFileSync(sessionPath, 'utf8').trim().split('\n')
+            .map((line) => JSON.parse(line)).filter((row) => row.type !== 'session');
+          const append = (row: Record<string, unknown>) => {
+            const id = `legacy-entry-${entries.length + 1}`;
+            const entry = { ...row, id, parentId: entries.at(-1)?.id ?? null, timestamp: new Date().toISOString() };
+            fs.appendFileSync(sessionPath, `${JSON.stringify(entry)}\n`);
+            entries.push(entry);
+            return id;
+          };
+          return {
+            cwd: '/legacy-workspace', sessionPath,
+            getCwd: () => '/legacy-workspace',
+            getSessionFile: () => sessionPath,
+            getSessionName: () => entries.filter((row) => row.type === 'session_info').at(-1)?.name,
+            getBranch: () => entries,
+            getEntries: () => entries,
+            appendSessionInfo: (name: string) => append({ type: 'session_info', name }),
+            appendCustomEntry: (customType: string, data: unknown) => append({ type: 'custom', customType, data }),
+          };
         },
       },
     };
@@ -175,6 +194,8 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     releaseTitleRead();
     await titleNamespaceHydration;
     assert.equal(server.liveSessionTitles.ready, true);
+    assert.deepEqual(openCalls, [[legacyPath], [legacyPath]], 'title admission reads and writes only the restored transcript');
+    const admissionOpenCalls = [...openCalls];
 
     const result = await server.handleRequest({
       id: 'create-configured',
@@ -191,7 +212,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     assert.deepEqual(catalogListDirs, [configuredDir, configuredDir]);
     assert.deepEqual(sdkListDirs, [], 'an unchanged indexed catalog must not rescan session files');
 
-    assert.deepEqual(openCalls, [], 'the stubbed browse payload owns file reading; session.open must not invoke the runtime-promotion seam');
+    assert.deepEqual(openCalls, admissionOpenCalls, 'create and indexed listing must not reopen the admitted transcript');
   } finally {
     releaseTitleRead();
     await titleNamespaceHydration?.catch(() => undefined);

@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 
-import { ActivationStore } from '../../../analytics/authority/activation-store';
 import { createCommandExecutor } from '../lib/command-execution';
 import { resolveAgentDir, type ResolvedAgentDir } from '../lib/agent-dir-resolution';
 import {
@@ -254,17 +253,6 @@ function workspaceDataPaths(dataRoot: string | undefined, agentDir: string | und
   }
 }
 
-/** Preserve canonical activation authority even when a test/embedding caller
- * supplies an already-resolved environment object. */
-export function validateStandaloneRuntimeIdentity(environment: Pick<StandaloneEnvironment, 'dataPaths' | 'runtimeIdentity'>): void {
-  const activation = new ActivationStore({ stateDir: environment.dataPaths.stateDir }).read();
-  if (activation.authority === 'canonical' && environment.runtimeIdentity === undefined) {
-    throw new StandaloneStartupError(
-      'Canonical analytics activation requires a readable extension runtime identity (publisher/name/version).',
-    );
-  }
-}
-
 /**
  * Resolve and validate everything the standalone process owns before creating
  * HostRuntime. Production startup accepts only the verified Pi SDK artifact
@@ -397,7 +385,7 @@ export async function resolveStandaloneEnvironment(
       ? workspaceDataPaths(developmentProfilePaths.dataDir, developmentProfilePaths.agentDir)
       : injectedEnvironment?.dataPaths ?? workspaceDataPaths(options.dataRoot, dependencies.agentDir);
     // Never accept identity injected by an embedding caller: the package manifest
-    // is the authority used by the generation manager and activation checks.
+    // is the authority used by the generation manager.
     const environment = {
       paths,
       dependencies,
@@ -408,7 +396,6 @@ export async function resolveStandaloneEnvironment(
       ...(sourceArtifactDescriptor ? { sourceArtifactDescriptor } : {}),
       ...(sdkRuntimeSelection ? { sdkRuntimeSelection } : {}),
     };
-    validateStandaloneRuntimeIdentity(environment);
     return environment;
   } catch (error) {
     await runtimeSelection.runtimeLease?.release().catch(() => undefined);

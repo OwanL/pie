@@ -124,7 +124,7 @@ test('unfinished preload sends only initialize and remains owned by coordinator 
       child.emit('exit', 0, null);
     },
   });
-  const server: any = new BackendServer({
+  const server: any = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: runtime.descriptor.sdkPath, sourceArtifactDescriptor: runtime.descriptor,
     cwd: '/workspace', workerEntryPath: '/worker.js',
   });

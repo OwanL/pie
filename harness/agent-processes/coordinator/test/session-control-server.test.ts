@@ -72,7 +72,7 @@ function trackServer(server: BackendServer): FakeServer {
 }
 
 function serverForTests(): FakeServer {
-  return trackServer(new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js' }));
+  return trackServer(new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js' }));
 }
 
 function frame(action: string, payload: Record<string, unknown> = {}): unknown {
@@ -2511,7 +2511,7 @@ test('agent close emits a typed host bridge request and reports acceptance for t
 });
 
 test('self-close source loss releases the host close after the bounded response-handoff timeout', async () => {
-  const server = trackServer(new BackendServer({
+  const server = trackServer(new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' },
     sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js', hostCloseHandoffTimeoutMs: 10,
   }));
   const events: Array<{ event: string; payload?: unknown }> = [];

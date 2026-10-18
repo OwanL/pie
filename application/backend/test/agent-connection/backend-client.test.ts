@@ -11,6 +11,7 @@ import test from 'node:test';
 import { deriveTrustedSdkRoot } from '../../agent-connection/trusted-sdk-root';
 import type { GenerationPiRuntimeDescriptor } from '../../../hosts/lib/pi-runtime-resolution';
 import { PROTOCOL_VERSION } from '../../../../harness/agent-processes/lib/rpc/wire.js';
+import { STORAGE_CUTOFF_AUTHORIZATION_ENV, STORAGE_CUTOFF_AUTHORIZATION_VALUE } from '../../../../analytics/authority/storage-cutoff-authorization.js';
 
 test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => {
   assert.equal(
@@ -23,7 +24,7 @@ test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => 
 class ImmediateReadyStream extends PassThrough {
   private emitted = false;
 
-  constructor(private readonly analyticsActivation?: Record<string, unknown>, private readonly analyticsContext?: Record<string, unknown>) {
+  constructor(private readonly analyticsContext?: Record<string, unknown>) {
     super();
   }
 
@@ -39,7 +40,6 @@ class ImmediateReadyStream extends PassThrough {
           sdkVersion: '0.0.0-test',
           protocolVersion: PROTOCOL_VERSION,
           authPath: '/mock/auth.json',
-          ...(this.analyticsActivation ? { analyticsActivation: this.analyticsActivation } : {}),
           ...(this.analyticsContext ? { analyticsContext: this.analyticsContext } : {}),
         },
       }) + '\n'));
@@ -54,9 +54,9 @@ class FakeChildProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   killCount = 0;
 
-  constructor(analyticsActivation?: Record<string, unknown>, analyticsContext?: Record<string, unknown>) {
+  constructor(analyticsContext?: Record<string, unknown>) {
     super();
-    this.stdout = new ImmediateReadyStream(analyticsActivation, analyticsContext);
+    this.stdout = new ImmediateReadyStream(analyticsContext);
   }
 
   kill(): boolean {
@@ -110,6 +110,8 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const previousDataRoot = process.env.PIE_DATA_DIR;
   const previousEditorVersion = process.env.PIE_EDITOR_VERSION;
   const previousWorkspaceSdkOptIn = process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
+  const previousCutoffAuthorization = process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
+  delete process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
   delete process.env.PIE_TRUSTED_SDK_ROOT;
   delete process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
   const agentDir = path.resolve('/mock/agent');
@@ -212,71 +214,37 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     standaloneProc.releaseRequest();
     await standaloneStop;
 
-    const activation = {
-      generationId: '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
-      buildId: 'build-1',
-      manifestRevision: 4,
-      manifestSha256: 'a'.repeat(64),
-      workspaceId: 'workspace-1',
-      hostInstanceId: 'host-1',
-    };
-    const descriptorProc = new FakeChildProcess(activation);
-    nextProc = descriptorProc as unknown as cp.ChildProcess;
-    const descriptorClient = new BackendClient({ orphanReaper: noOrphans });
-    const descriptorPayload = await descriptorClient.start({
-      nodePath: '/mock/node',
-      backendPath: '/mock/backend.js',
-      sdkPath: '/mock/sdk',
-      cwd: '/mock/cwd',
-      analyticsActivation: activation,
-    });
-    assert.deepEqual(descriptorPayload.analyticsActivation, activation);
-    assert.deepEqual(spawnArgs?.slice(-12), [
-      '--analyticsGenerationId', activation.generationId,
-      '--analyticsBuildId', activation.buildId,
-      '--analyticsManifestRevision', '4',
-      '--analyticsManifestSha256', activation.manifestSha256,
-      '--analyticsWorkspaceId', activation.workspaceId,
-      '--analyticsHostInstanceId', activation.hostInstanceId,
-    ]);
-    descriptorClient.dispose();
-
-    const mismatchedActivation = { ...activation, workspaceId: 'workspace-other' };
-    const mismatchedProc = new FakeChildProcess(mismatchedActivation);
-    nextProc = mismatchedProc as unknown as cp.ChildProcess;
-    const mismatchedClient = new BackendClient({ orphanReaper: noOrphans });
-    let mismatchedReadyEvents = 0;
-    const mismatchedEvents = mismatchedClient.onEvent((event) => {
-      if (event.event === 'backend.ready') mismatchedReadyEvents += 1;
-    });
-    await assert.rejects(
-      mismatchedClient.start({
-        nodePath: '/mock/node',
-        backendPath: '/mock/backend.js',
-        sdkPath: '/mock/sdk',
-        cwd: '/mock/cwd',
-        analyticsActivation: activation,
-      }),
-      /analytics activation descriptor mismatch/u,
-    );
-    assert.equal(mismatchedReadyEvents, 0, 'a mismatched ready payload is rejected before public event delivery');
-    assert.equal(mismatchedProc.killCount, 1, 'the mismatched child is stopped before it can rearm consumers');
-    mismatchedEvents.dispose();
-    mismatchedClient.dispose();
-
     const context = { mode: 'canonical-only' as const, generationId: 'capture', buildId: 'capture-build', workspaceId: 'workspace', hostInstanceId: 'host' };
-    nextProc = new FakeChildProcess(undefined, context) as unknown as cp.ChildProcess;
+    nextProc = new FakeChildProcess(context) as unknown as cp.ChildProcess;
     const contextClient = new BackendClient({ orphanReaper: noOrphans });
     const ready = await contextClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context });
     assert.deepEqual(ready.analyticsContext, context);
     assert.deepEqual(spawnArgs?.slice(-2), ['--analyticsContext', JSON.stringify(context)]);
+    assert.equal((spawnOptions?.env as NodeJS.ProcessEnv)?.PI_CODING_AGENT_SESSION_DIR,
+      path.join(agentDir, 'data/outcomes/sessions'), 'canonical analytics does not authorize the session-root cutoff');
     contextClient.dispose();
+
+    process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = STORAGE_CUTOFF_AUTHORIZATION_VALUE;
+    const cutoffClient = new BackendClient({ orphanReaper: noOrphans });
+    try {
+      nextProc = new FakeChildProcess(context) as unknown as cp.ChildProcess;
+      await cutoffClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context });
+      assert.equal((spawnOptions?.env as NodeJS.ProcessEnv)?.PI_CODING_AGENT_SESSION_DIR,
+        path.join(dataRoot, 'sessions'), 'only the separate authorization switches the session root');
+    } finally {
+      cutoffClient.dispose();
+      delete process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
+    }
     for (const received of [{ ...context, hostInstanceId: 'other' }, { mode: 'canonical-only', generationId: 'capture' }]) {
-      const proc = new FakeChildProcess(undefined, received);
+      const proc = new FakeChildProcess(received);
       nextProc = proc as unknown as cp.ChildProcess;
       const rejectedClient = new BackendClient({ orphanReaper: noOrphans });
+      let readyEvents = 0;
+      const events = rejectedClient.onEvent((event) => { if (event.event === 'backend.ready') readyEvents += 1; });
       await assert.rejects(rejectedClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context }), /analytics context mismatch/);
+      assert.equal(readyEvents, 0, 'mismatched context is rejected before public event delivery');
       assert.equal(proc.killCount, 1);
+      events.dispose();
       rejectedClient.dispose();
     }
 
@@ -619,5 +587,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     else process.env.PIE_EDITOR_VERSION = previousEditorVersion;
     if (previousWorkspaceSdkOptIn === undefined) delete process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
     else process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK = previousWorkspaceSdkOptIn;
+    if (previousCutoffAuthorization === undefined) delete process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
+    else process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = previousCutoffAuthorization;
   }
 });

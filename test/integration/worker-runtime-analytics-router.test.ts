@@ -78,8 +78,8 @@ test('router emits capture only for the exact live route and routes host ACK bac
       reconcileCrash: async () => undefined,
     } as any,
     coordinatorGeneration: 7,
-    analyticsActivation: {
-      generationId: 'analytics-generation-1', workspaceId: 'workspace-1', buildId: 'build-1',
+    analyticsContext: {
+      mode: 'canonical-only', generationId: 'analytics-generation-1', workspaceId: 'workspace-1', buildId: 'build-1', hostInstanceId: 'host-1',
     },
     emit: (event, payload) => emitted.push([event, payload]),
     buildPromotionSnapshot: async () => ({

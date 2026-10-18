@@ -508,7 +508,6 @@ export class HostRuntime {
           this.platform.renderer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration)
           || this.browserServer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration),
       },
-      () => undefined,
       () => this.handleQuestionRequested(),
       // Preserve canonical-only backend mode even when optional helpers fail.
       () => this.analyticsRuntime.getCanonicalContext() ?? canonicalContext,

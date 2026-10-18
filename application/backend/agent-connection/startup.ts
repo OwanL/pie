@@ -18,7 +18,6 @@ import { appendPieLog } from '../../../lib/structured-logging/pie-logger';
 import { publishBackendReady } from './backend-ready';
 import { seedHistoryCompactionEnvironment } from '../session-actions/runtime-prefs-bootstrap';
 import type { AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
-import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import type { ArchState } from '../conversation-state/arch-state';
 import type { Event } from '../conversation-state/events';
 import type { SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
@@ -67,8 +66,7 @@ interface StartSessionBackendOptions {
   openSession: (sessionPath: string) => void;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
-  /** Snapshot the host's canonical activation at each backend spawn. */
-  getAnalyticsBackendDescriptor?: () => AnalyticsBackendDescriptor | undefined;
+  /** Snapshot the host's canonical context at each backend spawn. */
   getAnalyticsBackendContext?: () => AnalyticsBackendContext | undefined;
 }
 
@@ -267,7 +265,6 @@ async function startBackendWithLogging(
       ...(sdkRuntimeSelection ? { sdkRuntimeSelection } : {}),
       backendPath,
       cwd: workspaceCwd,
-      analyticsActivation: options.getAnalyticsBackendDescriptor?.(),
       analyticsContext: options.getAnalyticsBackendContext?.(),
     });
     const durationMs = Math.max(0, Math.round(performance.now() - spawnStart));

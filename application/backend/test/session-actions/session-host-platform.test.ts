@@ -483,6 +483,7 @@ test('startSessionBackend uses the generation artifact, attaches before spawn, t
     nodePath: string;
     sdkPath: string;
     sourceArtifactDescriptor?: unknown;
+    analyticsContext: unknown;
     backendPath: string;
     cwd: string;
   } | undefined;
@@ -497,6 +498,7 @@ test('startSessionBackend uses the generation artifact, attaches before spawn, t
       // Exercise coordinator parsing of the verified descriptor without spawning a live host.
       parsedCoordinatorArgs = parseCoordinatorBackendArgs([
         '--sdkPath', args.sdkPath,
+        '--analyticsContext', JSON.stringify(args.analyticsContext),
         ...(args.sourceArtifactDescriptor
           ? ['--sourceArtifactDescriptor', JSON.stringify(args.sourceArtifactDescriptor)]
           : []),
@@ -524,6 +526,7 @@ test('startSessionBackend uses the generation artifact, attaches before spawn, t
   delete process.env.PIE_ALLOW_IN_TREE_AUTH;
   try {
     await startSessionBackend({
+      getAnalyticsBackendContext: () => ({ mode: 'canonical-only', generationId: 'test', buildId: 'test', workspaceId: 'test', hostInstanceId: 'test' }),
       platform: fixture.platform,
       backend,
       scheduleRender,

@@ -1,237 +1,106 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  ACTIVATION_SCHEMA_VERSION,
-  createCandidateManifest,
-  type AnalyticsBackendDescriptor,
-} from '../../analytics/authority/activation.js';
 import { resolvePieDataPaths } from '../../lib/data-root/pie-data-root.js';
-import { ActivationStore } from '../../analytics/authority/activation-store.js';
-import { analyticsWriterBuildId } from '../../harness/agent-processes/coordinator/server.js';
 import { BackendAnalyticsActivation } from '../../analytics/authority/backend-analytics-activation.js';
+import type { AnalyticsBackendContext } from '../../analytics/authority/backend-analytics-context.js';
 import { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
-import type { AnalyticsWriterIdentity } from '../../analytics/authority/session-lifecycle-writer-store.js';
 import { PIE_BUILD_ID } from '../../lib/build-identity.js';
 
-const GENERATION_ID = '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f';
-const SHA = 'a'.repeat(64);
-const SHA_B = 'b'.repeat(64);
+const context: AnalyticsBackendContext = {
+  mode: 'canonical-only', generationId: 'capture-namespace', buildId: 'capture-build',
+  workspaceId: 'workspace-1', hostInstanceId: 'host-1',
+};
 
-function activationFor(root: string, descriptor?: AnalyticsBackendDescriptor): BackendAnalyticsActivation {
-  return new BackendAnalyticsActivation(
-    {
-      agentDir: () => root,
-      buildId: PIE_BUILD_ID,
-      hostPid: () => process.pid,
-      openWriterStore: (stateDir) => new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite')),
-    },
-    descriptor ? { descriptor } : {},
-  );
+function fixture(t: test.TestContext, suppliedContext: unknown = context, hostPid = process.pid) {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-canonical-context-'));
+  const closeStores: (() => void)[] = [];
+  const previousDataRoot = process.env.PIE_DATA_DIR;
+  process.env.PIE_DATA_DIR = path.join(root, 'runtime-data');
+  t.after(() => {
+    activation.close();
+    for (const close of closeStores) close();
+    if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
+    else process.env.PIE_DATA_DIR = previousDataRoot;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const stateDir = resolvePieDataPaths({ dataDir: process.env.PIE_DATA_DIR, agentDir: root }).stateDir;
+  const activation = new BackendAnalyticsActivation({
+    agentDir: () => root, buildId: PIE_BUILD_ID, hostPid: () => hostPid,
+    openWriterStore: (directory) => new SessionLifecycleStore(path.join(directory, 'session-lifecycle.sqlite')),
+  }, { context: suppliedContext as AnalyticsBackendContext });
+  return { root, stateDir, activation, closeStores };
 }
 
-/** Commit the active revision-1 manifest a completed production activation
- * leaves behind: one active generation, a cleared successor, and the write-once
- * tombstone the store writes as part of the ever-active transition. */
-async function activateFixtureGeneration(store: ActivationStore, options: {
-  generationId: string;
-  buildId: string;
-  qualificationSha256: string;
-  trialSha256: string;
-  activatedAt: string;
-  cutoffReceiptSha256: string | null;
-}): Promise<void> {
-  await store.update(() => ({
-    schemaVersion: ACTIVATION_SCHEMA_VERSION,
-    revision: 1,
-    previousSha256: null,
-    everActive: true,
-    activeGeneration: {
-      identity: {
-        generationId: options.generationId,
-        buildId: options.buildId,
-        qualificationSha256: options.qualificationSha256,
-        trialSha256: options.trialSha256,
-      },
-      state: 'active',
-      activatedAt: options.activatedAt,
-      retiredAt: null,
-      predecessorGenerationId: null,
-      cutoffReceiptSha256: options.cutoffReceiptSha256,
-    },
-    successor: null,
-    retiredHistory: [],
-  }), { expectedSha256: null });
+test('canonical backend context is mandatory and exact, regardless of historical artifacts', (t) => {
+  const { stateDir, activation } = fixture(t);
+  mkdirSync(stateDir, { recursive: true });
+  const artifacts = ['analytics-activation-v1.json', 'analytics-ever-active-v1.json', 'analytics-host-loaded.json'];
+  for (const name of artifacts) writeFileSync(path.join(stateDir, name), 'invalid historical bytes');
+  activation.validate();
+  assert.deepEqual(activation.captureDescriptor, context);
+  for (const name of artifacts) assert.equal(readFileSync(path.join(stateDir, name), 'utf8'), 'invalid historical bytes');
+});
+
+for (const invalid of [null, {}, { ...context, mode: 'legacy' }, { ...context, hostInstanceId: '' },
+  { ...context, manifestRevision: 1 }, { generationId: 'legacy-descriptor' }]) {
+  test(`rejects invalid canonical context ${JSON.stringify(invalid)}`, (t) => {
+    const { activation } = fixture(t, invalid);
+    assert.throws(() => activation.validate(), /context/i);
+    assert.throws(() => activation.openWriterAdmission(), /context/i);
+    assert.equal(activation.admission, undefined);
+  });
 }
 
-test('backend analytics activation validates exact active generation and rejects stale authority', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-analytics-activation-'));
-  const previousDataRoot = process.env.PIE_DATA_DIR;
-  const dataRoot = path.join(root, 'runtime-data');
-  process.env.PIE_DATA_DIR = dataRoot;
-  try {
-    const stateDir = resolvePieDataPaths({ dataDir: dataRoot, agentDir: root }).stateDir;
-    const store = new ActivationStore({ stateDir });
-    await activateFixtureGeneration(store, {
-      generationId: GENERATION_ID,
-      buildId: 'build-1',
-      qualificationSha256: SHA,
-      trialSha256: SHA_B,
-      activatedAt: '2026-09-12T04:00:00.000Z',
-      cutoffReceiptSha256: SHA_B,
-    });
-    const active = store.read();
-    const descriptor: AnalyticsBackendDescriptor = {
-      generationId: GENERATION_ID,
-      buildId: 'build-1',
-      manifestRevision: active.manifest!.revision,
-      manifestSha256: active.sha256!,
-      workspaceId: 'workspace-1',
-      hostInstanceId: 'host-1',
-    };
-    activationFor(root, descriptor).validate();
-
-    assert.throws(
-      () => activationFor(root, { ...descriptor, buildId: 'stale-build' }).validate(),
-      /build does not match/u,
-    );
-    assert.throws(
-      () => activationFor(root).validate(),
-      /descriptor is missing/u,
-    );
-
-    await store.update((current, currentSha256) => ({
-      ...current!,
-      revision: current!.revision + 1,
-      previousSha256: currentSha256,
-    }));
-    assert.throws(
-      () => activationFor(root, descriptor).validate(),
-      /manifest revision is stale/u,
-    );
-  } finally {
-    if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
-    else process.env.PIE_DATA_DIR = previousDataRoot;
-    rmSync(root, { recursive: true, force: true });
-  }
+test('canonical writer requires a positive host process identity', (t) => {
+  const { activation } = fixture(t, context, 0);
+  assert.throws(() => activation.openWriterAdmission(), /positive host process identity/i);
 });
 
-test('the backend writer identity uses the loaded host-boot marker, not the manifest build id', async () => {
-  // Durable writer admission compares the backend's identity against the
-  // registered lifecycle host row byte-for-byte, and that row carries the
-  // loaded runtime's coordinated marker (`PIE_BUILD_ID`). Under the two-space
-  // convention the manifest's analytics build id is a different value, so
-  // deriving the writer identity from the descriptor would make every writer
-  // inadmissible and stall startup.
-  const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-analytics-writer-space-'));
-  const previousDataRoot = process.env.PIE_DATA_DIR;
-  const dataRoot = path.join(root, 'runtime-data');
-  process.env.PIE_DATA_DIR = dataRoot;
-  try {
-    const stateDir = resolvePieDataPaths({ dataDir: dataRoot, agentDir: root }).stateDir;
-    const store = new ActivationStore({ stateDir });
-    const manifestBuildId = 'qualification-build-id';
-    assert.notEqual(
-      manifestBuildId,
-      PIE_BUILD_ID,
-      'the fixture must distinguish the two spaces for this test to mean anything',
-    );
-    await activateFixtureGeneration(store, {
-      generationId: GENERATION_ID,
-      buildId: manifestBuildId,
-      qualificationSha256: SHA,
-      trialSha256: SHA_B,
-      activatedAt: '2026-09-12T04:00:00.000Z',
-      cutoffReceiptSha256: null,
-    });
-    const active = store.read();
-    const descriptor: AnalyticsBackendDescriptor = {
-      generationId: GENERATION_ID,
-      buildId: manifestBuildId,
-      manifestRevision: active.manifest!.revision,
-      manifestSha256: active.sha256!,
-      workspaceId: 'workspace-1',
-      hostInstanceId: 'host-1',
-    };
-    const activation = activationFor(root, descriptor);
-    activation.validate();
-    // The writer-identity derivation is the production seam; the server only
-    // materializes it on the SDK-load path, so assert the seam directly.
-    assert.equal(
-      analyticsWriterBuildId(),
-      PIE_BUILD_ID,
-      'the writer identity must carry the loaded host-boot marker',
-    );
-    const identity: AnalyticsWriterIdentity = {
-      hostInstanceId: descriptor.hostInstanceId,
-      workspaceId: descriptor.workspaceId,
-      generationId: descriptor.hostInstanceId,
-      buildId: analyticsWriterBuildId(),
-      processId: process.pid,
-    };
-
-    // Prove the identity is actually admissible against a registry row
-    // registered the way the extension host registers one.
-    const lifecycle = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
-    let release: (() => void) | undefined;
-    try {
-      lifecycle.registerAnalyticsHost({
-        hostInstanceId: identity.hostInstanceId,
-        workspaceId: identity.workspaceId,
-        generationId: identity.generationId,
-        buildId: PIE_BUILD_ID,
-        processId: identity.processId,
-        capabilities: ['host-discovery', 'host-status', 'authenticated-control', 'writer-fence'],
-        registeredAtMs: String(Date.now()),
-      });
-      lifecycle.assertAnalyticsWriterAdmitted(identity, 0);
-      activation.openWriterAdmission();
-      activation.admission!.assertAdmitted();
-      release = activation.admission!.acquire();
-      assert.equal(lifecycle.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
-    } finally {
-      release?.();
-      activation.close();
-      lifecycle.close();
-    }
-  } finally {
-    if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
-    else process.env.PIE_DATA_DIR = previousDataRoot;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('backend analytics activation rejects a candidate generation', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-analytics-candidate-'));
-  const previousDataRoot = process.env.PIE_DATA_DIR;
-  const dataRoot = path.join(root, 'runtime-data');
-  process.env.PIE_DATA_DIR = dataRoot;
-  try {
-    const stateDir = resolvePieDataPaths({ dataDir: dataRoot, agentDir: root }).stateDir;
-    const store = new ActivationStore({ stateDir });
-    await store.update(() => createCandidateManifest({
-      generationId: GENERATION_ID,
-      buildId: 'build-1',
-      qualificationSha256: SHA,
-      trialSha256: SHA_B,
-    }), { expectedSha256: null });
-    assert.throws(
-      () => activationFor(root, {
-        generationId: GENERATION_ID,
-        buildId: 'build-1',
-        manifestRevision: 1,
-        manifestSha256: store.read().sha256!,
-        workspaceId: 'workspace-1',
-        hostInstanceId: 'host-1',
-      }).validate(),
-      /no active generation/u,
-    );
-  } finally {
-    if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
-    else process.env.PIE_DATA_DIR = previousDataRoot;
-    rmSync(root, { recursive: true, force: true });
-  }
+test('canonical writer uses loaded build identity and durable leases, fences and epochs', async (t) => {
+  const { stateDir, activation, closeStores } = fixture(t);
+  const lifecycle = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+  closeStores.push(() => lifecycle.close());
+  const identity = {
+    hostInstanceId: context.hostInstanceId, workspaceId: context.workspaceId,
+    generationId: context.hostInstanceId, buildId: PIE_BUILD_ID, processId: process.pid,
+  };
+  activation.openWriterAdmission();
+  assert.deepEqual(activation.identity, identity);
+  assert.notEqual(activation.identity!.buildId, context.buildId);
+  assert.throws(() => activation.admission!.assertAdmitted(), /host|registered/i);
+  lifecycle.registerAnalyticsHost({ ...identity,
+    capabilities: ['host-discovery', 'host-status', 'authenticated-control', 'writer-fence'],
+    registeredAtMs: String(Date.now()),
+  });
+  activation.admission!.assertAdmitted();
+  const releaseA = activation.admission!.acquire();
+  const releaseB = activation.admission!.acquire();
+  assert.equal(lifecycle.listAnalyticsWriterLeases(context.workspaceId).length, 1);
+  assert.equal(await activation.waitForWriterLeases(0), 1);
+  const fence = lifecycle.beginAnalyticsWriterFence({
+    workspaceId: context.workspaceId, operationId: 'fence-1', purpose: 'analytics-activation',
+    expectedHosts: [identity], nowMs: Date.now(),
+  });
+  assert.throws(() => activation.admission!.acquire(), /fenc|admission|epoch/i);
+  releaseA(); releaseA();
+  assert.equal(lifecycle.listAnalyticsWriterLeases(context.workspaceId).length, 1);
+  releaseB();
+  assert.equal(await activation.waitForWriterLeases(0), 0);
+  lifecycle.acknowledgeAnalyticsWriterFence({
+    workspaceId: context.workspaceId, operationId: 'fence-1', fenceEpoch: fence.fenceEpoch,
+    identity, activeWriterCount: 0, nowMs: Date.now(),
+  });
+  lifecycle.completeAnalyticsWriterFence(context.workspaceId, 'fence-1', Date.now());
+  lifecycle.reopenAnalyticsWriterAdmission({
+    workspaceId: context.workspaceId, operationId: 'fence-1', purpose: 'analytics-activation',
+    admittedHosts: [identity], nowMs: Date.now(),
+  });
+  assert.throws(() => activation.admission!.assertAdmitted(), /epoch|stale/i);
+  activation.close();
+  assert.equal(activation.admission, undefined);
+  assert.equal(activation.identity, undefined);
 });

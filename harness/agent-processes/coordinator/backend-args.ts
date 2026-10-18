@@ -1,5 +1,4 @@
 import { assertAnalyticsBackendContext, type AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
-import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import path from 'node:path';
 import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
 import {
@@ -22,8 +21,7 @@ interface BackendArgsCommon {
   lifetimeFd?: number;
   /** Immutable canonical analytics authority snapshot, supplied only by the
    * production host after its readiness probe succeeds. */
-  analyticsActivation?: AnalyticsBackendDescriptor;
-  analyticsContext?: AnalyticsBackendContext;
+  analyticsContext: AnalyticsBackendContext;
 }
 
 export type BackendArgs = BackendArgsCommon & (
@@ -39,24 +37,12 @@ export type BackendArgs = BackendArgsCommon & (
     }
 );
 
-const ANALYTICS_DESCRIPTOR_FLAGS = new Set([
-  '--analyticsGenerationId',
-  '--analyticsBuildId',
-  '--analyticsManifestRevision',
-  '--analyticsManifestSha256',
-  '--analyticsWorkspaceId',
-  '--analyticsHostInstanceId',
-]);
-const ANALYTICS_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-const ANALYTICS_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
-
 export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = process.env): BackendArgs {
   let sdkPath = '';
   let cwd = process.cwd();
   let hostPid: number | undefined;
   let lifetimeFd: number | undefined;
   let backendGeneration = 1;
-  const analyticsValues: Record<string, string> = {};
   let analyticsContext: AnalyticsBackendContext | undefined;
   let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
   let sourceArtifactDescriptorSeen = false;
@@ -119,15 +105,6 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
       index += 1;
       continue;
     }
-    if (ANALYTICS_DESCRIPTOR_FLAGS.has(arg)) {
-      if (!value || ANALYTICS_DESCRIPTOR_FLAGS.has(value)) {
-        throw new Error(`Missing value for ${arg}.`);
-      }
-      if (analyticsValues[arg] !== undefined) throw new Error(`Duplicate ${arg} argument.`);
-      analyticsValues[arg] = value;
-      index += 1;
-      continue;
-    }
     if (arg === '--sdkPath' && value) {
       sdkPath = value;
       index += 1;
@@ -181,53 +158,17 @@ export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = proce
     }
   }
 
-  const analyticsFlagNames = [
-    '--analyticsGenerationId',
-    '--analyticsBuildId',
-    '--analyticsManifestRevision',
-    '--analyticsManifestSha256',
-    '--analyticsWorkspaceId',
-    '--analyticsHostInstanceId',
-  ] as const;
-  const suppliedAnalyticsFlags = analyticsFlagNames.filter((flag) => analyticsValues[flag] !== undefined);
-  let analyticsActivation: AnalyticsBackendDescriptor | undefined;
-  if (suppliedAnalyticsFlags.length > 0) {
-    if (suppliedAnalyticsFlags.length !== analyticsFlagNames.length) {
-      throw new Error('Analytics activation descriptor must provide every field.');
-    }
-    const manifestRevision = Number(analyticsValues['--analyticsManifestRevision']);
-    if (!Number.isSafeInteger(manifestRevision) || manifestRevision <= 0) {
-      throw new Error('Invalid --analyticsManifestRevision argument.');
-    }
-    const generationId = analyticsValues['--analyticsGenerationId'];
-    const manifestSha256 = analyticsValues['--analyticsManifestSha256'];
-    if (!ANALYTICS_UUID_PATTERN.test(generationId)) throw new Error('Invalid --analyticsGenerationId argument.');
-    if (!ANALYTICS_SHA256_PATTERN.test(manifestSha256)) throw new Error('Invalid --analyticsManifestSha256 argument.');
-    if (!analyticsValues['--analyticsBuildId'] || !analyticsValues['--analyticsWorkspaceId']
-      || !analyticsValues['--analyticsHostInstanceId']) {
-      throw new Error('Analytics activation descriptor contains an empty field.');
-    }
-    analyticsActivation = {
-      generationId,
-      buildId: analyticsValues['--analyticsBuildId'],
-      manifestRevision,
-      manifestSha256,
-      workspaceId: analyticsValues['--analyticsWorkspaceId'],
-      hostInstanceId: analyticsValues['--analyticsHostInstanceId'],
-    };
+  if (analyticsContext === undefined) {
+    throw new Error('Missing required --analyticsContext argument.');
   }
 
-  if (analyticsContext && suppliedAnalyticsFlags.length > 0) {
-    throw new Error('Analytics context and activation descriptor are mutually exclusive.');
-  }
   const common: BackendArgsCommon = {
     sdkPath,
     cwd,
     backendGeneration,
     ...(hostPid === undefined ? {} : { hostPid }),
     ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
-    ...(analyticsActivation === undefined ? {} : { analyticsActivation }),
-    ...(analyticsContext === undefined ? {} : { analyticsContext }),
+    analyticsContext,
   };
   if (sourceArtifactDescriptor !== undefined) return { ...common, sourceArtifactDescriptor };
   return { ...common, sdkRuntimeSelection: sdkRuntimeSelection! };

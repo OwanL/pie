@@ -17,7 +17,6 @@ import { HostRuntime } from '../../backend/composition/host-runtime.js';
 import { createStandaloneHostRuntimePlatform } from './platform';
 import {
   resolveStandaloneEnvironment,
-  validateStandaloneRuntimeIdentity,
   type ResolveStandaloneEnvironmentOptions,
   type StandaloneDependencyPaths,
   type StandaloneEnvironment,
@@ -573,7 +572,6 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
       ...(options.environment ? { environment: options.environment } : {}),
       ...(options.skipValidation !== undefined ? { skipValidation: options.skipValidation } : {}),
     } satisfies ResolveStandaloneEnvironmentOptions);
-    validateStandaloneRuntimeIdentity(environment);
     restoreEnvironment = installEnvironmentOverrides(environment);
 
     const platform = createStandaloneHostRuntimePlatform({

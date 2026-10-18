@@ -1,21 +1,8 @@
-/**
- * Canonical analytics activation supervision for the backend coordinator.
- *
- * This module owns the analytics-authority side of backend startup: descriptor
- * validation against the exact active manifest bytes, and durable
- * writer-admission/fence supervision over the session-lifecycle store. The
- * coordinator keeps request/session/worker composition and calls this module
- * behind the prepared port; this module never imports coordinator
- * implementation, so no analytics-to-coordinator implementation dependency
- * exists. Exactly one manifest-selected authority is activated: a descriptor
- * is validated against the active manifest before any writer admission is
- * installed, and legacy callers (no descriptor) keep legacy behavior.
- */
+/** Canonical context validation and durable writer-admission/fence supervision
+ * for the backend coordinator. Historical activation files are never read. */
 
 import { resolvePieDataPaths } from '../../lib/data-root/pie-data-root.js';
 import { assertAnalyticsBackendContext, type AnalyticsBackendContext } from './backend-analytics-context.js';
-import { ActivationStore } from './activation-store.js';
-import type { AnalyticsBackendDescriptor } from './activation.js';
 import {
   createSessionLifecycleWriterAdmission,
   type AnalyticsWriterIdentity,
@@ -39,20 +26,11 @@ export interface BackendAnalyticsActivationPorts {
 }
 
 export interface BackendAnalyticsActivationOptions {
-  /** Immutable canonical analytics authority snapshot supplied by the host.
-   * When present, startup validates it against the active manifest before any
-   * writer admission is installed. */
-  readonly descriptor?: AnalyticsBackendDescriptor;
-  readonly context?: AnalyticsBackendContext;
+  /** Required canonical capture identity; lifecycle admission authorizes writes. */
+  readonly context: AnalyticsBackendContext;
 }
 
-/**
- * Descriptor validation + writer-admission/fence supervision for one backend
- * process. Writer admission is opened only after `validate()` proved the
- * descriptor matches the active manifest, so a candidate/ready generation, a
- * stale revision, or any build/generation mismatch cannot reach a worker or
- * install a durable writer.
- */
+/** Context validation and writer-admission supervision for one backend. */
 export class BackendAnalyticsActivation {
   private writerStore?: AnalyticsWriterStorePort;
   private writerAdmission?: SessionLifecycleWriterAdmission;
@@ -64,16 +42,12 @@ export class BackendAnalyticsActivation {
     private readonly options: BackendAnalyticsActivationOptions,
   ) {}
 
-  get descriptor(): AnalyticsBackendDescriptor | undefined {
-    return this.options.descriptor;
-  }
-
-  get context(): AnalyticsBackendContext | undefined {
+  get context(): AnalyticsBackendContext {
     return this.options.context;
   }
 
-  get captureDescriptor(): AnalyticsBackendDescriptor | AnalyticsBackendContext | undefined {
-    return this.options.context ?? this.options.descriptor;
+  get captureDescriptor(): AnalyticsBackendContext {
+    return this.options.context;
   }
 
   get admission(): SessionLifecycleWriterAdmission | undefined {
@@ -88,54 +62,9 @@ export class BackendAnalyticsActivation {
     return this.writerStateDir;
   }
 
-  /** Validate the host-supplied descriptor against the exact active manifest
-   * bytes before installing the router. A candidate/ready generation, a stale
-   * revision, or any build/generation mismatch therefore cannot reach a
-   * worker. Legacy direct callers remain valid while no canonical authority
-   * is active. */
+  /** Validate the complete host-supplied context before installing admission. */
   validate(): void {
-    if (this.options.context !== undefined) {
-      if (this.options.descriptor !== undefined) throw new Error('Analytics context and activation descriptor are mutually exclusive.');
-      assertAnalyticsBackendContext(this.options.context);
-      return;
-    }
-    const dataPaths = resolvePieDataPaths({
-      dataDir: process.env.PIE_DATA_DIR,
-      agentDir: this.ports.agentDir(),
-    });
-    const read = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
-    const active = read.manifest?.activeGeneration;
-    const descriptor = this.options.descriptor;
-    if (!descriptor) {
-      if (read.authority === 'canonical') {
-        throw new Error('Canonical analytics authority is active but the backend descriptor is missing.');
-      }
-      return;
-    }
-    if (read.authority !== 'canonical' || !active) {
-      throw new Error('Analytics backend descriptor names an authority with no active generation.');
-    }
-    if (active.identity.generationId !== descriptor.generationId) {
-      throw new Error('Analytics backend generation does not match the active manifest.');
-    }
-    if (active.identity.buildId !== descriptor.buildId) {
-      throw new Error('Analytics backend build does not match the active manifest.');
-    }
-    if (read.manifest?.revision !== descriptor.manifestRevision) {
-      throw new Error('Analytics backend manifest revision is stale.');
-    }
-    if (read.sha256 !== descriptor.manifestSha256) {
-      throw new Error('Analytics backend manifest hash is stale.');
-    }
-    for (const [name, value] of Object.entries(descriptor)) {
-      if (name === 'manifestRevision') continue;
-      if (typeof value !== 'string' || value.length === 0) {
-        throw new Error(`Analytics backend descriptor ${name} is invalid.`);
-      }
-    }
-    if (!Number.isSafeInteger(descriptor.manifestRevision) || descriptor.manifestRevision <= 0) {
-      throw new Error('Analytics backend descriptor manifest revision is invalid.');
-    }
+    assertAnalyticsBackendContext(this.options.context);
   }
 
   /** Open the durable writer admission after validation. Requires a positive
@@ -145,10 +74,9 @@ export class BackendAnalyticsActivation {
   openWriterAdmission(): void {
     this.validate();
     const descriptor = this.captureDescriptor;
-    if (!descriptor) return;
     const hostPid = this.ports.hostPid();
     if (typeof hostPid !== 'number' || !Number.isSafeInteger(hostPid) || hostPid <= 0) {
-      throw new Error('Canonical analytics activation requires a positive host process identity.');
+      throw new Error('Canonical analytics admission requires a positive host process identity.');
     }
     const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,

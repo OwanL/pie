@@ -395,7 +395,9 @@ test('recognized backend with incomplete ownership is incomplete and never emitt
 
 test('Windows process census reports a finite plausible birth for this process', { skip: process.platform !== 'win32' }, async () => {
   const result = await readProcessCensus();
-  assert.equal(result.complete, true);
+  // Other live backends may be legacy or malformed; they must block complete
+  // reconciliation without hiding this process's independently read birth.
+  assert.ok(!result.reasons.some(({ code }) => code === 'process-census-unavailable'));
   const own = result.processes.find(({ processId }) => processId === process.pid);
   assert.ok(own, 'current process must appear in the read-only census');
   assert.ok(own.processCreatedAtMs !== null);

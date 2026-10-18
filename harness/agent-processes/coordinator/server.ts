@@ -12,7 +12,6 @@ import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
 import { cleanupSessionTempOutputManifests } from '../../../lib/temporary-files/session-temp-output-lifecycle.js';
 import { BackendAnalyticsActivation } from '../../../analytics/authority/backend-analytics-activation.js';
 import type { AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
-import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../lib/rpc/jsonl.js';
 import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-logging/error-message';
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
@@ -535,11 +534,9 @@ export class BackendServer {
   private readonly startupCwd: string;
   /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
   private readonly backendGeneration: number;
-  /** Analytics descriptor validation + writer-admission/fence supervision,
-   * owned by the analytics authority module behind the prepared port. When a
-   * canonical descriptor is present, startup validates it against the active
-   * manifest before any worker route can be promoted. */
-  private analyticsAuthority?: BackendAnalyticsActivation;
+  /** Mandatory canonical context validation and durable writer-admission/fence
+   * supervision. Startup opens admission before constructing any writer. */
+  private readonly analyticsAuthority: BackendAnalyticsActivation;
   private sessionDir?: string;
   private sessionDirResolved = false;
   private agentDir = '';
@@ -744,9 +741,8 @@ export class BackendServer {
     /** Test seam for causally blocking a cold catalog operation at the public
      * JSONL/writer boundary. Production always constructs the default. */
     sessionCatalog?: SessionCatalog;
-    /** Canonical analytics descriptor from the extension host. */
-    analyticsActivation?: AnalyticsBackendDescriptor;
-    analyticsContext?: AnalyticsBackendContext;
+    /** Canonical analytics context required for production writer admission. */
+    analyticsContext: AnalyticsBackendContext;
     /** Injected coordinator budgets for the typed host close bridge (tests). */
     hostCloseAcceptTimeoutMs?: number;
     hostCloseCompleteTimeoutMs?: number;
@@ -766,17 +762,16 @@ export class BackendServer {
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
       throw new Error('backendGeneration must be a positive safe integer.');
     }
-    this.analyticsAuthority = options.analyticsActivation || options.analyticsContext
-      ? new BackendAnalyticsActivation(
-          {
-            agentDir: () => this.agentDir,
-            buildId: analyticsWriterBuildId(),
-            hostPid: () => this.hostPid,
-            openWriterStore: canonicalSQLiteSessionLifecycleStore,
-          },
-          { descriptor: options.analyticsActivation, context: options.analyticsContext },
-        )
-      : undefined;
+    this.analyticsAuthority = new BackendAnalyticsActivation(
+      {
+        agentDir: () => this.agentDir,
+        buildId: analyticsWriterBuildId(),
+        hostPid: () => this.hostPid,
+        openWriterStore: canonicalSQLiteSessionLifecycleStore,
+      },
+      { context: options.analyticsContext },
+    );
+    this.analyticsAuthority.validate();
     this.hostPid = options.hostPid;
     this.lifetimeFd = options.lifetimeFd;
     this.hostCloseAcceptTimeoutMs = options.hostCloseAcceptTimeoutMs ?? 15_000;
@@ -815,7 +810,7 @@ export class BackendServer {
       sessionDir: this.getSessionDir(),
       sessionCatalog: this.sessionCatalog,
       browseHelper: this.coldBrowseHelper,
-      writerAdmission: this.analyticsAuthority?.admission,
+      writerAdmission: this.analyticsAuthority.admission,
     });
     return this.coldSessionStore;
   }
@@ -961,11 +956,9 @@ export class BackendServer {
           sdkRuntimeLoadMode(sdkRuntime, 'cold'),
         );
         this.agentDir = this.sdk.getAgentDir();
-        this.analyticsAuthority?.validate();
-        if (this.analyticsAuthority) {
-          this.analyticsAuthority.openWriterAdmission();
-        }
-        this.sessionCatalog.setWriterAdmission(this.analyticsAuthority?.admission);
+        this.analyticsAuthority.validate();
+        this.analyticsAuthority.openWriterAdmission();
+        this.sessionCatalog.setWriterAdmission(this.analyticsAuthority.admission);
         this.getSessionDir();
         this.initializeColdSessionStore();
         if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
@@ -1068,7 +1061,7 @@ export class BackendServer {
     const coldStore = this.initializeColdSessionStore();
     this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
       coldLeaseAuthority: coldStore.leases,
-      writerAdmission: this.analyticsAuthority?.admission,
+      writerAdmission: this.analyticsAuthority.admission,
     });
     this.durableDetailStore = new DurableDetailStore({
       resolve: (sessionPath, address, durableRef) => this.resolveDurableDetail(sessionPath, address, durableRef),
@@ -1080,9 +1073,9 @@ export class BackendServer {
     this.workerRuntimeRouter = new WorkerRuntimeRouter({
         supervisor: this.workerSupervisor!,
         coordinatorGeneration: this.backendGeneration,
-        ...(this.analyticsAuthority?.captureDescriptor
+        ...(this.analyticsAuthority.captureDescriptor
           ? {
-              analyticsActivation: {
+              analyticsContext: {
                 generationId: this.analyticsAuthority.captureDescriptor.generationId,
                 buildId: this.analyticsAuthority.captureDescriptor.buildId,
                 workspaceId: this.analyticsAuthority.captureDescriptor.workspaceId,
@@ -1237,8 +1230,7 @@ export class BackendServer {
       sdkVersion: this.sdk.VERSION,
       protocolVersion: PROTOCOL_VERSION,
       authPath,
-      ...(this.analyticsAuthority?.descriptor ? { analyticsActivation: this.analyticsAuthority.descriptor } : {}),
-      ...(this.analyticsAuthority?.context ? { analyticsContext: this.analyticsAuthority.context } : {}),
+      analyticsContext: this.analyticsAuthority.context,
     });
 
     this.startSessionCatalogPolling();
@@ -2587,7 +2579,7 @@ export class BackendServer {
       this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
         store: this.lifecycleStore,
         lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
-        writerAdmission: this.analyticsAuthority?.admission,
+        writerAdmission: this.analyticsAuthority.admission,
       });
       const cleaner = new SessionLifecycleCleaner({
         store: this.lifecycleStore,
@@ -2762,7 +2754,7 @@ export class BackendServer {
   }
 
   private async withAnalyticsWriterAdmission<T>(operation: () => T): Promise<T> {
-    const releaseAdmission = this.analyticsAuthority?.admission?.acquire();
+    const releaseAdmission = this.analyticsAuthority.admission?.acquire();
     let released = false;
     const release = (): void => {
       if (released) return;
@@ -5769,7 +5761,7 @@ export class BackendServer {
    * lease never expires here: timeout is an explicit fail-closed result, not
    * permission to assume the writer stopped. */
   private async waitForAnalyticsWriterLeases(timeoutMs: number): Promise<number> {
-    return await this.analyticsAuthority?.waitForWriterLeases(timeoutMs) ?? 0;
+    return await this.analyticsAuthority.waitForWriterLeases(timeoutMs);
   }
 
   /**
@@ -5874,8 +5866,7 @@ export class BackendServer {
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
     this.lifecycleBarrier = undefined;
-    this.analyticsAuthority?.close();
-    this.analyticsAuthority = undefined;
+    this.analyticsAuthority.close();
     if (this.coldSessionStore) {
       // Keep coordinator-local reservations intact until every hot worker has
       // confirmed exit and runtime ownership reconciliation has released its

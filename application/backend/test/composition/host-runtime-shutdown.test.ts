@@ -18,11 +18,7 @@ test('pre-backend timings preserve ordering, degraded analytics and fatal stage 
       startupPromise: null, shutdownRequested: false,
       reportStatus: () => undefined,
       analyticsHandoffControl: { start: async () => step('handoff') },
-      analyticsRuntime: {
-        start: async () => step('analytics'),
-        recordLoadedGeneration: () => step('loaded'),
-        recordTerminalRestartReceipt: () => step('receipt'),
-      },
+      analyticsRuntime: { start: async () => step('analytics') },
       platform: { notifications: { showWarningMessage: () => step('warning') } },
       hydratePrivacyMarkers: () => step('privacy'),
       tokenRateService: { start: () => step('rates') },

@@ -307,18 +307,19 @@ Scope and limits: the coordinator is loopback-only (never reachable over LAN) an
 
 ### Query local analytics
 
-For runtime usage/cost questions under canonical authority, use the [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md). See [Persistence and storage](#persistence-and-storage) for authority selection. The legacy DuckDB batch-query workspace is retired; local databases and exports are not removed.
+For runtime usage/cost questions, use the [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md). Reads use only the canonical SQLite store; missing databases, incompatible schemas, or helper failures fail closed without a legacy fallback. The legacy DuckDB batch-query workspace is retired; local databases and exports are preserved.
 
 ## Persistence and storage
 
 Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the platform default, holding `analytics/`, `sessions/`, `artifacts/`, `state/`, and `cache/`. See [docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) for the layout and the authority rules.
 
-- Analytics have two authorities, and only one is active at a time: the legacy owners (`data/outcomes/<workspace-id>/` run analytics plus the workspace billable-invocation ledger and activity timeline) stay authoritative whenever the resolved state directory records no active canonical generation — no manifest, or a validated candidate/ready manifest. With a validated active generation, capture goes exclusively to `<data-root>/analytics/analytics.sqlite` and the legacy ledger is not written at all — never a dual-write, and no import of old analytics into the canonical store. A malformed or inconsistent activation state fails startup closed instead of falling back to legacy.
-- Privacy mode means delete on explicit session close: capture stays available while the session is open, and closing a private session deletes its captured analytics. Under legacy authority, privacy instead suppresses run analytics and scrubs existing records.
-- `data/outcomes/` is the machine-wide session authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL and workspace-sharded analytics stores.
+- Production analytics are canonical-only: fresh history is captured automatically in `<data-root>/analytics/analytics.sqlite`, and reads use that store alone. Old activation artifacts are inert. Helper failure closes capture without legacy fallback or dual-write; this source behavior is not evidence of live installation or activation.
+- Legacy run persistence, billable ledgers, activity timelines, and automatic run exports are retired. Existing files remain preserved, not imported, backfilled, or reconstructed into canonical analytics; privacy scrubbing and explicit forget still apply.
+- Privacy mode means delete on explicit session close: capture stays available while the session is open, and closing a private session deletes its captured analytics. Attributed records in preserved legacy files are still scrubbed.
+- `data/outcomes/` remains the machine-wide session authority for this checkout, independent of cwd and VS Code workspace. It contains session JSONL alongside preserved retired analytics files.
 - The installer pins `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`. The separate transcript-root switch that would move new sessions under `<data-root>/sessions/` is implemented behind the explicit `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` gate; nothing in this repository sets it, so do not assume it is in effect.
 - `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same outcomes authority.
-- When an existing session environment points elsewhere, the installer merges its durable transcripts and completed run snapshots into the canonical authority. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
+- Session migration may retain durable transcript migration from an existing session environment; completed run snapshots are not imported into active analytics. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations
@@ -327,9 +328,9 @@ Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the plat
 |---|---|---|
 | Auth tokens | `%LOCALAPPDATA%\pie\auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
 | Runtime data root | `%LOCALAPPDATA%\pie\data` | `PIE_DATA_DIR` |
-| Canonical analytics | `<data-root>/analytics/analytics.sqlite` (only under canonical activation) | `PIE_DATA_DIR` |
+| Canonical analytics | `<data-root>/analytics/analytics.sqlite` (sole capture/read authority) | `PIE_DATA_DIR` |
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
-| Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |
+| Retired run analytics | `data/outcomes/<workspace-id>/` (preserved files, not active capture/read storage) | `PIE_ANALYTICS_DIR` (legacy location only) |
 
 The host logs resolved storage paths in its `backend` log channel entry, `starting pie backend`.
 

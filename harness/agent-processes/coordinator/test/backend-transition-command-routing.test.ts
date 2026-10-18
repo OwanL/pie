@@ -34,7 +34,7 @@ function createServer(
   router: Omit<TransitionRouterStub, 'cancelPendingRuntimeOperations'>
     & Partial<Pick<TransitionRouterStub, 'cancelPendingRuntimeOperations'>>,
 ): ServerTransitionTestPort {
-  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
+  const server = new BackendServer({ analyticsContext: { mode: 'canonical-only', generationId: 'test-capture', buildId: 'test-build', workspaceId: 'test-workspace', hostInstanceId: 'test-host' }, sdkPath: '/sdk', sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
   const port = server as unknown as ServerTransitionTestPort;
   port.workerRuntimeRouter = { cancelPendingRuntimeOperations: () => false, ...router };
   return port;
