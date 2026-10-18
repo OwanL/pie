@@ -20,6 +20,7 @@ import {
   resolveTestSdkPath,
   runNodeTests,
   runNodeTestsWithOverlay,
+  runNodeTestsWithOverlayLocal,
   TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE,
 } from '../test-node.mjs';
 
@@ -593,7 +594,7 @@ test('unconfirmed native SDK teardown retains its reader registration', async (t
     if (configPath) rmSync(path.dirname(configPath), { recursive: true, force: true });
   });
 
-  await assert.rejects(runNodeTestsWithOverlay([source], { repoRoot: root, sdkPath: sdkRoot, env: {} }, {
+  await assert.rejects(runNodeTestsWithOverlayLocal([source], { repoRoot: root, sdkPath: sdkRoot, env: {} }, {
     createOverlay: () => overlay,
     run: (files, options) => runNodeTests(files, {
       ...options,

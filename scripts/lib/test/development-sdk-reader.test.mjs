@@ -8,7 +8,7 @@ import {
   resolveDevelopmentSdkWorkspaceRoot,
   withDevelopmentSdkReader,
 } from '../development-sdk-reader.mjs';
-import { runNodeTestsWithOverlay } from '../../verification/test-node.mjs';
+import { runNodeTestsWithOverlayLocal } from '../../verification/test-node.mjs';
 
 function makeWorkspace(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-sdk-reader-'));
@@ -109,7 +109,7 @@ test('node-test alias setup and child remain inside the explicit native SDK read
   const held = new Promise((resolve) => { closeChild = resolve; });
   let disposed = 0;
 
-  const running = runNodeTestsWithOverlay(['suite.test.mjs'], { repoRoot: root, sdkPath }, {
+  const running = runNodeTestsWithOverlayLocal(['suite.test.mjs'], { repoRoot: root, sdkPath }, {
     createOverlay(_root, options) {
       assert.equal(options.sdkPath, realpathSync.native(sdkPath));
       assert.equal(readerEntries(workspaceRoot).length, 1, 'reader precedes SDK package alias resolution');

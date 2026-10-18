@@ -12,6 +12,8 @@ import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { initializeTestEnvironment, resolveTestProcessDirectories } from './test-environment.mjs';
 import { OWNERSHIP_STARTUP_TOKEN } from './ownership-startup.mjs';
+import { runInNativeTestKeeper } from './native-test-keeper.mjs';
+import { runOwnedTestDriver } from './owned-test-driver.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
@@ -178,6 +180,18 @@ export function createRunnerTsconfigOverlay(root, { tsconfigPath, sdkPath } = {}
 
 /** Hold native SDK readers and config aliases until test-tree teardown is confirmed. */
 export async function runNodeTestsWithOverlay(files, options = {}, dependencies = {}) {
+  assertCoverageQualification(files, options.nodeFlags);
+  const root = path.resolve(options.repoRoot ?? repoRoot);
+  if (process.platform === 'win32' && resolveDevelopmentSdkWorkspaceRoot(options.sdkPath, { root })) {
+    // Delegate BEFORE acquisition/validation/overlay. Injection of a legacy run
+    // or overlay callback must never silently bypass production containment.
+    return (dependencies.runInKeeper ?? runInNativeTestKeeper)(files, { ...options, repoRoot: root });
+  }
+  return runNodeTestsWithOverlayLocal(files, options, dependencies);
+}
+
+/** Explicit local seam for non-contained callers and isolated unit tests. */
+export async function runNodeTestsWithOverlayLocal(files, options = {}, dependencies = {}) {
   assertCoverageQualification(files, options.nodeFlags);
   const root = options.repoRoot ?? repoRoot;
   const createOverlay = dependencies.createOverlay ?? createRunnerTsconfigOverlay;
@@ -386,18 +400,8 @@ export function createTestEnvironment(source = process.env, { fixtureRoot } = {}
   };
 }
 
-/** Run one native node:test command and wait for watchdog-confirmed teardown. */
-export function runNodeTests(files, {
-  nodeFlags = [],
-  cwd = repoRoot,
-  env = process.env,
-  signal,
-  sdkPath,
-  spawnImpl = spawn,
-  watchChildProcessImpl = watchChildProcess,
-  writeTeardownDiagnosticImpl = writeFileSync,
-  timeoutMs = resolveChildProcessTimeoutMs(),
-} = {}) {
+/** Shared config, entries and argument generation for both lifetime drivers. */
+export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot } = {}) {
   assertCoverageQualification(files, nodeFlags);
   const parsedFlags = parseNodeTestFlags(nodeFlags);
   const configRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-node-runner-'));
@@ -419,11 +423,37 @@ export function runNodeTests(files, {
     throw error;
   }
 
+  return {
+    configRoot, configPath, args: buildNodeArgs(configPath, nodeFlags),
+    dispose() { rmSync(configRoot, { recursive: true, force: true }); },
+  };
+}
+
+/** Keeper-only local entry: same runner/scheduler, kernel containment authority. */
+export function runOwnedNodeTests(files, options = {}, dependencies = {}) {
+  const resolved = { cwd: repoRoot, env: process.env, timeoutMs: resolveChildProcessTimeoutMs(), ...options };
+  const invocation = prepareNodeTestInvocation(files, resolved);
+  return runOwnedTestDriver(invocation, resolved, dependencies);
+}
+
+/** Run one native node:test command and wait for watchdog-confirmed teardown. */
+export function runNodeTests(files, {
+  nodeFlags = [],
+  cwd = repoRoot,
+  env = process.env,
+  signal,
+  sdkPath,
+  spawnImpl = spawn,
+  watchChildProcessImpl = watchChildProcess,
+  writeTeardownDiagnosticImpl = writeFileSync,
+  timeoutMs = resolveChildProcessTimeoutMs(),
+} = {}) {
+  const { configRoot, configPath, args } = prepareNodeTestInvocation(files, { nodeFlags, cwd });
   return new Promise((resolve, reject) => {
     const teardownDiagnosticPath = path.join(configRoot, 'teardown.json');
     let child;
     try {
-      child = spawnImpl(process.execPath, buildNodeArgs(configPath, nodeFlags), withProcessTreeIsolation({
+      child = spawnImpl(process.execPath, args, withProcessTreeIsolation({
         cwd,
         env,
         stdio: ['pipe', 'inherit', 'inherit'],
