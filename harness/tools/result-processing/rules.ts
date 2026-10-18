@@ -77,7 +77,11 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
       }
     }
   }
-  const trailingBlanks = firstNonBlank === -1 ? lines.length : lines.length - 1 - lastNonBlankIndex(lines);
+  // All-newline input has no non-empty line to anchor trimming. Preserve one
+  // terminal newline rather than collapsing non-empty output to empty text.
+  if (firstNonBlank === -1) return maybe(text, "\n");
+
+  const trailingBlanks = lines.length - 1 - lastNonBlankIndex(lines);
   // A single trailing blank is the terminal newline of normal command output —
   // not worth rewriting (see header). Only a trailing *run* (2+) triggers.
   const needsCollapse = hasLongRun || leadingBlanks > 0 || trailingBlanks > 1;

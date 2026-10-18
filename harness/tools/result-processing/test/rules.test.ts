@@ -101,6 +101,21 @@ describe('lossless rules', () => {
       assert.equal(rule("collapse-blank-runs", mod).run("output\n", ctx), null);
     });
 
+    test('preserves a terminal newline for all-newline input', () => {
+      const cases: Array<[string, string | null]> = [
+        ['', null],
+        ['\n', null],
+        ['\n\n', '\n'],
+        ['\n\n\n', '\n'],
+        ['\n\ntext\n\n\n', 'text\n'],
+        ['text\n\n\n\nmore\n', 'text\n\nmore\n'],
+      ];
+      for (const [input, expected] of cases) {
+        const out = rule("collapse-blank-runs", mod).run(input, ctx);
+        assert.equal(out?.text ?? null, expected, JSON.stringify(input));
+      }
+    });
+
     test('trims 2+ trailing blanks down to a single newline', () => {
       const out = rule("collapse-blank-runs", mod).run("a\n\n\n", ctx);
       assert.equal(out?.text, "a\n");
