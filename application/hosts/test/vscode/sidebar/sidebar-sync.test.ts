@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStateEnvelope, createSidebarSyncState } from '../../../lib/renderer-delivery/sync';
+import { buildStateEnvelope } from '../../../lib/renderer-delivery/sync';
 import { setStreamDiagEnabled } from '../../../../lib/stream-telemetry.js';
 import { transcriptRenderSignature } from '../../../../lib/transcript/render-signature.js';
 import {
@@ -33,7 +33,7 @@ const baseViewState: ViewState = {
 
 test('buildStateEnvelope emits protocol/build identity and bounded transcript identity', () => {
   setStreamDiagEnabled(false);
-  const sync = createSidebarSyncState('host-1');
+  const sync = 'host-1';
   const result = buildStateEnvelope(sync, baseViewState, { revision: 1, viewGeneration: 7, rendererId: 'renderer-1', rendererGeneration: 3 });
 
   assert.equal(result.message.type, 'state');
@@ -47,13 +47,12 @@ test('buildStateEnvelope emits protocol/build identity and bounded transcript id
   assert.equal(result.message.expectedTranscriptIdentity, transcriptRenderSignature(baseViewState));
   assert.equal(result.message.snapshotBytes, 0, 'disabled diagnostics do not serialize snapshots');
   assert.equal(result.expectedTranscriptIdentity, result.message.expectedTranscriptIdentity);
-  assert.equal(result.nextSyncState.globalRevision, 1);
 });
 
 test('snapshot bytes are measured by the host only while diagnostics are enabled', () => {
   setStreamDiagEnabled(true);
   try {
-    const result = buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
+    const result = buildStateEnvelope('host-1', baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
     assert.equal(result.message.snapshotBytes, Buffer.byteLength(JSON.stringify(result.message), 'utf8'));
   } finally {
     setStreamDiagEnabled(false);
@@ -70,13 +69,13 @@ test('snapshot byte measurement reaches a true fixed point across a digit-width 
     // boundary (here 5 -> 6 digits). Compute the padding that puts it there
     // rather than guessing, then sweep the whole boundary window.
     const overhead = Buffer.byteLength(
-      JSON.stringify(buildStateEnvelope(createSidebarSyncState('host-1'), baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }).message),
+      JSON.stringify(buildStateEnvelope('host-1', baseViewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }).message),
       'utf8',
     );
     const basePad = 99_999 - overhead;
     for (let pad = basePad - 8; pad <= basePad + 4; pad += 1) {
       const viewState: ViewState = { ...baseViewState, draftText: 'x'.repeat(pad) };
-      const result = buildStateEnvelope(createSidebarSyncState('host-1'), viewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
+      const result = buildStateEnvelope('host-1', viewState, { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
       assert.equal(
         result.message.snapshotBytes,
         Buffer.byteLength(JSON.stringify(result.message), 'utf8'),
@@ -88,18 +87,14 @@ test('snapshot byte measurement reaches a true fixed point across a digit-width 
   }
 });
 
-test('full snapshots remain the sole envelope authority and revisions must be monotonic', () => {
-  let sync = createSidebarSyncState('host-1');
-  for (let revision = 1; revision <= 5; revision += 1) {
-    const result = buildStateEnvelope(sync, baseViewState, { revision, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 });
+test('envelope construction is stateless and uses only explicit delivery context', () => {
+  for (const revision of [5, 5, 1]) {
+    const context = { revision, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 };
+    const result = buildStateEnvelope('host-1', baseViewState, context);
     assert.equal(result.message.state, baseViewState);
     assert.equal(result.message.revision, revision);
-    sync = result.nextSyncState;
+    assert.deepEqual(buildStateEnvelope('host-1', baseViewState, context), result);
   }
-  assert.throws(
-    () => buildStateEnvelope(sync, baseViewState, { revision: 5, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 }),
-    /increase monotonically/,
-  );
 });
 
 test('renderer snapshots keep ordered tool parts and omit their redundant legacy mirror', () => {
@@ -121,7 +116,7 @@ test('renderer snapshots keep ordered tool parts and omit their redundant legacy
   };
   const viewState: ViewState = { ...baseViewState, transcript: [sourceMessage] };
   const result = buildStateEnvelope(
-    createSidebarSyncState('host-1'),
+    'host-1',
     viewState,
     { revision: 1, viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 3 },
   );

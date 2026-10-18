@@ -8,7 +8,7 @@ import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionCatalogProgres
 import { derivePinnedItems, findPinnedGroupIndex } from '../../lib/session-tabs/tab-behavior.js';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
-import { SessionTab } from './session-tab';
+import { SessionTabPresentation, projectSessionTabProps } from './session-tab';
 import { PinnedTabGroup } from './pinned-tab-group';
 import { SessionTabContextMenu } from './session-tab-context-menu';
 import type { SessionTabRunAction } from './run-state';
@@ -78,19 +78,23 @@ function pinnedTabGroupsEqual(left: readonly string[][], right: readonly string[
 }
 
 function openSessionMetadataEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
-  const previousMetadata = new Map(previous.sessions.map((session) => [session.path, {
-    name: session.name,
-    agentCreated: session.agentCreated,
-  }]));
-  const nextMetadata = new Map(next.sessions.map((session) => [session.path, {
-    name: session.name,
-    agentCreated: session.agentCreated,
-  }]));
+  if (previous.sessions === next.sessions) return true;
+  const openPaths = new Set(previous.openTabPaths);
+  const previousMetadata = new Map<string, SessionSummary>();
+  const nextMetadata = new Map<string, SessionSummary>();
+  for (const session of previous.sessions) {
+    if (openPaths.has(session.path)) previousMetadata.set(session.path, session);
+  }
+  for (const session of next.sessions) {
+    if (openPaths.has(session.path)) nextMetadata.set(session.path, session);
+  }
   return previous.openTabPaths.every((path) => {
     const previousSession = previousMetadata.get(path);
     const nextSession = nextMetadata.get(path);
     return previousSession?.name === nextSession?.name
-      && previousSession?.agentCreated === nextSession?.agentCreated;
+      && previousSession?.agentCreated === nextSession?.agentCreated
+      && previousSession?.creationState === nextSession?.creationState
+      && previousSession?.createOperationId === nextSession?.createOperationId;
   });
 }
 
@@ -583,54 +587,58 @@ function SessionTabsView({
               onContextMenu={onGroupContextMenu}
             />
           ) : (
-            <SessionTab
+            <SessionTabPresentation
               key={item.path}
-              tabPath={item.path}
-              index={itemIndex}
-              sessionByPath={sessionByPath}
-              openIndexByPath={openIndexByPath}
-              runningPathSet={runningPathSet}
-              generatingTitlePathSet={generatingTitlePathSet}
-              startingModelPathSet={startingModelPathSet}
-              unreadFinishedPathSet={unreadFinishedPathSet}
-              activePath={effectiveActivePath}
-              hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, item.path)}
-              isPinned
-              isDropTarget={dropOnPath !== null && item.path === dropOnPath}
-              hasDeferredTriggers={deferredPathSet.has(item.path)}
-              hasDeferredTimer={deferredTimerPathSet.has(item.path)}
-              onContextMenu={onContextMenu}
-              onPointerDown={onPointerDown}
-              onClick={onClick}
-              onClose={onClose}
-              onRetryCreate={onRetryCreate}
+              {...projectSessionTabProps({
+                tabPath: item.path,
+                index: itemIndex,
+                sessionByPath,
+                openIndexByPath,
+                runningPathSet,
+                generatingTitlePathSet,
+                startingModelPathSet,
+                unreadFinishedPathSet,
+                activePath: effectiveActivePath,
+                hasPendingExtensionUIRequest: hasPendingRequest(pendingExtensionUIRequestsBySession, item.path),
+                isPinned: true,
+                isDropTarget: dropOnPath !== null && item.path === dropOnPath,
+                hasDeferredTriggers: deferredPathSet.has(item.path),
+                hasDeferredTimer: deferredTimerPathSet.has(item.path),
+                onContextMenu,
+                onPointerDown,
+                onClick,
+                onClose,
+                onRetryCreate,
+              })}
             />
           ),
         ])}
         <DropGap index={renderedPinnedItems.length} dropIndex={activePinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
         {renderedUnpinnedPaths.map((tabPath, index) => [
           <DropGap key={`drop-gap-unpinned:${index}`} index={index} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />,
-          <SessionTab
+          <SessionTabPresentation
             key={tabPath}
-            tabPath={tabPath}
-            index={index}
-            sessionByPath={sessionByPath}
-            openIndexByPath={openIndexByPath}
-            runningPathSet={runningPathSet}
-            generatingTitlePathSet={generatingTitlePathSet}
-            startingModelPathSet={startingModelPathSet}
-            unreadFinishedPathSet={unreadFinishedPathSet}
-            activePath={effectiveActivePath}
-            hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
-            isPinned={false}
-            isDropTarget={false}
-            hasDeferredTriggers={deferredPathSet.has(tabPath)}
-            hasDeferredTimer={deferredTimerPathSet.has(tabPath)}
-            onContextMenu={onContextMenu}
-            onPointerDown={onPointerDown}
-            onClick={onClick}
-            onClose={onClose}
-            onRetryCreate={onRetryCreate}
+            {...projectSessionTabProps({
+              tabPath,
+              index,
+              sessionByPath,
+              openIndexByPath,
+              runningPathSet,
+              generatingTitlePathSet,
+              startingModelPathSet,
+              unreadFinishedPathSet,
+              activePath: effectiveActivePath,
+              hasPendingExtensionUIRequest: hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath),
+              isPinned: false,
+              isDropTarget: false,
+              hasDeferredTriggers: deferredPathSet.has(tabPath),
+              hasDeferredTimer: deferredTimerPathSet.has(tabPath),
+              onContextMenu,
+              onPointerDown,
+              onClick,
+              onClose,
+              onRetryCreate,
+            })}
           />,
         ])}
         <DropGap index={renderedUnpinnedPaths.length} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
@@ -717,5 +725,3 @@ function SessionTabsView({
 }
 
 export const SessionTabs = memo(SessionTabsView, areSessionTabsPropsEqual);
-
-export { SessionTab } from './session-tab';

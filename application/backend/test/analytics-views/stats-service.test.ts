@@ -1107,152 +1107,92 @@ test('StatsService tracks busy durations and mixed treatment changes', async () 
   });
 });
 
-test('StatsService migrates legacy runs analytics files into data/outcomes', async () => {
-  await withTempDir(async (tempDir) => {
-    let archState = createInitialArchState();
-    const workspaceId = 'workspace-runs-migration';
-    const legacyStorageDir = path.join(tempDir, 'runs', workspaceHash(workspaceId));
-    await fs.mkdir(legacyStorageDir, { recursive: true });
-    await fs.writeFile(path.join(legacyStorageDir, 'legacy-runs-marker.txt'), 'legacy-runs');
+const migrationCases = [
+  {
+    name: 'legacy runs root',
+    workspaceId: 'workspace-runs-migration',
+    sourcePath: (tempDir: string, workspaceId: string) =>
+      path.join(tempDir, 'runs', workspaceHash(workspaceId)),
+    legacyUsageDataRoot: (tempDir: string) => tempDir,
+    marker: 'legacy-runs-marker.txt',
+    markerContents: 'legacy-runs',
+  },
+  {
+    name: 'repo-local usage-data root for a legacy workspace hash',
+    workspaceId: 'workspace-current-hash',
+    legacyWorkspaceId: 'workspace-legacy-hash',
+    sourcePath: (tempDir: string, _workspaceId: string, legacyWorkspaceId: string) =>
+      path.join(tempDir, 'data', 'outcomes', 'usage-data', workspaceHash(legacyWorkspaceId)),
+    legacyUsageDataRoot: (tempDir: string) => path.join(tempDir, 'global-storage'),
+    marker: 'legacy-alias-marker.txt',
+    markerContents: 'legacy-alias',
+  },
+  {
+    name: 'legacy canonical root for a legacy workspace hash',
+    workspaceId: 'workspace-current-canonical-hash',
+    legacyWorkspaceId: 'workspace-legacy-canonical-hash',
+    sourcePath: (tempDir: string, _workspaceId: string, legacyWorkspaceId: string) =>
+      path.join(tempDir, 'data', 'outcomes', workspaceHash(legacyWorkspaceId)),
+    legacyUsageDataRoot: (tempDir: string) => path.join(tempDir, 'global-storage'),
+    marker: 'legacy-canonical-marker.txt',
+    markerContents: 'legacy-canonical',
+  },
+  {
+    name: 'legacy global data/outcomes root for a legacy workspace hash',
+    workspaceId: 'workspace-current-global-outcomes',
+    legacyWorkspaceId: 'workspace-legacy-global-outcomes',
+    sourcePath: (tempDir: string, _workspaceId: string, legacyWorkspaceId: string) =>
+      path.join(tempDir, 'global-storage', 'data', 'outcomes', workspaceHash(legacyWorkspaceId)),
+    legacyUsageDataRoot: (tempDir: string) => path.join(tempDir, 'global-storage'),
+    marker: 'legacy-global-outcomes-marker.txt',
+    markerContents: 'legacy-global-outcomes',
+  },
+] satisfies Array<{
+  name: string;
+  workspaceId: string;
+  legacyWorkspaceId?: string;
+  sourcePath: (tempDir: string, workspaceId: string, legacyWorkspaceId?: string) => string;
+  legacyUsageDataRoot: (tempDir: string) => string;
+  marker: string;
+  markerContents: string;
+}>;
 
-    const stats = new StatsService({
-      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
-      legacyUsageDataRootPath: tempDir,
-      workspaceId,
-      getArchState: () => archState,
-      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
+for (const migrationCase of migrationCases) {
+  test(`StatsService migrates ${migrationCase.name} into data/outcomes`, async () => {
+    await withTempDir(async (tempDir) => {
+      let archState = createInitialArchState();
+      const legacyWorkspaceId = migrationCase.legacyWorkspaceId ?? migrationCase.workspaceId;
+      const sourceDir = migrationCase.sourcePath(tempDir, migrationCase.workspaceId, legacyWorkspaceId);
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, migrationCase.marker), migrationCase.markerContents);
+
+      const stats = new StatsService({
+        dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+        legacyUsageDataRootPath: migrationCase.legacyUsageDataRoot(tempDir),
+        workspaceId: migrationCase.workspaceId,
+        ...(migrationCase.legacyWorkspaceId ? { legacyWorkspaceIds: [migrationCase.legacyWorkspaceId] } : {}),
+        getArchState: () => archState,
+        dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
+      });
+
+      await stats.start();
+      try {
+        const storageDir = path.join(
+          tempDir,
+          'data',
+          'outcomes',
+          workspaceHash(migrationCase.workspaceId),
+        );
+        assert.equal(
+          await fs.readFile(path.join(storageDir, migrationCase.marker), 'utf8'),
+          migrationCase.markerContents,
+        );
+      } finally {
+        await stats.shutdown();
+      }
     });
-
-    await stats.start();
-
-    const storageDir = await getRunStorageDir(tempDir);
-    assert.equal(await fs.readFile(path.join(storageDir, 'legacy-runs-marker.txt'), 'utf8'), 'legacy-runs');
-
-    await stats.shutdown();
   });
-});
-
-test('StatsService migrates repo-local usage-data roots for legacy workspace hashes', async () => {
-  await withTempDir(async (tempDir) => {
-    let archState = createInitialArchState();
-    const currentWorkspaceId = 'workspace-current-hash';
-    const legacyWorkspaceId = 'workspace-legacy-hash';
-    const storageDir = path.join(
-      tempDir,
-      'data',
-      'outcomes',
-      workspaceHash(currentWorkspaceId),
-    );
-    const legacyStorageDir = path.join(
-      tempDir,
-      'data',
-      'outcomes',
-      'usage-data',
-      workspaceHash(legacyWorkspaceId),
-    );
-
-    await fs.mkdir(legacyStorageDir, { recursive: true });
-    await fs.writeFile(path.join(legacyStorageDir, 'legacy-alias-marker.txt'), 'legacy-alias');
-
-    const stats = new StatsService({
-      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
-      legacyUsageDataRootPath: path.join(tempDir, 'global-storage'),
-      workspaceId: currentWorkspaceId,
-      legacyWorkspaceIds: [legacyWorkspaceId],
-      getArchState: () => archState,
-      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
-    });
-
-    await stats.start();
-
-    assert.equal(await fs.readFile(path.join(storageDir, 'legacy-alias-marker.txt'), 'utf8'), 'legacy-alias');
-
-    await stats.shutdown();
-  });
-});
-
-test('StatsService migrates legacy canonical roots for legacy workspace hashes', async () => {
-  await withTempDir(async (tempDir) => {
-    let archState = createInitialArchState();
-    const currentWorkspaceId = 'workspace-current-canonical-hash';
-    const legacyWorkspaceId = 'workspace-legacy-canonical-hash';
-    const storageDir = path.join(
-      tempDir,
-      'data',
-      'outcomes',
-      workspaceHash(currentWorkspaceId),
-    );
-    const legacyStorageDir = path.join(
-      tempDir,
-      'data',
-      'outcomes',
-      workspaceHash(legacyWorkspaceId),
-    );
-
-    await fs.mkdir(legacyStorageDir, { recursive: true });
-    await fs.writeFile(path.join(legacyStorageDir, 'legacy-canonical-marker.txt'), 'legacy-canonical');
-
-    const stats = new StatsService({
-      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
-      legacyUsageDataRootPath: path.join(tempDir, 'global-storage'),
-      workspaceId: currentWorkspaceId,
-      legacyWorkspaceIds: [legacyWorkspaceId],
-      getArchState: () => archState,
-      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
-    });
-
-    await stats.start();
-
-    assert.equal(
-      await fs.readFile(path.join(storageDir, 'legacy-canonical-marker.txt'), 'utf8'),
-      'legacy-canonical',
-    );
-
-    await stats.shutdown();
-  });
-});
-
-test('StatsService migrates legacy global data/outcomes roots for legacy workspace hashes', async () => {
-  await withTempDir(async (tempDir) => {
-    let archState = createInitialArchState();
-    const currentWorkspaceId = 'workspace-current-global-outcomes';
-    const legacyWorkspaceId = 'workspace-legacy-global-outcomes';
-    const storageDir = path.join(
-      tempDir,
-      'data',
-      'outcomes',
-      workspaceHash(currentWorkspaceId),
-    );
-    const legacyStorageDir = path.join(
-      tempDir,
-      'global-storage',
-      'data',
-      'outcomes',
-      workspaceHash(legacyWorkspaceId),
-    );
-
-    await fs.mkdir(legacyStorageDir, { recursive: true });
-    await fs.writeFile(path.join(legacyStorageDir, 'legacy-global-outcomes-marker.txt'), 'legacy-global-outcomes');
-
-    const stats = new StatsService({
-      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
-      legacyUsageDataRootPath: path.join(tempDir, 'global-storage'),
-      workspaceId: currentWorkspaceId,
-      legacyWorkspaceIds: [legacyWorkspaceId],
-      getArchState: () => archState,
-      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
-    });
-
-    await stats.start();
-
-    assert.equal(
-      await fs.readFile(path.join(storageDir, 'legacy-global-outcomes-marker.txt'), 'utf8'),
-      'legacy-global-outcomes',
-    );
-
-    await stats.shutdown();
-  });
-});
+}
 
 test('StatsService prefers newer snapshots across overlapping legacy roots', async () => {
   await withTempDir(async (tempDir) => {

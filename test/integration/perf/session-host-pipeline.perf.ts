@@ -28,7 +28,7 @@ import { produce } from 'immer';
 import { createInitialArchState, type ArchState } from '../../../application/backend/conversation-state/arch-state';
 import { dispatch } from '../../../application/backend/conversation-state/dispatch';
 import { selectViewState } from '../../../application/backend/conversation-state/projections/projection';
-import { buildStateEnvelope, createSidebarSyncState } from '../../../application/hosts/lib/renderer-delivery/sync';
+import { buildStateEnvelope } from '../../../application/hosts/lib/renderer-delivery/sync';
 import type { Event } from '../../../application/backend/conversation-state/events';
 import type { SessionOpenedPayload } from '../../../application/lib/protocol/index.js';
 import { BACKEND_PATH, SESSION_DIR, HERE, REPO_ROOT, copySamplesToTempStore, sampleSessions, spawnBackend, type BackendHandle } from './backend-probe';
@@ -132,9 +132,9 @@ async function main(): Promise<void> {
         const viewState = selectViewState(state);
         const t3 = performance.now();
 
-        const syncState = createSidebarSyncState('perf-host');
+        const context = { revision: 1, viewGeneration: 1, rendererId: 'perf', rendererGeneration: 1 };
         const t4 = performance.now();
-        const built = buildStateEnvelope(syncState, viewState, true);
+        const built = buildStateEnvelope('perf-host', viewState, context);
         const t5 = performance.now();
 
         // Dump the first trial's built envelope for the browser-render rig.

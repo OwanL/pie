@@ -7,12 +7,12 @@ installDom();
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
-import { SessionTab } from '../../session-tabs';
+import { projectSessionTabProps, SessionTabPresentation, type SessionTabProps } from '../../session-tabs/session-tab';
 import type { SessionSummary } from '../../../lib/protocol/index.js';
 
-// Derive the props type from the component so the test stays in sync with the
-// real SessionTab signature without exporting a separate interface.
-type SessionTabProps = Parameters<typeof SessionTab>[0];
+function SessionTab(props: SessionTabProps) {
+  return h(SessionTabPresentation, projectSessionTabProps(props));
+}
 
 let container: HTMLElement;
 

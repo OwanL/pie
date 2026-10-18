@@ -5,13 +5,6 @@ import { omitRedundantToolCallMirrorForTransport } from '../../../lib/transcript
 import { transcriptRenderSignature } from '../../../lib/transcript/render-signature.js';
 import { isStreamDiagEnabled } from '../../../lib/stream-telemetry.js';
 
-/** Process-wide envelope identity. Delivery/dirty ownership lives exclusively
- * in StateDeliveryController. */
-export type SidebarSyncState = {
-  hostInstanceId: string;
-  globalRevision: number;
-};
-
 export interface StateEnvelopeContext {
   revision: number;
   viewGeneration: number;
@@ -19,10 +12,6 @@ export interface StateEnvelopeContext {
   rendererId: string;
   /** Reload/reconnect fence for this renderer. */
   rendererGeneration: number;
-}
-
-export function createSidebarSyncState(hostInstanceId: string): SidebarSyncState {
-  return { hostInstanceId, globalRevision: 0 };
 }
 
 /** Measure the final wire envelope only for opt-in stream diagnostics. */
@@ -49,23 +38,13 @@ function measureSnapshotBytes(message: Extract<HostToWebviewMessage, { type: 'st
  * The expected identity is bounded by transcriptRenderSignature.
  */
 export function buildStateEnvelope(
-  syncState: SidebarSyncState,
+  hostInstanceId: string,
   viewState: ViewState,
-  context: StateEnvelopeContext | boolean,
+  context: StateEnvelopeContext,
 ): {
-  nextSyncState: SidebarSyncState;
   message: Extract<HostToWebviewMessage, { type: 'state' }>;
   expectedTranscriptIdentity: string;
 } {
-  // Boolean support is retained only for existing synthetic perf callers; the
-  // provider always supplies controller-owned revision/generation context.
-  const envelopeContext = typeof context === 'boolean'
-    ? { revision: syncState.globalRevision + 1, viewGeneration: 1, rendererId: 'perf', rendererGeneration: 1 }
-    : context;
-  if (envelopeContext.revision <= syncState.globalRevision) {
-    throw new Error('State envelope revisions must increase monotonically.');
-  }
-
   const transportTranscript = viewState.transcript.map(omitRedundantToolCallMirrorForTransport);
   const transportViewState = transportTranscript.some((message, index) => message !== viewState.transcript[index])
     ? { ...viewState, transcript: transportTranscript }
@@ -75,11 +54,11 @@ export function buildStateEnvelope(
     type: 'state',
     protocolVersion: WEBVIEW_PROTOCOL_VERSION,
     buildId: PIE_BUILD_ID,
-    hostInstanceId: syncState.hostInstanceId,
-    rendererId: envelopeContext.rendererId,
-    rendererGeneration: envelopeContext.rendererGeneration,
-    viewGeneration: envelopeContext.viewGeneration,
-    revision: envelopeContext.revision,
+    hostInstanceId,
+    rendererId: context.rendererId,
+    rendererGeneration: context.rendererGeneration,
+    viewGeneration: context.viewGeneration,
+    revision: context.revision,
     expectedTranscriptIdentity,
     snapshotBytes: 0,
     state: transportViewState,
@@ -91,7 +70,6 @@ export function buildStateEnvelope(
   }
 
   return {
-    nextSyncState: { ...syncState, globalRevision: envelopeContext.revision },
     expectedTranscriptIdentity,
     message,
   };

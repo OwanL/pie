@@ -2,7 +2,7 @@
  * Per-renderer delivery owner.
  *
  * One `RendererSession` owns everything a single renderer surface needs to
- * stay synchronized with the shared host state: its own `SidebarSyncState`,
+ * stay synchronized with the shared host state: its own
  * `StateDeliveryController`, readiness probe, commit watchdog, pending
  * imperatives, readiness/visibility beliefs, and renderer identity
  * (`rendererId`, `rendererGeneration`). Evidence from one renderer can never
@@ -35,7 +35,7 @@ import {
   type StateDeliveryRecovery,
   type StateDeliveryTelemetry,
 } from './state-delivery-controller';
-import { buildStateEnvelope, createSidebarSyncState, type SidebarSyncState } from './sync';
+import { buildStateEnvelope } from './sync';
 import type {
   HostToWebviewMessage,
   RendererCommandContext,
@@ -109,7 +109,6 @@ export class RendererSession implements RendererRegistration, DisposableLike {
   readonly rendererId: string;
   readonly kind: RendererKind;
   private readonly hostInstanceId: string;
-  private syncState: SidebarSyncState;
   private webviewReady = false;
   private visible = true;
   private focused = false;
@@ -128,7 +127,6 @@ export class RendererSession implements RendererRegistration, DisposableLike {
     this.rendererId = options.rendererId;
     this.kind = options.kind;
     this.hostInstanceId = options.hostInstanceId;
-    this.syncState = createSidebarSyncState(this.hostInstanceId);
     const clock = options.clock;
 
     this.watchdog = new StateAppliedWatchdog({
@@ -151,12 +149,11 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       clock,
       buildSnapshot: (buildContext) => {
         const startedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
-        const result = buildStateEnvelope(this.syncState, options.getViewState(), {
+        const result = buildStateEnvelope(this.hostInstanceId, options.getViewState(), {
           ...buildContext,
           rendererId: this.rendererId,
           rendererGeneration: this.rendererGeneration,
         });
-        this.syncState = result.nextSyncState;
         if (isLivePipelineTraceEnabled()) {
           recordLivePipelineTrace({
             process: 'host',
@@ -270,7 +267,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       focused: this.focused,
       webviewReady: this.webviewReady,
       globalDirty: delivery.dirty,
-      globalRevision: this.syncState.globalRevision,
+      globalRevision: delivery.lastBuiltRevision,
       lastStateAppliedRevision: delivery.lastTranscriptCommittedRevision,
       pendingStateAppliedRevision: delivery.acceptedRevisions[0] ?? null,
       viewGeneration: delivery.viewGeneration,
@@ -297,7 +294,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       if (isBootLogEnabled()) {
         bootLog('renderer-session', 'snapshot.markDirty', {
           ready: this.webviewReady,
-          revision: this.syncState.globalRevision,
+          revision: this.delivery.getDebugState().lastBuiltRevision,
           visible: this.visible,
         });
       }

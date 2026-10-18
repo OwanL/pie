@@ -150,6 +150,8 @@ export interface StateDeliveryControllerOptions<T> {
 }
 
 export interface StateDeliveryDebugState {
+  /** Last successfully built snapshot, including posts not accepted yet. */
+  lastBuiltRevision: number;
   desiredGeneration: number;
   lastAcceptedDesiredGeneration: number;
   dirty: boolean;
@@ -215,6 +217,7 @@ export class StateDeliveryController<T> {
   private viewGeneration = 1;
   private nextOperationId = 1;
   private nextRevision = 1;
+  private lastBuiltRevision = 0;
   private activeOperation: PostOperation<T> | undefined;
   private accepted: AcceptedRevision[] = [];
   /** Highest posted revision retired by settlement/commit timeout recovery.
@@ -496,6 +499,7 @@ export class StateDeliveryController<T> {
 
   getDebugState(): StateDeliveryDebugState {
     return {
+      lastBuiltRevision: this.lastBuiltRevision,
       desiredGeneration: this.desiredGeneration,
       lastAcceptedDesiredGeneration: this.lastAcceptedDesiredGeneration,
       dirty: this.dirty,
@@ -561,6 +565,7 @@ export class StateDeliveryController<T> {
     let snapshot: StateDeliverySnapshot<T>;
     try {
       snapshot = this.options.buildSnapshot(context);
+      this.lastBuiltRevision = context.revision;
     } catch (error: unknown) {
       this.lastRetryFailure = {
         stage: 'snapshot-build',

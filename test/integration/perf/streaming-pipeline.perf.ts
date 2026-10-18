@@ -37,8 +37,6 @@ import { dispatch } from '../../../application/backend/conversation-state/dispat
 import { selectViewState } from '../../../application/backend/conversation-state/projections/projection';
 import {
   buildStateEnvelope,
-  createSidebarSyncState,
-  type SidebarSyncState,
 } from '../../../application/hosts/lib/renderer-delivery/sync';
 import type { Event } from '../../../application/backend/conversation-state/events';
 import type { ChatMessage, ToolCall, ViewState } from '../../../application/lib/protocol/index.js';
@@ -317,11 +315,12 @@ function stepEvent(state: ArchState, event: Event, mode: OrchestrationMode, acc:
 }
 
 /** Replicates `SidebarViewProvider.postState` for one debounced post. */
-function stepPost(state: ArchState, syncState: SidebarSyncState, mode: OrchestrationMode, acc: Acc): SidebarSyncState {
+function stepPost(state: ArchState, revision: number, mode: OrchestrationMode, acc: Acc): number {
   const t0 = performance.now();
   const vs1 = selectViewState(state); // for the envelope
-  const result = buildStateEnvelope(syncState, vs1, true);
-  syncState = result.nextSyncState;
+  const result = buildStateEnvelope('perf-host', vs1, {
+    revision: revision + 1, viewGeneration: 1, rendererId: 'perf', rendererGeneration: 1,
+  });
   const t1 = performance.now();
   acc.postUs += (t1 - t0) * 1000;
   acc.projectionUs += (t1 - t0) * 1000; // getViewState#1 is a projection call
@@ -343,7 +342,7 @@ function stepPost(state: ArchState, syncState: SidebarSyncState, mode: Orchestra
     acc.postCloneUs += (c1 - c0) * 1000;
   }
   acc.postCount++;
-  return syncState;
+  return result.message.revision;
 }
 
 interface RunResult {
@@ -371,7 +370,7 @@ function runScenario(
   // toolCalls assignment. Production parses a fresh event per backend line.
   const replyEvents = buildReplyEvents();
   let state = seedState;
-  let syncState = createSidebarSyncState('perf-host');
+  let syncState = 0;
   const acc = newAcc();
 
   for (const event of replyEvents) {

@@ -23,11 +23,8 @@ export interface SessionTabProps {
   generatingTitlePathSet?: Set<string>;
   startingModelPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
-  /** Effective active path (host `activeSession.path`, or an optimistic
-   *  override while a tab click is awaiting the host round-trip). Replaces the
-   *  `activeSession` object so this prop is a stable string (the host
-   *  re-serialises `activeSession` every snapshot, which previously defeated
-   *  this component's `memo()` and re-rendered every tab each snapshot). */
+  /** Host selection or the optimistic click override. Projected to a per-tab
+   *  boolean before reaching the presentation memo barrier. */
   activePath: string | null;
   hasPendingExtensionUIRequest: boolean;
   isPinned: boolean;
@@ -46,43 +43,46 @@ export interface SessionTabProps {
   onRetryCreate?: (operationId: string) => void;
 }
 
-// Memoized so non-source tabs skip re-render during a drag (the parent
-// re-renders on every pointermove). Effectiveness depends on stable prop
-// identities: the derived Maps/Sets are memoized in SessionTabs and the drag
-// callbacks are useCallback-stabilized in the hook.
-export const SessionTab = memo(function SessionTab({
-  tabPath,
-  index,
-  sessionByPath,
-  openIndexByPath,
-  runningPathSet,
-  generatingTitlePathSet = new Set<string>(),
-  startingModelPathSet,
-  unreadFinishedPathSet,
-  activePath,
-  hasPendingExtensionUIRequest,
-  isPinned,
-  isDropTarget,
-  hasDeferredTriggers,
-  hasDeferredTimer,
-  onContextMenu,
-  onPointerDown,
-  onClick,
-  onClose,
-  onRetryCreate,
-}: SessionTabProps) {
+export function projectSessionTabProps(props: SessionTabProps): PresentationProps {
+  const { tabPath, index, sessionByPath, openIndexByPath, runningPathSet,
+    generatingTitlePathSet, startingModelPathSet, unreadFinishedPathSet, activePath,
+    ...rest } = props;
   const session = sessionByPath.get(tabPath);
-  const label = session?.name ?? 'New Session';
-  const isActive = activePath === tabPath;
-  const isAttention = !!hasPendingExtensionUIRequest;
-  const isRunning = runningPathSet.has(tabPath);
-  const isGeneratingTitle = generatingTitlePathSet.has(tabPath);
+  return { ...rest, tabPath,
+    label: session?.name ?? 'New Session', agentCreated: session?.agentCreated === true,
+    creationState: session?.creationState, createOperationId: session?.createOperationId,
+    originalIndex: openIndexByPath.get(tabPath) ?? index,
+    isActive: activePath === tabPath, isRunning: runningPathSet.has(tabPath),
+    isGeneratingTitle: generatingTitlePathSet?.has(tabPath) ?? false,
+    isStartingModel: runningPathSet.has(tabPath) && startingModelPathSet.has(tabPath),
+    isUnreadFinished: unreadFinishedPathSet.has(tabPath) && !props.hasDeferredTimer,
+  };
+}
+
+type PresentationProps = Omit<SessionTabProps, 'index' | 'sessionByPath' | 'openIndexByPath'
+  | 'runningPathSet' | 'generatingTitlePathSet' | 'startingModelPathSet' | 'unreadFinishedPathSet' | 'activePath'> & {
+  label: string;
+  agentCreated: boolean;
+  creationState?: SessionSummary['creationState'];
+  createOperationId?: string;
+  originalIndex: number;
+  isActive: boolean;
+  isRunning: boolean;
+  isGeneratingTitle: boolean;
+  isStartingModel: boolean;
+  isUnreadFinished: boolean;
+};
+
+export const SessionTabPresentation = memo(function SessionTabPresentation({
+  tabPath, label, agentCreated, creationState, createOperationId, originalIndex,
+  isActive, isRunning, isGeneratingTitle, isStartingModel, isUnreadFinished,
+  hasPendingExtensionUIRequest, isPinned, isDropTarget, hasDeferredTriggers,
+  hasDeferredTimer, onContextMenu, onPointerDown, onClick, onClose, onRetryCreate,
+}: PresentationProps) {
+  const isAttention = hasPendingExtensionUIRequest;
   const isPreparing = isPendingTabPath(tabPath);
-  const isCreationDelayed = session?.creationState === 'delayed';
-  const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
-  const isUnreadFinished = unreadFinishedPathSet.has(tabPath) && !hasDeferredTimer;
-  const isAgentCreated = session?.agentCreated === true;
-  const originalIndex = openIndexByPath.get(tabPath) ?? index;
+  const isCreationDelayed = creationState === 'delayed';
+  const isAgentCreated = agentCreated;
   const statusTitle = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
     : isCreationDelayed
@@ -94,7 +94,7 @@ export const SessionTab = memo(function SessionTab({
           : isUnreadFinished
             ? `${label} (finished, unread)`
             : label;
-  const title = getSessionTabTooltip(session?.agentCreated, statusTitle) ?? statusTitle;
+  const title = getSessionTabTooltip(agentCreated, statusTitle) ?? statusTitle;
 
   // A pending deferred trigger blocks closing its delivery target until it is
   // cancelled from the status strip, preventing the trigger from being orphaned.
@@ -165,7 +165,7 @@ export const SessionTab = memo(function SessionTab({
           </>
         )}
       </button>
-      {isCreationDelayed && session?.createOperationId && onRetryCreate && (
+      {isCreationDelayed && createOperationId && onRetryCreate && (
         <button
           class="session-tab-retry"
           type="button"
@@ -173,7 +173,7 @@ export const SessionTab = memo(function SessionTab({
           title="Retry session creation"
           onClick={(event) => {
             event.stopPropagation();
-            onRetryCreate?.(session.createOperationId!);
+            onRetryCreate?.(createOperationId);
           }}
         >
           ↻

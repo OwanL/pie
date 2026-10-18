@@ -8,10 +8,14 @@ import renderToString from 'preact-render-to-string';
 import { installDom } from '../helpers/dom';
 installDom();
 
-import { SessionTab } from '../../session-tabs/session-tab';
+import { projectSessionTabProps, SessionTabPresentation, type SessionTabProps } from '../../session-tabs/session-tab';
 import { SessionTabContextMenu } from '../../session-tabs/session-tab-context-menu';
 import { PENDING_SESSION_PREFIX } from '../../../lib/session-tabs/tab-behavior.js';
 import type { SessionSummary } from '../../../lib/protocol/index.js';
+
+function SessionTab(props: SessionTabProps) {
+  return h(SessionTabPresentation, projectSessionTabProps(props));
+}
 
 test('pending new-session tab shows background preparation without disabling interaction', () => {
   const tabPath = `${PENDING_SESSION_PREFIX}new`;

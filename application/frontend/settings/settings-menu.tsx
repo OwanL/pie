@@ -746,23 +746,26 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
 }
 
 export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, providerManagement, providerSetupPreview, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+  const [open, setOpen] = useState(false);
+  // Keep lifecycle and navigation state mounted, but do not derive popup data
+  // from every cloned host snapshot while the surface is closed. Include open
+  // in each memo so reopening always derives from the latest authoritative props.
   const skillCatalog = useMemo(
-    () => computeKeepCatalog(
+    () => open ? computeKeepCatalog(
       pruningCatalog.skills,
       pruningResult ? { included: pruningResult.includedSkills, excluded: pruningResult.excludedSkills } : null,
       pruningSettings.skillAlwaysKeep,
-    ),
-    [pruningCatalog.skills, pruningResult, pruningSettings.skillAlwaysKeep],
+    ) : [],
+    [open, pruningCatalog.skills, pruningResult, pruningSettings.skillAlwaysKeep],
   );
   const toolCatalog = useMemo(
-    () => computeToolKeepCatalog(
+    () => open ? computeToolKeepCatalog(
       pruningCatalog.tools,
       pruningResult ? { included: pruningResult.includedTools, excluded: pruningResult.excludedTools } : null,
       pruningSettings.toolAlwaysKeep,
-    ),
-    [pruningCatalog.tools, pruningResult, pruningSettings.toolAlwaysKeep],
+    ) : [],
+    [open, pruningCatalog.tools, pruningResult, pruningSettings.toolAlwaysKeep],
   );
-  const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('chat');
   const [query, setQuery] = useState('');
   const modelEntries = useMemo(
@@ -770,11 +773,11 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
     // prepass) must not inherit subagent-specific eligibility warnings or
     // ordering. Provider toggles still apply because disabled providers cannot
     // execute these configured model calls.
-    () => orderModelsForPicker(
+    () => open ? orderModelsForPicker(
       filterEnabledProviders(availableModels, prefs.providerToggles),
       { useSubagentEligibility: false },
-    ),
-    [availableModels, prefs.providerToggles],
+    ) : [],
+    [open, availableModels, prefs.providerToggles],
   );
   const [expandedExt, setExpandedExt] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -811,8 +814,8 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
 
   // Extract unique providers from available models, sorted alphabetically.
   const providers = useMemo(
-    () => [...new Set(availableModels.map((m) => m.provider))].sort((a, b) => a.localeCompare(b)),
-    [availableModels],
+    () => open ? [...new Set(availableModels.map((m) => m.provider))].sort((a, b) => a.localeCompare(b)) : [],
+    [open, availableModels],
   );
 
   // Extensions and Subagents disappear when their backing content is absent;
@@ -843,8 +846,8 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   // plus jump entries for the continuous (slider/select/stepper/text) controls,
   // so a single search box can find any setting without hunting through tabs.
   const searchIndex = useMemo<SearchEntry[]>(
-    () => buildSettingsSearchIndex(visibleTabs, availableExtensions, providers, prefs, onSetPrefs),
-    [visibleTabs, availableExtensions, providers, prefs, onSetPrefs],
+    () => open ? buildSettingsSearchIndex(visibleTabs, availableExtensions, providers, prefs, onSetPrefs) : [],
+    [open, visibleTabs, availableExtensions, providers, prefs, onSetPrefs],
   );
 
   const q = query.trim().toLowerCase();

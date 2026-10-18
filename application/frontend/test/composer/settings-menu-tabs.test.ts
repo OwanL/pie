@@ -68,6 +68,52 @@ function mount(
   });
 }
 
+test('closed snapshots do not traverse settings catalogs, model ordering, or search index', () => {
+  const calls = { skills: 0, tools: 0, models: 0, search: 0 };
+  function traced<T>(values: T[], key: keyof typeof calls): T[] {
+    return new Proxy(values, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator || property === 'map' || property === 'filter') calls[key]++;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+  function snapshot() {
+    mount(traced([{ id: 'skill-pruner', label: 'Skill Pruner', description: 'Prunes' }], 'search'), [], undefined, {
+      availableModels: traced(Array.from({ length: 100 }, (_, i) => ({ id: `m${i}`, name: `Model ${i}`, provider: `p${i % 5}`, reasoning: false, inputKinds: ['text'] as ['text'] })), 'models'),
+      pruningCatalog: { skills: traced(Array.from({ length: 100 }, (_, i) => `skill-${i}`), 'skills'), tools: traced(['read', 'write', 'bash'], 'tools') },
+      prefs: structuredClone(DEFAULT_CHAT_PREFS),
+    });
+  }
+  snapshot();
+  snapshot();
+  snapshot();
+  assert.deepEqual(calls, { skills: 0, tools: 0, models: 0, search: 0 });
+  openMenu();
+  assert.ok(Object.values(calls).every((count) => count > 0), 'opening derives the latest snapshot');
+  act(() => { click(document.querySelector('.toolbar-settings-close')); });
+  const afterClose = { ...calls };
+  snapshot();
+  assert.deepEqual(calls, afterClose, 'closed updates must not rebuild derived settings data');
+});
+
+test('close and reopen retain category and search and restore trigger focus', () => {
+  mount();
+  let menu = openMenu();
+  act(() => { click(menu.querySelector('[data-tab="context"]')); });
+  const search = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  act(() => {
+    search.value = 'compaction';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  act(() => { click(menu.querySelector('.toolbar-settings-close')); });
+  assert.equal(document.activeElement, container.querySelector('.toolbar-settings-trigger'));
+  menu = openMenu();
+  assert.equal(menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!.value, 'compaction');
+  assert.ok(menu.querySelector('[data-tab="context"].active'));
+  assert.equal(document.activeElement, menu.querySelector('.toolbar-settings-search-input'));
+});
+
 function openMenu() {
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
   const menu = document.body.querySelector('.toolbar-settings-menu');

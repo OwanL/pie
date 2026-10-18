@@ -113,6 +113,33 @@ function transcriptCommit(revision: number, viewGeneration: number, identity = `
   return { revision, viewGeneration, identity, mountGeneration: 1, evidence: 'displayed' as const };
 }
 
+test('debug revision tracks successful builds across failure and view invalidation', () => {
+  let fail = false;
+  const revisions: number[] = [];
+  const h = harness(() => new Promise<boolean>(() => {}), {
+    buildSnapshot: ({ revision }) => {
+      revisions.push(revision);
+      if (fail) throw new Error('snapshot unavailable');
+      return { payload: 'state', expectedTranscriptIdentity: 'identity' };
+    },
+  });
+  assert.equal(h.controller.getDebugState().lastBuiltRevision, 0);
+  h.controller.markDirty();
+  assert.equal(h.controller.getDebugState().lastBuiltRevision, 1, 'unsettled builds are visible');
+  h.setEligible(false);
+  h.controller.invalidateView();
+  assert.equal(h.controller.getDebugState().lastBuiltRevision, 1);
+  fail = true;
+  h.setEligible(true);
+  h.controller.notifyEligibilityChanged();
+  assert.equal(h.controller.getDebugState().lastBuiltRevision, 1, 'failed builds do not advance debug revision');
+  fail = false;
+  h.clock.advance(5);
+  assert.deepEqual(revisions, [1, 2, 3], 'failed allocations remain consumed');
+  assert.equal(h.controller.getDebugState().lastBuiltRevision, 3);
+  h.controller.dispose();
+});
+
 test('one unsettled or uncommitted post coalesces many host changes to the latest snapshot', async () => {
   const first = deferred<boolean>();
   const second = deferred<boolean>();
