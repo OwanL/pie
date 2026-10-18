@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { trustedTestChildCoverageEnv } from '../../../agent-processes/test/fixtures/sanitized-real-child-env.js';
 import { verifyPiRuntimeArtifact } from '../../../../lib/pi-runtime/artifact.mjs';
+import { collectSourceCoverage } from '../../../../scripts/verification/source-coverage.mjs';
 
 const entry = fileURLToPath(new URL('../../lifecycle/register.ts', import.meta.url));
 const prepass = fileURLToPath(new URL('../../prepass/prepass.js', import.meta.url));
@@ -90,10 +92,52 @@ exports.runPruningPrepass = async (_ctx, input) => {
     `;
     const childPath = path.join(root, 'state-sharing.mjs');
     await writeFile(childPath, script);
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(path|systemroot|windir|comspec|pathext|temp|tmp|lang)$/i.test(key)));
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(path|systemroot|windir|comspec|pathext|temp|tmp|lang)$/i.test(key))),
+      ...trustedTestChildCoverageEnv(process.env),
+    };
     const result = spawnSync(process.execPath, [childPath], {env, encoding: 'utf8', timeout: 60_000});
     assert.equal(result.status, 0, `${result.error ?? ''}\n${result.signal ?? ''}\n${result.stderr || result.stdout}`);
     assert.match(result.stdout, /CAPABILITY_STATE_OK/);
+
+    // Exercise the sanitized boundary with real Jiti, not just environment assertions.
+    const directory = path.join(root, 'capture');
+    await mkdir(directory, { mode: 0o700 });
+    await mkdir(path.join(directory, 'v8'));
+    const coverage = {
+      directory,
+      root: fileURLToPath(new URL('../../../../', import.meta.url)),
+      cwd: fileURLToPath(new URL('../../', import.meta.url)),
+      includes: ['lifecycle/register.ts'],
+    };
+    const capturedEnv = {
+      ...env,
+      ...trustedTestChildCoverageEnv({
+        PIE_TEST_COVERAGE_DIR: directory,
+        PIE_TEST_COVERAGE_ROOT: coverage.root,
+        PIE_TEST_COVERAGE_CWD: coverage.cwd,
+        PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(coverage.includes),
+        NODE_OPTIONS: '--require=untrusted-preload',
+        OPENAI_API_KEY: 'must-not-inherit',
+      }),
+    };
+    assert.equal(capturedEnv.OPENAI_API_KEY, undefined);
+    assert.ok(!capturedEnv.NODE_OPTIONS?.includes('untrusted-preload'));
+    const captured = spawnSync(process.execPath, [childPath], { env: capturedEnv, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(captured.status, 0, `${captured.error ?? ''}\n${captured.stderr || captured.stdout}`);
+    const captures = (await Promise.all((await readdir(directory))
+      .filter(name => name.startsWith('scripts-'))
+      .map(async name => JSON.parse(await readFile(path.join(directory, name), 'utf8')))))
+      .flatMap(record => record.scripts);
+    const registerCapture = captures.find(script => script.url === pathToFileURL(entry).href);
+    assert.ok(registerCapture, 'register.ts retains its evaluated identity');
+    assert.match(registerCapture.sourceMapURL, /^data:.*base64,/);
+    const map = JSON.parse(Buffer.from(registerCapture.sourceMapURL.split('base64,')[1], 'base64').toString());
+    assert.ok(map.sourcesContent.includes(await readFile(entry, 'utf8')), 'raw map retains exact register.ts bytes');
+    assert.ok((await readdir(path.join(directory, 'v8'))).length > 0);
+    const report = await collectSourceCoverage(coverage);
+    assert.deepEqual(report.files.map(file => file.path), [entry]);
+    assert.ok(report.totalFunctionCount > 0);
   } finally {
     await rm(root, {recursive: true, force: true});
   }

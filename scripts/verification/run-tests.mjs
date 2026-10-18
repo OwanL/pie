@@ -17,7 +17,7 @@ import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
 import { PACKAGE_REGISTRY } from '../lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
-import { prepareNodeTestInvocation, resolveTestFiles } from './test-node.mjs';
+import { prepareNodeTestInvocation, resolveRetainedTestFiles } from './test-node.mjs';
 
 import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
 
@@ -726,7 +726,6 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
   // `paths` target JS builds, not the typecheck-only `.d.ts` aliases). It must
   // precede the positional test globs.
   const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
-  const collectCoverage = !fast && config.coverage !== false;
   return [
     ...tsxConfigArgs,
     '--test',
@@ -736,14 +735,9 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     ...(fast
       ? ['--test-force-exit', ...(config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])]
       : ['--test-concurrency=1']),
-    // NODE_V8_COVERAGE supplies detailed raw blocks; qualified source accounting
-    // is authoritative. Do not also compute Node's unused native aggregate.
-    // Single-process coverage opt-in: run every test file in one process so the
-    // coverage report comes from exactly one child (see 'skill-pruner').
-    ...(collectCoverage && config.singleProcessCoverage ? ['--experimental-test-isolation=none'] : []),
     `--test-reporter=${reporterSpecifier}`,
     ...testArgs,
-    ...(collectCoverage && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs),
+    ...config.testGlobs,
   ];
 }
 
@@ -893,17 +887,11 @@ function coverageDiagnostics(coverage) {
 }
 
 export async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime, {
-  // Internal qualification seam only; public/default coverage remains retained.
-  execution = 'retained',
   createOverlay = createTsconfigOverlay, runChild = runChildProcess,
   createCoverageScope: makeCoverageScope = createCoverageScope, collectCoverage: accountCoverage = collectCoverage,
   resolveTsx = (owner) => owner.testTsx === 'root' ? resolveLocalTsx(repoRoot)
     : owner.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(owner.cwd),
 } = {}) {
-  if (!['retained', 'native'].includes(execution)) throw new Error(`Unknown test execution: ${execution}`);
-  if (!fast && execution === 'native' && config.singleProcessCoverage && config.id !== 'skill-pruner') {
-    throw new Error('Native single-process qualification is limited to skill-pruner');
-  }
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
   // the raw repo-relative path. Native fast runs manage their own overlay.
@@ -914,9 +902,7 @@ export async function runPackage(config, fast = false, integration = false, test
       sdkPath: runtime.sdkPath,
     })
     : null;
-  // Invoke the registry-selected tsx CLI directly rather than routing through
-  // npx and a platform shell. This preserves regexes/spaces in forwarded
-  // node:test arguments and avoids command-resolution differences between cwd/shells.
+  // Both covered and uncovered owners retain their registry-pinned tsx startup.
   let rawResult;
   let nativeInvocation;
   let coverageScope;
@@ -927,11 +913,16 @@ export async function runPackage(config, fast = false, integration = false, test
   let teardownConfirmed = true;
   try {
     if (coveredOwner) coverageScope = makeCoverageScope(config);
-    if (!fast && execution === 'native') {
+    if (coveredOwner) {
       const selection = nativePackageSelection({ ...config,
         testGlobs: coveredOwner && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs,
       });
-      const files = resolveTestFiles(repoRoot, selection.selectors, selection);
+      // Only exact entries explicitly registered by this coverage owner may
+      // bypass the public test suffix rule. Globs never authorize arbitrary files.
+      const approvedEntries = coveredOwner ? (config.coverageTestGlobs ?? [])
+        .filter(entry => !/[*?{\[]/u.test(entry))
+        .map(entry => path.resolve(config.cwd, entry)) : [];
+      const files = resolveRetainedTestFiles(repoRoot, selection.selectors, selection, approvedEntries);
       // This lane uses the retained runner's existing watchdog/lifetime owner,
       // not the native CLI's stdin authorization driver. Join/retain below.
       nativeInvocation = prepareNodeTestInvocation(files, { cwd: config.cwd, waitForOwnership: false,
@@ -954,10 +945,9 @@ export async function runPackage(config, fast = false, integration = false, test
         ...(integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {}),
         ...(nativeInvocation ? { TSX_TSCONFIG_PATH: tsxOverlay.configPath, NODE_TEST_CONTEXT: undefined } : {}),
         ...(coverageScope ? {
-          // The programmatic runner must not inherit debugPort=0: Node would
-          // increment it to invalid worker ports 1/2. Capture itself is identical.
-          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(path.join(__dirname, 'coverage-capture.cjs'))}`,
-            ...(!config.singleProcessCoverage && !nativeInvocation ? ['--inspect-port=0'] : [])].filter(Boolean).join(' '),
+          // Programmatic node:test must not inherit debugPort=0: Node would
+          // increment it to invalid worker ports 1/2.
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(path.join(__dirname, 'coverage-capture.cjs'))}`].filter(Boolean).join(' '),
           PIE_TEST_COVERAGE_DIR: coverageScope.directory,
           PIE_TEST_COVERAGE_ROOT: repoRoot,
           PIE_TEST_COVERAGE_CWD: config.cwd,

@@ -221,6 +221,17 @@ export async function runNodeTestsWithOverlayLocal(files, options = {}, dependen
 
 /** Resolve explicit files and Git-discovered directory tests into unique paths. */
 export function resolveTestFiles(root, selectors, options = {}) {
+  return resolveSelectedTestFiles(root, selectors, options, new Set());
+}
+
+/** Internal owner-selection seam; never populated from public CLI options. */
+export function resolveRetainedTestFiles(root, selectors, options, approvedEntries) {
+  return resolveSelectedTestFiles(root, selectors, options, new Set(
+    [...approvedEntries].map(file => path.resolve(root, file)),
+  ));
+}
+
+function resolveSelectedTestFiles(root, selectors, options, approvedEntries) {
   if (selectors.length === 0) throw new Error('Provide at least one test directory or file.');
   const directories = [];
   const explicitFiles = [];
@@ -234,7 +245,7 @@ export function resolveTestFiles(root, selectors, options = {}) {
     }
     if (info.isDirectory()) directories.push(absolute);
     else if (info.isFile()) {
-      if (!TEST_FILE_PATTERN.test(relative) && !EXPLICIT_E2E_PATTERN.test(relative)) {
+      if (!TEST_FILE_PATTERN.test(relative) && !EXPLICIT_E2E_PATTERN.test(relative) && !approvedEntries.has(absolute)) {
         throw new Error(`Explicit test file must end in .test.{ts,tsx,mjs,js} or .e2e.ts: ${relative}`);
       }
       explicitFiles.push(absolute);

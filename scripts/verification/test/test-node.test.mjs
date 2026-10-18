@@ -18,6 +18,7 @@ import {
   createNodeTestEntries,
   main,
   resolveTestFiles,
+  resolveRetainedTestFiles,
   resolveTestSdkPath,
   runNodeTests,
   runNodeTestsWithOverlay,
@@ -27,6 +28,20 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const testEnvironmentPreload = pathToFileURL(path.join(repoRoot, 'scripts', 'verification', 'test-environment.mjs')).href;
+
+test('coverage entries require internal exact owner approval, never public options', t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-covered-entry-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const entry = path.join(root, 'coverage-suite.ts');
+  const unrelated = path.join(root, 'unregistered.ts');
+  writeFileSync(entry, '');
+  writeFileSync(unrelated, '');
+  const approved = new Set([entry]);
+  assert.throws(() => resolveTestFiles(root, [entry], { approvedEntries: approved }), /Explicit test file must end/);
+  assert.deepEqual(resolveRetainedTestFiles(root, [entry], {}, approved), [entry]);
+  assert.throws(() => resolveRetainedTestFiles(root, [unrelated], {}, approved), /Explicit test file must end/);
+  assert.throws(() => resolveRetainedTestFiles(root, [entry], {}, new Set()), /Explicit test file must end/);
+});
 
 test('internal retained ESM none shares modules and registration environment while forwarding filters', (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-shared-runner-'));

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { trustedTestChildCoverageEnv } from '../../agent-processes/test/fixtures/sanitized-real-child-env.js';
 import { verifyPiRuntimeArtifact } from '../../../lib/pi-runtime/artifact.mjs';
 
 const entry = fileURLToPath(new URL('../lifecycle/register.ts', import.meta.url));
@@ -137,7 +138,10 @@ exports.runPruningPrepass = () => { throw new Error('must not call a provider');
       assert.equal(result.message.details.prepassError, 'No completion function available');
       console.log('LAZY_PRUNER_OK');
     `;
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(path|systemroot|windir|comspec|pathext|temp|tmp|lang)$/i.test(key)));
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(path|systemroot|windir|comspec|pathext|temp|tmp|lang)$/i.test(key))),
+      ...trustedTestChildCoverageEnv(process.env),
+    };
     const childPath = path.join(root, 'registration.mjs');
     await writeFile(childPath, script);
     const result = spawnSync(process.execPath, [childPath], { env, encoding: 'utf8', timeout: 60_000 });

@@ -17,17 +17,26 @@ import {
   buildTestArgs,
   parseArgs,
   runChildProcess,
-  runPackage,
+  runPackage as executePackage,
   runSelectedPackages,
 } from '../run-tests.mjs';
 
-test('internal native execution uses the same owner accountant and retention lifecycle', async () => {
+const retainedTestInvocations = new Set();
+async function runPackage(...args) {
+  const result = await executePackage(...args);
+  if (result.retainedInvocation) retainedTestInvocations.add(result.retainedInvocation);
+  return result;
+}
+test.after(() => {
+  for (const directory of retainedTestInvocations) rmSync(directory, { recursive: true, force: true });
+});
+
+test('production covered execution uses the common owner accountant and retention lifecycle', async () => {
   const owner = PACKAGE_CONFIGS.find(config => config.id === 'model-provider-authentication');
-  for (const outcome of ['passed', 'failed', 'mapping', 'uncertain']) {
+  for (const outcome of ['passed', 'failed', 'cancelled', 'timeout', 'mapping', 'uncertain', 'throw']) {
     let invocationRoot;
     let disposed = 0;
     const result = await runPackage(owner, false, false, [], undefined, { sdkPath: '/fixture' }, {
-      execution: 'native',
       createOverlay: () => ({ configPath: '/fixture/overlay', dispose() { disposed++; } }),
       createCoverageScope: () => ({ directory: '/private/evidence', dispose() { disposed++; } }),
       runChild: async (_command, args, cwd, _signal, env) => {
@@ -41,30 +50,31 @@ test('internal native execution uses the same owner accountant and retention lif
         assert.equal(env.TSX_TSCONFIG_PATH, '/fixture/overlay');
         assert.equal(env.PIE_TEST_COVERAGE_CWD, owner.cwd);
         assert.ok(Object.values(config.sourceFileByEntry).every(file => file.includes('authentication')));
-        return { ...reporterResult(outcome === 'failed' ? 1 : 0), teardownConfirmed: outcome !== 'uncertain' };
+        if (outcome === 'throw') throw new Error('executor lost child ownership');
+        return { ...reporterResult(outcome === 'failed' ? 1 : 0), teardownConfirmed: outcome !== 'uncertain',
+          aborted: outcome === 'cancelled', timedOut: outcome === 'timeout' };
       },
       collectCoverage: async () => {
-        if (outcome === 'uncertain') assert.fail('accounting before join');
+        if (['uncertain', 'throw'].includes(outcome)) assert.fail('accounting before join');
         if (outcome === 'mapping') throw new Error('Missing TypeScript source map');
         return qualifiedCoverage;
       },
     });
-    const retained = ['mapping', 'uncertain'].includes(outcome);
+    const retained = ['mapping', 'uncertain', 'throw'].includes(outcome);
     assert.equal(existsSync(invocationRoot), retained);
     assert.equal(disposed, retained ? 0 : 2);
     assert.equal(result.retainedInvocation, retained ? invocationRoot : undefined);
-    assert.equal(result.hasInfrastructureFailure, retained);
+    assert.equal(result.hasInfrastructureFailure, retained || ['cancelled', 'timeout'].includes(outcome));
     // The deliberately low fixture totals still fail the unchanged owner gate.
     assert.equal(result.passed, false);
     rmSync(invocationRoot, { recursive: true, force: true });
   }
 });
 
-test('skill-pruner internal native adapter explicitly retains single-process coverage', async () => {
+test('skill-pruner production adapter explicitly retains single-process coverage', async () => {
   const owner = PACKAGE_CONFIGS.find(config => config.id === 'skill-pruner');
   let accounted = false;
   const result = await runPackage(owner, false, false, ['--test-name-pattern=fixture'], undefined, { sdkPath: '/fixture' }, {
-    execution: 'native',
     createOverlay: () => ({ configPath: '/fixture/overlay', dispose() {} }),
     createCoverageScope: () => ({ directory: '/private/evidence', dispose() {} }),
     runChild: async (_command, args) => {
@@ -81,6 +91,51 @@ test('skill-pruner internal native adapter explicitly retains single-process cov
   assert.equal(accounted, true);
   assert.equal(result.teardownConfirmed, true);
   assert.equal(result.retainedInvocation, undefined);
+});
+
+test('every covered owner preserves metadata and complete inventory through the shared executor', async (t) => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const indexed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
+    .split(/\r?\n/u).filter(file => /\.test\.(?:ts|tsx|mjs|js)$/u.test(file));
+  for (const owner of PACKAGE_CONFIGS.filter(config => config.coverage !== false)) {
+    await t.test(owner.id, async () => {
+      const globs = (owner.coverageTestGlobs ?? owner.testGlobs).map(glob =>
+        path.relative(root, path.resolve(owner.cwd, glob)).replaceAll('\\', '/'));
+      const entries = globs.filter(glob => !/[*?{\[]/u.test(glob));
+      const expected = [...new Set([...indexed, ...entries])]
+        .filter(file => globs.some(glob => path.matchesGlob(file, glob)))
+        .map(file => path.resolve(root, file)).sort();
+      assert.ok(expected.length > 0);
+      let called = false;
+      const result = await runPackage(owner, false, true, ['--test-name-pattern=metadata'], undefined, { sdkPath: '/fixture' }, {
+        createOverlay: () => ({ configPath: '/fixture/overlay', dispose() {} }),
+        createCoverageScope: () => ({ directory: '/private/coverage', dispose() {} }),
+        resolveTsx: () => '/owner/tsx',
+        runChild: async (_command, args, cwd, _signal, env) => {
+          called = true;
+          const config = JSON.parse(readFileSync(args.at(-1), 'utf8'));
+          assert.deepEqual(config.files, expected);
+          assert.deepEqual(config.sourceFileByEntry, {}, 'retained ESM uses original entries, never CJS wrappers');
+          assert.equal(config.cwd, owner.cwd);
+          assert.equal(cwd, owner.cwd);
+          assert.equal(config.waitForOwnership, false);
+          assert.equal(config.options.isolation, owner.singleProcessCoverage ? 'none' : 'process');
+          assert.equal(config.options.concurrency, 1);
+          assert.deepEqual(config.options.testNamePatterns, ['metadata']);
+          assert.deepEqual(args.slice(0, 2), ['/owner/tsx', '--tsconfig=/fixture/overlay']);
+          assert.equal(env.PIE_TEST_COVERAGE_CWD, owner.cwd);
+          assert.deepEqual(JSON.parse(env.PIE_TEST_COVERAGE_INCLUDES), owner.coverageIncludes);
+          assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
+          assert.equal(env.TSX_TSCONFIG_PATH, '/fixture/overlay');
+          return reporterResult();
+        },
+        collectCoverage: async () => qualifiedCoverage,
+      });
+      assert.equal(called, true);
+      assert.equal(result.hasInfrastructureFailure, false, result.rawResult.diagnostics?.join('\n'));
+      assert.strictEqual(result.config.thresholds, owner.thresholds);
+    });
+  }
 });
 
 test('parseArgs forwards name filters without requiring a second separator', () => {
@@ -151,7 +206,7 @@ test('buildTestArgs applies an explicit fast worker budget', () => {
   assert.equal(args.includes('--experimental-test-coverage'), false);
 });
 
-test('buildTestArgs can use a stable single-process release coverage entrypoint', () => {
+test('legacy argument builder cannot select covered entrypoints or isolation', () => {
   const config = {
     testGlobs: ['test/**/*.test.ts'],
     coverageTestGlobs: ['test/coverage-suite.ts'],
@@ -162,8 +217,9 @@ test('buildTestArgs can use a stable single-process release coverage entrypoint'
   assert.ok(releaseArgs.includes('--test-concurrency=1'));
   assert.equal(releaseArgs.includes('--experimental-test-coverage'), false);
   assert.equal(releaseArgs.some((arg) => arg.startsWith('--test-coverage-include=')), false);
-  assert.ok(releaseArgs.includes('test/coverage-suite.ts'));
-  assert.equal(releaseArgs.includes('test/**/*.test.ts'), false);
+  assert.equal(releaseArgs.includes('test/coverage-suite.ts'), false);
+  assert.ok(releaseArgs.includes('test/**/*.test.ts'));
+  assert.equal(releaseArgs.includes('--experimental-test-isolation=none'), false);
   const fastArgs = buildTestArgs(config, true);
   assert.ok(fastArgs.includes('test/**/*.test.ts'));
   assert.equal(fastArgs.includes('test/coverage-suite.ts'), false);
@@ -283,7 +339,8 @@ test('retained coverage keeps overlays on unconfirmed or nested teardown, but di
   }
 });
 
-const coveredConfig = { ...lifetimeConfig, coverage: true, coverageIncludes: ['src/**/*.ts'],
+const coveredConfig = { ...lifetimeConfig, testGlobs: ['scripts/verification/test/run-tests.test.mjs'],
+  coverage: true, coverageIncludes: ['src/**/*.ts'],
   thresholds: { lines: 80, branches: 75 } };
 const qualifiedCoverage = { coveredLinePercent: 60, coveredBranchPercent: 70,
   files: [{ path: path.join(process.cwd(), 'src/subject.ts'), totalLineCount: 5, coveredLineCount: 3,
@@ -306,12 +363,12 @@ test('qualified accounting replaces Node aggregates after joined child and clean
       resolveTsx: () => '/unused/tsx',
       runChild: async (_command, args, cwd, _signal, env) => {
         assert.equal(cwd, coveredConfig.cwd);
-        assert.ok(args.includes('--test-concurrency=1'));
+        assert.equal(JSON.parse(readFileSync(args.at(-1), 'utf8')).options.concurrency, 1);
         assert.equal(args.includes('--experimental-test-coverage'), false);
         assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
         assert.equal(env.JITI_SOURCE_MAPS, 'true');
         assert.match(env.NODE_OPTIONS, /--require=.*coverage-capture\.cjs/u);
-        assert.match(env.NODE_OPTIONS, /--inspect-port=0/u);
+        assert.ok(!env.NODE_OPTIONS.includes('--inspect-port=0'));
         assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
         assert.equal(env.PIE_TEST_COVERAGE_DIR, '/private/coverage');
         assert.equal(env.PIE_TEST_COVERAGE_CWD, coveredConfig.cwd);
@@ -417,7 +474,7 @@ test('single-process coverage inherits capture but no inspector-port flag; fast 
       resolveTsx: () => '/unused/tsx',
       runChild: async (_command, args, _cwd, _signal, env) => {
         if (covered) {
-          assert.ok(args.includes('--experimental-test-isolation=none'));
+          assert.equal(JSON.parse(readFileSync(args.at(-1), 'utf8')).options.isolation, 'none');
           assert.equal(env.JITI_SOURCE_MAPS, 'true');
           assert.match(env.NODE_OPTIONS, /coverage-capture/u);
           assert.ok(!env.NODE_OPTIONS.includes('--inspect-port=0'));
