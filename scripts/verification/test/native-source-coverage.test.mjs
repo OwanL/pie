@@ -57,7 +57,9 @@ test('bounded native TS adapter matches retained AST accounting and rejects lost
   const root = path.join(temporary, 'source');
   mkdirSync(root);
   const subject = path.join(root, 'subject.ts');
-  const source = `export function classify(n: number) {
+  const source = `import path from 'node:path';
+export function classify(n: number) {
+ if (path.sep.length !== 1) throw new Error('separator');
  if (n > 0) return 'positive';
  return n === 0 ? 'zero' : 'negative';
 }
@@ -112,9 +114,9 @@ export function unused(n: boolean) { return n ? 1 : 2; }
   }
   assert.deepEqual(reports.native, reports.retained);
   const report = reports.native;
-  assert.equal(report.totalBranchCount, 6);
-  assert.equal(report.coveredBranchCount, 3);
-  const untouched = report.files[0].branches.filter(branch => branch.locations.every(loc => loc.start.line === 5));
+  assert.equal(report.totalBranchCount, 8);
+  assert.equal(report.coveredBranchCount, 4);
+  const untouched = report.files[0].branches.filter(branch => branch.locations.every(loc => loc.start.line === 7));
   assert.equal(untouched.length, 1);
   assert.deepEqual(untouched[0].counts, [0, 0], 'untouched branch arms stay zero');
   const names = readdirSync(nativeOptions.directory).filter(name => name.startsWith('scripts-'));

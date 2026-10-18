@@ -130,6 +130,8 @@ function runtimeCode(capture, record) {
 // skipped by the standard converter. Recognize this exact scaffold only when
 // its export table is synthetic and helper nodes have unmapped provenance.
 const ESBUILD_CJS_HELPERS = `
+var __create = Object.create;
+var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -145,6 +147,7 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target, mod));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 `;
 let knownHelpers;
@@ -153,7 +156,7 @@ function syntax(node) {
     if (['start', 'end', 'loc', 'raw'].includes(key)) return undefined;
     // Keep BigInt tokens distinct from both numeric and string literals.
     if (typeof value === 'bigint') return { $bigint: value.toString() };
-    if (key === 'name' && typeof value === 'string') return value.replace(/^(__(?:defProp|getOwnPropDesc|getOwnPropNames|hasOwnProp|export|copyProps|toCommonJS))\d+$/u, '$1');
+    if (key === 'name' && typeof value === 'string') return value.replace(/^(__(?:create|getProtoOf|defProp|getOwnPropDesc|getOwnPropNames|hasOwnProp|export|copyProps|toESM|toCommonJS))\d+$/u, '$1');
     return value;
   });
 }
@@ -195,10 +198,11 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
   };
   collectScopes(ast);
   const candidates = scopes.flatMap(body => body.filter(node => knownHelpers.has(syntax(node))));
-  if (!candidates.some(node => /^__export\d*$/u.test(node.declarations[0].id.name))) return undefined;
+  if (candidates.length === 0) return undefined;
   const identifiers = new Set();
   const anonymousDefaults = [];
   const namedReexports = [];
+  const imports = [];
   let authoredDebugExport = false;
   const visit = node => {
     if (!node || typeof node !== 'object') return;
@@ -220,6 +224,7 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
       const program = parseSource(source, { sourceType: 'unambiguous', plugins: ['typescript', 'estree', ...(jsx ? ['jsx'] : [])] }).program;
       visit(program);
       for (const node of program.body) {
+        if (node.type === 'ImportDeclaration') imports.push({ source: sourceMap.sources[index], node });
         if (node.type === 'ExportDefaultDeclaration' && node.declaration.type === 'FunctionDeclaration'
           && node.declaration.id === null) {
           anonymousDefaults.push({ source: sourceMap.sources[index], node });
@@ -289,6 +294,36 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
   const ignored = [];
   for (const body of scopes) {
     const helpers = body.filter(node => unmappedHelpers.has(node));
+    // A CJS entry may have imports but no export table at all. Its unmapped
+    // interop helper still receives backwards line-1 mappings in the converter.
+    // Require the exact helper AST plus a synthetic require binding mapped to
+    // a captured authored import; never suppress the import statement itself.
+    const interop = helpers.find(node => /^__toESM\d*$/u.test(node.declarations[0].id.name));
+    if (interop) {
+      const imported = body.find(node => node.type === 'VariableDeclaration'
+        && node.declarations.some(declaration => {
+          const call = declaration.init;
+          const required = call?.arguments?.[0];
+          return declaration.id.type === 'Identifier' && !identifiers.has(declaration.id.name)
+            && call?.type === 'CallExpression' && call.callee.type === 'Identifier'
+            && call.callee.name === interop.declarations[0].id.name
+            && (call.arguments.length === 1 || call.arguments.length === 2
+              && call.arguments[1].type === 'Literal' && call.arguments[1].value === 1)
+            && required?.type === 'CallExpression' && required.callee.type === 'Identifier'
+            && required.callee.name === 'require' && required.arguments.length === 1
+            && required.arguments[0].type === 'Literal'
+            && imports.some(authored => authored.node.source.value === required.arguments[0].value
+              && mapsToExport(node, authored));
+        }));
+      if (imported) {
+        for (const helper of helpers) {
+          if (helper.end <= imported.start
+            && /^__(?:create|getProtoOf|defProp|getOwnPropDesc|getOwnPropNames|hasOwnProp|copyProps|toESM)\d*$/u.test(helper.declarations[0].id.name)) {
+            ignored.push([helper.start, helper.end]);
+          }
+        }
+      }
+    }
     const helper = helpers.find(node => /^__export\d*$/u.test(node.declarations[0].id.name));
     const toCommonJS = helpers.find(node => /^__toCommonJS\d*$/u.test(node.declarations[0].id.name));
     if (!helper || !toCommonJS) continue;

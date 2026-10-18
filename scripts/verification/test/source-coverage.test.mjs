@@ -88,6 +88,44 @@ export function untouched(flag: boolean) { return flag ? 1 : 2; }
 export const anonymous = [(flag: boolean) => flag ? 3 : 4, function () { return 5; }];
 `;
 
+test('CJS import-only entry interop retains authored import and matches ESM branch AST', async t => {
+  const options = fixture(t);
+  const source = `import path from 'node:path';
+if (path.sep.length !== 1) throw new Error('separator');
+`;
+  await execute(options, source);
+  const retained = await collectSourceCoverage(options);
+  rmSync(options.directory, { recursive: true });
+  mkdirSync(path.join(options.directory, 'v8'), { recursive: true });
+  const { capture } = await execute(options, source, { format: 'cjs', tsxCjs: true });
+  assert.match(capture.code, /var __toESM=/u);
+  assert.doesNotMatch(capture.code, /var __export=/u);
+  const native = await collectSourceCoverage(options);
+  assert.deepEqual(native.files[0].branches, retained.files[0].branches);
+  // ESM imports have no executable statement in the converter; CJS requires
+  // do. Do not force line parity by deleting the authored import.
+  assert.equal(native.totalLineCount, retained.totalLineCount + 1);
+  assert.equal(native.totalBranchCount, 2);
+  assert.equal(native.totalFunctionCount, 0);
+  assert.ok(native.files[0].lines.some(item => item.line === 1), 'authored import remains executable');
+});
+
+test('authored AST-exact interop helper retains its function and branches', async t => {
+  const options = fixture(t);
+  const source = `import path from 'node:path';
+function untouched() {
+ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target, mod));
+ return __toESM(path);
+}
+`;
+  await execute(options, source, { format: 'cjs', tsxCjs: true });
+  const report = await collectSourceCoverage(options);
+  assert.ok(report.totalFunctionCount >= 2);
+  const authored = report.files[0].branches.filter(branch => branch.locations.some(loc => loc.start.line === 3));
+  assert.ok(authored.length >= 2);
+  assert.ok(authored.every(branch => branch.counts.every(count => count === 0)));
+});
+
 test('untouched ternaries and same-line anonymous functions are genuinely uncovered; interfaces are erased', async t => {
   const options = fixture(t);
   await execute(options, source);
