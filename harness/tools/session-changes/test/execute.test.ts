@@ -148,6 +148,50 @@ test('execute: default list and diff use current in-memory edit/write entries wi
   }
 });
 
+test('execute: explicit sessionPath diff uses the recorded header cwd, not the caller cwd', async () => {
+  const headerDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-header-cwd-'));
+  const callerDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-caller-cwd-'));
+  const sessionPath = path.join(headerDir, 'session.jsonl');
+  const git = (dir: string, args: string[]) => execFileP('git', args, { cwd: dir });
+  try {
+    for (const dir of [headerDir, callerDir]) {
+      await git(dir, ['init', '-q']);
+      await git(dir, ['config', 'user.email', 'test@example.com']);
+      await git(dir, ['config', 'user.name', 'Test']);
+    }
+    await fs.writeFile(path.join(headerDir, 'created.ts'), 'before\n');
+    await fs.writeFile(path.join(callerDir, 'created.ts'), 'caller-before\n');
+    for (const dir of [headerDir, callerDir]) {
+      await git(dir, ['add', 'created.ts']);
+      await git(dir, ['commit', '-q', '-m', 'initial']);
+    }
+    await fs.writeFile(path.join(headerDir, 'created.ts'), 'after\n');
+    await fs.writeFile(path.join(callerDir, 'created.ts'), 'caller-after\n');
+
+    const entries = [
+      { type: 'session', version: 3, id: 's', timestamp: 't', cwd: headerDir },
+      {
+        type: 'message', id: 'm1', timestamp: 't',
+        message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'edit', arguments: { path: 'created.ts', oldText: 'before', newText: 'after' } }] },
+      },
+      { type: 'message', id: 'tr1', timestamp: 't', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'edit', content: 'ok', isError: false } },
+    ];
+    await fs.writeFile(sessionPath, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+
+    const res = await exe(
+      { action: 'diff', sessionPath, path: ['created.ts'] },
+      { sessionManager: { getEntries: () => [], getCwd: () => callerDir, getHeader: () => ({ cwd: callerDir }) } },
+    );
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /-before/);
+    assert.match(textOf(res), /\+after/);
+    assert.doesNotMatch(textOf(res), /caller-before|caller-after/);
+  } finally {
+    await fs.rm(headerDir, { recursive: true, force: true });
+    await fs.rm(callerDir, { recursive: true, force: true });
+  }
+});
+
 test('execute: default runtime entries win over a stale persisted session file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-runtime-stale-'));
   const staleSessionPath = path.join(dir, 'stale.jsonl');
@@ -352,6 +396,35 @@ test('execute: list preserves an absolute path when the session header has no cw
     const res = await exe({ action: 'list', sessionPath: session.sessionPath });
     assert.equal(res.isError, false);
     assert.equal(textOf(res).includes(session.file), true);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff preserves an absolute manifest path when the session header has no cwd', async () => {
+  const session = await makeSession({ cwd: null, toolPath: (dir) => path.join(dir, 'created.ts') });
+  try {
+    const res = await exe({ action: 'diff', sessionPath: session.sessionPath, path: [session.file] });
+    assert.equal(res.isError, false);
+    assert.equal(textOf(res).includes(session.file), true);
+    assert.match(textOf(res), /Not in a Git repository; use read/);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff fails closed for a relative path when the persisted session has no cwd', async () => {
+  // The test runner's cwd is the repository root, so package.json is a known
+  // host file in the host Git repository. Before the fix, a relative manifest
+  // path fell through to process.cwd() and inspected this unrelated file.
+  const hostRelative = 'package.json';
+  await fs.access(path.resolve(process.cwd(), hostRelative));
+  const session = await makeSession({ cwd: null, toolPath: hostRelative });
+  try {
+    const res = await exe({ action: 'diff', sessionPath: session.sessionPath, path: [hostRelative] });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /no recorded cwd/);
+    assert.doesNotMatch(textOf(res), /HEAD|Not in a Git repository|Untracked|@@/);
   } finally {
     await fs.rm(session.dir, { recursive: true, force: true });
   }

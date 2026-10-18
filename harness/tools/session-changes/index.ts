@@ -71,12 +71,26 @@ function parseRuntimeSessionChanges(ctx: ToolExecuteCtx): ParsedSession | undefi
   return parseSessionEntriesChanges(entries, undefined, cwd);
 }
 
-/** Resolve a (possibly relative) manifest path against the session cwd. Falls
- *  back to the path itself when no cwd is available (mirrors FileDiffService's
- *  resolveFileChangePath fallback). */
+/** Resolve a (possibly relative) manifest path against the session cwd.
+ *  Absolute paths pass through. A relative path requires a session cwd; callers
+ *  must fail closed otherwise rather than resolving against process.cwd(). */
 function resolveAgainstCwd(relPath: string, cwd: string | undefined): string {
   if (path.isAbsolute(relPath)) return relPath;
   return cwd ? path.resolve(cwd, relPath) : relPath;
+}
+
+/** A session without a recorded cwd cannot resolve relative manifest paths for
+ *  Git inspection. Never fall back to process.cwd() or a live session's cwd:
+ *  either could inspect an unrelated working tree. Absolute paths stay valid. */
+function firstUnresolvedRelativePath(
+  paths: string[],
+  parsed: ParsedSession,
+): string | undefined {
+  if (parsed.cwd) return undefined;
+  return paths.find((relPath) => {
+    const entry = findManifestEntry(parsed.changes, relPath, parsed.cwd);
+    return entry !== undefined && !path.isAbsolute(entry.path);
+  });
 }
 
 /** Render paths inside the session cwd relative to it. The cwd is already part
@@ -239,6 +253,10 @@ export default function (pi: ExtensionAPI) {
       if (offset > 0 && paths.length !== 1) return err('diff continuation with offset requires exactly one path.');
       if (paths.some((rel) => !findManifestEntry(parsed.changes, rel, parsed.cwd))) {
         return err('Every diff path must belong to this session\'s list manifest; call list for the recorded paths.');
+      }
+      const unresolvedRelative = firstUnresolvedRelativePath(paths, parsed);
+      if (unresolvedRelative !== undefined) {
+        return err(`Cannot resolve relative diff path "${unresolvedRelative}": this session has no recorded cwd. Pass an absolute manifest path or review the session where it was recorded.`);
       }
       const context = p.context ?? 0;
       if (!Number.isInteger(context) || context < 0 || context > 100) return err('context must be an integer from 0 to 100.');
