@@ -80,18 +80,6 @@ interface RegisteredSendResource {
   timer: TimerHandle | null;
 }
 
-/** Legacy direct-runner calls have no reducer operation identity. Their stored
- * data is limited to execution handles, callbacks, and transport correlation. */
-interface LegacySendResource extends RegisteredSendResource {
-  corrId: string;
-  sessionPath: string;
-  localId: string;
-  requestId?: string;
-  restorePruning(): void;
-  logSuperseded(): void;
-  dispatchSuperseded(): void;
-}
-
 type ReconciliationEffect = Extract<
   import('./effects/effects').Effect,
   { kind: 'ScheduleOperationReconciliation' }
@@ -104,9 +92,6 @@ type ReconciliationEffect = Extract<
  */
 export class SessionOperationEffectController {
   private readonly registeredSends = new Map<string, RegisteredSendResource>();
-  private readonly legacyInFlightSends = new Map<string, LegacySendResource>();
-  private readonly legacyTimedOutSends = new Map<string, LegacySendResource>();
-  private readonly legacyInFlightSendBySession = new Map<string, string>();
   private readonly operationReconciliationTimers = new Map<string, TimerHandle>();
   private readonly queuedEditOperations = new Map<string, ExecutionCancellationTicket>();
   private readonly messageOperationTickets = new Map<string, object>();
@@ -119,10 +104,8 @@ export class SessionOperationEffectController {
     void queues.enqueueSessionOperation(effect.sessionPath, async () => {
       const send = this.startSend(effect);
       const operationAttempt = effect.operationAttempt ?? 1;
-      const isCurrentExecution = (): boolean => effect.operationId
-        ? this.registeredSends.get(effect.corrId)?.ticket === send.ticket
-        : this.legacyInFlightSends.get(effect.corrId) === send.legacy
-          || this.legacyTimedOutSends.get(effect.corrId) === send.legacy;
+      const isCurrentExecution = (): boolean =>
+        this.registeredSends.get(effect.corrId)?.ticket === send.ticket;
       try {
         service.bumpSessionDataEpoch(effect.sessionPath);
         if (operationAttempt === 1) {
@@ -137,7 +120,6 @@ export class SessionOperationEffectController {
         }>): void => {
           if (!isCurrentExecution()) return;
           if (settlement.ok) {
-            if (send.legacy) send.legacy.requestId = settlement.result.requestId;
             dispatch({
               kind: 'SendResult', corrId: effect.corrId, operationId: effect.operationId,
               operationAttempt, backendGeneration: effect.backendGeneration,
@@ -172,7 +154,6 @@ export class SessionOperationEffectController {
           onCorrelatedResponse: settleAcknowledgement,
           ...(coldPromotion ? { timeoutMs: BACKEND_READY_TIMEOUT_MS } : {}),
         });
-        if (send.legacy) send.legacy.requestId = response.requestId;
         dispatch({
           kind: 'SendResult', corrId: effect.corrId, operationId: effect.operationId,
           operationAttempt, backendGeneration: effect.backendGeneration,
@@ -238,8 +219,6 @@ export class SessionOperationEffectController {
         const controller = this.registeredSends.get(corrId)?.abort;
         if (controller && !controller.signal.aborted) controller.abort();
       }
-    } else if (!effect.operationId) {
-      this.abortInFlightSend(effect.sessionPath);
     }
     for (const operationId of effect.cancelQueuedOperationIds ?? []) {
       this.queuedEditOperations.get(operationId)?.cancel();
@@ -279,10 +258,6 @@ export class SessionOperationEffectController {
       resource.timer = null;
       return;
     }
-    const send = this.legacyInFlightSends.get(effect.corrId);
-    if (!send) return;
-    if (send.timer) this.deps.timer.cancel(send.timer);
-    send.timer = null;
   }
 
   clearSendTimer(corrId: string, restorePruningMode?: PruningMode): void {
@@ -318,28 +293,12 @@ export class SessionOperationEffectController {
     this.restorePruningMode(effect.corrId, effect.restorePruningMode);
   }
 
-  /** Compatibility hook for direct calls without a reducer operation ID. */
-  abortInFlightSend(sessionPath: string): boolean {
-    const corrId = this.legacyInFlightSendBySession.get(sessionPath);
-    if (!corrId) return false;
-    const send = this.legacyInFlightSends.get(corrId);
-    if (!send) return false;
-    if (!send.abort.signal.aborted) send.abort.abort();
-    return true;
-  }
-
   dispose(): void {
     for (const send of this.registeredSends.values()) {
       if (send.timer) this.deps.timer.cancel(send.timer);
       send.abort.abort();
     }
     this.registeredSends.clear();
-    for (const send of this.legacyInFlightSends.values()) {
-      if (send.timer) this.deps.timer.cancel(send.timer);
-    }
-    this.legacyInFlightSends.clear();
-    this.legacyTimedOutSends.clear();
-    this.legacyInFlightSendBySession.clear();
     for (const timer of this.operationReconciliationTimers.values()) this.deps.timer.cancel(timer);
     this.operationReconciliationTimers.clear();
     this.queuedEditOperations.clear();
@@ -348,99 +307,28 @@ export class SessionOperationEffectController {
     this.messageOperationTickets.clear();
   }
 
-  private startSend(effect: SendRpcEffect): {
-    abort: AbortController;
-    ticket: object;
-    legacy?: LegacySendResource;
-  } {
+  private startSend(effect: SendRpcEffect): RegisteredSendResource {
     const budgetMs = this.deps.getSendTimerTimeoutMs?.(effect.sessionPath)
       ?? this.deps.sendTimerTimeoutMs;
-    const abort = new AbortController();
-    const ticket = {};
-    if (effect.operationId && effect.backendGeneration !== undefined) {
-      this.clearRegisteredSend(effect.corrId);
-      const resource: RegisteredSendResource = { abort, ticket, timer: null };
-      this.registeredSends.set(effect.corrId, resource);
-      // The send-timer bounds only the acknowledgement/prepass window (the
-      // prepass budget plus queue-wait headroom). On fire the registry-backed
-      // operation becomes ambiguous and reconciles; `markPrepassSucceeded`
-      // disarms it, and no host timer runs between preflight success and
-      // commit. The pre-ack RPC deadline stays owned by the RequestTracker.
-      const handle = this.deps.timer.schedule(() => {
-        if (this.registeredSends.get(effect.corrId)?.timer !== handle) return;
-        resource.timer = null;
-        this.deps.dispatchEvent({
-          kind: 'SendOperationDelayed', operationId: effect.operationId!,
-          operationAttempt: effect.operationAttempt ?? 1,
-          sessionPath: effect.sessionPath,
-          backendGeneration: effect.backendGeneration!,
-        });
-      }, budgetMs);
-      resource.timer = handle;
-      return { abort, ticket };
-    }
-
-    const restorePruning = (): void => this.restorePruningMode(
-      effect.corrId,
-      effect.priorPruningMode,
-    );
-    const legacy: LegacySendResource = {
-      corrId: effect.corrId,
-      sessionPath: effect.sessionPath,
-      localId: effect.localId,
-      abort,
-      ticket,
-      timer: null,
-      restorePruning,
-      logSuperseded: () => this.deps.log.log('debug', 'send-timer.superseded', {
-        corrId: effect.corrId,
-        requestId: legacy.requestId,
-        sessionPath: effect.sessionPath,
-        budgetMs,
-      }),
-      dispatchSuperseded: () => {
-        this.deps.dispatchEvent({
-          kind: 'PreflightSuperseded', corrId: effect.corrId,
-          requestId: legacy.requestId ?? '', sessionPath: effect.sessionPath,
-          localId: effect.localId, composedText: effect.composedText,
-          userParts: effect.userParts,
-          timestamp: Date.now(),
-        });
-      },
+    this.clearRegisteredSend(effect.corrId);
+    const resource: RegisteredSendResource = {
+      abort: new AbortController(), ticket: {}, timer: null,
     };
-    legacy.timer = this.deps.timer.schedule(
-      () => this.onLegacySendTimerFire(legacy, budgetMs),
-      budgetMs,
-    );
-    this.legacyInFlightSends.set(effect.corrId, legacy);
-    this.legacyInFlightSendBySession.set(effect.sessionPath, effect.corrId);
-    return { abort, ticket, legacy };
-  }
-
-  private onLegacySendTimerFire(
-    send: LegacySendResource,
-    budgetMs: number,
-  ): void {
-    if (this.legacyInFlightSends.get(send.corrId) !== send) return;
-    this.legacyInFlightSends.delete(send.corrId);
-    if (this.legacyInFlightSendBySession.get(send.sessionPath) === send.corrId) {
-      this.legacyInFlightSendBySession.delete(send.sessionPath);
-    }
-    send.timer = null;
-    send.restorePruning();
-    if (send.requestId) {
-      this.legacyTimedOutSends.set(send.corrId, send);
+    this.registeredSends.set(effect.corrId, resource);
+    // Bounds acknowledgement/prepass observation only. Expiry is ambiguity,
+    // never rollback; preflight success disarms it until lifecycle settlement.
+    const handle = this.deps.timer.schedule(() => {
+      if (this.registeredSends.get(effect.corrId)?.timer !== handle) return;
+      resource.timer = null;
       this.deps.dispatchEvent({
-        kind: 'PreflightFailed', corrId: send.corrId, sessionPath: send.sessionPath,
-        requestId: send.requestId,
-        error: `Timed out waiting for the turn to start streaming (${budgetMs / 1000}s)`,
+        kind: 'SendOperationDelayed', operationId: effect.operationId,
+        operationAttempt: effect.operationAttempt ?? 1,
+        sessionPath: effect.sessionPath,
+        backendGeneration: effect.backendGeneration,
       });
-      return;
-    }
-    this.deps.log.log(
-      'warn',
-      `send-timer fired before early-ack for corrId=${send.corrId} session=${send.sessionPath} (pre-ack RequestTracker timer should have fired first)`,
-    );
+    }, budgetMs);
+    resource.timer = handle;
+    return resource;
   }
 
   private clearRegisteredSend(corrId: string): void {
@@ -451,25 +339,7 @@ export class SessionOperationEffectController {
   }
 
   private clearSend(corrId: string): void {
-    if (this.registeredSends.has(corrId)) {
-      this.clearRegisteredSend(corrId);
-      return;
-    }
-    const timedOut = this.legacyTimedOutSends.get(corrId);
-    if (timedOut) {
-      this.legacyTimedOutSends.delete(corrId);
-      timedOut.logSuperseded();
-      timedOut.dispatchSuperseded();
-      return;
-    }
-    const send = this.legacyInFlightSends.get(corrId);
-    if (!send) return;
-    if (send.timer) this.deps.timer.cancel(send.timer);
-    this.legacyInFlightSends.delete(corrId);
-    if (this.legacyInFlightSendBySession.get(send.sessionPath) === send.corrId) {
-      this.legacyInFlightSendBySession.delete(send.sessionPath);
-    }
-    send.restorePruning();
+    this.clearRegisteredSend(corrId);
   }
 
   private restorePruningMode(corrId: string, mode: PruningMode | undefined): void {

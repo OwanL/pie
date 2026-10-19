@@ -5,16 +5,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import {
-  buildTsxArgs,
   createGroupTsconfigOverlay,
   inferRepoRoot,
-  parseArgs,
-  resolveLocalTsx,
-  runGroup,
 } from '../run-test-files.mjs';
 
+import { parseArgs, runNodeTestsWithOverlay } from '../test-node.mjs';
+
 const repoRoot = inferRepoRoot();
-const runnerPath = path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs');
+const runnerPath = path.join(repoRoot, 'scripts', 'verification', 'test-node.mjs');
 const currentPackages = [
   '@earendil-works/pi-coding-agent',
   '@earendil-works/pi-agent-core',
@@ -61,36 +59,19 @@ function makeCandidateSdk(root) {
   return sdkRoot;
 }
 
-test('parseArgs accepts both SDK path forms and leaves options after -- as file names', () => {
-  assert.deepEqual(parseArgs(['a.test.ts', '--sdk-path', 'candidate/sdk', 'b.test.ts']), {
-    files: ['a.test.ts', 'b.test.ts'],
-    help: false,
-    filesFromStdin: false,
-    sdkPath: 'candidate/sdk',
-  });
-  assert.deepEqual(parseArgs(['--sdk-path=candidate/sdk', 'a.test.ts']), {
-    files: ['a.test.ts'],
-    help: false,
-    filesFromStdin: false,
-    sdkPath: 'candidate/sdk',
-  });
-  assert.deepEqual(parseArgs(['--sdk-path', 'candidate/sdk', '--', '--sdk-path', 'literal.test.ts']), {
-    files: ['--sdk-path', 'literal.test.ts'],
-    help: false,
-    filesFromStdin: false,
-    sdkPath: 'candidate/sdk',
-  });
-  assert.deepEqual(parseArgs(['--', '--sdk-path=candidate/sdk']), {
-    files: ['--sdk-path=candidate/sdk'],
-    help: false,
-    filesFromStdin: false,
-  });
-  assert.throws(() => parseArgs(['--sdk-path']), /--sdk-path requires a candidate/);
-  assert.throws(() => parseArgs(['--sdk-path', '--', 'a.test.ts']), /--sdk-path requires a candidate/);
-  assert.throws(() => parseArgs(['--sdk-path=']), /--sdk-path requires a candidate/);
+test('current SDK selector parser accepts both forms before selectors', () => {
+  const expected = {
+    selectors: ['a.test.ts'], nodeFlags: [], includeGlobs: [], excludeGlobs: [], sdkPath: 'candidate/sdk',
+  };
+  assert.deepEqual(parseArgs(['--sdk-path', 'candidate/sdk', 'a.test.ts']), expected);
+  assert.deepEqual(parseArgs(['--sdk-path=candidate/sdk', 'a.test.ts']), expected);
+  assert.throws(() => parseArgs(['a.test.ts', '--sdk-path=candidate/sdk']), /before test selectors/);
+  for (const args of [['--sdk-path'], ['--sdk-path', '--'], ['--sdk-path=']]) {
+    assert.throws(() => parseArgs(args), /--sdk-path requires a path/);
+  }
 });
 
-test('candidate overlay for an unconfigured group uses root SDK config and binds all Pi/TypeBox aliases', async (t) => {
+test('current runner loads all Pi/TypeBox aliases from the explicit SDK candidate', async (t) => {
   const fixtureRoot = makeFixture(t);
   const sdkPath = makeCandidateSdk(fixtureRoot);
   const overlay = createGroupTsconfigOverlay(repoRoot, { id: 'fixture' }, { sdkPath });
@@ -117,84 +98,35 @@ test('candidate overlay for an unconfigured group uses root SDK config and binds
     `test('all SDK aliases load from the explicit candidate', () => assert.deepEqual([${imports.map((_, index) => `candidate${index}`).join(', ')}], ${JSON.stringify(expected)}));`,
   ].join('\n'));
 
-  const group = { id: 'detached-sdk-candidate', cwd: fixtureRoot, tsxBin: resolveLocalTsx(repoRoot) };
+  // Exercise public native SDK alias loading, not the retired grouped CLI.
   // node:test sets this marker for its own subprocesses; do not propagate it
   // into the detached runner or Node will intentionally skip its test files.
   const nodeTestContext = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
   let code;
   try {
-    code = await runGroup(group, buildTsxArgs({ tsxConfig: overlay.configPath, files: [fixtureTest] }));
+    code = (await runNodeTestsWithOverlay([fixtureTest], { repoRoot, cwd: repoRoot, sdkPath })).code;
   } finally {
     if (nodeTestContext !== undefined) process.env.NODE_TEST_CONTEXT = nodeTestContext;
   }
   assert.equal(code, 0, 'detached fixture must execute imports through the candidate aliases');
 });
 
-test('SDK-independent test files still strictly validate explicit runtime selections', (t) => {
+test('current CLI validates explicit SDK selectors even for SDK-independent tests', (t) => {
   const fixtureRoot = makeFixture(t);
-  const allowlistedFile = 'application/hosts/test/asset-manifests/bootstrap.test.ts';
-  const invalidSdk = spawnSync(process.execPath, [
-    runnerPath,
-    '--sdk-path',
-    path.join(fixtureRoot, 'not-an-sdk'),
-    allowlistedFile,
-  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
-  assert.equal(invalidSdk.error, undefined, invalidSdk.error?.message);
-  assert.equal(invalidSdk.status, 1);
-  const sdkOutput = `${invalidSdk.stdout}\n${invalidSdk.stderr}`;
-  assert.match(sdkOutput, /Invalid --sdk-path candidate/);
-  assert.match(sdkOutput, /verified materialized/i);
-  assert.doesNotMatch(sdkOutput, /▶ extension/u);
-
-  const invalidRuntime = spawnSync(process.execPath, [
-    runnerPath,
-    '--pi-runtime',
-    path.join(fixtureRoot, 'missing-runtime'),
-    allowlistedFile,
-  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
-  assert.equal(invalidRuntime.error, undefined, invalidRuntime.error?.message);
-  assert.equal(invalidRuntime.status, 1);
-  const runtimeOutput = `${invalidRuntime.stdout}\n${invalidRuntime.stderr}`;
-  assert.match(runtimeOutput, /ENOENT|manifest/i);
-  assert.doesNotMatch(runtimeOutput, /▶ extension/u);
-});
-
-test('CLI rejects unpublished SDK fixtures and relative workspace candidates before discovery', (t) => {
-  const fixtureRoot = makeFixture(t);
-  const sdkPath = makeCandidateSdk(fixtureRoot);
-  const missing = spawnSync(process.execPath, [runnerPath, '--sdk-path'], {
-    cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true,
-  });
-  assert.equal(missing.error, undefined, missing.error?.message);
-  assert.equal(missing.status, 1);
-  assert.match(`${missing.stdout}\n${missing.stderr}`, /--sdk-path requires an artifact path/);
-
-  const invalidCandidate = path.join(fixtureRoot, 'not-an-sdk');
-  const invalid = spawnSync(process.execPath, [
-
-    runnerPath,
-    '--sdk-path',
-    invalidCandidate,
-    'scripts/verification/test/does-not-exist.test.mjs',
-  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
-  assert.equal(invalid.error, undefined, invalid.error?.message);
-  assert.equal(invalid.status, 1);
-  const invalidOutput = `${invalid.stdout}\n${invalid.stderr}`;
-  assert.match(invalidOutput, /Invalid --sdk-path candidate/);
-  assert.match(invalidOutput, /verified materialized/i);
-  assert.doesNotMatch(invalidOutput, /Test file not found/);
-
-  const relativeCandidate = path.relative(repoRoot, sdkPath);
-  const valid = spawnSync(process.execPath, [
-    runnerPath,
-    `--sdk-path=${relativeCandidate}`,
-    'scripts/verification/test/does-not-exist.test.mjs',
-  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
-  assert.equal(valid.error, undefined, valid.error?.message);
-  assert.equal(valid.status, 1);
-  const validOutput = `${valid.stdout}\n${valid.stderr}`;
-  assert.match(validOutput, /Invalid --sdk-path candidate/);
-  assert.match(validOutput, /verified materialized/i);
-  assert.doesNotMatch(validOutput, /Test file not found/);
+  const selector = 'scripts/verification/test/test-packages.test.mjs';
+  const invoke = (...args) => {
+    const result = spawnSync(process.execPath, [runnerPath, ...args], {
+      cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    });
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 1);
+    return result.stdout + '\n' + result.stderr;
+  };
+  assert.match(invoke('--sdk-path'), /--sdk-path requires a path/);
+  assert.match(invoke('--sdk-path='), /--sdk-path requires a path/);
+  assert.match(invoke(selector, '--sdk-path', fixtureRoot), /must be supplied before test selectors/);
+  assert.match(invoke('--sdk-path', path.join(fixtureRoot, 'not-an-sdk'), selector), /SDK|package|ENOENT/i);
+  // Runtime acquisition is intentionally not part of the native focused CLI.
+  assert.match(invoke('--pi-runtime', fixtureRoot, selector), /Unknown option --pi-runtime/);
 });

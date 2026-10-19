@@ -1,31 +1,7 @@
 /**
- * Interrupt / edit UX hardening.
- *
- * Interrupt responsiveness (Heuristic #3): on interrupt the runner calls
- * `abortInFlightSend(sessionPath)` (BEST-EFFORT pre-ack cancel of an in-flight
- * `message.send` (or an edit before its truncate boundary) AND enqueues
- * `message.interrupt` (stream abort). Calling
- * both is safe in every phase:
- *  - Pre-ack (RPC in flight, e.g. slow prepass): the abort cancels the
- *    `AbortController` passed to `backend.request` → the RPC rejects →
- *    `SendResult`/`EditResult{ok:false}` (rollback via `pending.ops`) and the
- *    send-timer is cleared. `message.interrupt` then runs (the turn never
- *    started, so it is a harmless no-op / SESSION_NOT_RUNNING).
- *  - Post-commit (RPC early-acked, turn streaming): `abortInFlightSend` finds
- *    no in-flight send (cleared at the commit point) → returns false → no
- *    rollback. `message.interrupt` aborts the stream.
- *  - Edit truncate in flight: local cancellation is fenced because it cannot
- *    cancel the already-written JSON-RPC request. The edit finishes its
- *    truncate+send transaction, then the serialized interrupt stops the new
- *    turn, keeping host and durable transcripts coherent.
- *
- * Rapid multi-prompt: a second `message.send` while a turn is in-flight is
- * REJECTED by the backend's `REQUEST_IN_PROGRESS` guard (not queued). The
- * effect-runner surfaces it as `SendResult{ok:false}` (a send failure, not a
- * silent drop or a deferred-prompt queue).
- *
- * Uses a `FakeTimerSink` + `runner.dispose()` so no real 120s send-timers keep
- * the event loop alive (mirrors `arch-effect-runner.test.ts`).
+ * Registered send interruption: the reducer selects exact pre-ack corrIds to
+ * abort; committed sends are released and cannot be rolled back by Stop.
+ * FIFO send admission and queued acknowledgements remain independently covered.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -92,7 +68,7 @@ function findResult<K extends EffectResultEvent['kind']>(
   return events.find((e) => e.kind === kind) as Extract<EffectResultEvent, { kind: K }> | undefined;
 }
 
-// ─── (a) Pre-ack interrupt: abortInFlightSend cancels the send → SendResult{ok:false},
+// ─── (a) Pre-ack interrupt: explicit cancellation cancels the send → SendResult{ok:false},
 //        AND message.interrupt is dispatched. ────────────────────────────────────
 test('interrupt aborts an in-flight pre-ack message.send AND enqueues message.interrupt', async () => {
   const timers = new FakeTimerSink();
@@ -108,9 +84,9 @@ test('interrupt aborts an in-flight pre-ack message.send AND enqueues message.in
   const runner = new EffectRunner(deps);
 
   // Default (inline) queues call the session-op task synchronously, so
-  // `startInFlightSend` arms the AbortController before this call returns.
-  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
-  runner.run({ kind: 'InterruptRpc', corrId: 'c-int', sessionPath: '/s' });
+  // `startSend` arms the AbortController before this call returns.
+  runner.run({ kind: 'SendRpc', corrId: 'c-send', operationId: 'c-send', backendGeneration: 0, sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
+  runner.run({ kind: 'InterruptRpc', corrId: 'c-int', operationId: 'stop-op', backendGeneration: 0, sessionPath: '/s', abortSendCorrIds: ['c-send'], usePriorityLane: true });
 
   await settle();
 
@@ -153,7 +129,7 @@ test('interrupt on a streaming (post-commit) turn does not roll back the send; m
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-send', operationId: 'c-send', backendGeneration: 0, sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
   await settle(); // early-ack → SendResult{ok:true}; send-timer armed (in-flight).
 
   // Commit point: first MessageStarted → reducer emits ClearSendTimer → the
@@ -208,8 +184,8 @@ test('a second send while a turn is in-flight is queued as a steering injection'
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c1', sessionPath: '/s', text: 'first', inputs: [], composedText: 'hi', localId: 'l1' });
-  runner.run({ kind: 'SendRpc', corrId: 'c2', sessionPath: '/s', text: 'second', inputs: [], composedText: 'hi', localId: 'l2' });
+  runner.run({ kind: 'SendRpc', corrId: 'c1', operationId: 'c1', backendGeneration: 0, sessionPath: '/s', text: 'first', inputs: [], composedText: 'hi', localId: 'l1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c2', operationId: 'c2', backendGeneration: 0, sessionPath: '/s', text: 'second', inputs: [], composedText: 'hi', localId: 'l2' });
   await settle();
 
   const sendResults = events.filter((e) => e.kind === 'SendResult') as Extract<EffectResultEvent, { kind: 'SendResult' }>[];

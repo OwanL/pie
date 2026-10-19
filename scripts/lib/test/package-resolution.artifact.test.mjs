@@ -418,18 +418,16 @@ export function createWebSocketServer() {
   assert.equal(typeof server.shouldHandle, 'function');
 });
 
-test('the integrated run-test-files wrapper keeps current-layout tsxConfig package runs green', { timeout: 120_000 }, async (t) => {
-  // Old layout stays operational: the full integrated wrapper (registry
-  // classification -> generated overlay -> package-local tsx) runs a real
-  // registered test that depends on the redirected nested SDK identity.
-  // This fixture derives all Pi roots from the outer TSX overlay and verifies
-  // the immutable artifact independently in native Node. Missing or mismatched
-  // selection throws before any nested runner can acquire a fresh artifact.
+test('the current test-node CLI validates and executes a selected SDK-backed assertion', { timeout: 120_000 }, async (t) => {
+  // The current native runner validates this explicit SDK package, then runs
+  // one selected assertion that independently resolves the SDK graph. It must
+  // execute exactly one test; runner success alone would not prove execution.
   const { sourceDescriptor } = await import('../../../harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
   const result = spawnSync(process.execPath, [
-    'scripts/verification/run-test-files.mjs',
-    'harness/tools/subagent/test/schema.test.ts',
-    '--pi-runtime', sourceDescriptor.artifactDir,
+    'scripts/verification/test-node.mjs',
+    '--sdk-path', sourceDescriptor.sdkPath,
+    'scripts/lib/test/package-resolution.artifact.test.mjs',
+    '--', '--test-name-pattern=^resolves current and planned package roots explicitly, and pins the explicitly selected SDK graph$',
   ], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -437,5 +435,7 @@ test('the integrated run-test-files wrapper keeps current-layout tsxConfig packa
     windowsHide: true,
   });
   assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
-  assert.match(result.stdout, /Summary: 1\/1 packages passed/);
+  assert.match(result.stdout, /# tests 1/);
+  assert.match(result.stdout, /# pass 1/);
+  assert.match(result.stdout, /# fail 0/);
 });

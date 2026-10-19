@@ -212,6 +212,12 @@ test('fresh refresh returns selected models; failed refresh and later reads pres
     const fresh = await f.service.request({ type: 'refresh', operationId: 'fresh', id: 'local' });
     assert.equal(fresh.status, 'ok'); assert.equal(fresh.snapshot.providers[0].discovery, 'fresh');
     assert.ok(fresh.draft?.models.some(m => m.id === 'discovered'));
+    // Published views must not expose mutable ownership of the cached catalog.
+    const publishedModels = structuredClone(fresh.draft!.models);
+    fresh.draft!.models.find(m => m.id === 'discovered')!.name = 'caller mutation';
+    fresh.draft!.models.length = 0;
+    const isolated = await f.service.request({ type: 'read-provider', operationId: 'isolated', id: 'local' });
+    assert.deepEqual(isolated.draft?.models, publishedModels);
     fail = true;
     const failed = await f.service.request({ type: 'refresh', operationId: 'failed', id: 'local' });
     assert.equal(failed.status, 'error'); assert.ok(failed.draft?.models.some(m => m.id === 'discovered'));

@@ -19,8 +19,6 @@ export type AnalyticsQueryRequest =
     }
   | { type: 'detail'; payloadId: string; offset?: number | string; maxBytes?: number; maxResultBytes?: number }
   | { type: 'storage'; maxResultBytes?: number }
-  // Compatibility commands for the in-tree accounting adapters.
-  | { type: 'providerSettlements'; rootSessionId?: string; limit?: number; maxResultBytes?: number }
   | {
       type: 'scopedProviderSettlements';
       scope: import('../recording/sqlite-recorder.js').ProviderSettlementScope;
@@ -29,8 +27,6 @@ export type AnalyticsQueryRequest =
       expectedRevision?: number | string;
       maxResultBytes?: number;
     }
-  | { type: 'providerAccounting'; rootSessionId?: string; maxResultBytes?: number }
-  | { type: 'executionSummary'; rootSessionId?: string; maxResultBytes?: number }
   | {
       type: 'providerAggregate';
       todayStartMs: number;
@@ -43,7 +39,6 @@ export type AnalyticsQueryRequest =
       maxGroups?: number;
       maxResultBytes?: number;
     }
-  | { type: 'historicalDimensions'; maxRowsPerDimension?: number; maxCellBytes?: number; maxResultBytes?: number }
   | { type: 'activityProjection'; rootSessionId?: string; maxKinds?: number; maxResultBytes?: number }
   | { type: 'toolFacetProjection'; rootSessionId?: string; limit?: number; maxResultBytes?: number }
   | {

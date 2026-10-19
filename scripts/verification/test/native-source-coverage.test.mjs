@@ -7,41 +7,11 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { collectSourceCoverage } from '../source-coverage.mjs';
-import { PACKAGE_CONFIGS, runPackage } from '../run-tests.mjs';
 import { assertCoverageQualification, buildNodeArgs, createNodeTestEntries, createTestEnvironment } from '../test-node.mjs';
 
 const require = createRequire(import.meta.url);
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
 const preload = fileURLToPath(new URL('../coverage-capture.cjs', import.meta.url));
-
-// An SDK-free real registry owner exercises the production orchestration seam,
-// not the low-level fixture adapter below. No public native coverage flag.
-test('authentication owner matches full AST records in both runPackage execution lanes', async t => {
-  const owner = PACKAGE_CONFIGS.find(config => config.id === 'model-provider-authentication');
-  const reports = {};
-  for (const execution of ['retained', 'native']) {
-    const result = await runPackage(owner, false, false, [], undefined, {}, {
-      execution,
-      createOverlay: () => {
-        const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-owner-qualification-'));
-        const configPath = path.join(directory, 'tsconfig.json');
-        writeFileSync(configPath, JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' } }));
-        return { configPath, dispose: () => rmSync(directory, { recursive: true, force: true }) };
-      },
-    });
-    if (!result.passed) t.diagnostic(JSON.stringify(result));
-    assert.equal(result.passed, true);
-    assert.equal(result.summary.counts.passed, 18);
-    reports[execution] = result.coverage;
-  }
-  assert.deepEqual(reports.native, reports.retained);
-  assert.equal(reports.native.coveredLineCount, 32);
-  assert.equal(reports.native.totalLineCount, 32);
-  assert.equal(reports.native.coveredFunctionCount, 5);
-  assert.equal(reports.native.totalFunctionCount, 5);
-  assert.equal(reports.native.coveredBranchCount, 22);
-  assert.equal(reports.native.totalBranchCount, 23);
-});
 
 // Qualification only: deliberately bypass the public refusal using the existing
 // runner's fixture config, not a new execution or coverage implementation.

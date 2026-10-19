@@ -173,7 +173,7 @@ function createLegacyFixture(version: 2 | 3): { root: string; databasePath: stri
 
 function assertPreservedLegacyUsage(recorder: SqliteAnalyticsRecorder): void {
   assert.equal(recorder.getDatabaseSchemaVersion(), 15);
-  const read = recorder.readProviderSettlements();
+  const read = recorder.readScopedProviderSettlements({ kind: 'global' });
   assert.equal(read.settlements.length, 1);
   assert.equal(read.settlements[0]?.invocationId, 'legacy-invocation');
   assert.equal(read.settlements[0]?.executionId, null);

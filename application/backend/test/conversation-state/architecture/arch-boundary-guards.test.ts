@@ -44,7 +44,6 @@ test('EffectRunner delegates session-operation resources to the dedicated contro
   const controller = readFileSync(SESSION_OPERATION_CONTROLLER_PATH, 'utf8');
   const resourcesOwnedByController = [
     'registeredSends',
-    'legacyInFlightSends',
     'operationReconciliationTimers',
     'queuedEditOperations',
     'messageOperationTickets',
@@ -56,6 +55,11 @@ test('EffectRunner delegates session-operation resources to the dedicated contro
   for (const resource of resourcesOwnedByController) {
     assert.ok(!effectRunner.includes(resource), `EffectRunner must not own session-operation resource ${resource}`);
     assert.ok(controller.includes(resource), `session-operation controller must own ${resource}`);
+  }
+
+  for (const retired of ['legacyInFlightSends', 'legacySendTimers', 'runLegacySendRpc', 'abortInFlightSend']) {
+    assert.ok(!controller.includes(retired), `retired send path must not return: ${retired}`);
+    assert.ok(!effectRunner.includes(retired), `retired façade path must not return: ${retired}`);
   }
 
   const fieldRegion = controller.match(/export class SessionOperationEffectController \{([\s\S]+?)\n {2}constructor/);

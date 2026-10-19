@@ -106,9 +106,9 @@ test('actual EffectRunner reads readiness after hot attach then loss for send an
   const runner = new EffectRunner(deps);
   try {
     f.loss();
-    runner.run({ kind: 'SendRpc', corrId: 'send-a', sessionPath: A, text: 'hi', inputs: [], composedText: 'hi', localId: 'local-a' });
+    runner.run({ kind: 'SendRpc', corrId: 'send-a', operationId: 'send-a', backendGeneration: 0, sessionPath: A, text: 'hi', inputs: [], composedText: 'hi', localId: 'local-a' });
     runner.run({ kind: 'ContinueRpc', corrId: 'continue-a', sessionPath: A });
-    runner.run({ kind: 'SendRpc', corrId: 'send-b', sessionPath: B, text: 'hi', inputs: [], composedText: 'hi', localId: 'local-b' });
+    runner.run({ kind: 'SendRpc', corrId: 'send-b', operationId: 'send-b', backendGeneration: 0, sessionPath: B, text: 'hi', inputs: [], composedText: 'hi', localId: 'local-b' });
     runner.run({ kind: 'ContinueRpc', corrId: 'continue-b', sessionPath: B });
     for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(observed.filter((entry) => entry.path === A).map((entry) => entry.budget), [120_000, 120_000]);

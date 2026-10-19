@@ -242,7 +242,7 @@ test('recorder prices a complete-channel subagent settlement from the catalog sn
       factSink: recorder,
       priceSettlement: () => RATES,
     } as never, 'parent-tool'), 'submitted');
-    const read = recorder.readProviderSettlementProjection('root-recorder-pricing');
+    const read = recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'root-recorder-pricing' });
     assert.equal(read.settlements.length, 1);
     const settlement = read.settlements[0]!;
     // 4_000 * 0.075 + 200 * 0.25 + 1_000 * 0.015 + 2_000 * 0 == 365 / 1e6 USD.

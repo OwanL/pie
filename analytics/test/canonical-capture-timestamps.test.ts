@@ -98,7 +98,7 @@ test('provider capture keeps unavailable source dates undated and preserves a re
     }), [[null, null, null], [null, null, null], [0, 0, 0]]);
     assert.deepEqual(observations.map((observation) => observation.observedAtMs), [0, 0, 0],
       'unavailable source time cannot vary with the clock on redelivery');
-    const { settlements } = recorder.readProviderSettlements();
+    const { settlements } = recorder.readScopedProviderSettlements({ kind: 'global' });
     assert.equal(settlements.length, 3, 'undated usage remains in durable accounting');
     assert.deepEqual(settlements.map((row) => row.settledAtMs), [null, null, 0]);
     assert.equal(settlements.reduce((sum, row) => sum + (row.effectiveCostUsd ?? 0), 0), 0.75);
@@ -254,7 +254,7 @@ test('accounting adapter does not replace missing producer dates with its clock 
       accounting.observeAuxiliaryLlmUsage('/session.jsonl', sample);
       accounting.observeAuxiliaryLlmUsage('/session.jsonl', sample);
     }
-    const { settlements } = recorder.readProviderSettlements();
+    const { settlements } = recorder.readScopedProviderSettlements({ kind: 'global' });
     assert.equal(settlements.length, 3);
     assert.deepEqual(captureErrors, [], 'exact redelivery stays idempotent with missing producer dates');
     assert.equal(settlements.filter((row) => row.settledAtMs === null).length, 2);

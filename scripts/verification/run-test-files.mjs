@@ -2,40 +2,19 @@
 
 import { OWNERSHIP_STARTUP_TOKEN } from './ownership-startup.mjs';
 
-// Run one or more repo-relative test files directly through the appropriate
-// LOCAL tsx with node:test, in fast mode (parallel files, no coverage). This is
-// the tightest dev loop: `node scripts/verification/run-test-files.mjs application/hosts/vscode/test/foo.test.ts
-// `harness/tools/subagent/test/schema.test.ts`.
-//
-// Classification mirrors scripts/verification/run-tests.mjs PACKAGE_CONFIGS and registry
-// testCwd metadata, routing over every registered source/test root (including
-// declared distributed future roots, which classify like any package dir):
-//  - application/hosts/vscode/ -> cwd application/hosts/vscode/, tsx = registry-selected local/root CLI
-//  - scripts/**/test/ -> cwd repoRoot,            tsx = node_modules/tsx (root)
-//  - extensions/* and tools/* -> cwd repoRoot, tsx = node_modules/tsx (root)
-//
-// Packages with a registry `tsxConfig` pass `--tsconfig` (their tests resolve
-// pi SDK path aliases); see scripts/lib/test-packages.mjs. `testTsx: 'root'`
-// selects the root CLI for cross-owner ESM sources that need its loader behavior.
-//
-// The local tsx CLI is invoked directly (`node <local tsx cli.mjs>`, not
-// `npx tsx`) to skip npx resolution overhead.
-//
-// This script is always fast/no-coverage; exit code is non-zero if any tsx
-// invocation fails.
+// Shared legacy classification and execution helpers. Focused CLI: test-node.mjs (test:file).
 
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
 import { isSdkIndependentTestFile, PACKAGE_DIRECTIVES, resolvePackageEntry } from '../lib/test-packages.mjs';
-import { extractRuntimeArgs, resolveRuntimeSelection, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+import { verificationChildEnv } from './verification-runtime.mjs';
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import {
-  abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
   watchChildProcess,
   withProcessTreeIsolation,
@@ -327,25 +306,6 @@ export function parseArgs(argv) {
   return { files, help, filesFromStdin, ...(sdkPath === undefined ? {} : { sdkPath }) };
 }
 
-function printHelp() {
-  console.log(
-    `Usage: node scripts/verification/run-test-files.mjs <test-file>... [options]\n\n` +
-      `Run specific test files through the appropriate local tsx with node:test\n` +
-      `(fast mode: parallel files, no coverage; up to ${DEFAULT_GROUP_CONCURRENCY} package groups at once). Classifies each path into\n` +
-      `application/hosts/vscode/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
-      `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
-      `Options:\n` +
-      `  --help, -h          Show this help.\n` +
-      `  --files-from-stdin  Read a JSON array of file paths from stdin.\n` +
-      `  --sdk-path <dir>    Use a candidate Pi coding-agent package directory.\n` +
-      `  --sdk-path=<dir>    Equivalent form of --sdk-path.\n` +
-      `  --                  Treat the rest of the args as file paths.\n\n` +
-      `Examples:\n` +
-      `  node scripts/verification/run-test-files.mjs application/frontend/test/components/app-smoke.test.ts\n` +
-      `  node scripts/verification/run-test-files.mjs harness/tools/subagent/test/schema.test.ts\n`,
-  );
-}
-
 /**
  * Spawn `node <tsxBin> <args>` with inherited stdio so output streams live.
  * Exported for the integrated future-root proof tests: registry classification
@@ -414,122 +374,4 @@ export async function readFilesFromStdin(stream = process.stdin) {
     throw new Error('Expected a JSON array of test file paths on stdin.');
   }
   return parsed;
-}
-
-export async function main() {
-  const repoRoot = inferRepoRoot();
-  let parsedArgs;
-  let selection;
-  try {
-    selection = extractRuntimeArgs(process.argv.slice(2), { allowSdkPath: true });
-    parsedArgs = parseArgs(selection.args);
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-    return;
-  }
-  const { files: argFiles, help, filesFromStdin } = parsedArgs;
-
-  if (help) {
-    printHelp();
-    return;
-  }
-
-  if (selection.sdkPath !== undefined) {
-    selection.sdkPath = path.resolve(repoRoot, selection.sdkPath);
-    try { selection = { ...selection, ...await resolveRuntimeSelection(selection), sdkPath: undefined }; }
-    catch (error) { throw new Error(`Invalid --sdk-path candidate: ${error.message}`); }
-  }
-
-  let files = argFiles;
-  if (filesFromStdin) {
-    try {
-      files = [...files, ...await readFilesFromStdin()];
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exitCode = 1;
-      return;
-    }
-  }
-
-  if (files.length === 0) {
-    console.error('Error: no test files given.\n');
-    printHelp();
-    process.exitCode = 1;
-    return;
-  }
-
-  let groups;
-  try {
-    groups = groupFilesByPackage(repoRoot, files);
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-    return;
-  }
-
-  // Registry-configured groups keep their base tsconfig. Candidate SDK mode
-  // also overlays unconfigured groups from the application owner's root SDK
-  // tsconfig so every Pi and TypeBox spelling resolves to the candidate.
-  // Overlays are private OS-temp files and are always disposed after the run.
-  const overlays = new Map();
-  const processAbort = abortOnProcessSignals();
-  const failures = [];
-  let passedGroups = 0;
-  const executeGroups = async (runtime) => {
-    for (const group of groups) {
-      const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath: runtime?.sdkPath });
-      if (overlay) overlays.set(group.id, overlay);
-    }
-    const results = await runGroupQueue(groups, async (group) => {
-      const overlay = overlays.get(group.id);
-      const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
-      const fileWord = group.files.length === 1 ? 'file' : 'files';
-      console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
-      const code = await runGroup(group, args, processAbort.signal);
-      if (code === 0) {
-        passedGroups += 1;
-        console.log(`✓ ${group.id}`);
-      } else {
-        console.log(`✖ ${group.id} (exit ${code})`);
-        failures.push(group.id);
-      }
-      return code;
-    }, { signal: processAbort.signal });
-    for (let index = 0; index < results.length; index += 1) {
-      if (results[index] !== undefined) continue;
-      const group = groups[index];
-      console.log(`\n✖ ${group.id} (not started: aborted)`);
-      failures.push(group.id);
-    }
-  };
-  try {
-    if (requiresVerifiedRuntime(repoRoot, files, selection)) {
-      await withVerificationRuntime(selection, processAbort.signal, executeGroups);
-    } else {
-      // This is an exact registry allowlist, not a recovery path. No Pi runtime
-      // is acquired for these tests; every other/default or mixed invocation
-      // remains on the verified-runtime path above.
-      await executeGroups(undefined);
-    }
-  } finally {
-    processAbort.dispose();
-    for (const overlay of overlays.values()) overlay.dispose();
-  }
-
-  console.log('');
-  if (passedGroups === groups.length && !processAbort.signal.aborted) {
-    console.log(`Summary: ${groups.length}/${groups.length} packages passed.`);
-    return;
-  }
-  console.log(`Summary: ${passedGroups}/${groups.length} packages passed. Failed: ${failures.join(', ') || 'aborted'}`);
-  process.exitCode = 1;
-}
-
-// Only run main() when invoked directly, so the pure helpers can be unit-tested
-// via `import` without side effects.
-const invokedDirectly = process.argv[1] &&
-  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) {
-  await main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

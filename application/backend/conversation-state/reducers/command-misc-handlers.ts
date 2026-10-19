@@ -359,7 +359,6 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
             operationAttempt: retried.attempt, backendGeneration: retried.backendGeneration,
             sessionPath: cmd.sessionPath, text: cmd.text, inputs: cmd.inputs,
             localId: cmd.localId, composedText: cmd.composedText, userParts: cmd.userParts,
-            priorPruningMode: cmd.priorPruningMode,
             refreshPruning: cmd.refreshPruning,
           },
         ],
@@ -549,7 +548,6 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           composedText: cmd.composedText,
           userParts: cmd.userParts,
           refreshPruning: cmd.refreshPruning,
-          priorPruningMode: cmd.priorPruningMode,
         },
       ],
     };
@@ -614,7 +612,6 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         composedText: cmd.composedText,
         userParts: cmd.userParts,
         refreshPruning: cmd.refreshPruning,
-        priorPruningMode: cmd.priorPruningMode,
       },
     ],
   };

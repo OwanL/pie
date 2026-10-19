@@ -110,13 +110,51 @@ function tempDatabase(): { root: string; databasePath: string } {
   return { root, databasePath: path.join(root, 'analytics.sqlite') };
 }
 
-test('historical dimensions bound each category and preserve explicit truncation', () => {
+const DIMENSION_SUMMARY_SQL = `
+  WITH grouped AS (
+    SELECT 'providers' AS category,
+      provider || '|' || effective_model || '|' || purpose || '|' || outcome AS dimension,
+      COUNT(*) AS occurrence_count
+    FROM analytics_provider_settlements
+    GROUP BY provider, effective_model, purpose, outcome
+    UNION ALL
+    SELECT 'tools', tool_definition_id || '|' || outcome, COUNT(*)
+    FROM analytics_tool_states
+    GROUP BY tool_definition_id, outcome
+    UNION ALL
+    SELECT 'activities', activity_kind || '|' || coverage, COUNT(*)
+    FROM analytics_activity_states
+    GROUP BY activity_kind, coverage
+    UNION ALL
+    SELECT 'features', feature || '|' || decision || '|' || COALESCE(rule_version, ''), COUNT(*)
+    FROM analytics_feature_observations
+    GROUP BY feature, decision, rule_version
+  )
+  SELECT category, dimension, occurrence_count
+  FROM grouped
+  WHERE dimension IN (
+    SELECT candidate.dimension
+    FROM grouped AS candidate
+    WHERE candidate.category = grouped.category
+    ORDER BY candidate.dimension
+    LIMIT 2
+  )
+  ORDER BY category, dimension
+`;
+
+test('bounded dimension SQL preserves per-category groups separately from transport bounds', () => {
   const temp = tempDatabase();
   const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
   try {
     for (let index = 0; index < 4; index += 1) {
       recorder.submit(observation({ sourceKey: `provider-${index}`, invocationId: `call-${index}`,
-        fields: { provider: `provider-${index}`, dispatchedModel: 'model', outcome: 'success' } }));
+        fields: {
+          provider: `provider-${index}`,
+          dispatchedModel: 'model',
+          reportedModel: 'model',
+          purpose: 'conversation',
+          outcome: 'success',
+        } }));
       recorder.submit(observation({ sourceKey: `tool-${index}`, entityKind: 'toolCall',
         fields: { toolDefinitionId: `tool-${index}`, outcome: 'success' } }));
       recorder.submit(observation({ sourceKey: `activity-${index}`, entityKind: 'activitySpan',
@@ -124,18 +162,19 @@ test('historical dimensions bound each category and preserve explicit truncation
       recorder.submit(observation({ sourceKey: `feature-${index}`, entityKind: 'featureObservation',
         fields: { feature: `feature-${index}`, decision: 'used', ruleVersion: '1' } }));
     }
-    const bounded = recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 2 });
-    assert.equal(bounded.maxRowsPerDimension, 2);
-    assert.deepEqual(bounded.truncation, { rowLimit: true, byteLimit: false, cellLimit: false });
-    for (const category of ['providers', 'tools', 'activities', 'features'] as const) {
-      assert.equal(bounded[category].length, 2, category);
-      assert.ok(bounded[category].every((row) => row.occurrence_count === 1));
-    }
-    const exact = recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 4 });
-    assert.deepEqual(exact.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
-    assert.equal(String(exact.revision), String(bounded.revision));
-    assert.equal(exact.features.length, 4);
-    assert.throws(() => recorder.readHistoricalDimensionSummary({ maxRowsPerDimension: 0 }), /positive/iu);
+    const grouped = recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL, [], { maxRows: 8 });
+    assert.deepEqual(grouped.rows.map((row) => row.category), [
+      'activities', 'activities', 'features', 'features', 'providers', 'providers', 'tools', 'tools',
+    ]);
+    assert.ok(grouped.rows.every((row) => row.occurrence_count === 1));
+    assert.deepEqual(grouped.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
+    assert.equal(grouped.rows.length, 8);
+
+    // maxRows is an overall SQL transport cap, not the deleted per-category summary API contract.
+    const transportLimited = recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL, [], { maxRows: 2 });
+    assert.deepEqual(transportLimited.rows.map((row) => row.category), ['activities', 'activities']);
+    assert.deepEqual(transportLimited.truncation, { rowLimit: true, byteLimit: false, cellLimit: false });
+    assert.throws(() => recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL, [], { maxRows: 0 }), /positive/iu);
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
@@ -794,7 +833,7 @@ test('canonical latest run marks summed channels partial when an int64 sum overf
   }
 });
 
-test('historical dimension bytes are shared across categories and oversized cells are qualified', () => {
+test('bounded dimension SQL enforces shared bytes and qualifies oversized cells', () => {
   const temp = tempDatabase();
   const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
   try {
@@ -804,17 +843,16 @@ test('historical dimension bytes are shared across categories and oversized cell
       fields: { toolDefinitionId: 'tool', outcome: 'success' } }));
     recorder.submit(observation({ sourceKey: 'feature', entityKind: 'featureObservation',
       fields: { feature: 'x'.repeat(1000), decision: 'used' } }));
-    const all = recorder.readHistoricalDimensionSummary();
-    const providerBytes = Buffer.byteLength(JSON.stringify(all.providers[0]), 'utf8');
-    const limited = recorder.readHistoricalDimensionSummary({ maxBytes: providerBytes });
-    assert.equal(limited.providers.length, 1);
-    assert.equal(limited.tools.length, 0);
-    assert.equal(limited.features.length, 0);
+    const all = recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL);
+    const firstRowBytes = Buffer.byteLength(serialize(all.rows[0]), 'utf8');
+    const limited = recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL, [], { maxBytes: firstRowBytes });
+    assert.equal(limited.rows.length, 1);
+    assert.equal(limited.rows[0]?.category, 'features');
     assert.equal(limited.truncation.byteLimit, true);
-    const cells = recorder.readHistoricalDimensionSummary({ maxCellBytes: 32 });
+    const cells = recorder.executeReadOnlyQuery(DIMENSION_SUMMARY_SQL, [], { maxCellBytes: 32 });
     assert.equal(cells.truncation.cellLimit, true);
-    assert.deepEqual(cells.features[0]?.feature, {
-      type: 'text', encoding: 'utf8', data: 'x'.repeat(32), originalBytes: 1000,
+    assert.deepEqual(cells.rows[0]?.dimension, {
+      type: 'text', encoding: 'utf8', data: 'x'.repeat(32), originalBytes: 1006,
     });
     assert.equal(cells.truncation.byteLimit, false);
   } finally {
@@ -1285,7 +1323,13 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
-    assert.deepEqual(recorder.readProviderSettlements(), {
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }), {
+      scope: { kind: 'global' },
+      settlementCoverage: 'complete',
+      truncated: false,
+      nextOffset: null,
+      selectionCoverage: 'not_applicable',
+      inheritanceCoverage: 'not_applicable',
       revision: 1,
       settlements: [{
         generationId: 'generation-1',
@@ -1450,7 +1494,7 @@ test('read-only query mode serves projections and rejects every mutation', () =>
     }));
     recorder.close();
     recorder = new SqliteAnalyticsRecorder(temp.databasePath, { readOnly: true });
-    assert.equal(recorder.readProviderSettlements().settlements.length, 1);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.length, 1);
     assert.throws(() => recorder.submit(observation({ sourceKey: 'forbidden-write' })), /read-only/);
     assert.throws(() => recorder.deleteSession('root-a', 'forbidden-delete', 1), /read-only/);
     assert.throws(() => recorder.checkpoint(), /read-only/);
@@ -1509,7 +1553,7 @@ test('provider settlement projection is transactional, once-only, and revisioned
     recorder.submit(first);
     recorder.submit(first);
     assert.equal(recorder.getProjectionRevision(), 1);
-    assert.deepEqual(recorder.readProviderSettlementProjection().settlements[0], {
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements[0], {
       generationId: 'generation-1',
       invocationId: 'invocation-accounting',
       rootSessionId: 'root-accounting',
@@ -1573,13 +1617,15 @@ test('provider settlement projection is transactional, once-only, and revisioned
 
     const deleted = recorder.deleteSession('root-accounting', 'delete-accounting', 500);
     assert.equal(deleted.deletedObservationCount, 1);
-    assert.deepEqual(recorder.readProviderSettlements(), { revision: 2, settlements: [] });
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements, []);
+    assert.equal(recorder.getProjectionRevision(), 2);
     assert.equal(recorder.deleteSession('root-accounting', 'retry-delete', 999).duplicate, true);
     assert.equal(recorder.getProjectionRevision(), 2, 'duplicate deletion does not advance the revision');
 
     recorder.close();
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.deepEqual(recorder.readProviderSettlements(), { revision: 2, settlements: [] });
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements, []);
+    assert.equal(recorder.getProjectionRevision(), 2);
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
@@ -1627,7 +1673,7 @@ test('branch and copy projections select original settlements without duplicatin
       cacheChannelsOmittedAsZero: true,
     },
   }));
-  const totalCost = (rows: ReturnType<typeof recorder.readProviderSettlements>['settlements']) =>
+  const totalCost = (rows: ReturnType<typeof recorder.readScopedProviderSettlements>['settlements']) =>
     rows.reduce((total, row) => total + (row.effectiveCostUsd ?? 0), 0);
   try {
     branch('source-root', 'source:A', null);
@@ -1685,7 +1731,7 @@ test('branch and copy projections select original settlements without duplicatin
     }).value, 0.04);
     assert.equal(summarizeCanonicalUsage(copiedRecords, { kind: 'global' }).value, 0.07);
     assert.equal(totalCost(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements), 0.1);
-    assert.equal(recorder.readProviderSettlements().settlements.length, 4, 'copy references never create settlement rows');
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.length, 4, 'copy references never create settlement rows');
     const firstPage = recorder.readScopedProviderSettlements({ kind: 'global' }, { limit: 2 });
     assert.equal(firstPage.settlementCoverage, 'truncated');
     assert.equal(firstPage.truncated, true);
@@ -1837,7 +1883,7 @@ test('private destination scrub removes only its copy relation and leaves source
       },
     }));
     recorder.deleteSession('private-copy', 'private-close-copy', 2_100);
-    assert.deepEqual(recorder.readProviderSettlements('retained-source').settlements.map(
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'retained-source' }).settlements.map(
       (row) => row.invocationId,
     ), ['retained-invocation']);
     assert.equal(recorder.executeReadOnlyQuery(
@@ -2172,7 +2218,7 @@ test('provider normalization keeps base/disjoint channels and reported zero ahea
         },
       },
     }));
-    const settlement = recorder.readProviderSettlements().settlements[0]!;
+    const settlement = recorder.readScopedProviderSettlements({ kind: 'global' }).settlements[0]!;
     assert.deepEqual(settlement.normalizedUsage, {
       baseInputTokens: 75,
       cacheReadTokens: 20,
@@ -2271,7 +2317,7 @@ test('provider projection preserves missingness and signed-64-bit token strings 
       0,
       'an explicitly scoped empty key must never alias the global projection',
     );
-    assert.deepEqual(recorder.projectProviderUsage(), [
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.map(({ invocationId, usage, reportedCostUsd }) => ({ invocationId, usage, reportedCostUsd })), [
       {
         invocationId: 'invocation-a',
         usage: {
@@ -2381,7 +2427,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
   let knownTotalBefore;
   try {
     recorder.submit(fact);
-    before = recorder.readProviderSettlements();
+    before = recorder.readScopedProviderSettlements({ kind: 'global' });
     knownTotalBefore = recorder.readProviderAccountingSummary().inputTokens.knownTotal;
     assert.equal(before.settlements.length, 1);
   } finally {
@@ -2402,7 +2448,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
       assert.equal(upgraded.getDatabaseSchemaVersion(), 15);
-      const after = upgraded.readProviderSettlements();
+      const after = upgraded.readScopedProviderSettlements({ kind: 'global' });
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);
       assert.equal(upgraded.countObservations(), 1);

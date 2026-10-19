@@ -190,7 +190,7 @@ assert.ok(aliases.typebox[0].startsWith(${JSON.stringify(candidate.artifactDir)}
 test('help/list entrypoints do not acquire or validate a deliberately missing artifact', () => {
   const missing = path.resolve(os.tmpdir(), 'pie-artifact-that-does-not-exist');
   for (const [script, args] of [
-    ['run-tests.mjs', ['--list']], ['run-typechecks.mjs', ['--list']], ['run-test-files.mjs', ['--help']],
+    ['run-tests.mjs', ['--list']], ['run-typechecks.mjs', ['--list']],
     ['run-verification.mjs', ['--help']],
     ['run-package-group.mjs', ['tests', 'extensions', '--list']],
   ]) {

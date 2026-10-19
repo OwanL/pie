@@ -295,7 +295,7 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
     const summary = recorder.readProviderAccountingSummary(rootSessionId);
     assert.equal(summary.invocationCount, 4);
     assert.equal(summary.effectiveCostUsd.value, 0.10);
-    assert.equal(recorder.readProviderSettlements(rootSessionId).settlements.length, 4);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId }).settlements.length, 4);
     const childProviderObservation = recorder.executeReadOnlyQuery(
       `SELECT payload_json FROM analytics_observations
        WHERE entity_kind = 'providerCall' AND json_extract(payload_json, '$.fields.sourceId') = ?`,
@@ -309,7 +309,7 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
     assert.equal(childProviderScope.executionId, succeeded.analyticsCaptureReceipt?.executionId);
     assert.equal(childProviderScope.parentToolCallId, 'canonical-tool:root-subagent-tool');
     assert.deepEqual(
-      recorder.readProviderSettlements(rootSessionId).settlements.map((row) => row.reportedCostUsd).sort(),
+      recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId }).settlements.map((row) => row.reportedCostUsd).sort(),
       [0.01, 0.02, 0.03, 0.04],
     );
     assert.equal('projectSessionUsage' in accounting, false);
@@ -446,7 +446,7 @@ test('aborted attempts preserve partial settlement and expose missing provider e
     };
     assert.equal(captureSubagentTerminalResult(noResponse, context, 'abort-parent-tool'), 'submitted');
 
-    const settlements = recorder.readProviderSettlements('root-p4-abort').settlements;
+    const settlements = recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'root-p4-abort' }).settlements;
     assert.equal(settlements.length, 1);
     assert.equal(settlements[0]?.outcome, 'aborted');
     assert.equal(settlements[0]?.usage.inputTokens, null);

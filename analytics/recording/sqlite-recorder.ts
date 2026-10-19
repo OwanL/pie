@@ -410,18 +410,6 @@ export interface ScopedProviderSettlementPage {
   expectedRevision?: number | string;
 }
 
-export interface HistoricalDimensionSummary extends AnalyticsQuerySnapshotMetadata {
-  revision: number | string;
-  scope: { kind: 'global' };
-  providers: Array<Record<string, unknown>>;
-  tools: Array<Record<string, unknown>>;
-  activities: Array<Record<string, unknown>>;
-  features: Array<Record<string, unknown>>;
-  /** Bounds apply before materialization, across one consistent snapshot. */
-  truncation: AnalyticsQueryTruncation;
-  maxRowsPerDimension: number;
-}
-
 export interface ProviderAccountingSummary {
   revision: number | string;
   invocationCount: number;
@@ -1259,16 +1247,6 @@ function migrateV4(database: SqliteDatabase): void {
   `);
 }
 
-/** Serve the settlement projection's declared ordering from an index.
- *
- * `readProviderSettlements` orders by `CAST(projection_revision AS INTEGER),
- * generation_id, invocation_id`. Because the leading key is a cast expression,
- * SQLite cannot satisfy that ordering from any plain index and falls back to a
- * full table SCAN plus a temporary B-tree — even when the caller supplies a
- * small LIMIT, so a bounded page still reads every settlement. Measured at
- * 250,000 settlements: the bounded read dropped from 30.7 ms to 0.8 ms once the
- * matching expression index existed, and the temp B-tree disappeared. This is
- * an additive index only; no stored value or ordering semantics change. */
 /** Index the reference-cleanup trigger's digest lookup.
  *
  * `analytics_detail_references` is keyed `(payload_id, digest)`, so its primary
@@ -1480,7 +1458,7 @@ function ensureDetailCountCounters(database: SqliteDatabase): void {
 
 /** Serve the settlement projection's declared ordering from an index.
  *
- * `readProviderSettlements` orders by `CAST(projection_revision AS INTEGER),
+ * Scoped settlement reads order by `CAST(projection_revision AS INTEGER),
  * generation_id, invocation_id`. Because the leading key is a cast expression,
  * SQLite cannot satisfy that ordering from any plain index and falls back to a
  * full table SCAN plus a temporary B-tree — even when the caller supplies a
@@ -4811,33 +4789,6 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     });
   }
 
-  /** Persisted, typed settlement read model. Revision and rows are read from
-   * one database snapshot so cross-host consumers never pair a new revision
-   * with stale rows. */
-  readProviderSettlements(rootSessionId?: string, limit?: number): ProviderSettlementReadModel {
-    this.assertOpen();
-    return this.snapshot(() => {
-      const revision = this.getProjectionRevision();
-      const scoped = rootSessionId !== undefined;
-      const where = scoped ? 'WHERE root_session_id = ?' : '';
-      const boundedLimit = limit === undefined ? undefined : Math.max(0, Math.trunc(limit));
-      const rows = this.database.prepare(`
-        SELECT * FROM analytics_provider_settlements
-        ${where}
-        ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
-        ${boundedLimit === undefined ? '' : 'LIMIT ?'}
-      `).all(...(scoped ? [rootSessionId] : []), ...(boundedLimit === undefined ? [] : [boundedLimit])) as Array<Record<string, unknown>>;
-      return {
-        revision,
-        settlements: rows.map((row) => providerSettlementProjection(row)),
-      };
-    });
-  }
-
-  readProviderSettlementProjection(rootSessionId?: string): ProviderSettlementReadModel {
-    return this.readProviderSettlements(rootSessionId);
-  }
-
   readScopedProviderSettlements(
     scope: ProviderSettlementScope,
     page: ScopedProviderSettlementPage = {},
@@ -5067,75 +5018,6 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
             ?? (inheritedAvailable ? 'incomplete_source_ancestry' : 'missing_source_selection'),
         } : {}),
       };
-    });
-  }
-
-  readHistoricalDimensionSummary(
-    options: { maxRowsPerDimension?: number; maxBytes?: number; maxCellBytes?: number } = {},
-  ): HistoricalDimensionSummary {
-    this.assertOpen();
-    const maxRowsPerDimension = boundedPositiveInteger(
-      options.maxRowsPerDimension, DEFAULT_QUERY_ROWS, MAX_QUERY_ROWS, 'dimension maxRowsPerDimension',
-    );
-    const maxBytes = boundedPositiveInteger(options.maxBytes, DEFAULT_QUERY_BYTES, MAX_QUERY_BYTES, 'dimension maxBytes');
-    const maxCellBytes = boundedPositiveInteger(options.maxCellBytes, Math.min(64 * 1024, maxBytes), maxBytes, 'dimension maxCellBytes');
-    return this.snapshot(() => {
-      const metadata = this.readQuerySnapshotMetadata();
-      const revision = metadata.projectionRevision;
-      const truncation: AnalyticsQueryTruncation = { rowLimit: false, byteLimit: false, cellLimit: false };
-      let resultBytes = 0;
-      // Historical membership can have unbounded cardinality. Stream capped
-      // groups instead of allocating the full result before the IPC size check.
-      // The byte budget is shared by all four dimensions, not renewed per query.
-      const readGroups = (sql: string): Array<Record<string, unknown>> => {
-        if (truncation.byteLimit) return [];
-        const rows: Array<Record<string, unknown>> = [];
-        for (const raw of this.database.prepare(`${sql} LIMIT ?`).iterate(maxRowsPerDimension + 1) as Iterable<Record<string, unknown>>) {
-          if (rows.length >= maxRowsPerDimension) {
-            truncation.rowLimit = true;
-            break;
-          }
-          const row: Record<string, unknown> = {};
-          for (const [key, value] of Object.entries(raw)) {
-            const encoded = encodeQueryCell(value, maxCellBytes);
-            row[key] = encoded.value;
-            if (encoded.truncated) truncation.cellLimit = true;
-          }
-          const rowBytes = Buffer.byteLength(serialize(row), 'utf8');
-          if (resultBytes + rowBytes > maxBytes) {
-            truncation.byteLimit = true;
-            break;
-          }
-          resultBytes += rowBytes;
-          rows.push(row);
-        }
-        return rows;
-      };
-      const providers = readGroups(`
-        SELECT provider, effective_model, purpose, outcome, COUNT(*) AS occurrence_count
-        FROM analytics_provider_settlements
-        GROUP BY provider, effective_model, purpose, outcome
-        ORDER BY provider, effective_model, purpose, outcome
-      `);
-      const tools = readGroups(`
-        SELECT tool_definition_id, outcome, COUNT(*) AS occurrence_count
-        FROM analytics_tool_states
-        GROUP BY tool_definition_id, outcome
-        ORDER BY tool_definition_id, outcome
-      `);
-      const activities = readGroups(`
-        SELECT activity_kind, coverage, COUNT(*) AS occurrence_count
-        FROM analytics_activity_states
-        GROUP BY activity_kind, coverage
-        ORDER BY activity_kind, coverage
-      `);
-      const features = readGroups(`
-        SELECT feature, decision, rule_version, COUNT(*) AS occurrence_count
-        FROM analytics_feature_observations
-        GROUP BY feature, decision, rule_version
-        ORDER BY feature, decision, rule_version
-      `);
-      return { ...metadata, revision, scope: { kind: 'global' }, providers, tools, activities, features, truncation, maxRowsPerDimension };
     });
   }
 
@@ -5867,46 +5749,6 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     };
   }
 
-  /** Backward-compatible P0 usage-only view, now served without replaying the
-   * generic observation ledger. Missing channels remain null.
-   *
-   * This reads the usage columns directly instead of mapping over
-   * {@link readProviderSettlements}. That path builds a full
-   * `ProviderSettlementProjection` for every settlement row — roughly twenty-five
-   * fields including nested `usage`, `cost` and coverage objects — and this view
-   * then discards all but three of them. Measured against 400,000 settlements:
-   * the projection path took 7,284 ms while selecting the three columns directly
-   * took 833 ms, so about 6.5 s of the 7.3 s was constructing objects nobody read.
-   * That is what pushed the all-history projection past its 9 s gate at 1M. */
-  projectProviderUsage(rootSessionId?: string): ProviderUsageProjection[] {
-    this.assertOpen();
-    const scoped = rootSessionId !== undefined;
-    const where = scoped ? 'WHERE root_session_id = ?' : '';
-    const rows = this.database.prepare(`
-      SELECT invocation_id, input_tokens, output_tokens, cache_read_tokens,
-        cache_write_tokens, reasoning_tokens, provider_total_tokens, reported_cost_usd
-      FROM analytics_provider_settlements
-      ${where}
-      ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
-    `).all(...(scoped ? [rootSessionId] : [])) as Array<Record<string, unknown>>;
-    const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
-      ? null
-      : encodeInt64(String(value));
-    return rows.map((row) => ({
-      invocationId: String(row.invocation_id),
-      usage: {
-        inputTokens: decodeInt(row.input_tokens),
-        outputTokens: decodeInt(row.output_tokens),
-        cacheReadTokens: decodeInt(row.cache_read_tokens),
-        cacheWriteTokens: decodeInt(row.cache_write_tokens),
-        reasoningTokens: decodeInt(row.reasoning_tokens),
-        providerTotalTokens: decodeInt(row.provider_total_tokens),
-      },
-      reportedCostUsd: row.reported_cost_usd === null || row.reported_cost_usd === undefined
-        ? null
-        : Number(row.reported_cost_usd),
-    }));
-  }
 
   readProducerAcknowledgements(observations: readonly AnalyticsObservation[]): ProducerReconciliation[] {
     this.assertOpen();

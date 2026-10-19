@@ -162,7 +162,7 @@ test('reuses one writable connection safely after a rolled-back batch', () => {
     // absent after the transaction rollback.  Projection and accounting state
     // must remain exactly at the pre-batch snapshot.
     assert.equal(recorder.countObservations(), 1);
-    assert.deepEqual(recorder.readProviderSettlements().settlements.map((row) => row.invocationId), [
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.map((row) => row.invocationId), [
       'invocation-b',
     ]);
     const afterRollback = recorder.readProviderAccountingSummary();
@@ -183,7 +183,7 @@ test('reuses one writable connection safely after a rolled-back batch', () => {
     // ROLLBACK.
     assert.doesNotThrow(() => recorder.submit(freshA));
     assert.equal(recorder.countObservations(), 2);
-    assert.deepEqual(recorder.readProviderSettlements().settlements.map((row) => row.invocationId).sort(), [
+    assert.deepEqual(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.map((row) => row.invocationId).sort(), [
       'invocation-a', 'invocation-b',
     ]);
     const afterReuse = recorder.readProviderAccountingSummary();
@@ -811,7 +811,7 @@ test('bounds all seven projection statements to one cached prepare per connectio
   // A second recorder on a different database shares nothing.
   const other = new SqliteAnalyticsRecorder(otherPath);
   try {
-    assert.equal(other.readProviderSettlements().settlements.length, 0);
+    assert.equal(other.readScopedProviderSettlements({ kind: 'global' }).settlements.length, 0);
     assert.equal(other.readProviderAccountingSummary().invocationCount, 0);
   } finally {
     assert.doesNotThrow(() => other.close());

@@ -134,16 +134,16 @@ test('canonical private close deletes session rows and scrubs rotated side-chann
     getArchState: () => state, analyticsCapture: capture,
   });
   try {
-    assert.equal(recorder.readProviderSettlements('private-root').settlements.length, 1);
-    assert.equal(recorder.readProviderSettlements('other-root').settlements.length, 1);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'private-root' }).settlements.length, 1);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'other-root' }).settlements.length, 1);
     await stats.setSessionPrivacy(sessionPath, true);
     assert.equal(readFileSync(path.join(dataRoot, 'pruning.jsonl'), 'utf8').trim().split(/\r?\n/).length, 4,
       'canonical privacy-on while open does not scrub auxiliary logs');
 
     await stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
 
-    assert.equal(recorder.readProviderSettlements('private-root').settlements.length, 0);
-    assert.equal(recorder.readProviderSettlements('other-root').settlements.length, 1);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'private-root' }).settlements.length, 0);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'rootSession', rootSessionId: 'other-root' }).settlements.length, 1);
     for (const fileName of fileNames) {
       for (const suffix of ['', '.1', '.2']) {
         const lines = readFileSync(path.join(dataRoot, `${fileName}${suffix}`), 'utf8')
@@ -244,7 +244,7 @@ test('private close prevents cache rehydration while deletion is in flight', asy
     stats.getSessionUsage(sessionPath);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(stats.getSessionUsage(sessionPath).samples.length, 0);
-    assert.equal(recorder.readProviderSettlements().settlements.length, 0);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.length, 0);
   } finally {
     releaseDelete();
     await closing;

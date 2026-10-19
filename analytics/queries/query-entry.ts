@@ -12,14 +12,10 @@ import type {
   AnalyticsReadOnlyQueryResult,
   AnalyticsSchemaDescription,
   AnalyticsStorageReadModel,
-  HistoricalDimensionSummary,
-  ProviderAccountingSummary,
   ProviderAggregateReadModel,
   ProviderSettlementScope,
-  ProviderSettlementReadModel,
   ScopedProviderSettlementReadModel,
 } from '../recording/sqlite-recorder.js';
-import type { CanonicalExecutionSummary } from '../capture/execution-summary.js';
 import type { ActivityProjectionReadModel } from '../projections/activity-projection.js';
 import type { ToolFacetProjectionReadModel } from '../projections/tool-facet.js';
 
@@ -86,12 +82,6 @@ export interface CanonicalDetailRequest {
   payloadId: string;
   offset?: number | string;
   maxBytes?: number;
-  maxResultBytes?: number;
-}
-
-export interface CanonicalSettlementRequest {
-  rootSessionId?: string;
-  limit?: number;
   maxResultBytes?: number;
 }
 
@@ -314,24 +304,6 @@ export class CanonicalAnalyticsReadModel {
     }, signal);
   }
 
-  /** Bounded settlement projection rows (optionally one root session), with the
-   * projection revision the rows were read at. */
-  readProviderSettlements(
-    request: CanonicalSettlementRequest = {},
-    signal?: AbortSignal,
-  ): Promise<ProviderSettlementReadModel> {
-    if (request.rootSessionId !== undefined
-        && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
-      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
-    }
-    return this.client.query<ProviderSettlementReadModel>({
-      type: 'providerSettlements',
-      rootSessionId: request.rootSessionId,
-      limit: request.limit ?? this.maxRows,
-      maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
-    }, signal);
-  }
-
   /** Accounting-only branch/copy view. Inherited rows remain references to
    * original invocation identities and carry explicit coverage. */
   readScopedProviderSettlements(
@@ -354,29 +326,6 @@ export class CanonicalAnalyticsReadModel {
       expectedRevision: page.expectedRevision,
       maxResultBytes,
     }, signal, priority);
-  }
-
-  /** Engine-neutral scoped accounting summary over the canonical settlements. */
-  readProviderAccountingSummary(rootSessionId?: string, signal?: AbortSignal): Promise<ProviderAccountingSummary> {
-    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
-      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
-    }
-    return this.client.query<ProviderAccountingSummary>({
-      type: 'providerAccounting',
-      rootSessionId,
-    }, signal);
-  }
-
-  /** Bounded maintained root agent-run execution counts and latest settled
-   * identity. Provider calls and assistant-turn facets are excluded. */
-  readExecutionSummary(rootSessionId?: string, signal?: AbortSignal): Promise<CanonicalExecutionSummary> {
-    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
-      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
-    }
-    return this.client.query<CanonicalExecutionSummary>({
-      type: 'executionSummary',
-      rootSessionId,
-    }, signal);
   }
 
   /** Accounting and bounded provider/model/date groups from one recorder
@@ -425,16 +374,6 @@ export class CanonicalAnalyticsReadModel {
       maxResultBytes,
       }, signal, 'interactive');
     })();
-  }
-
-  /** Bounded historical membership. Inspect truncation; use explicit SQL for
-   * narrower scopes when these convenience groups exceed the display limits. */
-  readHistoricalDimensions(signal?: AbortSignal): Promise<HistoricalDimensionSummary> {
-    return this.client.query<HistoricalDimensionSummary>({
-      type: 'historicalDimensions',
-      maxRowsPerDimension: this.maxRows,
-      maxResultBytes: this.maxResultBytes,
-    }, signal);
   }
 
   /** Bounded maintained activity summary for the global or one session scope.

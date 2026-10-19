@@ -103,9 +103,6 @@ process.on('message', (raw: unknown) => {
       );
     } else if (message.type === 'storage') {
       result = recorder.readStorageReadModel();
-    } else if (message.type === 'providerSettlements') {
-      const limit = boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
-      result = recorder.readProviderSettlements(message.rootSessionId, limit);
     } else if (message.type === 'scopedProviderSettlements') {
       const limit = boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
       result = recorder.readScopedProviderSettlements(message.scope, {
@@ -113,10 +110,6 @@ process.on('message', (raw: unknown) => {
         offset: message.offset,
         expectedRevision: message.expectedRevision,
       });
-    } else if (message.type === 'providerAccounting') {
-      result = recorder.readProviderAccountingSummary(message.rootSessionId);
-    } else if (message.type === 'executionSummary') {
-      result = recorder.readExecutionSummary(message.rootSessionId);
     } else if (message.type === 'providerAggregate') {
       const maxGroups = message.maxGroups === undefined
         ? undefined
@@ -130,12 +123,6 @@ process.on('message', (raw: unknown) => {
         dailyWindowStartMs: message.dailyWindowStartMs,
         dailyWindowEndMs: message.dailyWindowEndMs,
         maxGroups,
-      });
-    } else if (message.type === 'historicalDimensions') {
-      result = recorder.readHistoricalDimensionSummary({
-        maxRowsPerDimension: message.maxRowsPerDimension,
-        maxCellBytes: message.maxCellBytes,
-        maxBytes: Math.max(1, maximum - 8 * 1024),
       });
     } else if (message.type === 'activityProjection') {
       result = recorder.readActivityProjection({

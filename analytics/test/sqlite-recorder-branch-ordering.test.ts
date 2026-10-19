@@ -161,7 +161,7 @@ test('late older branch delivery after restart cannot replace selection or dupli
       'invocation-A', 'invocation-C',
     ]);
     assert.equal(totalCost(selectedGeneration1.settlements), 0.04);
-    assert.equal(recorder.readProviderSettlements().settlements.length, 3);
+    assert.equal(recorder.readScopedProviderSettlements({ kind: 'global' }).settlements.length, 3);
 
     recorder.submitBatch([
       branch('generation-2', 'process-2', 'A', null, 1, 100),

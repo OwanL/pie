@@ -1626,11 +1626,6 @@ export class EffectRunner {
     }
   }
 
-  /** Compatibility hook preserved on the single effect-executor façade. */
-  abortInFlightSend(sessionPath: string): boolean {
-    return this.sessionOperations.abortInFlightSend(sessionPath);
-  }
-
   /** Dispose of every opaque execution resource owned below this façade. */
   dispose(): void {
     this.disposed = true;

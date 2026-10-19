@@ -32,9 +32,9 @@ export interface EffectBase {
 export interface SendRpcEffect extends EffectBase {
   kind: 'SendRpc';
   refreshPruning?: boolean;
-  operationId?: string;
+  operationId: string;
   operationAttempt?: number;
-  backendGeneration?: number;
+  backendGeneration: number;
   sessionPath: string;
   text: string;
   /** Composer inputs (file refs, images) sent alongside the text. */
@@ -47,9 +47,6 @@ export interface SendRpcEffect extends EffectBase {
   composedText: string;
   /** User content parts for rich rendering of the optimistic message. */
   userParts?: UserContentPart[];
-  /** Compatibility payload for unregistered send paths. Registered operations keep restoration
-   * intent in reducer state and describe it on their cleanup effect. */
-  priorPruningMode?: PruningMode;
 }
 
 export interface GenerateSessionTitleEffect extends EffectBase {
