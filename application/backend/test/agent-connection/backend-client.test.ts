@@ -8,18 +8,9 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { deriveTrustedSdkRoot } from '../../agent-connection/trusted-sdk-root';
 import type { GenerationPiRuntimeDescriptor } from '../../../hosts/lib/pi-runtime-resolution';
 import { PROTOCOL_VERSION } from '../../../../harness/agent-processes/lib/rpc/wire.js';
 import { STORAGE_CUTOFF_AUTHORIZATION_ENV, STORAGE_CUTOFF_AUTHORIZATION_VALUE } from '../../../../analytics/authority/storage-cutoff-authorization.js';
-
-test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => {
-  assert.equal(
-    deriveTrustedSdkRoot('C:\\tools\\node_modules\\@earendil-works\\pi-coding-agent'),
-    'C:\\tools\\node_modules',
-  );
-  assert.equal(deriveTrustedSdkRoot('C:\\tools\\pi-coding-agent'), undefined);
-});
 
 class ImmediateReadyStream extends PassThrough {
   private emitted = false;
@@ -100,11 +91,6 @@ class DrainingChildProcess extends FakeChildProcess {
 }
 
 test('BackendClient.start resolves when backend.ready arrives immediately as stdout listener attaches', async () => {
-  // client.start spreads process.env into the spawn env, so a stale
-  // PIE_TRUSTED_SDK_ROOT inherited from the parent environment would leak
-  // through when the derived trusted root is undefined. Isolate the var so
-  // the assertion below is deterministic regardless of the host environment.
-  const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
   const previousDataRoot = process.env.PIE_DATA_DIR;
@@ -112,7 +98,6 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const previousWorkspaceSdkOptIn = process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
   const previousCutoffAuthorization = process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
   delete process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
-  delete process.env.PIE_TRUSTED_SDK_ROOT;
   delete process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
   const agentDir = path.resolve('/mock/agent');
   const dataRoot = path.join(agentDir, 'runtime-data');
@@ -177,7 +162,6 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       'production keeps its source-artifact CLI route unchanged');
     assert.deepEqual(spawnOptions?.stdio, ['pipe', 'pipe', 'pipe', 'pipe']);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
-    assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
 
     const observedEvents: string[] = [];
     const eventSubscription = client.onEvent((event) => observedEvents.push(event.event));
@@ -575,8 +559,6 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   } finally {
     client.dispose();
     moduleWithLoad._load = originalLoad;
-    if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-    else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;

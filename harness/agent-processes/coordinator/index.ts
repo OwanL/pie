@@ -36,14 +36,6 @@ async function main(): Promise<void> {
       initialContextEstimateEntryPath: path.join(__dirname, 'initial-context-estimate-worker.js'),
     });
     await server.start();
-    if (process.env.PIE_PHASE2_PACKAGE_SMOKE === '1') {
-      await server.runPhase2WorkerSmoke(path.join(process.cwd(), '.pie-phase2-package-smoke.jsonl'));
-      await server.dispose();
-      await new Promise<void>((resolve) => {
-        process.stderr.write('[pie] phase4-package-smoke:promoted-command-retired\n', () => resolve());
-      });
-      process.exit(0);
-    }
   } catch (error) {
     try {
       await server?.dispose();

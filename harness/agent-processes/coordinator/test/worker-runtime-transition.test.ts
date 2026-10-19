@@ -95,7 +95,11 @@ test('hot transition fences the old worker before interrupt awaits and same trun
   assert.equal(await joined, 'worker-2');
   const current = router.getRoute(sessionPath);
   assert.equal(current.state, 'hot');
-  if (current.state === 'hot') assert.notEqual(current.owner.workerId, original.owner.workerId);
+  if (current.state === 'hot') {
+    assert.notEqual(current.owner.workerId, original.owner.workerId);
+    assert.notEqual(current.owner.workerGeneration, original.owner.workerGeneration,
+      'hot truncate publishes a fresh worker generation');
+  }
 
   const stop = router.interrupt(sessionPath, 'public stop fence');
   assert.equal(router.getRoute(sessionPath).state, 'transitioning');

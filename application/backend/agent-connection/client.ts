@@ -24,7 +24,6 @@ import {
 } from '../../lib/live-pipeline-trace-runtime.js';
 import { classifyBackendStderrLine } from './stderr-classifier';
 import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
-import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../conversation-state/effects/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import { assertAnalyticsBackendContext, sameAnalyticsBackendContext, type AnalyticsBackendContext } from '../../../analytics/authority/backend-analytics-context.js';
@@ -445,12 +444,6 @@ export class BackendClient implements Disposable {
 
     this.stderrBuffer = '';
     this.stderrLineBuffer = '';
-    // The backend's assertAllowedSdkPath only loads SDKs under trusted roots
-    // (user profile / program files / npm prefix). Generation-local artifacts
-    // may live outside the extension host's npm prefix, so derive the trusted
-    // root from the already verified sdkPath and pass it through.
-    const trustedRoot = deriveTrustedSdkRoot(options.sdkPath);
-    const trustedRootEnv = trustedRoot ? { PIE_TRUSTED_SDK_ROOT: trustedRoot } : {};
     const {
       agentDir: agentDirEnv,
       sessionDir: sessionDirEnv,
@@ -488,7 +481,6 @@ export class BackendClient implements Disposable {
       ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
       PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
       PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),
-      ...trustedRootEnv,
     };
     // Do not leak blank/raw relative values through process.env: the child
     // receives only the normalized authority, or no override so SDK defaults

@@ -23,6 +23,7 @@ function record(kind: string, context: { sessionManager: { getSessionFile(): str
   if (!tracePath) return;
   fs.appendFileSync(tracePath, `${JSON.stringify({
     kind,
+    pid: process.pid,
     sessionPath: context.sessionManager.getSessionFile(),
     detail,
   })}\n`);
@@ -41,7 +42,7 @@ function completeReplacement(
     action === 'fork' ? 'phase4-extension-durable' : `phase4-extension-${action}`,
     { action, sourcePath, finalPath },
   );
-  fs.writeFileSync(resultPath, JSON.stringify({ action, sourcePath, finalPath }));
+  fs.writeFileSync(resultPath, JSON.stringify({ action, sourcePath, finalPath, pid: process.pid }));
   record('command_destination', { sessionManager: manager }, action);
 }
 
@@ -55,7 +56,7 @@ export default function phase4WorkerCommandExtension(pi: ExtensionAPI): void {
       if (!sessionPath || !resultPath) throw new Error('Phase 4 no-agent fixture arguments are incomplete.');
       record('command_no_agent', context);
       manager.appendCustomEntry('phase4-extension-no-agent', { sessionPath });
-      fs.writeFileSync(resultPath, JSON.stringify({ sessionPath }));
+      fs.writeFileSync(resultPath, JSON.stringify({ sessionPath, pid: process.pid, thinkingLevel: pi.getThinkingLevel() }));
     },
   });
 

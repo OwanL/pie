@@ -43,21 +43,6 @@ export interface ResolveCompatibleNodePathOptions extends ResolveNodePathOptions
   minimumVersion: string;
 }
 
-export interface ResolveSdkPathOptions extends CommonOptions {
-  configuredPath?: string;
-  cachedPath?: string;
-  /**
-   * Pinned SDK candidate (build-manifest path in the checkout or a package-local
-   * install). Tried after explicit overrides (setting + env) but before the
-   * globalState cache and `npm root -g`. The package owner is
-   * `application/hosts/vscode`, while an installed extension has its own root.
-   */
-  localCandidatePath?: string;
-  /** Additional package-root candidates, in priority order (e.g. build manifest then installed package). */
-  localCandidatePaths?: readonly string[];
-  exec: CommandExecutor;
-}
-
 const defaultExists = (filePath: string): boolean => {
   try {
     return require('node:fs').existsSync(filePath);
@@ -321,20 +306,6 @@ export async function resolveCompatibleNodePath(
   );
 }
 
-function isValidSdkPath(sdkPath: string, exists: (filePath: string) => boolean): boolean {
-  return exists(path.join(sdkPath, 'package.json')) && exists(path.join(sdkPath, 'dist', 'index.js'));
-}
-
-const GLOBAL_SDK_PACKAGE_PATHS = [
-  ['@earendil-works', 'pi-coding-agent'],
-  ['@mariozechner', 'pi-coding-agent'],
-] as const;
-
-function isLegacyGlobalSdkPath(sdkPath: string): boolean {
-  const parts = sdkPath.split(/[\\/]+/);
-  return parts.at(-2) === '@mariozechner' && parts.at(-1) === 'pi-coding-agent';
-}
-
 export function resolveNodePath(options: ResolveNodePathOptions): string {
   const exists = options.exists ?? defaultExists;
   const platform = options.platform ?? process.platform;
@@ -360,74 +331,5 @@ export function resolveNodePath(options: ResolveNodePathOptions): string {
 
   throw new Error(
     'Could not find a standalone Node.js runtime. Set pie.nodePath, PI_NODE_PATH, or add node to PATH.',
-  );
-}
-
-/**
- * Retained compatibility resolver; production startup instead uses the verified
- * artifact route in pi-runtime-resolution. These legacy selectors are not a
- * supported way to override the production SDK.
- *
- * Candidate priority:
- *   1. `configuredPath` (`pie.sdkPath` setting — explicit override; validated)
- *   2. `PI_SDK_PATH` env var (explicit override; validated)
- *   3. `localCandidatePath`, then `localCandidatePaths` — pinned build-manifest
- *      SDK followed by the loaded package's own dependency; each validated.
- *   4. `cachedPath` (globalState cache from a previous start, unless it points
- *      at the legacy `@mariozechner` global package)
- *   5. `npm root -g` discovery of the maintained or legacy global package
- */
-export async function resolveSdkPath(options: ResolveSdkPathOptions): Promise<string> {
-  const exists = options.exists ?? defaultExists;
-
-  const configuredPath = options.configuredPath;
-  if (configuredPath) {
-    if (!isValidSdkPath(configuredPath, exists)) {
-      throw new Error(`Configured PI sdkPath is not a valid SDK install: ${configuredPath}`);
-    }
-    return configuredPath;
-  }
-
-  const envPath = options.env.PI_SDK_PATH;
-  if (envPath) {
-    if (!isValidSdkPath(envPath, exists)) {
-      throw new Error(`PI_SDK_PATH is not a valid SDK install: ${envPath}`);
-    }
-    return envPath;
-  }
-
-  // 3. Pinned build-manifest SDK, then the loaded package's own dependency.
-  // A stale manifest must not suppress an installed/package-local SDK.
-  for (const candidate of [options.localCandidatePath, ...(options.localCandidatePaths ?? [])]) {
-    if (candidate && isValidSdkPath(candidate, exists)) {
-      return candidate;
-    }
-  }
-
-  if (
-    options.cachedPath &&
-    !isLegacyGlobalSdkPath(options.cachedPath) &&
-    isValidSdkPath(options.cachedPath, exists)
-  ) {
-    return options.cachedPath;
-  }
-
-  const npmRoot = await options.exec('npm', ['root', '-g']);
-  if (npmRoot.exitCode !== 0) {
-    throw new Error(
-      `Failed to resolve the global PI SDK install via npm root -g: ${npmRoot.stderr || npmRoot.stdout}`,
-    );
-  }
-
-  const npmRootPath = npmRoot.stdout.trim();
-  for (const packagePath of GLOBAL_SDK_PACKAGE_PATHS) {
-    const sdkPath = path.join(npmRootPath, ...packagePath);
-    if (isValidSdkPath(sdkPath, exists)) {
-      return sdkPath;
-    }
-  }
-
-  throw new Error(
-    'Could not find @earendil-works/pi-coding-agent or @mariozechner/pi-coding-agent in the global npm root. Set pie.sdkPath or PI_SDK_PATH.',
   );
 }

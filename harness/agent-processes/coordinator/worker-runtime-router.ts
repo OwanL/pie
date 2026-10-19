@@ -344,7 +344,6 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'extension_ui.response',
   'settings.set',
   'systemPromptToggles.set',
-  'test.extensionCommand',
 ]);
 
 /** Coordinator owner for cold→promoting→hot→retiring routing. */

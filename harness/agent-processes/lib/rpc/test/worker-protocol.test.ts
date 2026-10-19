@@ -147,6 +147,10 @@ test('Phase 2 protocol accepts only its closed coordinator and worker variants',
 
   for (const frame of coordinatorFrames) assert.equal(parseCoordinatorToWorkerFrame(frame, expected).status, 'accepted');
   for (const frame of workerFrames) assert.equal(parseWorkerToCoordinatorFrame(frame, expected).status, 'accepted');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base, kind: 'runtime.command', requestId: 'retired-extension-command', operation: 'test.extensionCommand',
+    payload: { params: { command: '/example' }, publicRequestId: 'public-smoke' },
+  }, expected).status, 'invalid', 'the retired smoke-only operation is not part of worker IPC');
   assert.equal(parseWorkerToCoordinatorFrame(coordinatorFrames[1], expected).status, 'invalid', 'direction is closed');
   assert.equal(parseCoordinatorToWorkerFrame(workerFrames[0], expected).status, 'invalid', 'direction is closed');
 });

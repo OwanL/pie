@@ -90,7 +90,14 @@ test('authority reserves exact canonical intent, transfers once, and rejects sta
     const authorization = await adapter.commitTransfer(reservation, sourceLease);
     sourceManager.revokePieWriteLease();
     prepared.sessionFile = reservation.canonicalDestinationPath;
+    const pending = await authority.inspect(reservation.canonicalDestinationPath);
+    assert.ok(pending?.state === 'hot');
+    assert.equal(pending.transferConsumed, false);
     const destinationLease = await prepared.activatePiePrepared(authorization);
+    const consumed = await authority.inspect(reservation.canonicalDestinationPath);
+    assert.ok(consumed?.state === 'hot');
+    assert.equal(consumed.transferConsumed, true, 'SDK activation consumes the destination transfer');
+    assert.deepEqual(consumed.owner, identity, 'replacement retains the exact initiating worker generation');
     await fs.access(reservation.canonicalDestinationPath);
     await adapter.runtimeReady(destinationLease, reservation.canonicalDestinationPath);
     assert.equal((await authority.inspect(sourcePath))?.state, 'cold');

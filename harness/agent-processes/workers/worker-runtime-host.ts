@@ -452,13 +452,6 @@ export class WorkerRuntimeHost {
       const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
         ? payload.params
         : payload;
-      if (operation === 'test.extensionCommand') {
-        if (process.env.PIE_PHASE2_PACKAGE_SMOKE !== '1' || typeof params.command !== 'string') {
-          throw new Error('Extension command dispatch is available only to the packaged worker smoke.');
-        }
-        await this.context.session.prompt(params.command, { source: 'rpc' });
-        return asWorkerJson({ sessionPath: this.context.sessionPath });
-      }
       if (operation === 'session.duplicateHot') {
         const sourceSessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
         if (!sourceSessionPath || !sameSessionPath(sourceSessionPath, this.context.sessionPath)) {

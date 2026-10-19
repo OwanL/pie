@@ -94,7 +94,6 @@ export type WorkerRuntimeOperation =
   | 'extension_ui.response'
   | 'settings.set'
   | 'systemPromptToggles.set'
-  | 'test.extensionCommand'
   | 'session.managerFence'
   | 'session.snoozeReserve'
   | 'session.snoozeRelease';
@@ -980,7 +979,7 @@ const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
   'session.truncateAfter', 'session.title.generate', 'session.title.assign', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
-  'settings.set', 'systemPromptToggles.set', 'test.extensionCommand', 'session.managerFence', 'session.snoozeReserve', 'session.snoozeRelease',
+  'settings.set', 'systemPromptToggles.set', 'session.managerFence', 'session.snoozeReserve', 'session.snoozeRelease',
 ]);
 
 const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([

@@ -12,8 +12,9 @@ import test from 'node:test';
 
 import { verifyPiRuntimeArtifact, type VerifiedPiRuntimeArtifact } from '../../../lib/pi-runtime/artifact.mjs';
 import { resolveGenerationPiRuntime } from '../../../application/hosts/lib/pi-runtime-resolution.ts';
-import { deriveTrustedSdkRoot } from '../../../application/backend/agent-connection/trusted-sdk-root.ts';
 import { requestPieHostRelease } from '../../../application/hosts/lib/host-coordinator.ts';
+import { attachJsonlLineReader, serializeJsonLine } from '../../../harness/agent-processes/lib/rpc/jsonl.ts';
+import { SessionLifecycleStore } from '../../../harness/session-storage/lifecycle/session-lifecycle-store.ts';
 
 const execFileAsync = promisify(execFile);
 // The extension source/test roots remain at extension/ for now, but the
@@ -313,7 +314,7 @@ test('packaged isolated source-artifact backend drives public message.send exten
   // acquires, installs, or publishes on its own.
   const selectedRuntime = await selectVerifiedRuntime();
 
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-packaged-worker-'));
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'pie-packaged-worker-')));
   const vsixPath = path.join(temp, 'pie-phase2.vsix');
   const unpacked = path.join(temp, 'unpacked');
   let standaloneChild: ChildProcess | undefined;
@@ -323,6 +324,7 @@ test('packaged isolated source-artifact backend drives public message.send exten
   let backendChild: ChildProcess | undefined;
   let backendProcessExit: Promise<ChildExit> | undefined;
   let backendTimer: NodeJS.Timeout | undefined;
+  let backendLifecycle: SessionLifecycleStore | undefined;
   try {
     await fs.mkdir(unpacked);
     // New absolute OS-temp isolated output directory for the build. build.mjs
@@ -464,9 +466,9 @@ test('packaged isolated source-artifact backend drives public message.send exten
     assert.equal((await fs.stat(coldBrowseHelperEntry)).isFile(), true);
     assert.equal((await fs.stat(commandExtension)).isFile(), true);
 
-    // The packaged backend's sdkPath, trusted root, and source descriptor are
-    // resolved from the VERIFIED unpacked out/pi-runtime, never from the
-    // checkout or a globally installed SDK.
+    // The packaged backend's sdkPath and source descriptor are resolved from
+    // the VERIFIED unpacked out/pi-runtime, never from the checkout or a
+    // globally installed SDK.
     const packagedBackendTarget = {
       platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules,
     } as const;
@@ -479,10 +481,6 @@ test('packaged isolated source-artifact backend drives public message.send exten
     assert.ok(containsPath(await fs.realpath(packagedExtension), descriptor.artifactDir)
       && !containsPath(extensionRoot, descriptor.artifactDir),
       'the packaged SDK must come from the unpacked out/pi-runtime, not the checkout or a global install');
-    const trustedRoot = deriveTrustedSdkRoot(descriptor.sdkPath);
-    assert.equal(trustedRoot, path.join(descriptor.artifactDir, 'node_modules'),
-      'the trusted root is the unpacked artifact\'s node_modules owner');
-
     // Exercise the packaged standalone from this same isolated VSIX and
     // verified source artifact. The temporary wrapper calls its exported main
     // with the supported browserServerSettings seam to avoid fixed port 1997;
@@ -548,7 +546,6 @@ test('packaged isolated source-artifact backend drives public message.send exten
       PI_CODING_AGENT_AUTH_DIR: standaloneAuthDir,
       PI_CODING_AGENT_SESSION_DIR: standaloneSessionDir,
       PIE_DATA_DIR: standaloneDataDir,
-      PIE_TRUSTED_SDK_ROOT: trustedRoot,
       PIE_LIVE_PIPELINE_TRACE_DIR: path.join(temp, 'standalone-live-pipeline-traces'),
       PIE_PROVIDER_TRAFFIC_LOG: '0',
       PI_DIAG: '0',
@@ -751,10 +748,23 @@ test('packaged isolated source-artifact backend drives public message.send exten
       fs.copyFile(path.resolve(repositoryRoot, 'models.json'), path.join(agentDir, 'models.json')),
       fs.writeFile(path.join(agentDir, 'auth.json'), '{}\n'),
     ]);
+    const backendBuildId = (await fs.readFile(path.join(packagedExtension, 'out', 'pie-build-id.txt'), 'utf8')).trim();
+    const analyticsContext = {
+      mode: 'canonical-only', generationId: 'package-proof', buildId: backendBuildId,
+      workspaceId: 'package-proof-workspace', hostInstanceId: 'package-proof-host',
+    };
+    backendLifecycle = new SessionLifecycleStore(path.join(temp, 'data', 'state', 'session-lifecycle.sqlite'));
+    backendLifecycle.registerAnalyticsHost({
+      hostInstanceId: analyticsContext.hostInstanceId, workspaceId: analyticsContext.workspaceId,
+      generationId: analyticsContext.hostInstanceId, buildId: backendBuildId, processId: process.pid,
+      capabilities: [], registeredAtMs: String(Date.now()),
+    });
     const runningBackend = spawn(process.execPath, [
       backendEntry,
       '--sdkPath', descriptor.sdkPath,
       '--sourceArtifactDescriptor', JSON.stringify(descriptor),
+      '--analyticsContext', JSON.stringify(analyticsContext),
+      '--hostPid', String(process.pid),
       '--cwd', temp,
     ], {
       cwd: temp,
@@ -762,7 +772,6 @@ test('packaged isolated source-artifact backend drives public message.send exten
       windowsHide: true,
       env: {
         ...standaloneEnv,
-        PIE_PHASE2_PACKAGE_SMOKE: '1',
         PIE_HOST_COORDINATOR_PORT: String(coordinatorPort),
         PIE_PROVIDER_TRAFFIC_LOG: '0',
         // Disable inherited diagnostics and confine any dynamically enabled traces
@@ -773,12 +782,14 @@ test('packaged isolated source-artifact backend drives public message.send exten
         PIE_PHASE4_EXTENSION_FIXTURE_RESULT: commandResultPath,
         PIE_PHASE4_EXTENSION_FIXTURE_TRACE: commandTracePath,
         PI_CODING_AGENT_DIR: agentDir,
-        // The isolated VSIX resolves its SDK from the unpacked verified
-        // out/pi-runtime only; trust only that boundary.
-        PIE_TRUSTED_SDK_ROOT: trustedRoot,
         PIE_DATA_DIR: path.join(temp, 'data'),
         PI_CODING_AGENT_AUTH_DIR: path.join(temp, 'auth'),
         PI_CODING_AGENT_SESSION_DIR: path.join(temp, 'sessions'),
+        // This packaged-worker proof needs authoritative model availability for
+        // the SDK's Anthropic fixture provider. It is deliberately fake and is
+        // scoped to this no-agent backend; standalone remains unauthenticated.
+        ANTHROPIC_API_KEY: 'pie-packaged-fixture-not-a-real-credential',
+        ANTHROPIC_OAUTH_TOKEN: '',
       },
     });
     backendChild = runningBackend;
@@ -789,7 +800,30 @@ test('packaged isolated source-artifact backend drives public message.send exten
     let stderr = '';
     runningBackend.stdout.setEncoding('utf8');
     runningBackend.stderr.setEncoding('utf8');
-    runningBackend.stdout.on('data', (chunk) => { stdout += chunk; });
+    type PublicRecord = { id?: string; ok?: boolean; result?: any; error?: unknown; event?: string; payload?: any };
+    const records: PublicRecord[] = [];
+    runningBackend.stdout.on('data', (chunk: string) => { stdout += chunk; });
+    attachJsonlLineReader(runningBackend.stdout, (line) => {
+      if (line.trim()) records.push(JSON.parse(line));
+    });
+    const waitRecord = async (predicate: (record: PublicRecord) => boolean, after = 0): Promise<PublicRecord> => {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const record = records.slice(after).find(predicate);
+        if (record) return record;
+        assert.equal(runningBackend.exitCode, null, `backend exited while waiting: ${stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`Timed out waiting for packaged public RPC/event: ${stderr}`);
+    };
+    let requestSequence = 0;
+    const request = async (method: string, params: unknown = {}): Promise<any> => {
+      const id = `package-proof-${++requestSequence}`;
+      runningBackend.stdin.write(serializeJsonLine({ id, method, params }));
+      const response = await waitRecord((record) => record.id === id);
+      assert.equal(response.ok, true, `${method}: ${JSON.stringify(response.error)}`);
+      return response.result;
+    };
     runningBackend.stderr.on('data', (chunk) => { stderr += chunk; });
     const exit = new Promise<ChildExit>((resolve, reject) => {
       runningBackend.once('error', reject);
@@ -797,17 +831,100 @@ test('packaged isolated source-artifact backend drives public message.send exten
     });
     backendTimer = setTimeout(() => runningBackend.kill('SIGKILL'), 45_000);
     backendTimer.unref?.();
+    await waitRecord((record) => record.event === 'backend.ready');
+    const create = async (): Promise<string> => {
+      const after = records.length;
+      const created = await request('session.create', { cwd: temp });
+      await waitRecord((record) => record.event === 'session.opened'
+        && record.payload?.session?.path === created.sessionPath, after);
+      return created.sessionPath;
+    };
+    let currentPath = await create();
+    const switchPath = await create();
+    const availableModels = await request('models.list', { sessionPath: currentPath }) as Array<{
+      id: string; provider: string; thinkingLevels?: string[];
+    }>;
+    const reasoningModel = availableModels.find((model) => model.provider === 'anthropic'
+      && (model.thinkingLevels?.length ?? 0) >= 2);
+    assert.ok(reasoningModel, 'fake Anthropic fixture credential exposes a reasoning model with multiple supported levels');
+    const initialThinkingLevel = reasoningModel.thinkingLevels![0]!;
+    const nextThinkingLevel = reasoningModel.thinkingLevels!.find((level) => level !== initialThinkingLevel)!;
+    await request('runtimePrefs.set', { providerToggles: {}, extensionToggles: {}, autonomousMode: true });
+    assert.equal((await request('settings.set', {
+      sessionPath: currentPath,
+      defaultProvider: reasoningModel.provider,
+      defaultModel: reasoningModel.id,
+      defaultThinkingLevel: initialThinkingLevel,
+    })).defaultThinkingLevel, initialThinkingLevel);
+    assert.equal((await request('settings.set', {
+      sessionPath: currentPath, defaultThinkingLevel: nextThinkingLevel,
+    })).defaultThinkingLevel, nextThinkingLevel);
+    assert.equal((await request('settings.get')).defaultThinkingLevel, nextThinkingLevel);
+    const command = async (sessionPath: string, text: string): Promise<any> => {
+      await fs.rm(commandResultPath, { force: true });
+      const after = records.length;
+      const ack = await request('message.send', { sessionPath, text, inputs: [] });
+      assert.equal(typeof ack.requestId, 'string', 'public command receives an early acknowledgement');
+      // Replacement terminates the source request before destination startup
+      // and withSession complete. The terminal event alone is not completion
+      // evidence (and can also carry a genuine command failure).
+      const terminal = await waitRecord((record) => record.event === 'preflight.failed'
+        && record.payload?.sessionPath === sessionPath
+        && record.payload?.requestId === ack.requestId, after);
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        try {
+          return JSON.parse(await fs.readFile(commandResultPath, 'utf8'));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= deadline) {
+            const trace = await fs.readFile(commandTracePath, 'utf8').catch(() => '(missing)');
+            throw new Error(`Packaged command ${text.split(' ')[0]} produced no readable result. `
+              + `Terminal: ${JSON.stringify(terminal)}\nEvents: ${JSON.stringify(records.slice(after))}`
+              + `\nFixture trace: ${trace}\nBackend stderr: ${stderr}`, { cause: error });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    };
+    const noAgent = async (sessionPath: string): Promise<any> => command(sessionPath,
+      `/phase4-no-agent ${Buffer.from(commandResultPath).toString('base64url')}`);
+    const first = await noAgent(currentPath);
+    const sourcePaths: string[] = [];
+    for (const action of ['new', 'switch', 'fork'] as const) {
+      const after = records.length;
+      const replacement = await command(currentPath, `/phase4-replace ${Buffer.from(JSON.stringify({
+        action, resultPath: commandResultPath, switchPath,
+      })).toString('base64url')}`);
+      assert.equal(replacement.action, action);
+      assert.equal(replacement.sourcePath, currentPath);
+      assert.equal(replacement.pid, first.pid, 'replacement remains in the initiating worker process');
+      await waitRecord((record) => record.event === 'session.opened'
+        && record.payload?.replacesSessionPath === currentPath
+        && record.payload?.session?.path === replacement.finalPath, after);
+      sourcePaths.push(currentPath);
+      currentPath = replacement.finalPath;
+    }
+    const commandResult = { sourcePaths, finalPath: currentPath };
+    assert.match(await fs.readFile(currentPath, 'utf8'), /phase4-extension-durable/);
+    for (const sourcePath of new Set(sourcePaths)) {
+      if (sourcePath === currentPath) continue;
+      const reused = await noAgent(sourcePath);
+      assert.notEqual(reused.pid, first.pid, 'released source is reusable by an independent worker process');
+    }
+    const truncated = await request('session.truncateAfter', { sessionPath: currentPath, entryId: 'missing-smoke-entry' });
+    currentPath = truncated.sessionPath;
+    await request('models.list', { sessionPath: currentPath });
+    const freshWorker = await noAgent(currentPath);
+    assert.notEqual(freshWorker.pid, first.pid, 'truncate replaces the worker process');
+    assert.equal(freshWorker.thinkingLevel, nextThinkingLevel, 'fresh worker inherits authoritative settings');
+    // EOF uses the ordinary production shutdown path; no smoke-only disposal.
+    runningBackend.stdin.end();
     const result = await exit.finally(() => {
       if (backendTimer) { clearTimeout(backendTimer); backendTimer = undefined; }
     });
     assert.equal(result.code, 0, `packaged coordinator failed (${result.signal ?? 'no signal'}):\n${stderr}`);
     assert.match(stdout, /backend\.ready/);
-    assert.match(stderr, /phase4-package-smoke:promoted-command-retired/);
 
-    const commandResult = JSON.parse(await fs.readFile(commandResultPath, 'utf8')) as {
-      sourcePaths: string[];
-      finalPath: string;
-    };
     commandResult.sourcePaths = await Promise.all(commandResult.sourcePaths.map(canonicalPath));
     commandResult.finalPath = await canonicalPath(commandResult.finalPath);
     assert.equal(commandResult.sourcePaths.length, 3, 'new, switch, and fork each release one source');
@@ -908,6 +1025,7 @@ test('packaged isolated source-artifact backend drives public message.send exten
       await ensureStandaloneStopped(standaloneChild, standaloneProcessExit, standaloneCoordinatorPort);
     }
     if (backendChild && backendProcessExit) await ensureChildStopped(backendChild, backendProcessExit);
+    backendLifecycle?.close();
     await fs.rm(temp, { recursive: true, force: true });
   }
 });
