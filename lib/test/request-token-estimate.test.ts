@@ -14,6 +14,112 @@ const {
 } = require('../tokenization.ts') as typeof import('../tokenization');
 const { encode } = require('gpt-tokenizer/encoding/cl100k_base') as typeof import('gpt-tokenizer/encoding/cl100k_base');
 
+const modern = { id: 'gpt-6-astra', provider: 'openai-codex', api: 'openai-codex-responses' };
+const { encode: modernEncode } = require('gpt-tokenizer/encoding/o200k_base') as typeof import('gpt-tokenizer/encoding/o200k_base');
+const modernTokens = (text: string) => modernEncode(text, { disallowedSpecial: new Set<string>() }).length;
+
+test('model-aware literal text preserves whitespace and reserved spellings', () => {
+  const text = '  日本語 中文 한국어 😀 <|im_end|>\n  ';
+  for (const id of ['gpt-4o', 'gpt-4.1-mini', 'gpt-5', 'gpt-6-astra', 'o1', 'o3-mini', 'o4-mini']) {
+    assert.equal(estimateRequestPrefixTokens(text, [], { ...modern, id }), modernTokens(text));
+  }
+  for (const provider of ['openai', 'openai-codex', 'github-copilot']) {
+    for (const api of ['openai-completions', 'openai-responses', 'openai-codex-responses']) {
+      assert.equal(estimateRequestPrefixTokens(text, [], { ...modern, provider, api }), modernTokens(text));
+    }
+  }
+  for (const model of [undefined, { ...modern, api: 'anthropic-messages' }, { ...modern, id: 'claude-sonnet-4', provider: 'github-copilot' }, { ...modern, provider: 'other' }, { ...modern, id: 'gpt-4' }]) {
+    assert.equal(estimateRequestPrefixTokens(text, [], model), literalTokens(text));
+  }
+});
+
+const obj = (properties: Record<string, unknown> = {}, required: string[] = [], extra = {}) => ({ type: 'object', properties, required, ...extra });
+const str = (description: string) => ({ type: 'string', description });
+test('recorded provider holdout removal delta 86 versus unindented structural estimate 70 plus 12-token tools-block overhead', () => {
+  const parameters = obj({ jobs: { type: 'array', description: 'Ordered processing jobs.', items: obj({ operation: { type: 'string', description: 'Operation.', enum: ['insert', 'delete', 'replace'] }, target: obj({ path: str('Relative path.'), recursive: { type: 'boolean', description: 'Include descendants.' } }, ['path'], { additionalProperties: false }) }, ['operation', 'target'], { additionalProperties: false }) }, dry_run: { type: 'boolean', description: 'Preview without writing.' } }, ['jobs'], { additionalProperties: false });
+  assert.equal(estimateToolDefinitionsTokens([{ name: 'synthetic_inspect', description: 'Inspect synthetic data.', parameters }], modern), 70 + 12);
+  assert.equal(estimateToolDefinitionsTokens([{ name: 'synthetic_inspect', description: 'Inspect synthetic data.', parameters: obj() }], modern), 17 + 12);
+});
+
+test('supported annotations render as compact comments before the annotated member line', () => {
+  // Frozen ask_user-shaped copy: bounds/default values are rendered, never
+  // silently dropped; key-colon comment lines keep the estimate close to
+  // the provider's structural rendering (recorded live-probe accuracy).
+  const parameters = obj({
+    question: { type: 'string', minLength: 3, maxLength: 40, description: 'The question to present to the user.' },
+    ratio: { type: 'number', minimum: 0.25, maximum: 4 },
+    options: { type: 'array', minItems: 0, maxItems: 6, description: 'Preset answers.', items: str('A suggested short answer (~1–6 words).') },
+    mode: { type: 'boolean', default: true, description: 'Whether custom replies are allowed.' },
+  }, ['question', 'options'], { additionalProperties: false });
+  const declaration = '// \ntype ask_user = (_: {\n'
+    + '// The question to present to the user.\n// minLength: 3, maxLength: 40\nquestion: string,\n'
+    + '// minimum: 0.25, maximum: 4\nratio?: number,\n'
+    + '// Preset answers.\n// minItems: 0, maxItems: 6\noptions: Array<\n// A suggested short answer (~1–6 words).\nstring>,\n'
+    + '// Whether custom replies are allowed.\n// default: true\nmode?: boolean,\n'
+    + '}) => any;';
+  assert.equal(estimateToolDefinitionsTokens([{ name: 'ask_user', description: '', parameters }], modern), modernTokens(declaration) + 12);
+});
+
+test('array item descriptions render before the nested item type and root descriptions render at the head', () => {
+  const nestedItems = obj({
+    tags: { type: 'array', description: 'Outer record tags.', items: { type: 'array', items: { type: 'number', description: 'Weighted value.' } } },
+  }, [], { additionalProperties: false });
+  const declaration = '// \ntype nested = (_: {\n// Outer record tags.\ntags?: Array<Array<\n// Weighted value.\nnumber>>,\n}) => any;';
+  assert.equal(estimateToolDefinitionsTokens([{ name: 'nested', description: '', parameters: nestedItems }], modern), modernTokens(declaration) + 12);
+  const rooted = { type: 'object', description: 'Root schema description.', properties: { x: { type: 'string' } }, additionalProperties: false } as const;
+  const rootDeclaration = '// \ntype rooted = (_: // Root schema description.\n{\nx?: string,\n}) => any;';
+  assert.equal(estimateToolDefinitionsTokens([{ name: 'rooted', description: '', parameters: rooted }], modern), modernTokens(rootDeclaration) + 12);
+});
+
+test('invalid annotation values use compact fallback instead of rendering', () => {
+  for (const parameters of [{ type: 'string', minLength: -1 }, { type: 'number', maximum: NaN }, { type: 'string', default: { nested: undefined } }, { type: 'string', minItems: 2 }, { type: 'string', minimum: 'low' }]) {
+    const tools = [{ name: 'test', parameters }];
+    assert.equal(estimateToolDefinitionsTokens(tools, modern), modernTokens(JSON.stringify(tools)) + 12);
+  }
+});
+
+test('recognized-model tool-block overhead counts once per request, never per tool; empty and non-modern stay unchanged', () => {
+  const first = { name: 'first', description: 'First tool.', parameters: obj({ x: { type: 'string' } }) };
+  const second = { name: 'second', description: 'Second tool.', parameters: obj({ y: { type: 'integer' } }) };
+  const singleFirst = estimateToolDefinitionsTokens([first], modern);
+  const singleSecond = estimateToolDefinitionsTokens([second], modern);
+  assert.equal(estimateToolDefinitionsTokens([first, second], modern), (singleFirst - 12) + (singleSecond - 12) + 12,
+    'per-tool declaration costs sum once plus one 12-token block');
+  assert.equal(estimateToolDefinitionsTokens([], modern), 0);
+  // Compact-JSON basis keeps no framing overhead: non-modern estimates are
+  // unaffected on the tools side.
+  const prompt = 'Prompt';
+  assert.equal(estimateRequestPrefixTokens(prompt, [first]), literalTokens(prompt) + literalTokens(JSON.stringify([{ name: 'first', description: 'First tool.', parameters: first.parameters }])));
+});
+
+test('unsupported or malformed schemas use compact fallback; cycles never crash', () => {
+  for (const parameters of [true, null, { type: 'string', minLength: -1 }, { anyOf: [{ type: 'string' }] }, { $ref: '#/x' }, obj({ x: { type: 'array' } }), obj({}, ['missing']), { type: 'object', properties: [] }, obj({ x: { type: 'string', pattern: 'a+' } }), obj({}, [], { additionalProperties: true }), { type: ['string', 'null'] }, { type: 'string', enum: [3] }, { type: 'string', minimum: 'low' }, { type: 'array', minItems: -1, items: str('x') }]) {
+    const tools = [{ name: 'test', description: 'Test.', parameters }];
+    assert.equal(estimateToolDefinitionsTokens(tools, modern), modernTokens(JSON.stringify(tools)) + 12);
+  }
+  const cyclic: Record<string, unknown> = { type: 'object' }; cyclic.properties = { cycle: cyclic };
+  assert.doesNotThrow(() => estimateToolDefinitionsTokens([{ name: 'test', parameters: cyclic }], modern));
+});
+
+test('unsupported tool preserves its whole schema without resetting supported neighbors', () => {
+  const supported = { name: 'read', parameters: obj({ path: { type: 'string' } }) };
+  const unsupported = { name: 'ask_user', parameters: obj({ questions: { type: 'array', minItems: 1, pattern: 'a+' } }) };
+  const fallback = modernTokens(JSON.stringify([unsupported]));
+  assert.notEqual(fallback, literalTokens(JSON.stringify([unsupported])));
+  // One 12-token tools-block overhead for the whole request, never per tool.
+  const supportedSingle = estimateToolDefinitionsTokens([supported], modern) - 12;
+  assert.equal(estimateToolDefinitionsTokens([supported, unsupported, supported], modern), 2 * supportedSingle + fallback + 12);
+});
+
+test('nested descriptions preserve newlines and unusual names are quoted', () => {
+  const tools = [{ name: 'odd-name', description: 'one\ntwo', parameters: obj({ 'a-b': str('first\nsecond <|im_end|>') }) }];
+  const declaration = '// one\n// two\ntype "odd-name" = (_: {\n// first\n// second <|im_end|>\n"a-b"?: string,\n}) => any;';
+  assert.equal(estimateToolDefinitionsTokens(tools, modern), modernTokens(declaration) + 12);
+  const escaped = [{ name: 'quoted"name', parameters: obj({ 'a"b': { type: 'string', enum: ['a"b', 'a\\b'] } }) }];
+  const escapedDeclaration = '// \ntype ' + JSON.stringify(escaped[0].name) + ' = (_: {\n' + JSON.stringify('a"b') + '?: ' + ['a"b', 'a\\b'].map(value => JSON.stringify(value)).join(' | ') + ',\n}) => any;';
+  assert.equal(estimateToolDefinitionsTokens(escaped, modern), modernTokens(escapedDeclaration) + 12);
+});
+
 type RequestEstimateTool = import('../request-token-estimate').RequestEstimateTool;
 
 function assertRealTokenizerAvailable(): void {

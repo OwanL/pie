@@ -10,6 +10,7 @@ import { isPendingTabPath } from '../../../../lib/session-path.js';
 import type {
   ComposerInput,
   ContextWindowUsage,
+  InitialContextEstimate,
   ModelSettings,
   SessionSummary,
 } from '../../../lib/protocol/index.js';
@@ -25,9 +26,12 @@ import type {
  *
  * Revert restores every field the optimistic apply flipped so the state matches
  * the pre-change state field-for-field (STATE_CONTRACT § Optimistic
- * Reconciliation: "optimistic UI writes must be reversible"). `undefined` vs
- * `null` in the snapshot distinguishes "key absent" (delete on revert) from
- * "key present with null" (set null on revert) for the two Record fields.
+ * Reconciliation: "optimistic UI writes must be reversible"), except that the
+ * cleared initial-context estimate is restored only while the cleared entry is
+ * still current (a newer estimate publication fences the restore).
+ * `undefined` vs `null` in the snapshot distinguishes "key absent" (delete on
+ * revert) from "key present with null" (set null on revert) for the Record
+ * fields.
  */
 
 /** Apply a model switch optimistically and record a rollback snapshot. */
@@ -54,6 +58,11 @@ export function applySetModelOptimistic(
   const previousPendingInputs: ComposerInput[] | undefined =
     sessionPath in state.composer.pendingComposerInputsBySession
       ? state.composer.pendingComposerInputsBySession[sessionPath]
+      : undefined;
+  // Same key-absent vs explicit-null distinction as previousContextUsage.
+  const previousInitialContextEstimate: InitialContextEstimate | null | undefined =
+    sessionPath in state.settings.initialContextEstimateBySession
+      ? state.settings.initialContextEstimateBySession[sessionPath]
       : undefined;
 
   return produce(state, (draft) => {
@@ -82,6 +91,17 @@ export function applySetModelOptimistic(
     // real reading lands. Holding the previous value keeps the indicator
     // stable across the switch.
 
+    // A cold initial-context estimate is denominated in the PRE-switch model's
+    // context window, so the optimistic apply clears it for the in-flight
+    // switch. A successful cold settings.set write does not republish the
+    // inventory, so it stays cleared until the next cold snapshot or deferred
+    // publication recomputes it; the failure rollback below restores it.
+    // Clear only an existing key (including a previous explicit null) so an
+    // absent entry is never fabricated.
+    if (sessionPath in draft.settings.initialContextEstimateBySession) {
+      draft.settings.initialContextEstimateBySession[sessionPath] = null;
+    }
+
     // Drop pending pasted image inputs when the new model can't accept them.
     // Only happens on the modal-confirmed path (clearImages === true).
     if (clearImages) {
@@ -102,6 +122,7 @@ export function applySetModelOptimistic(
         previousSummary,
         previousContextUsage,
         previousPendingInputs,
+        previousInitialContextEstimate,
       },
     };
   });
@@ -266,6 +287,20 @@ export function revertSetModel(state: ArchState, corrId: string, error: string |
       delete draft.composer.pendingComposerInputsBySession[sessionPath];
     } else {
       draft.composer.pendingComposerInputsBySession[sessionPath] = snap.previousPendingInputs;
+    }
+
+    // Restore the pre-switch estimate only while the cleared entry the
+    // optimistic apply left still owns the slot. A SessionOpened cold refresh
+    // or a fence-matching SessionPromptInventory during the in-flight switch
+    // may have published a newer estimate for the session's (reverted) model;
+    // that publication is fenced like inventory results and must not be
+    // clobbered by the rollback.
+    if (
+      snap.previousInitialContextEstimate !== undefined
+      && sessionPath in draft.settings.initialContextEstimateBySession
+      && draft.settings.initialContextEstimateBySession[sessionPath] === null
+    ) {
+      draft.settings.initialContextEstimateBySession[sessionPath] = snap.previousInitialContextEstimate;
     }
 
     delete draft.pending.setModelByCorrId[corrId];

@@ -406,13 +406,21 @@ export interface PrepassPhaseState {
  *  § Optimistic Reconciliation).
  *
  *  `undefined` vs `null` distinguishes "key absent" (delete on revert) from
- *  "key present with a null value" (set null on revert) for the two Record
- *  fields (`contextUsageBySession`, `pendingComposerInputsBySession`). */
+ *  "key present with a null value" (set null on revert) for the three Record
+ *  fields (`contextUsageBySession`, `initialContextEstimateBySession`,
+ *  `pendingComposerInputsBySession`).
+ *
+ *  The cold initial-context estimate's `contextWindow` denominator describes
+ *  the pre-switch model, so the optimistic apply snapshots and clears it; a
+ *  failed-switch rollback restores it, fenced against a newer estimate
+ *  publication that landed while the switch was in flight (see
+ *  STATE_CONTRACT § Snapshot Recovery). */
 export interface SetModelSnapshot {
   previousModelSettings: ModelSettings | null;
   previousSummary: SessionSummary | null;
   previousContextUsage: ContextWindowUsage | null | undefined;
   previousPendingInputs: ComposerInput[] | undefined;
+  previousInitialContextEstimate: InitialContextEstimate | null | undefined;
 }
 
 /** Tracks an in-flight `SetModel` lifecycle keyed by `corrId`.

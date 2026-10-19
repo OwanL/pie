@@ -259,11 +259,17 @@ function buildInitialContextInventoryProjection(
     promptGuidelines: inventoryPromptOptions.promptGuidelines,
   }));
 
-  // Count the exact Pie-owned prompt text used by runtime requests (literal
-  // whitespace-preserving cl100k basis). Provider tool descriptions/schemas are
-  // separate request metadata and are added exactly once by the shared
-  // estimator below, as one compact JSON array — no Markdown catalog text.
-  const tokens = estimateRequestPrefixTokens(fullSystemPrompt, tools);
+  // Count the exact Pie-owned prompt text used by runtime requests. The
+  // estimate follows the discovery model: the shared estimator narrows it to
+  // {id, provider, api?} and its predicate treats a missing api as acceptable
+  // for the shipped OpenAI-structured ids of the recognized providers
+  // (openai/openai-codex/github-copilot), so the discovery frame is enough.
+  // `session.model` is the same discovered model (its contextWindow is read
+  // below) but may omit provider, so the discovery frame is authoritative
+  // here. Provider tool descriptions/schemas are separate request metadata
+  // and are added exactly once by the shared estimator below, on the same
+  // model basis — no Markdown catalog text.
+  const tokens = estimateRequestPrefixTokens(fullSystemPrompt, tools, input.model);
   const contextWindow = session.model?.contextWindow;
   if (!Number.isSafeInteger(tokens) || tokens < 0
     || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {

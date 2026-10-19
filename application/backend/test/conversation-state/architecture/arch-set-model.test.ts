@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { reducer, initialArchState, type ArchState } from '../../../conversation-state/reducer';
 import type { Event } from '../../../conversation-state/events';
 import type { Effect } from '../../../conversation-state/effects/effects';
-import type { ModelInfo, ComposerInput, ContextWindowUsage, ThinkingLevel } from '../../../../lib/protocol/index.js';
+import type { ModelInfo, ComposerInput, ContextWindowUsage, InitialContextEstimate, ThinkingLevel } from '../../../../lib/protocol/index.js';
 
 const SESSION = '/s';
 
@@ -36,6 +36,8 @@ const FILE_REF_INPUT: ComposerInput = {
   id: 'f1', kind: 'filesystemPathRef', path: '/w/file.ts', name: 'file.ts', source: 'picker',
 };
 const USAGE: ContextWindowUsage = { tokens: 100, contextWindow: 200000, percent: 0.0005 };
+const ESTIMATE: InitialContextEstimate = { tokens: 12_345, contextWindow: 200_000 };
+const FRESH_ESTIMATE: InitialContextEstimate = { tokens: 12_345, contextWindow: 400_000 };
 
 interface BuildOpts {
   openTabs?: string[];
@@ -692,6 +694,90 @@ test('SetModelResult{ok:false} with no snapshot (no optimistic apply) just notif
   assert.equal(out.state.settings.modelSettings?.defaultModel, 'old-model');
   assert.equal(out.state.settings.notice, 'Failed to set model: late');
   assert.deepEqual(out.state.pending.setModelByCorrId, {});
+});
+
+test('SetModelResult{ok:false} restores a snapshotted cold initial-context estimate', () => {
+  const base = buildState();
+  const state: ArchState = { ...base, settings: {
+    ...base.settings, initialContextEstimateBySession: { [SESSION]: ESTIMATE },
+  } };
+  const applied: ArchState = reduceFrom(state, cmd('c1', 'image-model'));
+  // The estimate's contextWindow denominator describes the pre-switch model,
+  // so the optimistic apply clears it while the switch is in flight.
+  assert.equal(applied.settings.initialContextEstimateBySession[SESSION], null);
+  assert.deepEqual(applied.pending.setModelByCorrId['c1']?.snapshot?.previousInitialContextEstimate, ESTIMATE);
+
+  const out = reducer(applied, result('c1', false, 'boom'));
+  assert.deepEqual(out.state.settings.initialContextEstimateBySession[SESSION], ESTIMATE);
+  assert.equal(out.state.settings.modelSettings?.defaultModel, 'old-model');
+});
+
+test('SetModelResult{ok:false} preserves absent and explicit-null estimate entries on revert', () => {
+  // Key absent before the apply: no estimate was cleared, so nothing is
+  // restored and no key is fabricated.
+  const fromAbsent: ArchState = reduceFrom(buildState(), cmd('c1', 'image-model'));
+  assert.equal(SESSION in fromAbsent.settings.initialContextEstimateBySession, false);
+  assert.equal(fromAbsent.pending.setModelByCorrId['c1']?.snapshot?.previousInitialContextEstimate, undefined);
+  const revertedAbsent = reducer(fromAbsent, result('c1', false, 'boom')).state;
+  assert.equal(SESSION in revertedAbsent.settings.initialContextEstimateBySession, false);
+
+  // Explicit null before the apply (a prior discovery settled without an
+  // estimate): revert restores null, not a fabricated value.
+  const base = buildState();
+  const fromNull: ArchState = { ...base, settings: {
+    ...base.settings, initialContextEstimateBySession: { [SESSION]: null },
+  } };
+  const appliedNull: ArchState = reduceFrom(fromNull, cmd('c1', 'image-model'));
+  assert.equal(appliedNull.settings.initialContextEstimateBySession[SESSION], null);
+  assert.equal(appliedNull.pending.setModelByCorrId['c1']?.snapshot?.previousInitialContextEstimate, null);
+  const revertedNull = reducer(appliedNull, result('c1', false, 'boom')).state;
+  assert.equal(revertedNull.settings.initialContextEstimateBySession[SESSION], null);
+});
+
+test('SetModelResult{ok:true} leaves the estimate cleared until a cold republish recomputes it', () => {
+  // A successful cold settings.set model write does not republish the prompt
+  // inventory, so the cleared estimate stays cleared until the next cold
+  // snapshot/refresh recomputes it for the new model's context window.
+  const base = buildState();
+  const state: ArchState = { ...base, settings: {
+    ...base.settings, initialContextEstimateBySession: { [SESSION]: ESTIMATE },
+  } };
+  const out: ArchState = reduceFrom(state, cmd('c1', 'image-model'), result('c1', true));
+  assert.equal(out.settings.initialContextEstimateBySession[SESSION], null);
+  assert.deepEqual(out.pending.setModelByCorrId, {});
+});
+
+test('a failed-switch rollback does not clobber a newer estimate published while the switch was in flight', () => {
+  // Between the optimistic apply and the failure result, a SessionOpened cold
+  // refresh may publish a fresh estimate computed for the session's current
+  // model. The same model-write fence that blocks stale inventory results
+  // fences the rollback restore: that publication owns the slot.
+  const base = buildState();
+  const state: ArchState = { ...base, settings: {
+    ...base.settings, initialContextEstimateBySession: { [SESSION]: ESTIMATE },
+  } };
+  const applied: ArchState = reduceFrom(state, cmd('c1', 'new-model', SESSION, 'high', 'p'));
+  assert.equal(applied.settings.initialContextEstimateBySession[SESSION], null);
+
+  const refreshed: Event = {
+    kind: 'SessionOpened', backendGeneration: 0, modelWriteFence: 1, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    sessionPath: SESSION,
+    payload: {
+      session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'new-model', thinkingLevel: 'high' },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      runtimeReady: false,
+      initialContextEstimate: FRESH_ESTIMATE,
+    },
+  };
+  const afterOpened: ArchState = reduceFrom(applied, refreshed);
+  assert.deepEqual(afterOpened.settings.initialContextEstimateBySession[SESSION], FRESH_ESTIMATE);
+
+  const out = reducer(afterOpened, result('c1', false, 'boom'));
+  // Model state reverted; the newer estimate publication is untouched.
+  assert.equal(out.state.settings.modelSettings?.defaultModel, 'old-model');
+  assert.deepEqual(out.state.settings.initialContextEstimateBySession[SESSION], FRESH_ESTIMATE);
 });
 
 // ─── Edge cases flagged by review ─────────────────────────────────────────────

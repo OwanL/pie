@@ -1427,6 +1427,141 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 });
 
 
+test("prepass and main-model estimates differ: full request-prefix deltas follow ctx.model, never the prepass model", async () => {
+	const { estimateRequestPrefixTokens } = require("../../../lib/request-token-estimate.ts") as typeof import("../../../lib/request-token-estimate.ts");
+	// Schema + Unicode content is chosen so the modern OpenAI o200k basis (the
+	// main session model below) and the legacy cl100k/compact fallback (what a
+	// non-modern prepass model would produce) disagree, making the model wiring
+	// observable in the shared before/after deltas.
+	const unicodeSkills: Skill[] = [
+		skill("計画レビュー", "計画を慎重に審査する。Plans with 漢字, emoji 😀🚀, and 中文 descriptions."),
+		skill("debugging", "Debug carefully. 除錯時保留原始空白與縮排。"),
+		skill("refactoring", "Refactor code safely. 重構程式碼，保留原有格式。"),
+	];
+	const schemaTools = mockToolInfo.map((tool) => ({ ...tool, parameters: { type: "object", properties: { payload: { type: "string", enum: Array.from({ length: 200 }, (_, i) => `schema-heavy-${i}`) } } } }));
+	let scorerCalls = 0;
+	let prepassModel: unknown;
+	let pruningFeedback: any;
+	let hookInput = "";
+	let hookOutput = "";
+	let activeTools = mockToolInfo.map((tool) => tool.name);
+	__setCompleteFn(async (model: unknown) => {
+		scorerCalls++;
+		prepassModel = model;
+		return {
+			text: JSON.stringify({
+				pruneSkills: unicodeSkills.map((entry) => entry.name),
+				pruneTools: ["web_search"],
+			}),
+		};
+	});
+	try {
+		// The prepass LLM is a non-modern Claude id while the main session model
+		// is modern OpenAI: the estimator must follow the latter.
+		const activeConfig = config({}, "auto", { ceiling: 10 });
+		activeConfig.model = "claude-sonnet-4";
+		activeConfig.provider = "github-copilot";
+		const { handlers } = register(activeConfig);
+		const pruningHandler = handlers.get("before_agent_start");
+		assert.ok(pruningHandler);
+
+		const runnerModulePath = path.join(
+			process.cwd(),
+			"application", "hosts", "vscode", "node_modules", "@earendil-works", "pi-coding-agent",
+			"dist", "core", "extensions", "runner.js",
+		);
+		const { ExtensionRunner } = await import(pathToFileURL(runnerModulePath).href) as { ExtensionRunner: new (...args: any[]) => any };
+		const mainModel = { id: "gpt-5", provider: "openai", api: "openai-responses" };
+		const sdkRunner = new ExtensionRunner([
+			{ path: "<skill-pruner>", handlers: new Map([["before_agent_start", [async (event: any, ctx: any) => {
+				hookInput = event.systemPrompt;
+				const result = await pruningHandler(event, ctx) as any;
+				pruningFeedback = result?.message?.details;
+				hookOutput = result?.systemPrompt ?? event.systemPrompt;
+				return result;
+			}]]]) },
+		], {}, "/repo", { getSessionId: () => "sdk-model-aware-session", getSessionFile: () => undefined }, {});
+		sdkRunner.getModel = () => mainModel;
+
+		const initialBase = piePrompt(unicodeSkills, activeTools);
+		const promptOptions = {
+			cwd: "/repo",
+			skills: unicodeSkills,
+			selectedTools: activeTools,
+			contextFiles: [],
+		};
+		const promptState: any = {
+			_baseSystemPrompt: initialBase,
+			_baseSystemPromptOptions: promptOptions,
+			agent: { state: { systemPrompt: initialBase } },
+			_extensionRunner: sdkRunner,
+			_rebuildSystemPrompt(toolNames: string[]) {
+				this._baseSystemPromptOptions = { ...this._baseSystemPromptOptions, selectedTools: toolNames };
+				return piePrompt(unicodeSkills, toolNames);
+			},
+		};
+		installPieSystemPromptRebuildGuard(promptState, "/pie");
+		__setToolSeams({
+			getAllTools: () => schemaTools as any[],
+			getActiveTools: () => activeTools,
+			setActiveTools: (names) => {
+				activeTools = names;
+				const rebuilt = promptState._rebuildSystemPrompt(names);
+				promptState._baseSystemPrompt = rebuilt;
+				promptState.agent.state.systemPrompt = rebuilt;
+			},
+		});
+		__setFormatter(testFormatSkillsForPrompt);
+
+		await sdkRunner.emitBeforeAgentStart(
+			"計画とスキルとツールの選択を検証する Implement the tool and skill selection 😀",
+			undefined,
+			initialBase,
+			promptOptions,
+		);
+
+		assert.equal(scorerCalls, 1, "selection uses exactly one scorer call");
+		assert.deepEqual(prepassModel, { id: "claude-sonnet-4", provider: "github-copilot", api: "unknown" },
+			"the prepass runs on its configured model, not the main session model");
+		const keptToolFilter = schemaTools.filter((tool) => activeTools.includes(tool.name));
+		// setActiveTools' rebuild rewrites the pie-owned prompt wholesale (hookInput
+		// is exactly the previous base), so the after-tool prompt is the rebuilt
+		// base and hookOutput differs only in the replaced skills block.
+		const SKILLS_BLOCK_RE = (require("../../agent-instructions/skill-selection/skill-policy.ts") as typeof import("../../agent-instructions/skill-selection/skill-policy.js")).SKILLS_BLOCK_RE as RegExp;
+		const afterToolPrompt: string = promptState._baseSystemPrompt;
+		assert.equal(hookOutput, afterToolPrompt.replace(SKILLS_BLOCK_RE, "\n\n"),
+			"the emitted prompt differs from the rebuilt base only in the replaced skills block");
+		const toolMainDelta = estimateRequestPrefixTokens(hookInput, schemaTools, mainModel)
+			- estimateRequestPrefixTokens(afterToolPrompt, keptToolFilter, mainModel);
+		const skillMainDelta = estimateRequestPrefixTokens(afterToolPrompt, keptToolFilter, mainModel)
+			- estimateRequestPrefixTokens(hookOutput, keptToolFilter, mainModel);
+		assert.ok(pruningFeedback.toolTokensSaved > 0 && pruningFeedback.skillTokensSaved > 0);
+		assert.equal(
+			pruningFeedback.toolTokensSaved,
+			toolMainDelta,
+			"the tool-stage delta is counted on the main session model basis",
+		);
+		assert.equal(
+			pruningFeedback.skillTokensSaved,
+			skillMainDelta,
+			"the skill-stage delta is counted on the same main session model basis",
+		);
+		assert.equal(pruningFeedback.toolTokensSaved + pruningFeedback.skillTokensSaved,
+			estimateRequestPrefixTokens(hookInput, schemaTools, mainModel) - estimateRequestPrefixTokens(hookOutput, keptToolFilter, mainModel));
+		assert.ok(pruningFeedback.toolTokensSaved > 500, "schema-heavy savings include definitions and changed tool guidance");
+		assert.notEqual(
+			pruningFeedback.toolTokensSaved + pruningFeedback.skillTokensSaved,
+			estimateRequestPrefixTokens(hookInput, schemaTools) - estimateRequestPrefixTokens(hookOutput, keptToolFilter),
+			"schema + Unicode deltas must not be counted on the legacy/prepass-model fallback basis",
+		);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		resetForTesting();
+	}
+});
+
+
 test("standalone Pi without the fresh-base seam does not return stale tool prose", async () => {
 	let scorerCalls = 0;
 	let setActiveToolsCalls = 0;

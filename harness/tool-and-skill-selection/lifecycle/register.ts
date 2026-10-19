@@ -11,7 +11,7 @@ import {
 	state,
 	PROCESS_SESSION_ID,
 } from "../state/selector-state.ts";
-import { estimateRequestPrefixTokens } from "../../../lib/request-token-estimate.ts";
+import { estimateRequestPrefixTokens, type RequestEstimateModel } from "../../../lib/request-token-estimate.ts";
 import { toErrorMessage } from "../../../lib/structured-logging/error-message.ts";
 import { rootSessionAttribution } from "../../../lib/session-attribution.ts";
 import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.ts";
@@ -42,6 +42,20 @@ import { clearSessionPruningState } from "../state/session-pruning-state.ts";
 
 const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
 const WAKE_TOOL_NAMES = ["wakeup_timer"];
+
+/** Safely narrow the unknown extension context to the shared estimator model
+ * shape {id, provider, api?}. The main lifecycle must estimate every
+ * request-prefix stage for the session's own model, never the prepass LLM's
+ * configured model (a different provider/id that would otherwise skew the
+ * basis), so the capture happens once per turn before any await. */
+function requestEstimateModelFromContext(ctx: unknown): RequestEstimateModel | undefined {
+	const model = (ctx as { model?: unknown } | null | undefined)?.model;
+	if (!model || typeof model !== "object" || Array.isArray(model)) return undefined;
+	const { id, provider, api } = model as Record<string, unknown>;
+	if (typeof id !== "string" || typeof provider !== "string") return undefined;
+	if (id === "" || provider === "") return undefined;
+	return { id, provider, ...(typeof api === "string" && api !== "" ? { api } : {}) };
+}
 
 // Share only execution-module loading, never registration/session closures.
 // A rejected load must not poison later refreshes or other registrations.
@@ -108,6 +122,9 @@ export default function register(pi: ExtensionAPI) {
 		const afterCompaction = compactionResume && getConfig().refreshAfterCompaction !== false;
 		if (compactionResume && !afterCompaction && !event.newUserPrompt) return undefined;
 		const sessionId = getSessionId(ctx);
+		// Capture the main session model once per turn; all three request-prefix
+		// estimates below share it. Never the prepass LLM's configured model.
+		const requestEstimateModel = requestEstimateModelFromContext(ctx);
 		const isChildSession = isInSubagentContext();
 		const childRuntimeOwner = isChildSession && sessionId !== PROCESS_SESSION_ID
 			? currentChildToolRuntimeOwner()
@@ -439,7 +456,7 @@ export default function register(pi: ExtensionAPI) {
 				const beforeToolPrompt = modifiedSystemPrompt;
 				const beforeToolNames = new Set(toolSeams.getActiveTools());
 				const beforeToolDefinitions = toolsManuallyDisabled ? [] : configuredTools.filter((tool) => beforeToolNames.has(tool.name));
-				const beforeToolTokens = estimateRequestPrefixTokens(beforeToolPrompt, beforeToolDefinitions);
+				const beforeToolTokens = estimateRequestPrefixTokens(beforeToolPrompt, beforeToolDefinitions, requestEstimateModel);
 				const toolSelection = applyToolSelection(
 					availableTools,
 					prunedTools,
@@ -470,7 +487,7 @@ export default function register(pi: ExtensionAPI) {
 				const afterToolNames = new Set(activeConfig.mode === "shadow"
 					? toolSelection.includedToolNames : toolSeams.getActiveTools());
 				const afterToolDefinitions = toolsManuallyDisabled ? [] : configuredTools.filter((tool) => afterToolNames.has(tool.name));
-				const afterToolTokens = estimateRequestPrefixTokens(modifiedSystemPrompt, afterToolDefinitions);
+				const afterToolTokens = estimateRequestPrefixTokens(modifiedSystemPrompt, afterToolDefinitions, requestEstimateModel);
 				if (toolResult) toolResult.tokensSaved = beforeToolTokens - afterToolTokens;
 				let afterSkillTokens = afterToolTokens;
 				const toolsRemain = toolSelection.includedToolNames.length > 0;
@@ -506,7 +523,7 @@ export default function register(pi: ExtensionAPI) {
 
 					const estimatedSkillPrompt = staleToolProseCannotBeRebased && activeConfig.mode === "auto"
 						? modifiedSystemPrompt : modifiedSystemPrompt.replace(SKILLS_BLOCK_RE, replacement);
-					afterSkillTokens = estimateRequestPrefixTokens(estimatedSkillPrompt, afterToolDefinitions);
+					afterSkillTokens = estimateRequestPrefixTokens(estimatedSkillPrompt, afterToolDefinitions, requestEstimateModel);
 					skillResult.tokensSaved = afterToolTokens - afterSkillTokens;
 
 					const excludedSkillPaths = skillSelection.excludedSkillNames.map((name) => visibleSkills.find((skill) => skill.name === name)?.filePath).filter(Boolean) as string[];

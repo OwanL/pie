@@ -298,6 +298,104 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.equal(promptsById.get('provider')?.summary, 'mock');
 });
 
+test('inventory estimate follows the discovery-model basis instead of the legacy fallback', async () => {
+  // Schema + Unicode content is chosen so the modern OpenAI o200k basis and
+  // the legacy cl100k/compact fallback disagree, making the wiring observable.
+  const unicodeContextContent = 'Project instructions.\n必読: 設定ファイルを編集する前に必ずバックアップを取得してください。😀🚀 保留原始空白與縮排。';
+  const unicodeGuideline = '読みやすい出力を優先してください。日本語と😀を含む説明。';
+  const schemaTool = {
+    name: 'plan_review',
+    description: '"漢字" review of the plan. 😀',
+    parameters: {
+      type: 'object',
+      properties: {
+        steps: { type: 'array', description: 'Ordered steps to review. 步驟:', items: { type: 'string' } },
+        approved: { type: 'boolean', description: 'Whether the reviewer approved. 已核准。' },
+      },
+      required: ['steps'],
+      additionalProperties: false,
+    },
+  };
+  let disposed = false;
+  // The builder runs twice (full inventory prompt first, harness card last);
+  // the estimate uses the first (full) output.
+  const capturedPromptOutputs: string[] = [];
+  const session: any = {
+    model: { provider: 'openai', id: 'gpt-5', contextWindow: 400_000 },
+    async bindExtensions() {
+      this._baseSystemPromptOptions = {
+        cwd: '/workspace',
+        selectedTools: [schemaTool.name],
+        contextFiles: [{ path: '/workspace/AGENTS.md', content: unicodeContextContent }],
+        skills: [{ name: 'planning', description: unicodeGuideline, filePath: '/skills/planning/SKILL.md' }],
+      };
+    },
+    getAllTools: () => [schemaTool],
+    getToolDefinition: () => undefined,
+    waitForIdle: async () => undefined,
+    prompt: async () => { throw new Error('forbidden'); },
+  };
+  const sdk: any = {
+    AuthStorage: { create: () => ({}) },
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSessionServices: async () => ({
+      cwd: '/workspace',
+      agentDir: '/agent',
+      modelRegistry: { find: () => session.model },
+    }),
+    createAgentSessionFromServices: async () => ({ session }),
+    createAgentSessionRuntime: async (factory: any, options: any) => {
+      await factory(options);
+      return { session, dispose: async () => { disposed = true; } };
+    },
+    formatSkillsForPrompt: (skills: any[]) => `<available_skills>${skills.map((skill) => skill.name).join(',')}</available_skills>`,
+  };
+  const systemPromptModule: any = {
+    buildSystemPrompt: (options: any) => {
+      const output = [
+        'Available tools:',
+        ...Object.entries(options.toolSnippets ?? {}).map(([name, snippet]) => `- ${name}: ${snippet}`),
+        'Guidelines:',
+        ...(options.promptGuidelines ?? []).map((guideline: string) => `- ${guideline}`),
+        ...((options.contextFiles ?? []) as Array<{ content: string }>).map((file) => file.content),
+      ].join('\n');
+      capturedPromptOutputs.push(output);
+      return output;
+    },
+  };
+  const estimateModel = { provider: 'openai', id: 'gpt-5' };
+
+  const inventory = await collectInitialContextInventory(sdk, systemPromptModule, {
+    cwd: '/workspace',
+    agentDir: '/agent',
+    model: estimateModel,
+  });
+
+  assert.equal(disposed, true, 'the temporary runtime is always disposed');
+  assert.equal(inventory.estimate.contextWindow, 400_000);
+  // The fake builder output has no Pie docs bullets, so the worker's
+  // buildPieSystemPrompt rewrite is an identity for it.
+  const expectedPrompt = capturedPromptOutputs[0];
+  const expectedTools = session.getAllTools() as ReadonlyArray<RequestEstimateTool>;
+  assert.equal(
+    inventory.estimate.tokens,
+    estimateRequestPrefixTokens(expectedPrompt, expectedTools, estimateModel),
+    'the inventory estimate is computed by the shared estimator on the discovery-model basis',
+  );
+  assert.equal(
+    inventory.estimate.tokens,
+    estimateRequestPrefixTokens(expectedPrompt, expectedTools, { ...estimateModel, api: 'openai-responses' }),
+    'a missing api stays acceptable for shipped OpenAI-structured ids; a known OpenAI api agrees',
+  );
+  assert.notEqual(
+    inventory.estimate.tokens,
+    estimateRequestPrefixTokens(expectedPrompt, expectedTools),
+    'schema + Unicode content makes the discovery-model basis observable against the legacy fallback',
+  );
+  const promptsById = new Map(inventory.systemPrompts.map((entry) => [entry.id, entry]));
+  assert.equal(promptsById.get('provider')?.summary, 'openai');
+});
+
 test('inventory network deny boundary detects caught provider attempts instead of allowing a partial estimate', async () => {
   const boundary = installInventoryProviderDenyBoundary();
   try {
