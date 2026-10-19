@@ -8,8 +8,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { isDeepStrictEqual } from 'node:util';
 
 import { deduplicateToolCallResultsForTransport } from '../transcripts/message-parts.js';
-import { findDurableDetail } from '../transcripts/lazy-details';
-import { LIVE_PIPELINE_LIMITS } from '../../agent-processes/lib/rpc/live-pipeline.js';
+import { resolveDurableLazyDetail } from '../transcripts/durable-detail-resolver';
 import type { ChatMessage, DetailResult, LazyDetailRef } from '../../agent-processes/lib/rpc/message-contract.js';
 import type { InitialContextEstimate, SessionOpenedPayload, SessionSummary, SystemPromptEntry, TranscriptMode, TranscriptPageDirection, TranscriptPagePayload } from '../../agent-processes/lib/rpc/session-events.js';
 import type { ModelInfo, ModelSettings } from '../../model-providers/catalog/model-contract.js';
@@ -677,10 +676,9 @@ export class ColdSessionStore {
       // background inventory reconciliation. An eager inventory walk here
       // would defeat its immediate nonempty-index startup path.
       const sessions = await this.catalog.list(
-        this.sdk as SdkModule,
+        this.agentDir,
         this.sessionDir,
         liveSummaries,
-        this.agentDir,
       );
       if (generation !== this.leases.coordinatorGeneration
         || authorityRevision !== this.leases.authorityRevision
@@ -1032,17 +1030,8 @@ export class ColdSessionStore {
       return assisted.result;
     }
     return await this.withStableBrowse(sessionPath, async (browse, stamp) => {
-      const found = findDurableDetail(browse.cache.transcript, ref);
-      let result: DetailResult;
-      if (found.status === 'unavailable') {
-        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
-      } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
-        result = { sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
-      } else if (found.sizeBytes !== ref.sizeBytes) {
-        result = { sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh the session and retry.' };
-      } else {
-        result = { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
-      }
+      const result = resolveDurableLazyDetail(sessionPath, browse.cache.transcript,
+        browse.modelExchangeEntries ?? [], ref);
       this.leases.assertCurrent(stamp);
       this.stampResult(result, [stamp]);
       return result;

@@ -1,6 +1,5 @@
 import type { ChatMessage, CompactionSummaryDetails } from '../../agent-processes/lib/rpc/message-contract.js';
 import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
-import type { SessionSummary } from '../../agent-processes/lib/rpc/session-events.js';
 import {
   AGENT_MESSAGE_CUSTOM_TYPE,
   AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
@@ -12,7 +11,6 @@ import {
   type SessionControlSender,
 } from '../../agent-processes/lib/rpc/session-control-attribution.js';
 import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY } from '../../agent-processes/workers/agent-message-provenance.js';
-import { NEW_SESSION_NAME } from '../metadata/session-name';
 import { formatToolResult } from './tool-result-format.js';
 import {
   reasoningFromMessageParts,
@@ -96,14 +94,6 @@ export function assistantErrorDetail(
   return [baseSentence, transportDetail, recovery].filter(Boolean).join(' ');
 }
 
-interface SessionInfoLike {
-  path: string;
-  cwd: string;
-  name?: string;
-  modified: Date;
-  messageCount: number;
-}
-
 export interface SessionEntryLike {
   id: string;
   /** Exact SDK ancestry. Older adapters may omit it; null is the root. */
@@ -124,19 +114,6 @@ export interface SessionEntryLike {
    *  `appendCustomEntry`). Not rendered; scanned by `mapTranscript` to attach
    *  typed details to the matching compaction-summary message. */
   data?: unknown;
-}
-
-export function summarizeSession(info: SessionInfoLike, modelId?: string): SessionSummary {
-  const hasName = !!info.name;
-  return {
-    path: info.path,
-    cwd: info.cwd,
-    name: hasName ? info.name! : NEW_SESSION_NAME,
-    isPlaceholder: !hasName,
-    modifiedAt: info.modified.toISOString(),
-    messageCount: info.messageCount,
-    modelId,
-  };
 }
 
 export function mapAssistantMessage(

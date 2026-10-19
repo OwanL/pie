@@ -24,7 +24,6 @@ import {
   readBackendSessionInventorySignature,
   statBackendSessionFile,
 } from '../session-directory';
-import type { SdkModule } from '../../../agent-processes/lib/sdk-integration/sdk';
 import { deriveSessionNameFromText } from '../../metadata/session-name';
 
 const sqlite = createRequire(import.meta.url)('node:sqlite') as {
@@ -85,14 +84,6 @@ async function readMetadata(
   assert.equal(result.status, 'ok');
   return result.metadata;
 }
-
-const unusedSdk = {
-  SessionManager: {
-    listAll: async (): Promise<never> => {
-      throw new Error('the persistent catalog must not call SessionManager.listAll');
-    },
-  },
-} as unknown as SdkModule;
 
 const createSyntheticFingerprintIndexStore = (
   indexPath: string,
@@ -567,7 +558,7 @@ test('multi-batch reconciliation advances only across its own checked invalid-ro
     });
 
     assert.deepEqual(
-      (await catalog.list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await catalog.list(agentDir, sessionDir)).map((summary) => summary.path),
       [validPath],
       'the invalid first batch advances its own generation without self-staling the next batch',
     );
@@ -626,14 +617,14 @@ test('an invalid fingerprint is retried until its durable delete commits', async
     });
 
     assert.deepEqual(
-      (await catalog.list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await catalog.list(agentDir, sessionDir)).map((summary) => summary.path),
       [filePath],
       'a failed delete commit keeps the last complete projection visible',
     );
     assert.deepEqual(catalog.getProgress(), { complete: false, processed: 0, total: 1 });
 
     assert.deepEqual(
-      (await catalog.list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await catalog.list(agentDir, sessionDir)).map((summary) => summary.path),
       [],
       'the unchanged invalid fingerprint is retried and removed after commit succeeds',
     );
@@ -708,7 +699,7 @@ test('queued inventory scanned before another backend forget cannot publish afte
       },
     });
 
-    const firstListing = catalog.list(unusedSdk, sessionDir, [], agentDir);
+    const firstListing = catalog.list(agentDir, sessionDir);
     await blockingStarted;
     const queuedListing = catalog.invalidateIfInventoryChanged(agentDir, sessionDir);
     await queuedScan;
@@ -882,7 +873,7 @@ test('SessionCatalog serves a durable snapshot immediately and reconciles only t
     ]);
 
     const bootstrap = new SessionCatalog();
-    assert.equal((await bootstrap.list(unusedSdk, sessionDir, [], agentDir)).length, 2);
+    assert.equal((await bootstrap.list(agentDir, sessionDir)).length, 2);
 
     const reads: Array<{ path: string; resumed: boolean }> = [];
     let resolveChanged!: () => void;
@@ -901,7 +892,7 @@ test('SessionCatalog serves a durable snapshot immediately and reconciles only t
       },
     });
 
-    assert.equal((await warm.list(unusedSdk, sessionDir, [], agentDir)).length, 2);
+    assert.equal((await warm.list(agentDir, sessionDir)).length, 2);
     assert.deepEqual(reads, [], 'a valid snapshot does not await or repeat transcript parsing');
     await warmInventory;
 
@@ -915,14 +906,14 @@ test('SessionCatalog serves a durable snapshot immediately and reconciles only t
     );
     await changed;
     assert.deepEqual(reads, [{ path: firstPath, resumed: true }]);
-    const refreshed = await warm.list(unusedSdk, sessionDir, [], agentDir);
+    const refreshed = await warm.list(agentDir, sessionDir);
     assert.equal(refreshed.find((summary) => summary.path === firstPath)?.messageCount, 2);
 
     await fs.rm(secondPath);
     warm.remove(secondPath);
-    assert.equal((await warm.list(unusedSdk, sessionDir, [], agentDir)).length, 1);
+    assert.equal((await warm.list(agentDir, sessionDir)).length, 1);
     assert.equal(
-      (await new SessionCatalog().list(unusedSdk, sessionDir, [], agentDir)).length,
+      (await new SessionCatalog().list(agentDir, sessionDir)).length,
       1,
       'a forgotten transcript cannot reappear from the durable sidecar after restart',
     );
@@ -974,7 +965,7 @@ test('forget tombstones cannot be reinserted by a metadata batch already in flig
       },
     });
 
-    const listing = catalog.list(unusedSdk, sessionDir, [], agentDir);
+    const listing = catalog.list(agentDir, sessionDir);
     await blockingReadStarted;
     await fs.rm(forgottenPath);
     catalog.remove(forgottenPath);
@@ -1011,7 +1002,7 @@ test('a nonempty durable catalog returns before the background inventory walk se
     )]);
 
     const bootstrap = new SessionCatalog();
-    assert.equal((await bootstrap.list(unusedSdk, sessionDir, [], agentDir)).length, 1);
+    assert.equal((await bootstrap.list(agentDir, sessionDir)).length, 1);
 
     let releaseInventory!: () => void;
     const inventoryGate = new Promise<void>((resolve) => { releaseInventory = resolve; });
@@ -1031,7 +1022,7 @@ test('a nonempty durable catalog returns before the background inventory walk se
     });
 
     let settled = false;
-    const listing = warm.list(unusedSdk, sessionDir, [], agentDir).finally(() => { settled = true; });
+    const listing = warm.list(agentDir, sessionDir).finally(() => { settled = true; });
     await inventoryStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(settled, true, 'the durable rows do not wait behind the directory stat walk');
@@ -1064,7 +1055,7 @@ test('filename publication barrier removes externally deleted rows in a current 
     ]);
 
     const bootstrap = new SessionCatalog();
-    assert.equal((await bootstrap.list(unusedSdk, sessionDir, [], agentDir)).length, 2);
+    assert.equal((await bootstrap.list(agentDir, sessionDir)).length, 2);
 
     let resolveComplete!: () => void;
     const complete = new Promise<void>((resolve) => { resolveComplete = resolve; });
@@ -1073,17 +1064,17 @@ test('filename publication barrier removes externally deleted rows in a current 
         if (warm.getProgress().complete) resolveComplete();
       },
     });
-    assert.equal((await warm.list(unusedSdk, sessionDir, [], agentDir)).length, 2);
+    assert.equal((await warm.list(agentDir, sessionDir)).length, 2);
     await complete;
 
     await fs.rm(deletedPath);
     assert.deepEqual(
-      (await warm.list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await warm.list(agentDir, sessionDir)).map((summary) => summary.path),
       [retainedPath],
       'the next publication in an existing backend filters the absent transcript',
     );
     assert.deepEqual(
-      (await new SessionCatalog().list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await new SessionCatalog().list(agentDir, sessionDir)).map((summary) => summary.path),
       [retainedPath],
       'a new backend filters and durably deletes the stale sidecar row before publication',
     );
@@ -1109,7 +1100,7 @@ test('filename publication barrier coalesces concurrent scans and retains a snap
     await writeJsonl(filePath, [header(root, 'coalesce'), message(
       'user', 'user', 'Keep the warm snapshot responsive', '2026-01-01T00:00:01.000Z',
     )]);
-    assert.equal((await new SessionCatalog().list(unusedSdk, sessionDir, [], agentDir)).length, 1);
+    assert.equal((await new SessionCatalog().list(agentDir, sessionDir)).length, 1);
 
     let scans = 0;
     let releaseScan!: () => void;
@@ -1130,8 +1121,8 @@ test('filename publication barrier coalesces concurrent scans and retains a snap
         return await readBackendSessionInventorySignature(nextAgentDir, nextSessionDir);
       },
     });
-    const first = warm.list(unusedSdk, sessionDir, [], agentDir);
-    const concurrent = warm.list(unusedSdk, sessionDir, [], agentDir);
+    const first = warm.list(agentDir, sessionDir);
+    const concurrent = warm.list(agentDir, sessionDir);
     await scanStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(scans, 1, 'concurrent list callers share one filename-only directory scan');
@@ -1147,7 +1138,7 @@ test('filename publication barrier coalesces concurrent scans and retains a snap
       readInventory: async () => await Promise.reject(inaccessible),
     });
     assert.equal(
-      (await retaining.list(unusedSdk, sessionDir, [], agentDir))[0]?.path,
+      (await retaining.list(agentDir, sessionDir))[0]?.path,
       filePath,
       'an inaccessible root is not mistaken for an empty/deleted store',
     );
@@ -1195,13 +1186,13 @@ test('SessionCatalog isolates a transient newest-file failure and still indexes 
     });
 
     assert.deepEqual(
-      (await catalog.list(unusedSdk, sessionDir, [], agentDir)).map((summary) => summary.path),
+      (await catalog.list(agentDir, sessionDir)).map((summary) => summary.path),
       [olderPath],
     );
     assert.deepEqual(reads, [newestPath, olderPath], 'newest-first traversal continues after a local failure');
 
     failNewest = false;
-    assert.equal((await catalog.list(unusedSdk, sessionDir, [], agentDir)).length, 2);
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 2);
     assert.equal(reads.filter((filePath) => filePath === newestPath).length, 2, 'the missing row remains retryable');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -1220,23 +1211,8 @@ test('SessionCatalog retries a transient index-open failure after bounded backof
     )]);
     let now = 0;
     let indexOpens = 0;
-    let legacyScans = 0;
     let resolveRetryNotification!: () => void;
     const retryNotification = new Promise<void>((resolve) => { resolveRetryNotification = resolve; });
-    const fallbackSdk = {
-      SessionManager: {
-        listAll: async () => {
-          legacyScans += 1;
-          return [{
-            path: filePath,
-            cwd: root,
-            name: 'Legacy fallback',
-            modified: new Date('2026-01-01T00:00:00.000Z'),
-            messageCount: 1,
-          }];
-        },
-      },
-    } as unknown as SdkModule;
     const catalog = new SessionCatalog({
       nowMs: () => now,
       onCatalogChanged: resolveRetryNotification,
@@ -1247,48 +1223,35 @@ test('SessionCatalog retries a transient index-open failure after bounded backof
       },
     });
 
-    assert.deepEqual(await catalog.list(fallbackSdk, sessionDir, [], agentDir), []);
+    assert.deepEqual(await catalog.list(agentDir, sessionDir), []);
     assert.deepEqual(catalog.getProgress(), { complete: false, processed: 0 });
-    assert.equal(legacyScans, 0, 'SQLITE_BUSY must never enter the full SDK directory scan');
     now = 249;
-    assert.deepEqual(await catalog.list(fallbackSdk, sessionDir, [], agentDir), []);
+    assert.deepEqual(await catalog.list(agentDir, sessionDir), []);
     assert.equal(indexOpens, 1, 'calls inside the backoff window retain the bounded live-only result');
 
     now = 250;
     await retryNotification;
-    const recovered = await catalog.list(fallbackSdk, sessionDir, [], agentDir);
+    const recovered = await catalog.list(agentDir, sessionDir);
     assert.equal(indexOpens, 2);
-    assert.equal(legacyScans, 0);
     assert.equal(recovered[0]?.path, filePath);
-    assert.notEqual(recovered[0]?.name, 'Legacy fallback');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('SessionCatalog retains SDK compatibility fallback for a non-lock index failure', async () => {
+test('SessionCatalog uses canonical memory reconciliation for a non-lock index failure', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-index-generic-fallback-'));
   try {
     const agentDir = path.join(root, 'agent');
     const sessionDir = path.join(root, 'sessions');
     await Promise.all([fs.mkdir(agentDir), fs.mkdir(sessionDir)]);
-    let legacyScans = 0;
-    const sdk = {
-      SessionManager: {
-        listAll: async () => {
-          legacyScans += 1;
-          return [];
-        },
-      },
-    } as unknown as SdkModule;
     const catalog = new SessionCatalog({
       createIndexStore: () => {
         throw Object.assign(new Error('index directory is read-only'), { code: 'EACCES' });
       },
     });
 
-    assert.deepEqual(await catalog.list(sdk, sessionDir, [], agentDir), []);
-    assert.equal(legacyScans, 1);
+    assert.deepEqual(await catalog.list(agentDir, sessionDir), []);
     assert.deepEqual(catalog.getProgress(), { complete: true, processed: 0, total: 0 });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -1319,7 +1282,7 @@ test('brand-new small catalog waits for its meaningful first batch but not unrel
     });
 
     let settled = false;
-    const listing = catalog.list(unusedSdk, sessionDir, [], agentDir).finally(() => { settled = true; });
+    const listing = catalog.list(agentDir, sessionDir).finally(() => { settled = true; });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(settled, false, 'the first caller waits for a meaningful batch rather than flashing empty');
     releaseRead();
@@ -1365,8 +1328,8 @@ test('large bootstrap shares its 24-row count guard across callers and continues
       },
     });
 
-    const first = catalog.list(unusedSdk, sessionDir, [], agentDir);
-    const concurrent = catalog.list(unusedSdk, sessionDir, [], agentDir);
+    const first = catalog.list(agentDir, sessionDir);
+    const concurrent = catalog.list(agentDir, sessionDir);
     await firstNotification;
     assert.equal((await first).length, 24);
     assert.equal((await concurrent).length, 24, 'concurrent first callers share the same bootstrap barrier');
@@ -1375,7 +1338,7 @@ test('large bootstrap shares its 24-row count guard across callers and continues
 
     releaseRemainder();
     await finalNotification;
-    assert.equal((await catalog.list(unusedSdk, sessionDir, [], agentDir)).length, 33);
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 33);
     assert.deepEqual(catalog.getProgress(), { complete: true, processed: 33, total: 33 });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -1436,7 +1399,7 @@ test('bootstrap and background publication batches are capped by source bytes', 
       },
     });
 
-    const listing = catalog.list(unusedSdk, sessionDir, [], agentDir);
+    const listing = catalog.list(agentDir, sessionDir);
     await firstNotification;
     assert.equal((await listing).length, 2, '16 MiB first budget admits two 6 MiB sessions');
     assert.equal(reads, 3, 'the next source starts only after the first projection is durable');
@@ -1486,7 +1449,7 @@ test('bootstrap readiness is bounded even when its newest 24 files are invalid',
       },
     });
 
-    const listing = catalog.list(unusedSdk, sessionDir, [], agentDir);
+    const listing = catalog.list(agentDir, sessionDir);
     await remainderStarted;
     assert.deepEqual(
       await listing,

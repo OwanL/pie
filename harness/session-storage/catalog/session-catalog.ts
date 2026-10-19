@@ -15,14 +15,12 @@ import {
   type SessionIndexStoreOptions,
 } from './session-index-store';
 import type { SessionManagerFenceAdmission } from '../ownership/session-manager-fence';
-import { discoverSessionSummaries } from './session-listing';
 import {
   readIndexedSessionMetadata,
   type IndexedSessionMetadata,
   type SessionMetadataReadResult,
 } from '../metadata/session-metadata';
 import { backendTrace } from '../../../lib/structured-logging/backend-log';
-import type { SdkModule } from '../../agent-processes/lib/sdk-integration/sdk';
 
 type SessionIndexStoreFactory = (
   indexPath: string,
@@ -64,8 +62,7 @@ function parseFilenameSnapshot(signature: string): FilenameSnapshot {
 }
 
 export interface SessionCatalogOptions {
-  /** Legacy filename-signature injection. Supplying only this seam keeps the
-   * old in-memory discovery path for focused compatibility tests. */
+  /** Directory-only publication barrier; never selects a different parser. */
   readInventorySignature?: typeof readBackendSessionInventorySignature;
   readInventory?: typeof readBackendSessionInventory;
   readIndexedMetadata?: IndexedMetadataReader;
@@ -84,7 +81,7 @@ export interface SessionCatalogOptions {
 
 interface SessionIndexContext {
   authorityKey: string;
-  store: SessionIndexStore;
+  store?: SessionIndexStore;
   records: Map<string, IndexedSessionMetadata>;
   /** Present only while this process is parsing one inventory. Known local
    * tombstones may advance it through their exact checked SQLite transition. */
@@ -110,15 +107,9 @@ function newestInventoryFirst(
 }
 
 export class SessionCatalog {
-  /** Compatibility discovery cache used only when the persistent sidecar is
-   * disabled/unavailable. */
-  private basePromise?: Promise<SessionSummary[]>;
-  /** null means the initial legacy signature failed, so the next success must refresh. */
-  private inventorySignature?: string | null;
   /** Forgotten paths remain excluded even if discovery/reconciliation was
    * already in flight or review merging synthesizes a placeholder. */
   private readonly removedPathKeys = new Set<string>();
-  private cacheGeneration = 0;
   private readonly readInventorySignature: typeof readBackendSessionInventorySignature;
 
   private readonly usePersistentIndex: boolean;
@@ -161,10 +152,7 @@ export class SessionCatalog {
     this.writerAdmission = options.writerAdmission;
     this.createIndexStore = options.createIndexStore
       ?? ((indexPath, authorityKey, storeOptions) => new SessionIndexStore(indexPath, authorityKey, storeOptions));
-    // Existing signature-injection tests intentionally exercise the legacy
-    // cache unless they explicitly opt into the persistent index.
-    this.usePersistentIndex = options.usePersistentIndex
-      ?? options.readInventorySignature === undefined;
+    this.usePersistentIndex = options.usePersistentIndex ?? true;
     this.onCatalogChanged = options.onCatalogChanged;
     this.backgroundReconciliation = options.backgroundReconciliation
       ?? options.onCatalogChanged !== undefined;
@@ -177,7 +165,7 @@ export class SessionCatalog {
    * sidecar store. */
   setWriterAdmission(writerAdmission?: SessionManagerFenceAdmission): void {
     this.writerAdmission = writerAdmission;
-    this.indexContext?.store.setWriterAdmission(writerAdmission);
+    this.indexContext?.store?.setWriterAdmission(writerAdmission);
   }
 
   /** Progress for the latest successfully-read canonical inventory. Event
@@ -211,37 +199,32 @@ export class SessionCatalog {
   }
 
   async list(
-    sdk: SdkModule,
+    agentDir: string,
     sessionDir: string | undefined,
     liveSummaries: readonly SessionSummary[] = [],
-    agentDir?: string,
   ): Promise<SessionSummary[]> {
-    const context = agentDir ? this.ensureIndexContext(agentDir, sessionDir) : undefined;
-    if (!context) {
-      if (agentDir && this.hasBusyIndexFailure(agentDir, sessionDir)) {
-        return this.projectLiveSummaries(liveSummaries);
-      }
-      return await this.listLegacy(sdk, sessionDir, liveSummaries, agentDir);
-    }
+    const context = this.ensureIndexContext(agentDir, sessionDir);
+    if (!context) return this.projectLiveSummaries(liveSummaries);
 
     // A durable projection is useful only while its transcript filename still
     // exists. This cheap, coalesced directory-only fence runs before every
     // publication, so a restart or another backend process cannot resurrect a
     // forgotten row while the stronger stat/content reconciliation remains in
     // the background.
-    await this.applyFilenamePublicationBarrier(context, agentDir!, sessionDir);
-    if (context !== this.indexContext) return [];
+    await this.applyFilenamePublicationBarrier(context, agentDir, sessionDir);
+    if (context !== this.indexContext) return this.projectLiveSummaries(liveSummaries);
 
     let inventory = this.currentInventoryAuthority === context.authorityKey
       ? this.currentInventory
       : undefined;
     if (!inventory) {
       if (this.backgroundReconciliation && context.records.size > 0) {
-        this.startBackgroundInventoryRead(context, agentDir!, sessionDir);
+        this.startBackgroundInventoryRead(context, agentDir, sessionDir);
         return this.projectIndexedSummaries(context, liveSummaries);
       }
       try {
-        inventory = await this.readInventory(agentDir!, sessionDir);
+        inventory = await this.readInventory(agentDir, sessionDir);
+        if (context !== this.indexContext) return this.projectLiveSummaries(liveSummaries);
         this.currentInventory = inventory;
         this.currentInventoryAuthority = context.authorityKey;
       } catch (error) {
@@ -256,19 +239,14 @@ export class SessionCatalog {
 
     if (inventory) {
       this.dropMissingRecords(context, inventory);
-      // Compatibility for embedders/tests that implement bare SDK listAll()
-      // without the SDK's default `<agentDir>/sessions/<cwd>/` layout. A real
-      // empty default store is cheap to discover, while configured canonical
-      // stores always remain index-authoritative.
-      if (!sessionDir && inventory.length === 0 && context.records.size === 0) {
-        return await this.listLegacy(sdk, sessionDir, liveSummaries, agentDir);
-      }
       const reconciliation = this.scheduleReconciliation(context, inventory);
       if (!this.backgroundReconciliation) await reconciliation;
       else if (context.records.size === 0) await this.waitForBootstrapBatch(context);
     }
 
-    return this.projectIndexedSummaries(context, liveSummaries);
+    return context === this.indexContext
+      ? this.projectIndexedSummaries(context, liveSummaries)
+      : this.projectLiveSummaries(liveSummaries);
   }
 
   /** Immediately and permanently exclude a forgotten path from this backend's
@@ -283,15 +261,11 @@ export class SessionCatalog {
       this.indexContext.records.delete(key);
       this.queueIndexDeletes(this.indexContext, [key], sessionPath);
     }
-    this.invalidateLegacy();
   }
 
   async invalidateIfInventoryChanged(agentDir: string, sessionDir: string | undefined): Promise<boolean> {
     const context = this.ensureIndexContext(agentDir, sessionDir);
-    if (!context) {
-      if (this.hasBusyIndexFailure(agentDir, sessionDir)) return false;
-      return await this.invalidateLegacyIfInventoryChanged(agentDir, sessionDir);
-    }
+    if (!context) return false;
 
     // The explicit safety poll supersedes any older background walk. The
     // generation fence prevents that older result from publishing afterwards.
@@ -322,7 +296,6 @@ export class SessionCatalog {
     this.inventoryReadPromise = undefined;
     this.currentInventory = undefined;
     this.currentInventoryAuthority = undefined;
-    this.invalidateLegacy();
   }
 
   /** A nonempty durable sidecar is immediately useful. Discover its canonical
@@ -408,9 +381,16 @@ export class SessionCatalog {
     agentDir: string,
     sessionDir: string | undefined,
   ): SessionIndexContext | undefined {
-    if (!this.usePersistentIndex || !agentDir) return undefined;
+    if (!agentDir) throw new Error('Session catalog requires an explicit agentDir.');
     const authorityKey = backendSessionPathKey(resolveSessionIndexAuthority(agentDir, sessionDir));
-    if (this.indexContext?.authorityKey === authorityKey) return this.indexContext;
+    if (this.indexContext && this.indexContext.authorityKey !== authorityKey) {
+      this.replaceIndexContext(undefined);
+    }
+    if (!this.usePersistentIndex) {
+      if (!this.indexContext) this.replaceIndexContext({ authorityKey, records: new Map() });
+      return this.indexContext;
+    }
+    if (this.indexContext?.store) return this.indexContext;
     if (this.indexOpenFailure && this.indexOpenFailure.authorityKey !== authorityKey) {
       this.indexOpenFailure = undefined;
       this.clearIndexOpenRetryTimer();
@@ -418,24 +398,11 @@ export class SessionCatalog {
     const previousFailure = this.indexOpenFailure?.authorityKey === authorityKey
       ? this.indexOpenFailure
       : undefined;
-    if (previousFailure && this.nowMs() < previousFailure.retryAfterMs) return undefined;
+    if (previousFailure && this.nowMs() < previousFailure.retryAfterMs) return this.indexContext;
 
-    if (this.indexContext) {
-      try { this.indexContext.store.close(); } catch { /* process exit remains safe */ }
-      this.indexContext = undefined;
-      this.pendingIndexDeleteKeys.clear();
-      this.indexDeleteRetryAttempts = 0;
-      if (this.indexDeleteRetryTimer) clearTimeout(this.indexDeleteRetryTimer);
-      this.indexDeleteRetryTimer = undefined;
-    }
-    this.inventoryReadGeneration += 1;
-    this.inventoryReadPromise = undefined;
-    this.filenameReadPromise = undefined;
-    this.filenameReadAuthority = undefined;
-    this.filenameSnapshotSignature = undefined;
-    this.filenameSnapshotAuthority = undefined;
+    let store: SessionIndexStore | undefined;
     try {
-      const store = this.createIndexStore(
+      store = this.createIndexStore(
         resolveSessionIndexPath(agentDir, sessionDir),
         authorityKey,
         { writerAdmission: this.writerAdmission },
@@ -444,25 +411,21 @@ export class SessionCatalog {
       const records = new Map(storedRecords
         .filter((record) => !this.removedPathKeys.has(record.fingerprint.pathKey))
         .map((record) => [record.fingerprint.pathKey, record]));
-      this.indexContext = { authorityKey, store, records };
-      this.settledInvalidFingerprints.clear();
+      // Promotion reopens durable truth and reconciles canonical files afresh;
+      // memory-only fingerprints never authorize a durable write.
+      const context: SessionIndexContext = { authorityKey, store, records };
+      this.replaceIndexContext(context);
       this.indexOpenFailure = undefined;
       this.clearIndexOpenRetryTimer();
-      this.bootstrapReadyPromise = undefined;
-      this.resolveBootstrapReady = undefined;
-      this.bootstrapContext = undefined;
-      this.currentInventory = undefined;
-      this.currentInventoryAuthority = undefined;
       const forgottenKeys = storedRecords
         .map((record) => record.fingerprint.pathKey)
         .filter((key) => this.removedPathKeys.has(key));
-      if (forgottenKeys.length > 0) this.queueIndexDeletes(this.indexContext, forgottenKeys);
+      if (forgottenKeys.length > 0) this.queueIndexDeletes(context, forgottenKeys);
       return this.indexContext;
     } catch (error) {
-      // Read-only/unsupported environments preserve the established SDK cache
-      // rather than making session.list unavailable. Failures are not sticky:
-      // later list/poll calls retry with bounded backoff, so a short lock or
-      // mount race cannot strand this backend on the slow legacy scan forever.
+      try { store?.close(); } catch { /* failed opens retain no owned context */ }
+      // Busy means another writer owns durable recovery: publish live only.
+      // Other failures use exactly the same parser/reconciler in memory.
       const attempts = (previousFailure?.attempts ?? 0) + 1;
       const delayMs = Math.min(
         INDEX_OPEN_RETRY_MAX_MS,
@@ -475,17 +438,42 @@ export class SessionCatalog {
         busy: isSessionIndexBusyError(error),
       };
       if (this.indexOpenFailure.busy) {
-        this.scheduleIndexOpenRetry(this.indexOpenFailure);
-      } else {
-        this.clearIndexOpenRetryTimer();
+        this.replaceIndexContext(undefined);
+      } else if (!this.indexContext) {
+        this.replaceIndexContext({ authorityKey, records: new Map() });
       }
+      this.scheduleIndexOpenRetry(this.indexOpenFailure);
       backendTrace('sessionCatalog', 'index.unavailable', {
         level: 'warn',
         error: toErrorMessage(error),
         retryAfterMs: delayMs,
       });
-      return undefined;
+      return this.indexContext;
     }
+  }
+
+  private replaceIndexContext(context: SessionIndexContext | undefined): void {
+    try { this.indexContext?.store?.close(); } catch { /* process exit remains safe */ }
+    this.resolveBootstrapReady?.();
+    this.indexContext = context;
+    this.inventoryReadGeneration += 1;
+    this.inventoryReadPromise = undefined;
+    this.filenameReadPromise = undefined;
+    this.filenameReadAuthority = undefined;
+    this.filenameSnapshotSignature = undefined;
+    this.filenameSnapshotAuthority = undefined;
+    this.currentInventory = undefined;
+    this.currentInventoryAuthority = undefined;
+    this.queuedInventory = undefined;
+    this.reconcilePromise = undefined;
+    this.settledInvalidFingerprints.clear();
+    this.bootstrapReadyPromise = undefined;
+    this.resolveBootstrapReady = undefined;
+    this.bootstrapContext = undefined;
+    this.pendingIndexDeleteKeys.clear();
+    this.indexDeleteRetryAttempts = 0;
+    if (this.indexDeleteRetryTimer) clearTimeout(this.indexDeleteRetryTimer);
+    this.indexDeleteRetryTimer = undefined;
   }
 
   private projectIndexedSummaries(
@@ -511,12 +499,6 @@ export class SessionCatalog {
       .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path))));
   }
 
-  private hasBusyIndexFailure(agentDir: string, sessionDir: string | undefined): boolean {
-    const authorityKey = backendSessionPathKey(resolveSessionIndexAuthority(agentDir, sessionDir));
-    return this.indexOpenFailure?.authorityKey === authorityKey
-      && this.indexOpenFailure.busy;
-  }
-
   private scheduleIndexOpenRetry(failure: IndexOpenFailure): void {
     if (!this.onCatalogChanged) return;
     this.clearIndexOpenRetryTimer();
@@ -524,7 +506,7 @@ export class SessionCatalog {
     this.indexOpenRetryTimer = setTimeout(() => {
       this.indexOpenRetryTimer = undefined;
       const current = this.indexOpenFailure;
-      if (!current?.busy || current.authorityKey !== failure.authorityKey) return;
+      if (!current || current.authorityKey !== failure.authorityKey) return;
       const remainingMs = current.retryAfterMs - this.nowMs();
       if (remainingMs > 0) {
         this.scheduleIndexOpenRetry(current);
@@ -575,7 +557,7 @@ export class SessionCatalog {
     pathKeys: readonly string[],
     sessionPath?: string,
   ): void {
-    if (context !== this.indexContext) return;
+    if (context !== this.indexContext || !context.store) return;
     for (const key of pathKeys) this.pendingIndexDeleteKeys.add(key);
     try {
       const pendingKeys = [...this.pendingIndexDeleteKeys];
@@ -642,7 +624,7 @@ export class SessionCatalog {
       while (this.queuedInventory && this.indexContext === activeContext) {
         const next = this.queuedInventory;
         this.queuedInventory = undefined;
-        activeContext.reconciliationMutationGeneration = activeContext.store.readMutationGeneration();
+        activeContext.reconciliationMutationGeneration = activeContext.store?.readMutationGeneration();
         try {
           changed = await this.reconcileInventory(activeContext, next) || changed;
         } finally {
@@ -682,7 +664,7 @@ export class SessionCatalog {
     // scheduleReconciliation captured the shared cross-process delete fence
     // before entering this parser. Each batch validates and, for its own
     // invalid-row deletes, advances that exact value transactionally.
-    if (context.reconciliationMutationGeneration === undefined) {
+    if (context.store && context.reconciliationMutationGeneration === undefined) {
       throw new Error('Session index reconciliation generation is unavailable.');
     }
 
@@ -694,6 +676,7 @@ export class SessionCatalog {
     let changed = false;
 
     const flush = (): void => {
+      if (context !== this.indexContext) throw new Error('Session catalog context superseded.');
       if (attemptedInBatch === 0) return;
       // A forget can run while a later file in this batch is awaiting metadata
       // I/O. The tombstone is process-local authority from that synchronous
@@ -717,12 +700,14 @@ export class SessionCatalog {
         oldSummaries.set(key, summaryProjectionKey(context.records.get(key)?.summary));
       }
 
-      const write = context.store.commitReconciliationBatch(
-        committableBatch,
-        committableInvalidPathKeys,
-        context.reconciliationMutationGeneration!,
-      );
-      context.reconciliationMutationGeneration = write.mutationGeneration;
+      if (context.store) {
+        const write = context.store.commitReconciliationBatch(
+          committableBatch,
+          committableInvalidPathKeys,
+          context.reconciliationMutationGeneration!,
+        );
+        context.reconciliationMutationGeneration = write.mutationGeneration;
+      }
       let visibleChanged = false;
       for (const record of committableBatch) {
         const key = record.fingerprint.pathKey;
@@ -754,6 +739,7 @@ export class SessionCatalog {
     };
 
     for (const file of changedFiles) {
+      if (context !== this.indexContext) return changed;
       if (this.removedPathKeys.has(file.pathKey)) continue;
       const maxFiles = firstBootstrapBatch ? FIRST_BOOTSTRAP_MAX_FILES : BACKGROUND_BATCH_MAX_FILES;
       const maxBytes = firstBootstrapBatch ? FIRST_BOOTSTRAP_MAX_BYTES : BACKGROUND_BATCH_MAX_BYTES;
@@ -768,6 +754,7 @@ export class SessionCatalog {
       const previous = context.records.get(file.pathKey);
       try {
         const result = await this.readIndexedMetadata(file, previous);
+        if (context !== this.indexContext) return changed;
         if (result.status === 'ok') {
           this.settledInvalidFingerprints.delete(file.pathKey);
           batch.push(result.metadata);
@@ -833,62 +820,4 @@ export class SessionCatalog {
     });
   }
 
-  private async listLegacy(
-    sdk: SdkModule,
-    sessionDir: string | undefined,
-    liveSummaries: readonly SessionSummary[],
-    agentDir?: string,
-  ): Promise<SessionSummary[]> {
-    if (!this.basePromise) {
-      const generation = this.cacheGeneration;
-      const discovery = (async () => {
-        let signature: string | null | undefined;
-        if (agentDir) {
-          try {
-            signature = await this.readInventorySignature(agentDir, sessionDir);
-          } catch {
-            signature = null;
-          }
-        }
-        const summaries = await discoverSessionSummaries(sdk, sessionDir);
-        if (this.cacheGeneration === generation) this.inventorySignature = signature;
-        return summaries;
-      })().catch((error) => {
-        if (this.basePromise === discovery) {
-          this.basePromise = undefined;
-          this.inventorySignature = undefined;
-        }
-        throw error;
-      });
-      this.basePromise = discovery;
-    }
-
-    const discovered = await this.basePromise;
-    const byPath = new Map(discovered
-      .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path)))
-      .map((summary) => [backendSessionPathKey(summary.path), summary]));
-    for (const summary of liveSummaries) {
-      const key = backendSessionPathKey(summary.path);
-      if (!this.removedPathKeys.has(key)) byPath.set(key, summary);
-    }
-    return sortSummaries([...byPath.values()]
-      .filter((summary) => !this.removedPathKeys.has(backendSessionPathKey(summary.path))));
-  }
-
-  private async invalidateLegacyIfInventoryChanged(
-    agentDir: string,
-    sessionDir: string | undefined,
-  ): Promise<boolean> {
-    if (!this.basePromise || this.inventorySignature === undefined) return false;
-    const signature = await this.readInventorySignature(agentDir, sessionDir);
-    if (this.inventorySignature !== null && signature === this.inventorySignature) return false;
-    this.invalidateLegacy();
-    return true;
-  }
-
-  private invalidateLegacy(): void {
-    this.cacheGeneration += 1;
-    this.basePromise = undefined;
-    this.inventorySignature = undefined;
-  }
 }

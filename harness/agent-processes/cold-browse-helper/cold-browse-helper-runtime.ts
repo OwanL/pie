@@ -1,7 +1,5 @@
 import { deduplicateToolCallResultsForTransport } from '../../session-storage/transcripts/message-parts.js';
-import { findDurableDetail } from '../../session-storage/transcripts/lazy-details';
-import { findToolModelExchange } from '../../session-storage/transcripts/tool-model-exchange';
-import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
+import { resolveDurableLazyDetail } from '../../session-storage/transcripts/durable-detail-resolver';
 import type { DetailResult } from '../lib/rpc/message-contract.js';
 import type { SessionOpenedPayload, TranscriptPagePayload } from '../lib/rpc/session-events.js';
 import { ColdBrowseProjectionCache } from './cold-browse-projection-cache';
@@ -153,50 +151,8 @@ export class ColdBrowseHelperRuntime {
       });
     }
 
-    let result: DetailResult;
-    if (payload.ref.source !== 'durable') {
-      result = {
-        sessionPath: payload.fence.sessionPath,
-        key: payload.ref.key,
-        status: 'unavailable',
-        message: 'Live detail is owned by the execution runtime.',
-      };
-    } else {
-      const found = payload.ref.kind === 'model-exchange'
-        ? findToolModelExchange(loaded.browse.cache.transcript, loaded.browse.modelExchangeEntries ?? [], payload.ref)
-        : findDurableDetail(loaded.browse.cache.transcript, payload.ref);
-      if (found.status === 'unavailable') {
-        result = {
-          sessionPath: payload.fence.sessionPath,
-          key: payload.ref.key,
-          status: 'unavailable',
-          message: 'message' in found && typeof found.message === 'string' ? found.message : 'The durable detail is no longer available.',
-        };
-      } else if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
-        result = {
-          sessionPath: payload.fence.sessionPath,
-          key: payload.ref.key,
-          status: 'unavailable',
-          message: 'The detail exceeds the supported retrieval size.',
-        };
-      } else if (found.sizeBytes !== payload.ref.sizeBytes
-        && !(payload.ref.kind === 'model-exchange' && payload.ref.sizeBytes === 0)) {
-        result = {
-          sessionPath: payload.fence.sessionPath,
-          key: payload.ref.key,
-          status: 'stale',
-          message: 'The durable detail changed; refresh the session and retry.',
-        };
-      } else {
-        result = {
-          sessionPath: payload.fence.sessionPath,
-          key: payload.ref.key,
-          status: 'loaded',
-          value: found.value,
-          sizeBytes: found.sizeBytes,
-        };
-      }
-    }
+    const result = resolveDurableLazyDetail(payload.fence.sessionPath, loaded.browse.cache.transcript,
+      loaded.browse.modelExchangeEntries ?? [], payload.ref);
     return this.finishResponse(payload.fence, loaded.fingerprint, () => result);
   }
 

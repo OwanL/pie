@@ -20,6 +20,9 @@ import {
 import { loadSdk, type SdkSessionManager } from '../../../agent-processes/lib/sdk-integration/sdk';
 import { sourceDescriptor, sourceLoadMode } from '../../../agent-processes/lib/sdk-integration/test/source-fixture.js';
 import { SessionSnapshotTooLargeError } from '../../transcripts/snapshot-boundary.js';
+import { ColdBrowseHelperRuntime } from '../../../agent-processes/cold-browse-helper/cold-browse-helper-runtime';
+import { LIVE_PIPELINE_LIMITS } from '../../../agent-processes/lib/rpc/live-pipeline';
+import type { DetailResult, LazyDetailRef } from '../../../agent-processes/lib/rpc/message-contract';
 
 // The source fixture verifies the explicitly selected artifact before exposing
 // its descriptor and rehashes the artifact in its after hook.
@@ -111,6 +114,55 @@ async function makeHarness() {
   });
   return { root, sessionDir, leases, store };
 }
+
+test('model exchange detail has identical helper, disabled and failed-helper results', async () => {
+  const h = await makeHarness();
+  const SessionManager = await getRealSessionManager();
+  const runtime = new ColdBrowseHelperRuntime({ sdk: { SessionManager } as any, startupCwd: h.root });
+  try {
+    const sessionPath = path.join(h.sessionDir, 'exchange.jsonl');
+    const ref: LazyDetailRef = { key: 'exchange', kind: 'model-exchange', source: 'durable', sessionPath,
+      messageId: 'result', toolCallId: 'tool', sizeBytes: 0, summary: '', available: true };
+    const stores = ['enabled', 'disabled', 'failed'].map((mode) => new ColdSessionStore({
+      sdk: { SessionManager } as any, coordinatorGeneration: 7, startupCwd: h.root, agentDir: h.root,
+      ...(mode === 'disabled' ? {} : { browseHelper: {
+        warm: async () => undefined,
+        loadDetail: async (stamp, detailRef) => {
+          if (mode === 'failed') throw new Error('helper unavailable');
+          return (await runtime.execute({ operation: 'detail', fence: stamp, ref: detailRef })).result as DetailResult;
+        },
+        openSnapshot: async () => { throw new Error('unused'); },
+        loadPage: async () => { throw new Error('unused'); },
+        invalidatePath: async () => undefined, dispose: async () => undefined,
+      } satisfies ColdBrowseHelper }),
+    }));
+    for (const scenario of ['missing', 'zero', 'stale', 'oversize'] as const) {
+      const capture = { type: 'custom', id: 'capture', parentId: null, timestamp: '2026-08-15T00:00:01.000Z',
+        customType: 'pie.tool-model-exchange', data: { version: 1, toolCallId: 'tool', produced: {
+          name: 'actual', arguments: scenario === 'oversize' ? 'x'.repeat(LIVE_PIPELINE_LIMITS.previewBytes + 1) : { exact: true },
+        } } };
+      await writeJsonl(sessionPath, [header(h.root), ...(scenario === 'missing' ? [] : [capture]), {
+        ...assistantEntry('assistant', scenario === 'missing' ? null : 'capture', ''),
+        message: { ...assistantEntry('assistant', null, '').message,
+          content: [{ type: 'toolCall', id: 'tool', name: 'display', arguments: { display: true } }] },
+      }, { type: 'message', id: 'result', parentId: 'assistant', timestamp: '2026-08-15T00:00:03.000Z',
+        message: { role: 'toolResult', toolCallId: 'tool', content: [{ type: 'text', text: 'display only' }] } }]);
+      const results = await Promise.all(stores.map((store) => store.loadDetail(sessionPath,
+        { ...ref, sizeBytes: scenario === 'stale' ? 1 : 0 })));
+      assert.deepEqual(results[1], results[0], scenario);
+      assert.deepEqual(results[2], results[0], scenario);
+      assert.equal(results[0].status, scenario === 'zero' ? 'loaded' : scenario === 'stale' ? 'stale' : 'unavailable');
+      if (scenario === 'missing' || scenario === 'oversize') {
+        const result = results[0];
+        assert.ok(result.status !== 'loaded');
+        assert.match(result.message, scenario === 'missing' ? /capture/i : /exceeds/);
+      }
+    }
+  } finally {
+    runtime.dispose();
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
 
 async function makeObservedBrowseStore(
   h: Awaited<ReturnType<typeof makeHarness>>,

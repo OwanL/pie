@@ -8,6 +8,8 @@ import { readColdBrowseFingerprintSync } from '../cold-browse-helper-protocol';
 import type { SdkModule } from '../../lib/sdk-integration/sdk';
 import { LIVE_PIPELINE_LIMITS } from '../../lib/rpc/live-pipeline';
 import type { SessionEntryLike } from '../../../session-storage/transcripts/transcript';
+import { resolveDurableLazyDetail } from '../../../session-storage/transcripts/durable-detail-resolver';
+import { openSessionBrowseSnapshot } from '../../../session-storage/transcripts/session-browser';
 
 test('cold browse serves capture only, wildcard size, partial refresh and explicit oversized unavailable', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-model-exchange-'));
@@ -29,10 +31,13 @@ test('cold browse serves capture only, wildcard size, partial refresh and explic
   let version = 0;
   async function load() {
     await fs.writeFile(sessionPath, `${++version}`);
-    return (await runtime.execute({ operation: 'detail', fence: {
+    const result = (await runtime.execute({ operation: 'detail', fence: {
       sessionPath, sessionPathKey: sessionPath, coordinatorGeneration: 1, ownershipRevision: 0,
       fingerprint: readColdBrowseFingerprintSync(sessionPath),
     }, ref })).result;
+    const browse = await openSessionBrowseSnapshot({ manager: sdk.SessionManager.open(sessionPath), sessionPath, startupCwd: root });
+    assert.deepEqual(result, resolveDurableLazyDetail(sessionPath, browse.cache.transcript, browse.modelExchangeEntries ?? [], ref));
+    return result;
   }
   try {
     const empty = await load();
@@ -45,6 +50,10 @@ test('cold browse serves capture only, wildcard size, partial refresh and explic
     const full = await load();
     if ('value' in full) assert.deepEqual(full.value, { produced: { name: 'actual', arguments: '{exact}' }, received: ['exact result'] });
     else assert.fail('expected full capture');
+    ref.sizeBytes = 1;
+    const stale = await load();
+    assert.equal('status' in stale && stale.status, 'stale');
+    ref.sizeBytes = 0;
     branch.splice(0, 1, { type: 'custom', id: 'oversize', timestamp: '', customType: 'pie.tool-model-exchange', data: { version: 1, toolCallId: 'tool', produced: { name: 'actual', arguments: 'x'.repeat(LIVE_PIPELINE_LIMITS.previewBytes + 1) } } });
     const oversized = await load();
     assert.equal('status' in oversized && oversized.status, 'unavailable');

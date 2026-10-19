@@ -1,205 +1,124 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-
 import { SessionCatalog } from '../session-catalog';
-import type { SdkModule } from '../../../agent-processes/lib/sdk-integration/sdk';
-import type { SessionSummary } from '../../../agent-processes/lib/rpc/session-events.js';
+import { readBackendSessionInventory, readBackendSessionInventorySignature } from '../session-directory';
+import { SessionIndexStore } from '../session-index-store';
+import { readIndexedSessionMetadata } from '../../metadata/session-metadata';
+import { withCatalogDirectory, writeSession } from './catalog-fixtures';
 
-function summary(pathname: string, name: string, modifiedAt: string): SessionSummary {
-  return { path: pathname, name, cwd: '/repo', modifiedAt, messageCount: 1 };
-}
-
-function canonicalSdk(calls: Array<string | undefined>): SdkModule {
-  return {
-    SessionManager: {
-      listAll: async (sessionDir?: string) => {
-        calls.push(sessionDir);
-        return sessionDir ? [{
-          path: path.join(sessionDir, 'canonical.jsonl'),
-          cwd: '/repo',
-          name: 'Canonical',
-          modified: new Date('2026-01-01T00:00:00.000Z'),
-          messageCount: 1,
-        }] : [];
-      },
-    },
-  } as Pick<SdkModule, 'SessionManager'> as SdkModule;
-}
-
-test('SessionCatalog scans once and overlays live session metadata', async () => {
-  const configuredDir = path.resolve('/configured/sessions');
-  const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
-  const calls: Array<string | undefined> = [];
-  const sdk = {
-    SessionManager: {
-      listAll: async (sessionDir?: string) => {
-        calls.push(sessionDir);
-        return [{
-          path: canonicalPath,
-          cwd: '/repo',
-          name: 'Canonical',
-          modified: new Date('2026-01-01T00:00:00.000Z'),
-          messageCount: 1,
-        }];
-      },
-    },
-  } as Pick<SdkModule, 'SessionManager'> as SdkModule;
-  const catalog = new SessionCatalog();
-
-  assert.equal((await catalog.list(sdk, configuredDir)).length, 1);
-  const livePath = process.platform === 'win32' ? canonicalPath.toUpperCase() : canonicalPath;
-  const live = {
-    ...summary(livePath, 'Live canonical', '2026-01-02T00:00:00.000Z'),
-    agentCreated: true,
-  };
-  const second = await catalog.list(sdk, configuredDir, [live]);
-
-  assert.deepEqual(calls, [configuredDir]);
-  assert.equal(second.length, 1, 'live metadata replaces the discovered path instead of duplicating it');
-  assert.equal(second[0]?.name, 'Live canonical');
-  assert.equal(second[0]?.agentCreated, true);
-  assert.equal(second.filter((item) => item.name === 'Live canonical').length, 1);
-});
-
-test('SessionCatalog immediately excludes a forgotten path from cached and in-flight discovery', async () => {
-  const configuredDir = path.resolve('/configured/sessions');
-  const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
-  let resolveDiscovery!: (value: Array<Record<string, unknown>>) => void;
-  const discovery = new Promise<Array<Record<string, unknown>>>((resolve) => { resolveDiscovery = resolve; });
-  const sdk = {
-    SessionManager: {
-      listAll: async () => await discovery,
-    },
-  } as unknown as SdkModule;
-  const catalog = new SessionCatalog();
-
-  const pending = catalog.list(sdk, configuredDir);
-  catalog.remove(canonicalPath);
-  resolveDiscovery([{
-    path: canonicalPath,
-    cwd: '/repo',
-    name: 'Canonical',
-    modified: new Date('2026-01-01T00:00:00.000Z'),
-    messageCount: 1,
-  }]);
-
-  assert.deepEqual(await pending, []);
-  assert.deepEqual(await catalog.list(sdk, configuredDir, [summary(canonicalPath, 'Live', '2026-01-02T00:00:00.000Z')]), []);
-});
-
-test('SessionCatalog invalidates only when the visible JSONL inventory changes', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-catalog-'));
-  try {
-    const agentDir = path.join(root, 'agent');
-    const configuredDir = path.join(root, 'canonical');
-    await fs.mkdir(configuredDir, { recursive: true });
-    const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
-    await fs.writeFile(canonicalPath, '');
-    const externalPath = path.join(configuredDir, 'external.jsonl');
-    let includeExternal = false;
-    const calls: Array<string | undefined> = [];
-    const sdk = {
-      SessionManager: {
-        listAll: async (sessionDir?: string) => {
-          calls.push(sessionDir);
-          if (sessionDir === undefined) return [];
-          const sessions = [{
-            path: canonicalPath,
-            cwd: '/repo',
-            name: 'Canonical',
-            modified: new Date('2026-01-01T00:00:00.000Z'),
-            messageCount: 1,
-          }];
-          if (includeExternal) sessions.push({
-            path: externalPath,
-            cwd: '/repo',
-            name: 'External',
-            modified: new Date('2026-01-02T00:00:00.000Z'),
-            messageCount: 1,
-          });
-          return sessions;
-        },
-      },
-    } as Pick<SdkModule, 'SessionManager'> as SdkModule;
-    const catalog = new SessionCatalog({ usePersistentIndex: false });
-
-    assert.deepEqual(
-      (await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name),
-      ['Canonical'],
-    );
-    assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, configuredDir), false);
-    assert.deepEqual((await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name), ['Canonical']);
-    assert.deepEqual(calls, [configuredDir], 'unchanged inventory remains cache-fast');
-
-    await fs.appendFile(canonicalPath, '{"type":"message"}\n');
-    assert.equal(
-      await catalog.invalidateIfInventoryChanged(agentDir, configuredDir),
-      false,
-      'streaming appends do not trigger an expensive full catalog rescan',
-    );
-
-    includeExternal = true;
-    await fs.writeFile(externalPath, '');
-    assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, configuredDir), true);
-    assert.deepEqual(
-      (await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name),
-      ['External', 'Canonical'],
-    );
-    assert.deepEqual(calls, [configuredDir, configuredDir]);
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('SessionCatalog preserves its cached discovery when an inventory refresh cannot read a directory', async () => {
-  const configuredDir = path.resolve('/configured/sessions');
-  const agentDir = path.resolve('/agent');
-  const calls: Array<string | undefined> = [];
-  let inventoryReads = 0;
-  const sdk = canonicalSdk(calls);
-  const catalog = new SessionCatalog({
-    readInventorySignature: async () => {
-      inventoryReads += 1;
-      if (inventoryReads === 1) return '["canonical.jsonl"]';
-      throw Object.assign(new Error('inventory unavailable'), { code: 'EACCES' });
-    },
+test('non-lock memory context promotes to durable truth without resurrecting tombstones', async () => {
+  await withCatalogDirectory(async (_root, agentDir, sessionDir) => {
+    const file = path.join(sessionDir, 'canonical.jsonl');
+    await writeSession(file, 'Canonical');
+    let now = 0;
+    let opens = 0;
+    const catalog = new SessionCatalog({ nowMs: () => now, createIndexStore: (...args) => {
+      if (++opens === 1) throw Object.assign(new Error('read-only'), { code: 'EACCES' });
+      return new SessionIndexStore(...args);
+    } });
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+    now = 249;
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+    assert.equal(opens, 1);
+    catalog.remove(file);
+    now = 250;
+    assert.deepEqual(await catalog.list(agentDir, sessionDir), []);
+    assert.equal(opens, 2);
+    await writeSession(path.join(sessionDir, 'external.jsonl'), 'External');
+    assert.deepEqual((await catalog.list(agentDir, sessionDir)).map(s => s.name), ['External']);
   });
-
-  assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  await assert.rejects(
-    catalog.invalidateIfInventoryChanged(agentDir, configuredDir),
-    (error: NodeJS.ErrnoException) => error.code === 'EACCES',
-  );
-  assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir], 'failed inventory reads must retain the last complete catalog');
 });
 
-test('SessionCatalog discovers through an initial signature failure and forces a refresh after recovery', async () => {
-  const configuredDir = path.resolve('/configured/sessions');
-  const agentDir = path.resolve('/agent');
-  const calls: Array<string | undefined> = [];
-  let inventoryReads = 0;
-  const sdk = canonicalSdk(calls);
-  const catalog = new SessionCatalog({
-    readInventorySignature: async () => {
-      inventoryReads += 1;
-      if (inventoryReads === 1) {
-        throw Object.assign(new Error('inventory temporarily unavailable'), { code: 'EBUSY' });
-      }
-      return '["canonical.jsonl"]';
-    },
+test('promotion fences metadata still in flight in the old memory context', async () => {
+  await withCatalogDirectory(async (_root, agentDir, sessionDir) => {
+    await writeSession(path.join(sessionDir, 'canonical.jsonl'), 'Canonical');
+    let now = 0;
+    let opens = 0;
+    let reads = 0;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const catalog = new SessionCatalog({ nowMs: () => now,
+      createIndexStore: (...args) => {
+        if (++opens === 1) throw new Error('index unavailable');
+        return new SessionIndexStore(...args);
+      },
+      readIndexedMetadata: async (...args) => {
+        const result = await readIndexedSessionMetadata(...args);
+        if (++reads === 1) { entered(); await gate; }
+        return result;
+      },
+    });
+    const stale = catalog.list(agentDir, sessionDir);
+    await started;
+    now = 250;
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+    release();
+    assert.deepEqual(await stale, [], 'superseded context may publish live summaries only');
+    assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
   });
-
-  assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir], 'signature failure must not block discovery');
-  assert.equal(
-    await catalog.invalidateIfInventoryChanged(agentDir, configuredDir),
-    true,
-    'the first successful signature after an unknown baseline must force a safe refresh',
-  );
-  assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir, configuredDir]);
 });
+
+for (const usePersistentIndex of [false, true]) {
+  test(`unchanged fingerprints cache metadata; appends and new files reconcile (persistent=${usePersistentIndex})`, async () => {
+    await withCatalogDirectory(async (_root, agentDir, sessionDir) => {
+      const file = path.join(sessionDir, 'canonical.jsonl');
+      await writeSession(file, 'Canonical');
+      let reads = 0;
+      const catalog = new SessionCatalog({ usePersistentIndex, readIndexedMetadata: async (...args) => {
+        reads++; return readIndexedSessionMetadata(...args);
+      } });
+      assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+      assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, sessionDir), false);
+      assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, sessionDir), false);
+      await catalog.list(agentDir, sessionDir);
+      assert.equal(reads, 1);
+      await fs.appendFile(file, JSON.stringify({ type: 'session_info', id: 'rename', parentId: 'name', name: 'Renamed', timestamp: '2026-01-03T00:00:00.000Z' }) + '\n');
+      assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, sessionDir), true);
+      assert.equal((await catalog.list(agentDir, sessionDir))[0]?.name, 'Renamed');
+      await writeSession(path.join(sessionDir, 'external.jsonl'), 'External');
+      assert.equal((await catalog.list(agentDir, sessionDir)).length, 2);
+    });
+  });
+  test(`forget excludes in-flight metadata and live overlays (persistent=${usePersistentIndex})`, async () => {
+    await withCatalogDirectory(async (_root, agentDir, sessionDir) => {
+      const file = path.join(sessionDir, 'canonical.jsonl');
+      await writeSession(file, 'Canonical');
+      let release!: () => void;
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const catalog = new SessionCatalog({ usePersistentIndex, readIndexedMetadata: async (...args) => {
+        const result = await readIndexedSessionMetadata(...args); entered(); await gate; return result;
+      } });
+      const pending = catalog.list(agentDir, sessionDir);
+      await started;
+      catalog.remove(file);
+      release();
+      assert.deepEqual(await pending, []);
+      assert.deepEqual(await catalog.list(agentDir, sessionDir, [{ path: file, name: 'Live', cwd: '/repo', messageCount: 1, modifiedAt: '2026-01-02T00:00:00.000Z' }]), []);
+    });
+  });
+  test(`inaccessible inventory retains complete projection and recovers (persistent=${usePersistentIndex})`, async () => {
+    await withCatalogDirectory(async (_root, agentDir, sessionDir) => {
+      await writeSession(path.join(sessionDir, 'canonical.jsonl'), 'Canonical');
+      let inaccessible = false;
+      const failure = Object.assign(new Error('unavailable'), { code: 'EACCES' });
+      const catalog = new SessionCatalog({ usePersistentIndex,
+        readInventorySignature: async (...args) => { if (inaccessible) throw failure; return readBackendSessionInventorySignature(...args); },
+        readInventory: async (...args) => { if (inaccessible) throw failure; return readBackendSessionInventory(...args); },
+      });
+      assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+      inaccessible = true;
+      catalog.refresh();
+      assert.equal((await catalog.list(agentDir, sessionDir)).length, 1);
+      await assert.rejects(catalog.invalidateIfInventoryChanged(agentDir, sessionDir), { code: 'EACCES' });
+      inaccessible = false;
+      await writeSession(path.join(sessionDir, 'external.jsonl'), 'External');
+      assert.equal((await catalog.list(agentDir, sessionDir)).length, 2);
+    });
+  });
+}
