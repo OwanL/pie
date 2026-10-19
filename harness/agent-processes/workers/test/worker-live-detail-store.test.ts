@@ -1,3 +1,4 @@
+import { createSettledDetailStore } from './live-detail-settlement-helper';
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,10 +7,9 @@ import test from 'node:test';
 import { applyJsonPatch } from '../../../../lib/json-structural-patch';
 import {
   WorkerLiveDetailStore,
-  reassembleDetailPages,
-  segmentCanonicalDetail,
   type DetailBaselinePage,
 } from '../worker-live-detail-store';
+import { reassembleDetailPages, segmentDetailPages } from '../../../session-storage/transcripts/detail-segmentation';
 import type { LiveSubagentDetailAddress } from '../../lib/rpc/subagent-detail';
 import { PassThrough } from 'node:stream';
 
@@ -62,7 +62,7 @@ function details(text: string, generation = 1, reorder = false) {
 
 test('no subscriber produces zero heavy detail traffic and does not traverse recursive getters', () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
+  const { store } = createSettledDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
   const recursive = {} as Record<string, unknown>;
   Object.defineProperty(recursive, 'details', { enumerable: true, get: () => { throw new Error('traversed'); } });
   store.observe({ ...root, details: recursive });
@@ -70,15 +70,16 @@ test('no subscriber produces zero heavy detail traffic and does not traverse rec
   assert.deepEqual(store.debugState(), { sources: 1, subscriptions: 0, canonicalBytes: 0 });
 });
 
-test('baseline pages reassemble huge non-ASCII strings exactly under a tiny injected page budget', () => {
+test('baseline pages reassemble huge non-ASCII strings exactly under a tiny injected page budget', async () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({
+  const { store, settle } = createSettledDetailStore({
     emit: (frame) => { frames.push(frame as DetailFrame); return true; },
     budgets: { maxPageBytes: 768, maxCanonicalBytes: 1024 },
   });
-  const text = '🙂é漢字'.repeat(800);
+  const text = '🙂é漢字\\\"\n\t'.repeat(800);
   store.observe({ ...root, details: details(text) });
   store.subscribe('request-1', 'subscription-1', address, undefined, 768);
+  await settle();
   const start = frames.find((frame) => frame.kind === 'detail.start');
   const pages = frames.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.page' }> => frame.kind === 'detail.page')
     .map((frame) => ({ ref: frame.ref, payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum } as DetailBaselinePage));
@@ -86,11 +87,80 @@ test('baseline pages reassemble huge non-ASCII strings exactly under a tiny inje
   assert.ok(pages.length > 10);
   assert.equal(start.pageCount, pages.length);
   assert.equal(start.totalBytes, pages[0]?.payload.totalBytes);
+  assert.deepEqual(pages, segmentDetailPages(
+    pages.map((page) => page.payload.text).join(''), pages[0]!.ref.baselineRevision,
+    768, pages[0]!.payload.segmentId,
+  ), 'file-backed delivery exactly matches the shared string reader');
   assert.equal(start.totalCodePoints, pages[0]?.payload.totalCodePoints);
   assert.ok(Buffer.byteLength(JSON.stringify(start), 'utf8') < 2_048, 'baseline manifest is bounded independently of total detail bytes');
   const rebuilt = reassembleDetailPages(pages) as any;
   assert.equal(rebuilt.messages[0].content[0].text, text);
   assert.equal(store.debugState().canonicalBytes, 0, 'oversized canonical value is not retained in the bounded delta window');
+  // Independent fetch cursors must match real delivered baseline pages even
+  // when requests arrive in reverse or deterministic pseudo-random order.
+  let seed = 17;
+  const shuffled = [...pages];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const other = seed % (index + 1);
+    [shuffled[index], shuffled[other]] = [shuffled[other]!, shuffled[index]!];
+  }
+  for (const page of [...pages].reverse().concat(shuffled)) {
+    store.fetch('fetch-page', 'subscription-1', address, page.ref, 768);
+    const fetched = frames.at(-1)!;
+    assert.equal(fetched.kind, 'detail.page');
+    assert.deepEqual(fetched, { kind: 'detail.page', requestId: 'fetch-page', subscriptionId: 'subscription-1', ...page });
+  }
+  store.dispose();
+});
+
+test('smaller fetch caps never reshape a same-count live manifest', async () => {
+  for (const index of [0, 1]) {
+    const frames: DetailFrame[] = [];
+    const { store, settle } = createSettledDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
+    try {
+      store.observe({ ...root, details: details('x'.repeat(5000)) });
+      store.subscribe('s', 's', address, undefined, 4096);
+      await settle();
+      const baseline = frames.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.page' }> => frame.kind === 'detail.page');
+      const reshaped = segmentDetailPages(baseline.map((page) => page.payload.text).join(''), baseline[0]!.ref.baselineRevision, 4000, baseline[0]!.payload.segmentId);
+      assert.equal(reshaped.length, baseline.length);
+      assert.notDeepEqual(reshaped[0]!.payload, baseline[0]!.payload);
+      const page = baseline[index]!;
+      frames.length = 0;
+      store.fetch('f', 's', address, page.ref, 4000);
+      if (page.payloadBytes > 4000) {
+        assert.deepEqual(frames.map((frame) => frame.kind), ['detail.rebase']);
+      } else {
+        assert.deepEqual(frames, [{ ...page, requestId: 'f' }]);
+      }
+    } finally {
+      store.dispose();
+    }
+  }
+});
+
+test('fetch rejects incorrect page counts and invalid indices without emitting a page', async () => {
+  for (const invalid of [
+    { pageCount: 1 }, { pageCount: 999_999 },
+    { pageIndex: -1 }, { pageIndex: 0.5 }, { pageIndex: 999_999 },
+  ]) {
+    const frames: DetailFrame[] = [];
+    const { store, settle } = createSettledDetailStore({
+      emit: (frame) => { frames.push(frame as DetailFrame); return true; },
+      budgets: { maxPageBytes: 768 },
+    });
+    store.observe({ ...root, details: details('🙂é漢字'.repeat(80)) });
+    store.subscribe('subscribe', 'subscription', address, undefined, 768);
+    await settle();
+    const page = frames.find((frame) => frame.kind === 'detail.page');
+    assert.ok(page && page.kind === 'detail.page');
+    frames.length = 0;
+    store.fetch('fetch', 'subscription', address, { ...page.ref, ...invalid }, 768);
+    assert.equal(frames.some((frame) => frame.kind === 'detail.page'), false);
+    assert.equal(frames.at(-1)?.kind, 'detail.rebase');
+    store.dispose();
+  }
 });
 
 test('large live baseline drains through the bounded detail queue without a rebase loop', async () => {
@@ -125,7 +195,7 @@ test('large live baseline drains through the bounded detail queue without a reba
     readable: new PassThrough(),
     writable: target as never,
   });
-  const prefillPage = segmentCanonicalDetail(JSON.stringify({ filler: 'x'.repeat(120_000) }), 1, address, 128 * 1024)[0]!;
+  const prefillPage = segmentDetailPages(JSON.stringify({ filler: 'x'.repeat(120_000) }), 1, 128 * 1024, 'worker-prefill-fixture')[0]!;
   let prefillCount = 0;
   for (let index = 0; index < 32; index += 1) {
     if (!server.sendDetailFrame({
@@ -531,11 +601,12 @@ test('unsubscribe and disposal fence pending baseline delivery', async () => {
   assert.equal(disposed.emitted.filter((frame) => frame.kind === 'detail.page').length, 1);
 });
 
-test('stable lineage survives source reorder and changed revisions emit one ordered structural delta', () => {
+test('stable lineage survives source reorder and changed revisions emit one ordered structural delta', async () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
+  const { store, settle } = createSettledDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
   store.observe({ ...root, details: details('before', 1) });
   store.subscribe('request-1', 'subscription-1', address, undefined, 4096);
+  await settle();
   frames.length = 0;
   store.observe({ ...root, details: details('after', 2, true) });
   const deltas = frames.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.delta' }> => frame.kind === 'detail.delta');
@@ -545,9 +616,9 @@ test('stable lineage survives source reorder and changed revisions emit one orde
   assert.ok(deltas[0]!.operations.length > 0);
 });
 
-test('gap fetch, canonical eviction, and detail queue backpressure produce explicit rebases', () => {
+test('gap fetch, canonical eviction, and detail queue backpressure produce explicit rebases', async () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({
+  const { store, settle } = createSettledDetailStore({
     emit: (frame) => {
       frames.push(frame as DetailFrame);
       return true;
@@ -556,26 +627,28 @@ test('gap fetch, canonical eviction, and detail queue backpressure produce expli
   });
   store.observe({ ...root, details: details('before') });
   store.subscribe('request-1', 'subscription-1', address, undefined, 1024);
+  await settle();
   const start = frames.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start')!;
   frames.length = 0;
   store.fetch('fetch-gap', 'subscription-1', address, { baselineRevision: start.baselineRevision + 1, pageIndex: 0, pageCount: start.pageCount }, 1024);
   assert.equal(frames.at(-1)?.kind, 'detail.rebase');
 
   const backpressureFrames: DetailFrame[] = [];
-  const backpressure = new WorkerLiveDetailStore({ emit: (frame) => {
+  const { store: backpressure, settle: settleBackpressure } = createSettledDetailStore({ emit: (frame) => {
     backpressureFrames.push(frame as DetailFrame);
     return frame.kind !== 'detail.delta';
   } });
   backpressure.observe({ ...root, details: details('before', 1) });
   backpressure.subscribe('request-2', 'subscription-2', address, undefined, 4096);
+  await settleBackpressure();
   backpressureFrames.length = 0;
   backpressure.observe({ ...root, details: details('after', 2) });
   assert.deepEqual(backpressureFrames.map((frame) => frame.kind), ['detail.delta', 'detail.rebase']);
 });
 
-test('tiny canonical budget evicts an older subscribed revision with an explicit rebase', () => {
+test('tiny canonical budget evicts an older subscribed revision with an explicit rebase', async () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({
+  const { store, settle } = createSettledDetailStore({
     emit: (frame) => { frames.push(frame as DetailFrame); return true; },
     budgets: { maxCanonicalBytes: 900, maxPageBytes: 1024 },
   });
@@ -584,18 +657,21 @@ test('tiny canonical budget evicts an older subscribed revision with an explicit
   const address2: LiveSubagentDetailAddress = { ...root2, lineage: [parent2] };
   store.observe({ ...root, details: details('first') });
   store.subscribe('request-1', 'subscription-1', address, undefined, 1024);
+  await settle();
   store.observe({ ...root2, details: { details: { results: [child(parent2, [parent2], 'second')] } } });
   store.subscribe('request-2', 'subscription-2', address2, undefined, 1024);
+  await settle();
   assert.ok(frames.some((frame) => frame.kind === 'detail.rebase'
     && frame.subscriptionId === 'subscription-1' && frame.reason === 'evicted'));
   assert.ok(store.debugState().canonicalBytes <= 900);
 });
 
-test('terminal emits only after durable ref exists and a restarted store has no live authority', () => {
+test('terminal emits only after durable ref exists and a restarted store has no live authority', async () => {
   const frames: DetailFrame[] = [];
-  const store = new WorkerLiveDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
+  const { store, settle } = createSettledDetailStore({ emit: (frame) => { frames.push(frame as DetailFrame); return true; } });
   store.observe({ ...root, details: details('terminal') });
   store.subscribe('request-1', 'subscription-1', address, undefined, 4096);
+  await settle();
   frames.length = 0;
   store.terminal(root, 'durable-entry-1');
   const terminal = frames[0];
@@ -607,8 +683,51 @@ test('terminal emits only after durable ref exists and a restarted store has no 
   assert.equal(store.debugState().subscriptions, 0);
 
   const restartedFrames: DetailFrame[] = [];
-  const restarted = new WorkerLiveDetailStore({ emit: (frame) => { restartedFrames.push(frame as DetailFrame); return true; } });
+  const { store: restarted, settle: settleRestarted } = createSettledDetailStore({ emit: (frame) => { restartedFrames.push(frame as DetailFrame); return true; } });
   restarted.subscribe('restart', 'subscription-restart', address, undefined, 4096);
+  await settleRestarted();
   assert.equal(restartedFrames[0]?.kind, 'detail.error');
   assert.equal((restartedFrames[0] as any).code, 'NOT_FOUND');
+});
+
+test('retryable page settlement waits for drain and retries the immutable page', async () => {
+  const frames: DetailFrame[] = [];
+  const pending: Array<(settlement: import('../worker-live-detail-store').WorkerLiveDetailEmitSettlement) => void> = [];
+  let drain: (() => void) | undefined;
+  const store = new WorkerLiveDetailStore({
+    emit(frame, settled) {
+      frames.push(frame as DetailFrame);
+      if (settled) pending.push(settled);
+      return true;
+    },
+    onDrain(listener) {
+      drain = listener;
+      return () => { drain = undefined; };
+    },
+    budgets: { maxCanonicalBytes: 128, maxPageBytes: 768 },
+  });
+  try {
+    store.observe({ ...root, details: details('retry 🙂'.repeat(100)) });
+    store.subscribe('request-retry', 'subscription-retry', address, undefined, 768);
+    pending.shift()!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const page = frames.at(-1);
+    assert.equal(page?.kind, 'detail.page');
+    pending.shift()!({ status: 'rejected', retryable: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(frames.length, 2, 'rejection must not spin without a drain');
+    store.observe({ ...root, details: details('new revision', 2) });
+    drain!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(frames.at(-1), page, 'drain retries the exact retained baseline page despite a new revision');
+    store.unsubscribe('unsubscribe-retry', 'subscription-retry');
+    pending.shift()!({ status: 'sent' });
+    drain!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(frames.at(-1)?.kind, 'detail.unsubscribed', 'late settlements cannot resurrect an unsubscribed cursor');
+    assert.equal(store.debugState().canonicalBytes, 0);
+  } finally {
+    store.dispose();
+  }
+  assert.equal(drain, undefined);
 });

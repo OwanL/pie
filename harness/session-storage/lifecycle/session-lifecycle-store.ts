@@ -1785,6 +1785,33 @@ export class SessionLifecycleStore {
     })();
   }
 
+  /** Resolve registered transcript identity without opening the transcript. Deleted
+   * artifacts remain authoritative. Ambiguous registrations fail closed. */
+  findByRegisteredTranscriptPath(transcriptPath: string, roots: Record<string, string>): SessionLifecycleRecord | undefined {
+    const absolute = path.resolve(transcriptPath);
+    const matches = new Set<string>();
+    const equal = (a: string, b: string) => process.platform === 'win32'
+      ? a.toLowerCase() === b.toLowerCase() : a === b;
+    // Query only registered transcript artifacts, never the filesystem. Root
+    // resolution uses the same lexical boundary as managed artifact cleanup.
+    for (const row of this.database.prepare("SELECT * FROM session_lifecycle_artifacts WHERE kind = 'transcript'").all() as ArtifactRow[]) {
+      let registered: string;
+      if (row.location_kind === 'root_relative') {
+        const root = roots[row.root_name!];
+        if (!root) continue;
+        registered = path.resolve(root, normalizeLifecycleRelativePath(row.location));
+        const relative = path.relative(path.resolve(root), registered);
+        if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      } else if (row.location_kind === 'fixed_absolute') {
+        registered = path.resolve(row.location);
+      } else continue;
+      if (equal(registered, absolute)) matches.add(row.session_id);
+    }
+    if (matches.size > 1) throw new SessionLifecycleConflictError('Ambiguous registered transcript path.');
+    const sessionId = matches.values().next().value;
+    return sessionId === undefined ? undefined : this.get(sessionId);
+  }
+
   listArtifacts(sessionId: string): LifecycleArtifactRecord[] {
     return (this.database.prepare(`SELECT * FROM session_lifecycle_artifacts WHERE session_id = ? ORDER BY artifact_id`).all(sessionId) as ArtifactRow[])
       .map(toArtifact);

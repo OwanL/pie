@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { backendSessionPathKey } from '../catalog/session-directory.js';
 
 import { isJsonSafeValue } from '../../../lib/json-structural-patch.js';
 import type { LazyDetailRef } from '../../agent-processes/lib/rpc/message-contract.js';
@@ -12,6 +13,10 @@ import {
   MAX_DETAIL_PAGE_BYTES,
   MIN_DETAIL_PAGE_BYTES,
   segmentDetailPages,
+  DetailPageCursor,
+  StringCodePointReader,
+  countCodePoints,
+  type DetailSegmentPage,
 } from './detail-segmentation.js';
 import type { ChatMessage, ToolCall } from '../../agent-processes/lib/rpc/message-contract.js';
 
@@ -149,15 +154,9 @@ function sameLineage(value: unknown, expected: LiveSubagentDetailAddress['lineag
 }
 
 interface SourceRecord {
-  sessionPath: string;
-  messageId: string;
-  toolCallId: string;
-  revision: number;
-  kind: 'tool-result' | 'reasoning';
+  sessionKey: string;
   serialized: string;
   bytes: number;
-  durableRef: LazyDetailRef;
-  touchedAt: number;
 }
 
 interface SubscriptionRecord {
@@ -264,15 +263,9 @@ export class DurableDetailStore {
       available: true,
     };
     this.retainSource(sourceKey, {
-      sessionPath: address.sessionPath,
-      messageId: resolved.messageId,
-      toolCallId: resolved.toolCallId,
-      revision,
-      kind: resolved.kind,
+      sessionKey: backendSessionPathKey(address.sessionPath),
       serialized,
       bytes,
-      durableRef,
-      touchedAt: Date.now(),
     });
     const subscription: SubscriptionRecord = {
       subscriptionId,
@@ -337,6 +330,7 @@ export class DurableDetailStore {
       return;
     }
     if (ref.baselineRevision !== subscription.baselineRevision || ref.pageCount !== subscription.pageCount
+      || !Number.isSafeInteger(ref.pageIndex) || ref.pageIndex < 0
       || ref.pageIndex >= subscription.pageCount) {
       this.error(subscriptionId, 'NOT_FOUND', 'The requested page is not part of the active durable baseline manifest.', false, fence);
       return;
@@ -348,17 +342,38 @@ export class DurableDetailStore {
       return;
     }
     const pageBytes = clampPageBytes(requestedPageBytes, subscription.maxPageBytes);
-    const pages = segmentDetailPages(
-      source.serialized,
+    const cursor = new DetailPageCursor(
+      new StringCodePointReader(source.serialized),
       subscription.baselineRevision,
-      pageBytes,
+      subscription.maxPageBytes,
       stableSegmentId(subscription.sourceKey, subscription.baselineRevision, source.bytes),
+      source.bytes,
+      countCodePoints(source.serialized),
+      subscription.pageCount,
     );
-    if (ref.pageCount !== pages.length) {
+    let requestedPage: DetailSegmentPage | undefined;
+    let actualCount = 0;
+    let complete = false;
+    try {
+      let page: DetailSegmentPage | undefined;
+      while ((page = cursor.nextPage())) {
+        if (actualCount === ref.pageIndex) requestedPage = page;
+        actualCount += 1;
+      }
+      complete = cursor.isComplete();
+    } finally {
+      cursor.close();
+    }
+    if (ref.pageCount !== actualCount || !complete || !requestedPage
+      || requestedPage.ref.pageIndex !== ref.pageIndex) {
       this.error(subscriptionId, 'NOT_FOUND', 'The durable baseline manifest changed; re-subscribe for a fresh baseline.', true, fence);
       return;
     }
-    if (!this.options.emit({ kind: 'detail.page', subscriptionId, ...pages[ref.pageIndex]!, fence })) {
+    if (requestedPage.payloadBytes > pageBytes) {
+      this.error(subscriptionId, 'NOT_FOUND', 'The baseline page exceeds the requested cap; re-subscribe for a smaller-page baseline.', true, fence);
+      return;
+    }
+    if (!this.options.emit({ kind: 'detail.page', subscriptionId, ...requestedPage, fence })) {
       this.error(subscriptionId, 'UNAVAILABLE', 'The durable detail page could not be delivered.', true, fence);
     }
   }
@@ -369,6 +384,22 @@ export class DurableDetailStore {
 
   owns(subscriptionId: string): boolean {
     return this.subscriptions.has(subscriptionId) || this.pending.has(subscriptionId);
+  }
+
+  /** Release this session's cached bytes and owners without blocking a fresh reopen. */
+  invalidateSession(sessionPath: string): void {
+    const key = backendSessionPathKey(sessionPath);
+    for (const [id, owner] of this.pending) {
+      if (backendSessionPathKey(owner.sessionPath) === key) this.pending.delete(id);
+    }
+    for (const [id, owner] of this.subscriptions) {
+      if (backendSessionPathKey(owner.sessionPath) === key) this.subscriptions.delete(id);
+    }
+    for (const [sourceKey, source] of this.sources) {
+      if (source.sessionKey !== key) continue;
+      this.canonicalBytes -= source.bytes;
+      this.sources.delete(sourceKey);
+    }
   }
 
   dispose(): void {
@@ -411,7 +442,6 @@ export class DurableDetailStore {
   private async sourceFor(subscription: SubscriptionRecord, fence: BackendDetailFence): Promise<SourceRecord | undefined> {
     const cached = this.sources.get(subscription.sourceKey);
     if (cached) {
-      cached.touchedAt = Date.now();
       return cached;
     }
     const resolved = await this.resolve(subscription.address, subscription.durableRef, subscription.subscriptionId, fence,
@@ -426,15 +456,9 @@ export class DurableDetailStore {
     const bytes = Buffer.byteLength(serialized, 'utf8');
     if (bytes !== subscription.totalBytes || contentDigest(serialized) !== subscription.digest) return undefined;
     const source: SourceRecord = {
-      sessionPath: subscription.sessionPath,
-      messageId: resolved.messageId,
-      toolCallId: resolved.toolCallId,
-      revision: subscription.baselineRevision,
-      kind: resolved.kind,
+      sessionKey: backendSessionPathKey(subscription.sessionPath),
       serialized,
       bytes,
-      durableRef: subscription.durableRef,
-      touchedAt: Date.now(),
     };
     this.retainSource(subscription.sourceKey, source);
     return source;

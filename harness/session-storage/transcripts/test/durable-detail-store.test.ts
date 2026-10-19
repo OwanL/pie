@@ -7,7 +7,7 @@ import {
   DurableDetailStore,
   resolveDurableDetailFromTranscript,
 } from '../durable-detail-store';
-import { reassembleDetailPages } from '../detail-segmentation';
+import { reassembleDetailPages, segmentDetailPages } from '../detail-segmentation';
 import type { ChatMessage } from '../../../agent-processes/lib/rpc/message-contract.js';
 import type {
   CoordinatorToHostDetailMessage,
@@ -199,6 +199,73 @@ test('fetch re-emits the exact evicted page with stable identity and checksum', 
     assert.deepEqual(actual.ref, expected.ref, 'the re-emitted page keeps the stable ref');
     assert.deepEqual(actual.payload, expected.payload, 'the re-emitted page is byte-exact');
     assert.equal(actual.checksum, expected.checksum, 'the re-emitted checksum is stable');
+  }
+});
+
+test('smaller fetch caps never reshape a same-count durable manifest', async () => {
+  const value = addressableResult({ text: 'x'.repeat(5000) });
+  const { store, emitted } = createStore({ transcript: transcriptWithResult(value) });
+  await store.subscribe('s', 's', ADDRESS, 4096, fence());
+  const baseline = pagesOf(emitted, 's').map(asPage) as NarrowPage[];
+  const reshaped = segmentDetailPages(JSON.stringify(value), baseline[0]!.ref.baselineRevision, 4000, baseline[0]!.payload.segmentId);
+  assert.equal(reshaped.length, baseline.length);
+  assert.notDeepEqual(reshaped[0]!.payload, baseline[0]!.payload);
+  for (const page of baseline) {
+    const before = emitted.length;
+    await store.fetch('f', 's', ADDRESS, page.ref, 4000, fence());
+    const result = emitted.slice(before);
+    if (page.payloadBytes > 4000) {
+      assert.equal(result.length, 1);
+      assert.equal(result[0]?.kind, 'detail.error');
+    } else {
+      assert.deepEqual(result, [{ kind: 'detail.page', subscriptionId: 's', ...page, fence: fence() }]);
+    }
+  }
+  store.dispose();
+});
+
+test('reverse and shuffled Unicode refreshes preserve every baseline field', async () => {
+  for (const maxCanonicalBytes of [1, 2 * 1024 * 1024]) {
+    const value = addressableResult({ text: '🌍é中\u0000\n\t"\\\ud800x\udfff'.repeat(200) });
+    const { store, emitted } = createStore({ transcript: transcriptWithResult(value), budgets: { maxCanonicalBytes } });
+    await store.subscribe('s', 's', ADDRESS, 1024, fence());
+    const baseline = pagesOf(emitted, 's');
+    assert.ok(baseline.length > 2);
+    const reverse = baseline.map((_, index) => index).reverse();
+    const shuffled = [...reverse];
+    let seed = 123;
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      const other = seed % (index + 1);
+      [shuffled[index], shuffled[other]] = [shuffled[other]!, shuffled[index]!];
+    }
+    for (const index of [...reverse, ...shuffled]) {
+      const page = asPage(baseline[index]!);
+      assert.ok(page);
+      const before = emitted.length;
+      await store.fetch('f', 's', ADDRESS, page.ref, 1024, fence());
+      assert.deepEqual(emitted.slice(before), [baseline[index]]);
+    }
+  }
+});
+
+test('invalid refresh indexes, counts, revisions and actual count changes emit only errors', async () => {
+  const { store, emitted } = createStore({ transcript: transcriptWithResult(addressableResult({ text: '🌍'.repeat(2000) })) });
+  await store.subscribe('s', 's', ADDRESS, 4096, fence());
+  const page = asPage(pagesOf(emitted, 's')[0]!);
+  assert.ok(page);
+  const invalid = [
+    ...[-1, 0.5, Number.NaN, Infinity, page.ref.pageCount].map((pageIndex) => ({ ...page.ref, pageIndex })),
+    { ...page.ref, pageCount: page.ref.pageCount + 1 },
+    { ...page.ref, pageCount: Number.NaN },
+    { ...page.ref, baselineRevision: page.ref.baselineRevision + 1 },
+  ];
+  for (const [ref, bytes] of [...invalid.map((ref) => [ref, 4096] as const), [page.ref, 512] as const]) {
+    const before = emitted.length;
+    await store.fetch('f', 's', ADDRESS, ref, bytes, fence());
+    assert.equal(emitted.length, before + 1);
+    const error = emitted.at(-1);
+    assert.equal(error?.kind === 'detail.error' ? error.code : undefined, 'NOT_FOUND');
   }
 });
 
@@ -538,6 +605,47 @@ test('source resolution cannot retain after ownership retires between nested pro
       else store.unsubscribe('u', 'a');
     });
     const before = emitted.length;
+    await pending;
+    assert.equal(emitted.length, before);
+    assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+  }
+});
+
+test('session invalidation releases cached owners and bytes without affecting siblings or reopen', async () => {
+  const { store, emitted } = createStore();
+  const other = { ...ADDRESS, sessionPath: '/repo/other.jsonl' };
+  await store.subscribe('a', 'a', ADDRESS, 4096, fence());
+  await store.subscribe('b', 'b', other, 4096, fence());
+  const page = asPage(pagesOf(emitted, 'a')[0]!)!;
+  const bytes = store.debugState().canonicalBytes;
+  store.invalidateSession('/repo/./session.jsonl');
+  assert.deepEqual(store.debugState(), { sources: 1, subscriptions: 1, canonicalBytes: bytes / 2 });
+  const before = emitted.length;
+  await store.fetch('f', 'a', ADDRESS, page.ref, 4096, fence());
+  assert.equal(emitted.slice(before).some((message) => message.kind === 'detail.page'), false);
+  assert.equal(store.owns('b'), true);
+  await store.subscribe('reopen', 'a', ADDRESS, 4096, fence());
+  assert.equal(store.owns('a'), true);
+});
+
+test('session invalidation fences pending subscribe and evicted fetch resolutions', async () => {
+  for (const operation of ['subscribe', 'fetch'] as const) {
+    let finish!: (value: unknown) => void;
+    let calls = 0;
+    const { store, emitted } = createStore({ budgets: { maxCanonicalBytes: 1 }, resolveOverride: async () => {
+      calls += 1;
+      if (operation === 'fetch' && calls === 1) return { text: 'baseline' };
+      return new Promise((resolve) => { finish = resolve; });
+    } });
+    let pending: Promise<void>;
+    if (operation === 'fetch') {
+      await store.subscribe('s', 's', ADDRESS, 4096, fence());
+      const page = asPage(pagesOf(emitted, 's')[0]!)!;
+      pending = store.fetch('f', 's', ADDRESS, page.ref, 4096, fence());
+    } else pending = store.subscribe('s', 's', ADDRESS, 4096, fence());
+    store.invalidateSession(SESSION_PATH);
+    const before = emitted.length;
+    finish({ text: 'baseline' });
     await pending;
     assert.equal(emitted.length, before);
     assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });

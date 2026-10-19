@@ -12,10 +12,12 @@ import {
   type LiveSubagentDetailAddress,
 } from '../lib/rpc/subagent-detail.js';
 import {
-  DETAIL_PAGE_ENVELOPE_SLACK_BYTES,
-  MIN_DETAIL_PAGE_BYTES,
-  reassembleDetailPages as reassembleDetailPagesShared,
-  segmentDetailPages as segmentDetailPagesShared,
+  DetailPageCursor,
+  StringCodePointReader,
+  countCodePoints,
+  takeCodePoints,
+  type CodePointRead,
+  type CodePointReader,
   type DetailSegmentPage,
 } from '../../session-storage/transcripts/detail-segmentation.js';
 import type { LazyDetailRef } from '../lib/rpc/message-contract.js';
@@ -54,7 +56,7 @@ export interface WorkerLiveDetailStoreOptions {
   emit(frame: DetailStreamBody, onSettled?: (settlement: WorkerLiveDetailEmitSettlement) => void): boolean;
   /** Called after a detail-lane frame settles, when a previously rejected page
    * may be admitted without growing the bounded transport backlog. */
-  onDrain?: (listener: () => void) => () => void;
+  onDrain: (listener: () => void) => () => void;
   budgets?: Partial<WorkerLiveDetailStoreBudgets>;
 }
 
@@ -150,15 +152,13 @@ export class WorkerLiveDetailStore {
   private readonly sources = new Map<string, SourceRecord>();
   private readonly subscriptions = new Map<string, SubscriptionRecord>();
   private canonicalBytes = 0;
-  private readonly progressiveDelivery: boolean;
-  private readonly removeDrainListener?: () => void;
+  private readonly removeDrainListener: () => void;
   private drainScheduled = false;
   private disposed = false;
 
   constructor(private readonly options: WorkerLiveDetailStoreOptions) {
     this.budgets = validateBudgets({ ...DEFAULT_WORKER_LIVE_DETAIL_BUDGETS, ...options.budgets });
-    this.progressiveDelivery = options.onDrain !== undefined;
-    this.removeDrainListener = options.onDrain?.(() => this.scheduleDrain());
+    this.removeDrainListener = options.onDrain(() => this.scheduleDrain());
   }
 
   observe(observation: LiveDetailRootObservation): void {
@@ -229,9 +229,6 @@ export class WorkerLiveDetailStore {
       return;
     }
     const maxPageBytes = clampPageBytes(requestedPageBytes, this.budgets.maxPageBytes);
-    const pages = this.progressiveDelivery
-      ? undefined
-      : segmentCanonicalDetail(canonical.serialized, source.revision, address, maxPageBytes);
     const subscription: SubscriptionRecord = {
       subscriptionId,
       address: cloneAddress(address),
@@ -245,37 +242,21 @@ export class WorkerLiveDetailStore {
       touchedAt: Date.now(),
     };
     this.subscriptions.set(subscriptionId, subscription);
-    if (!this.progressiveDelivery) this.retainCanonical(subscription, canonical);
-    if (this.progressiveDelivery) {
-      try {
-        subscription.baseline = this.createBaselineDelivery(subscription, canonical, source.revision, address, maxPageBytes);
-      } catch {
-        this.dropSubscription(subscriptionId);
-        this.error(requestId, subscriptionId, 'INTERNAL_ERROR', 'The live detail baseline could not be retained.', true);
-        return;
-      }
+    try {
+      subscription.baseline = this.createBaselineDelivery(subscription, canonical, source.revision, address, maxPageBytes);
+    } catch {
+      this.dropSubscription(subscriptionId);
+      this.error(requestId, subscriptionId, 'INTERNAL_ERROR', 'The live detail baseline could not be retained.', true);
+      return;
     }
-    const firstPage = subscription.baseline?.pendingPage ?? pages?.[0];
+    const firstPage = subscription.baseline.pendingPage;
     const startFrame: DetailStreamBody = {
       kind: 'detail.start', requestId, subscriptionId, address: cloneAddress(address), source: 'live',
-      baselineRevision: source.revision, pageCount: subscription.baseline?.pageCount ?? pages!.length, totalBytes: canonical.bytes,
+      baselineRevision: source.revision, pageCount: subscription.baseline.pageCount, totalBytes: canonical.bytes,
       totalCodePoints: firstPage?.payload.totalCodePoints ?? 0,
     };
-    if (this.progressiveDelivery) {
-      if (!this.options.emit(startFrame, (settlement) => this.handleBaselineStartSettlement(subscription, settlement))) {
-        this.dropSubscription(subscriptionId);
-      }
-      return;
-    }
-    if (!this.options.emit(startFrame)) {
+    if (!this.options.emit(startFrame, (settlement) => this.handleBaselineStartSettlement(subscription, settlement))) {
       this.dropSubscription(subscriptionId);
-      return;
-    }
-    for (const page of pages!) {
-      if (!this.options.emit({ kind: 'detail.page', subscriptionId, ...page })) {
-        this.requireRebase(subscription, source.revision, 'backpressure');
-        break;
-      }
     }
   }
 
@@ -313,12 +294,35 @@ export class WorkerLiveDetailStore {
       return;
     }
     const pageBytes = clampPageBytes(requestedPageBytes, Math.min(subscription.maxPageBytes, this.budgets.maxPageBytes));
-    const pages = segmentCanonicalDetail(canonical.serialized, source.revision, address, pageBytes);
-    if (ref.pageCount !== pages.length || ref.pageIndex >= pages.length) {
+    // Canonical serialization and a full scan are still required. Retain only
+    // the requested page, using an independent reader so fetch cannot advance
+    // the subscription's baseline delivery cursor.
+    const cursor = new DetailPageCursor(
+      new StringCodePointReader(canonical.serialized), source.revision, subscription.maxPageBytes,
+      detailSegmentId(address, source.revision), canonical.bytes,
+      countCodePoints(canonical.serialized), ref.pageCount,
+    );
+    let requestedPage: DetailBaselinePage | undefined;
+    let pageCount = 0;
+    let complete: boolean;
+    try {
+      for (let page = cursor.nextPage(); page; page = cursor.nextPage()) {
+        if (pageCount === ref.pageIndex) requestedPage = page;
+        pageCount += 1;
+      }
+      complete = cursor.isComplete();
+    } finally {
+      cursor.close();
+    }
+    if (!complete || ref.pageCount !== pageCount || !requestedPage) {
       this.requireRebase(subscription, source.revision, 'gap');
       return;
     }
-    this.options.emit({ kind: 'detail.page', requestId, subscriptionId, ...pages[ref.pageIndex]! });
+    if (requestedPage.payloadBytes > pageBytes) {
+      this.requireRebase(subscription, source.revision, 'gap');
+      return;
+    }
+    this.options.emit({ kind: 'detail.page', requestId, subscriptionId, ...requestedPage });
   }
 
   terminal(root: Omit<LiveDetailRootObservation, 'details'>, durableEntryId: string): void {
@@ -341,7 +345,7 @@ export class WorkerLiveDetailStore {
         childCount: 1,
         available: true,
       };
-      if (this.progressiveDelivery && subscription.baseline) {
+      if (subscription.baseline) {
         subscription.pendingTerminal = { revision, durableRef };
         if (!subscription.baseline.inFlight) this.finishPendingTerminal(subscription);
       } else {
@@ -357,7 +361,7 @@ export class WorkerLiveDetailStore {
 
   dispose(): void {
     this.disposed = true;
-    this.removeDrainListener?.();
+    this.removeDrainListener();
     for (const subscriptionId of [...this.subscriptions.keys()]) this.dropSubscription(subscriptionId);
     this.sources.clear();
     this.canonicalBytes = 0;
@@ -677,7 +681,7 @@ export class WorkerLiveDetailStore {
       // The second reader is the actual delivery cursor; neither path rebuilds
       // normalized JSON or consults the mutable producer object.
       const countCursor = new DetailPageCursor(
-        snapshot.openReader(), revision, maxPageBytes, segmentId,
+        snapshot.openReader(), revision, Math.max(MIN_LIVE_DETAIL_PAGE_BYTES, maxPageBytes), segmentId,
         canonical.bytes, totalCodePoints, 1,
       );
       let pageCount = 0;
@@ -687,7 +691,7 @@ export class WorkerLiveDetailStore {
         countCursor.close();
       }
       const cursor = new DetailPageCursor(
-        snapshot.openReader(), revision, maxPageBytes, segmentId,
+        snapshot.openReader(), revision, Math.max(MIN_LIVE_DETAIL_PAGE_BYTES, maxPageBytes), segmentId,
         canonical.bytes, totalCodePoints, pageCount,
         createHash('sha256').update(canonical.serialized).digest('hex'),
       );
@@ -965,35 +969,6 @@ export class WorkerLiveDetailStore {
   }
 }
 
-export function segmentCanonicalDetail(
-  serialized: string,
-  revision: number,
-  address: LiveSubagentDetailAddress,
-  requestedPageBytes: number,
-): DetailBaselinePage[] {
-  const maxPageBytes = Math.max(MIN_DETAIL_PAGE_BYTES, requestedPageBytes);
-  // Stable segment identity for the same address/revision so a page re-fetch
-  // always yields the exact same segment id.
-  return segmentDetailPagesShared(serialized, revision, maxPageBytes, detailSegmentId(address, revision));
-}
-
-export function reassembleDetailPages(pages: readonly DetailBaselinePage[]): JsonSafeValue {
-  // Re-exported shared reassembly: exact order/contiguity/checksum verification
-  // plus JSON-safe decoding.
-  return reassembleDetailPagesShared(pages);
-}
-
-interface CodePointRead {
-  text: string;
-  count: number;
-}
-
-interface CodePointReader {
-  read(maxCodePoints: number): CodePointRead;
-  unread(text: string): void;
-  close(): void;
-}
-
 function createMemorySnapshot(serialized: string, bytes: number): SerializedSnapshot {
   return {
     memoryBytes: bytes,
@@ -1021,39 +996,6 @@ function createSpoolSnapshot(serialized: string): SerializedSnapshot {
       fsSync.rmSync(directory, { recursive: true, force: true });
     },
   };
-}
-
-class StringCodePointReader implements CodePointReader {
-  private index = 0;
-  private pending = '';
-
-  constructor(private readonly source: string) {}
-
-  read(maxCodePoints: number): CodePointRead {
-    const points: string[] = [];
-    while (points.length < maxCodePoints) {
-      let point: string | undefined;
-      if (this.pending.length > 0) {
-        const codePoint = this.pending.codePointAt(0)!;
-        point = String.fromCodePoint(codePoint);
-        this.pending = this.pending.slice(point.length);
-      } else if (this.index < this.source.length) {
-        const codePoint = this.source.codePointAt(this.index)!;
-        point = String.fromCodePoint(codePoint);
-        this.index += point.length;
-      } else {
-        break;
-      }
-      points.push(point);
-    }
-    return { text: points.join(''), count: points.length };
-  }
-
-  unread(text: string): void {
-    if (text.length > 0) this.pending = text + this.pending;
-  }
-
-  close(): void { /* memory-backed */ }
 }
 
 class FileCodePointReader implements CodePointReader {
@@ -1104,108 +1046,6 @@ class FileCodePointReader implements CodePointReader {
     this.pending += text;
     this.pendingCount += countCodePoints(text);
   }
-}
-
-function takeCodePoints(value: string, maxCodePoints: number): CodePointRead {
-  if (maxCodePoints <= 0 || value.length === 0) return { text: '', count: 0 };
-  let end = 0;
-  let count = 0;
-  while (end < value.length && count < maxCodePoints) {
-    const codePoint = value.codePointAt(end)!;
-    end += codePoint > 0xffff ? 2 : 1;
-    count += 1;
-  }
-  return { text: value.slice(0, end), count };
-}
-
-class DetailPageCursor {
-  private pageIndex = 0;
-  private byteIndex = 0;
-  private codePointIndex = 0;
-  private readonly maxPageBytes: number;
-
-  private readonly hash: ReturnType<typeof createHash> | undefined;
-
-  constructor(
-    private readonly reader: CodePointReader,
-    private readonly revision: number,
-    requestedPageBytes: number,
-    private readonly segmentId: string,
-    private readonly totalBytes: number,
-    private readonly totalCodePoints: number,
-    private readonly pageCount: number,
-    private readonly expectedHash?: string,
-  ) {
-    this.maxPageBytes = Math.max(MIN_DETAIL_PAGE_BYTES, requestedPageBytes);
-    this.hash = expectedHash ? createHash('sha256') : undefined;
-  }
-
-  nextPage(): DetailBaselinePage | undefined {
-    if (this.codePointIndex >= this.totalCodePoints) return undefined;
-    const read = this.reader.read(Math.max(1, this.maxPageBytes - DETAIL_PAGE_ENVELOPE_SLACK_BYTES));
-    if (read.count === 0) return undefined;
-    let text = read.text;
-    let count = read.count;
-    let page = this.makePage(text, count);
-    while (page.payloadBytes > this.maxPageBytes && count > 1) {
-      const nextCount = Math.max(1, Math.floor(count / 2));
-      const prefix = takeCodePoints(text, nextCount).text;
-      this.reader.unread(text.slice(prefix.length));
-      text = prefix;
-      count = nextCount;
-      page = this.makePage(text, count);
-    }
-    if (page.payloadBytes > this.maxPageBytes) {
-      throw new Error(`Detail page budget ${this.maxPageBytes} cannot encode one Unicode code point.`);
-    }
-    this.pageIndex += 1;
-    this.byteIndex = page.payload.endByte;
-    this.codePointIndex = page.payload.endCodePoint;
-    this.hash?.update(text);
-    return page;
-  }
-
-  isComplete(): boolean {
-    if (this.pageIndex !== this.pageCount
-      || this.byteIndex !== this.totalBytes
-      || this.codePointIndex !== this.totalCodePoints) return false;
-    const trailing = this.reader.read(1);
-    if (trailing.count !== 0) {
-      this.reader.unread(trailing.text);
-      return false;
-    }
-    return !this.expectedHash || this.hash!.digest('hex') === this.expectedHash;
-  }
-
-  close(): void { this.reader.close(); }
-
-  private makePage(text: string, codePointCount: number): DetailBaselinePage {
-    const payload = {
-      kind: 'json-segment' as const,
-      encoding: 'utf8-json' as const,
-      segmentId: this.segmentId,
-      semanticPath: [] as readonly (string | number)[],
-      startByte: this.byteIndex,
-      endByte: this.byteIndex + Buffer.byteLength(text, 'utf8'),
-      totalBytes: this.totalBytes,
-      startCodePoint: this.codePointIndex,
-      endCodePoint: this.codePointIndex + codePointCount,
-      totalCodePoints: this.totalCodePoints,
-      text,
-    };
-    return {
-      ref: { baselineRevision: this.revision, pageIndex: this.pageIndex, pageCount: this.pageCount },
-      payload,
-      payloadBytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
-      checksum: createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
-    };
-  }
-}
-
-function countCodePoints(value: string): number {
-  let count = 0;
-  for (const _ of value) count += 1;
-  return count;
 }
 
 function canonicalizeTarget(details: unknown, address: LiveSubagentDetailAddress): CanonicalDetail | undefined {

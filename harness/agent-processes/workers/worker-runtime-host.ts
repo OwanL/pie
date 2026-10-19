@@ -31,9 +31,9 @@ import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
 } from '../../../analytics/authority/storage-cutoff-authorization.js';
-import { compactDurableMessageForTransport, findDurableDetail } from '../../session-storage/transcripts/lazy-details';
-import { captureModelExchangeEntries, findToolModelExchange } from '../../session-storage/transcripts/tool-model-exchange';
-import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
+import { compactDurableMessageForTransport } from '../../session-storage/transcripts/lazy-details';
+import { resolveDurableLazyDetail } from '../../session-storage/transcripts/durable-detail-resolver';
+import { captureModelExchangeEntries } from '../../session-storage/transcripts/tool-model-exchange';
 import { deriveContextUsageEvidenceFromBranch } from '../../session-storage/transcripts/context-usage';
 import { projectRegistryModels, resolveActiveModel } from '../../model-providers/catalog/model-catalog';
 import { ExtensionUIBridge } from './extension-ui-bridge';
@@ -1782,13 +1782,10 @@ export class WorkerRuntimeHost {
       return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
     }
     const transcript = ensureDisplayTranscriptCache(context).transcript;
-    const found = ref.kind === 'model-exchange'
-      ? findToolModelExchange(transcript, captureModelExchangeEntries(context.session.sessionManager.getBranch()), ref)
-      : findDurableDetail(transcript, ref);
-    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'message' in found && typeof found.message === 'string' ? found.message : 'The durable detail is no longer available.' };
-    if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
-    if (found.sizeBytes !== ref.sizeBytes && !(ref.kind === 'model-exchange' && ref.sizeBytes === 0)) return { sessionPath: context.sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh and retry.' };
-    return { sessionPath: context.sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
+    const entries = ref.kind === 'model-exchange'
+      ? captureModelExchangeEntries(context.session.sessionManager.getBranch())
+      : [];
+    return resolveDurableLazyDetail(context.sessionPath, transcript, entries, ref);
   }
 
   private fenceSessionManager(manager: import('../lib/sdk-integration/sdk').SdkSessionManager): MutableSdkSessionManager {

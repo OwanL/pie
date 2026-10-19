@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
+  DetailPageCursor,
+  StringCodePointReader,
   MAX_DETAIL_PAGE_BYTES,
   MIN_DETAIL_PAGE_BYTES,
   detailSegmentChecksum,
@@ -165,6 +167,23 @@ test('huge values segment into bounded pages and reassemble exactly (tiny budget
 // The >64 MiB serialized verification is opt-in: it is excluded from `npm test`
 // (test discovery only picks up *.test.ts) and runs under
 // `npm run test:large-detail` -> test/large-detail.e2e.ts.
+
+test('cursor preserves exact minimum-budget pages and optional source hash verification', () => {
+  const source = JSON.stringify({ text: '🌍é漢\\\"\n\t'.repeat(300) });
+  const pages = segmentDetailPages(source, 5, MIN_DETAIL_PAGE_BYTES, 'stable-fixture');
+  for (const expectedHash of [undefined, sha256(source), sha256('wrong')]) {
+    const cursor = new DetailPageCursor(new StringCodePointReader(source), 5,
+      MIN_DETAIL_PAGE_BYTES, 'stable-fixture', Buffer.byteLength(source), [...source].length,
+      pages.length, expectedHash);
+    const actual: DetailSegmentPage[] = [];
+    try {
+      let page: DetailSegmentPage | undefined;
+      while ((page = cursor.nextPage())) actual.push(page);
+      assert.deepEqual(actual, pages);
+      assert.equal(cursor.isComplete(), expectedHash !== sha256('wrong'));
+    } finally { cursor.close(); }
+  }
+});
 
 test('the same fragment text always yields the same checksum and segment id', () => {
   const payload: DetailJsonSegmentPayload = {

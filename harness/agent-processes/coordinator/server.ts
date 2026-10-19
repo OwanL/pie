@@ -1726,7 +1726,23 @@ export class BackendServer {
    *  durable JSONL. A live NOT_FOUND/NOT_LIVE_ADDRESSABLE means the worker no
    *  longer retains the source (terminal or evicted) and the durable JSONL is
    *  authoritative, so it falls back to durable. */
+  private assertDetailLifecycleAdmission(sessionPath: string): void {
+    if (this.isSessionForgotten(sessionPath)) {
+      throw new BackendError('SESSION_NOT_FOUND', 'The session has been forgotten.');
+    }
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
+    const { store } = this.initializeFilesystemLifecycle();
+    const paths = resolvePieDataPaths({ agentDir: this.agentDir });
+    const record = store.findByRegisteredTranscriptPath(sessionPath, {
+      sessions: paths.sessionsDir, artifacts: paths.artifactsDir,
+    });
+    if (record && record.cleanupState !== 'open' && record.cleanupState !== 'retained') {
+      throw new BackendError('SESSION_NOT_FOUND', 'The session is being deleted or has been deleted.');
+    }
+  }
+
   private async routeDetailSubscribe(requestId: string, params: DetailSubscribeParams): Promise<void> {
+    this.assertDetailLifecycleAdmission(params.address.sessionPath);
     const router = this.workerRuntimeRouter;
     if (!router) {
       throw new BackendError('UNKNOWN_METHOD', 'Detail subscription routing is unavailable.');
@@ -1754,6 +1770,7 @@ export class BackendServer {
     if (!durable) {
       throw new BackendError('UNKNOWN_METHOD', 'Durable detail subscription routing is unavailable.');
     }
+    this.assertDetailLifecycleAdmission(sessionPath);
     await durable.subscribe(requestId, params.subscriptionId, params.address, params.maxPageBytes, fence);
   }
 
@@ -1776,6 +1793,7 @@ export class BackendServer {
   }
 
   private async routeDetailFetch(requestId: string, params: DetailFetchParams): Promise<void> {
+    this.assertDetailLifecycleAdmission(params.address.sessionPath);
     const router = this.workerRuntimeRouter;
     const durable = this.durableDetailStore;
     if (durable?.owns(params.subscriptionId)) {
@@ -2585,6 +2603,16 @@ export class BackendServer {
         store: this.lifecycleStore,
         barrier: this.lifecycleBarrier,
         roots: { sessions: dataPaths.sessionsDir, artifacts: dataPaths.artifactsDir },
+        onCleanupClaimed: (claim) => {
+          const roots: Record<string, string> = { sessions: dataPaths.sessionsDir, artifacts: dataPaths.artifactsDir };
+          for (const artifact of this.lifecycleStore!.listArtifacts(claim.sessionId)) {
+            if (artifact.kind !== 'transcript') continue;
+            const transcriptPath = artifact.locationKind === 'root_relative' && roots[artifact.rootName!]
+              ? path.resolve(roots[artifact.rootName!], artifact.location)
+              : artifact.locationKind === 'fixed_absolute' ? artifact.location : undefined;
+            if (transcriptPath) this.durableDetailStore?.invalidateSession(transcriptPath);
+          }
+        },
         cleanupExternalArtifact: async (artifact) => {
           if (artifact.artifactId === 'review-sidecar-entry') {
             forgetLegacyReviewArtifacts(artifact.location, artifact.sessionId);
@@ -3445,6 +3473,7 @@ export class BackendServer {
       if (this.hostMembershipSessions.sessions.has(key)) continue;
       if (this.hostMembershipClosing.has(key)) continue;
       this.liveSessionTitles.retireLive(publicPath);
+      this.durableDetailStore?.invalidateSession(publicPath);
       this.newCreatePublicationPaths.delete(key);
       this.sessionControlCreators.delete(key);
       this.pendingLiveTitlePaths.delete(key);
@@ -3918,6 +3947,7 @@ export class BackendServer {
       // barrier. The router holds its own tombstone across manifest cleanup, so
       // no promotion or transition can create a later output manifest.
       this.forgottenSessionPaths.add(sessionPath);
+      this.durableDetailStore?.invalidateSession(sessionPath);
       try {
         const forget = async () => await this.forgetSessionAdmitted(sessionPath, operationId);
         const router = this.workerRuntimeRouter;
@@ -5810,6 +5840,7 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
+    this.durableDetailStore?.dispose();
     // Dispose provider operations before runtime owners, without exposing errors.
     try { (await this.providerManagementPromise)?.dispose(); } catch { /* unavailable */ }
     this.clearLiveTitleNamespaceRetry();

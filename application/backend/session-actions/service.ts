@@ -102,7 +102,7 @@ export class SessionService implements HostDisposable {
   private readonly privateSessionCleanup: PrivateSessionCleanup;
   private readonly dispatchArch: (event: Event) => void;
   private readonly detailCache = new Map<string, { result: DetailResult; bytes: number }>();
-  private readonly detailRequests = new Map<string, Promise<DetailResult>>();
+  private readonly detailRequests = new Map<string, { epoch: number; generation: number; promise: Promise<DetailResult> }>();
   private readonly detailEpochBySession = new Map<string, number>();
   private detailCacheBytes = 0;
   private detailGeneration = 0;
@@ -911,6 +911,13 @@ export class SessionService implements HostDisposable {
 
   /** Bounded, deduplicated retrieval for details omitted from state snapshots. */
   async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
+    if (ref.source === 'live') {
+      try {
+        return resolveLiveDetail(this.getArchState(), sessionPath, ref);
+      } catch {
+        return { sessionPath, key: ref.key, status: 'failure', message: 'Could not load details. Retry to try again.' };
+      }
+    }
     const cacheKey = `${sessionPath}\u0000${ref.key}`;
     const cached = ref.kind === 'model-exchange' ? undefined : this.detailCache.get(cacheKey);
     if (cached) {
@@ -918,34 +925,30 @@ export class SessionService implements HostDisposable {
       this.detailCache.set(cacheKey, cached);
       return cached.result;
     }
-    const pending = this.detailRequests.get(cacheKey);
-    if (pending) return await pending;
-
     const requestEpoch = this.detailEpochBySession.get(sessionPath) ?? 0;
     const requestGeneration = this.detailGeneration;
-    const request = (async (): Promise<DetailResult> => {
+    const pending = this.detailRequests.get(cacheKey);
+    if (pending?.epoch === requestEpoch && pending.generation === requestGeneration) return await pending.promise;
+
+    // Install ownership before executing even a synchronously failing request.
+    const request = Promise.resolve().then(async (): Promise<DetailResult> => {
       try {
-        const result = ref.source === 'live'
-          ? resolveLiveDetail(this.getArchState(), sessionPath, ref)
-          : await this.backend.request<DetailResult>('session.loadDetail', { sessionPath, ref });
+        const result = await this.backend.request<DetailResult>('session.loadDetail', { sessionPath, ref });
         if (this.detailGeneration !== requestGeneration
           || (this.detailEpochBySession.get(sessionPath) ?? 0) !== requestEpoch) {
           return { sessionPath, key: ref.key, status: 'stale', message: 'The session changed while details were loading.' };
         }
-        // Live detail is a moving view. In particular, fallback subagent refs
-        // intentionally keep one stable owner while progress advances, so a
-        // retry must re-read current host state instead of replaying the first
-        // expanded snapshot. Captured exchanges can gain a received sidecar
-        // after produced-only retrieval; other durable detail remains cached.
-        if (result.status === 'loaded' && ref.source === 'durable' && ref.kind !== 'model-exchange') this.cacheDetail(cacheKey, result);
+        // Captured exchanges can gain a received sidecar after produced-only
+        // retrieval; other durable detail remains cached.
+        if (result.status === 'loaded' && ref.kind !== 'model-exchange') this.cacheDetail(cacheKey, result);
         return result;
       } catch {
         return { sessionPath, key: ref.key, status: 'failure', message: 'Could not load details. Retry to try again.' };
       } finally {
-        this.detailRequests.delete(cacheKey);
+        if (this.detailRequests.get(cacheKey)?.promise === request) this.detailRequests.delete(cacheKey);
       }
-    })();
-    this.detailRequests.set(cacheKey, request);
+    });
+    this.detailRequests.set(cacheKey, { epoch: requestEpoch, generation: requestGeneration, promise: request });
     return await request;
   }
 

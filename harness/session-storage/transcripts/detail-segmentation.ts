@@ -38,38 +38,20 @@ export function segmentDetailPages(
   maxPageBytes: number,
   segmentId: string,
 ): DetailSegmentPage[] {
-  const points = [...serialized];
-  const totalBytes = Buffer.byteLength(serialized, 'utf8');
-  const raw: Array<Omit<DetailSegmentPage, 'ref'>> = [];
-  let pointIndex = 0;
-  let byteIndex = 0;
-  while (pointIndex < points.length) {
-    let end = Math.min(points.length, pointIndex + Math.max(1, maxPageBytes - DETAIL_PAGE_ENVELOPE_SLACK_BYTES));
-    let payload: DetailJsonSegmentPayload;
-    let payloadBytes: number;
-    for (;;) {
-      const text = points.slice(pointIndex, end).join('');
-      const bytes = Buffer.byteLength(text, 'utf8');
-      payload = {
-        kind: 'json-segment', encoding: 'utf8-json', segmentId, semanticPath: [],
-        startByte: byteIndex, endByte: byteIndex + bytes, totalBytes,
-        startCodePoint: pointIndex, endCodePoint: end, totalCodePoints: points.length, text,
-      };
-      payloadBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
-      if (payloadBytes <= maxPageBytes || end === pointIndex + 1) break;
-      end = pointIndex + Math.max(1, Math.floor((end - pointIndex) / 2));
-    }
-    if (payloadBytes > maxPageBytes) {
-      throw new Error(`Detail page budget ${maxPageBytes} cannot encode one Unicode code point.`);
-    }
-    raw.push({ payload, payloadBytes, checksum: detailSegmentChecksum(payload) });
-    byteIndex = payload.endByte;
-    pointIndex = payload.endCodePoint;
+  const cursor = new DetailPageCursor(
+    new StringCodePointReader(serialized), revision, maxPageBytes, segmentId,
+    Buffer.byteLength(serialized, 'utf8'), countCodePoints(serialized), 1,
+  );
+  const pages: DetailSegmentPage[] = [];
+  try {
+    let page: DetailSegmentPage | undefined;
+    while ((page = cursor.nextPage())) pages.push(page);
+  } finally {
+    cursor.close();
   }
-  if (raw.length === 0) throw new Error('Detail serialization unexpectedly produced no pages.');
-  return raw.map((page, pageIndex) => ({
-    ref: { baselineRevision: revision, pageIndex, pageCount: raw.length },
-    ...page,
+  if (pages.length === 0) throw new Error('Detail serialization unexpectedly produced no pages.');
+  return pages.map((page) => ({
+    ...page, ref: { ...page.ref, pageCount: pages.length },
   }));
 }
 
@@ -109,4 +91,150 @@ export function reassembleDetailPages(pages: readonly DetailSegmentPage[]): Json
   const value = JSON.parse(text) as unknown;
   if (!isJsonSafeValue(value)) throw new Error('Detail baseline did not decode to bounded JSON-safe data.');
   return value;
+}
+
+export interface CodePointRead {
+  text: string;
+  count: number;
+}
+
+export interface CodePointReader {
+  read(maxCodePoints: number): CodePointRead;
+  unread(text: string): void;
+  close(): void;
+}
+
+export class StringCodePointReader implements CodePointReader {
+  private index = 0;
+  private pending = '';
+
+  constructor(private readonly source: string) {}
+
+  read(maxCodePoints: number): CodePointRead {
+    const points: string[] = [];
+    while (points.length < maxCodePoints) {
+      let point: string | undefined;
+      if (this.pending.length > 0) {
+        const codePoint = this.pending.codePointAt(0)!;
+        point = String.fromCodePoint(codePoint);
+        this.pending = this.pending.slice(point.length);
+      } else if (this.index < this.source.length) {
+        const codePoint = this.source.codePointAt(this.index)!;
+        point = String.fromCodePoint(codePoint);
+        this.index += point.length;
+      } else {
+        break;
+      }
+      points.push(point);
+    }
+    return { text: points.join(''), count: points.length };
+  }
+
+  unread(text: string): void {
+    if (text.length > 0) this.pending = text + this.pending;
+  }
+
+  close(): void { /* memory-backed */ }
+}
+
+export function takeCodePoints(value: string, maxCodePoints: number): CodePointRead {
+  if (maxCodePoints <= 0 || value.length === 0) return { text: '', count: 0 };
+  let end = 0;
+  let count = 0;
+  while (end < value.length && count < maxCodePoints) {
+    const codePoint = value.codePointAt(end)!;
+    end += codePoint > 0xffff ? 2 : 1;
+    count += 1;
+  }
+  return { text: value.slice(0, end), count };
+}
+
+export class DetailPageCursor {
+  private pageIndex = 0;
+  private byteIndex = 0;
+  private codePointIndex = 0;
+  private readonly maxPageBytes: number;
+
+  private readonly hash: ReturnType<typeof createHash> | undefined;
+
+  constructor(
+    private readonly reader: CodePointReader,
+    private readonly revision: number,
+    requestedPageBytes: number,
+    private readonly segmentId: string,
+    private readonly totalBytes: number,
+    private readonly totalCodePoints: number,
+    private readonly pageCount: number,
+    private readonly expectedHash?: string,
+  ) {
+    this.maxPageBytes = requestedPageBytes;
+    this.hash = expectedHash ? createHash('sha256') : undefined;
+  }
+
+  nextPage(): DetailSegmentPage | undefined {
+    if (this.codePointIndex >= this.totalCodePoints) return undefined;
+    const read = this.reader.read(Math.max(1, this.maxPageBytes - DETAIL_PAGE_ENVELOPE_SLACK_BYTES));
+    if (read.count === 0) return undefined;
+    let text = read.text;
+    let count = read.count;
+    let page = this.makePage(text, count);
+    while (page.payloadBytes > this.maxPageBytes && count > 1) {
+      const nextCount = Math.max(1, Math.floor(count / 2));
+      const prefix = takeCodePoints(text, nextCount).text;
+      this.reader.unread(text.slice(prefix.length));
+      text = prefix;
+      count = nextCount;
+      page = this.makePage(text, count);
+    }
+    if (page.payloadBytes > this.maxPageBytes) {
+      throw new Error(`Detail page budget ${this.maxPageBytes} cannot encode one Unicode code point.`);
+    }
+    this.pageIndex += 1;
+    this.byteIndex = page.payload.endByte;
+    this.codePointIndex = page.payload.endCodePoint;
+    this.hash?.update(text);
+    return page;
+  }
+
+  isComplete(): boolean {
+    if (this.pageIndex !== this.pageCount
+      || this.byteIndex !== this.totalBytes
+      || this.codePointIndex !== this.totalCodePoints) return false;
+    const trailing = this.reader.read(1);
+    if (trailing.count !== 0) {
+      this.reader.unread(trailing.text);
+      return false;
+    }
+    return !this.expectedHash || this.hash!.digest('hex') === this.expectedHash;
+  }
+
+  close(): void { this.reader.close(); }
+
+  private makePage(text: string, codePointCount: number): DetailSegmentPage {
+    const payload = {
+      kind: 'json-segment' as const,
+      encoding: 'utf8-json' as const,
+      segmentId: this.segmentId,
+      semanticPath: [] as readonly (string | number)[],
+      startByte: this.byteIndex,
+      endByte: this.byteIndex + Buffer.byteLength(text, 'utf8'),
+      totalBytes: this.totalBytes,
+      startCodePoint: this.codePointIndex,
+      endCodePoint: this.codePointIndex + codePointCount,
+      totalCodePoints: this.totalCodePoints,
+      text,
+    };
+    return {
+      ref: { baselineRevision: this.revision, pageIndex: this.pageIndex, pageCount: this.pageCount },
+      payload,
+      payloadBytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+      checksum: createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
+    };
+  }
+}
+
+export function countCodePoints(value: string): number {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
 }

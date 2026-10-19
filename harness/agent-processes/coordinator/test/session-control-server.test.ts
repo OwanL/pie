@@ -24,6 +24,7 @@ import { ColdSessionLeaseAuthority, ColdSessionStore } from '../../../session-st
 import { parseWorkerToCoordinatorFrame, WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
 import { serializeRuntimeCommandError } from '../../workers/worker-entry.js';
 import { WorkerRequestTimeoutError } from '../../lib/rpc/worker-client.js';
+import { DurableDetailStore } from '../../../session-storage/transcripts/durable-detail-store.js';
 
 const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(pathMod.resolve('/sdk')).descriptor;
 
@@ -979,6 +980,38 @@ test('membership-closing targets reject reads and messages and report UI-close j
   assert.equal(closingClose.result.alreadyClosing, true);
   // The host-owned close is not duplicated by a second coordinator request.
   assert.deepEqual(events.filter((entry) => entry.event === 'session.close.requested').length, 0);
+});
+
+test('closing retains durable detail until confirmed retirement, then reopen resolves fresh detail', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'detail-close-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  let resolutions = 0;
+  const emitted: unknown[] = [];
+  const store = new DurableDetailStore({
+    resolve: async () => {
+      resolutions += 1;
+      const value = { text: `detail-${resolutions}` };
+      return { value, sizeBytes: Buffer.byteLength(JSON.stringify(value)), messageId: 'message', toolCallId: 'tool', kind: 'tool-result' };
+    },
+    emit: (message) => { emitted.push(message); return true; },
+  });
+  (server as unknown as { durableDetailStore: DurableDetailStore }).durableDetailStore = store;
+  const address = { sessionPath: currentPath, turnId: 'turn', rootToolCallId: 'tool', rootAttemptId: 'attempt', lineage: [] };
+  const fence = { backendGeneration: 1, coordinatorGeneration: 1 };
+  await store.subscribe('before-close', 'before-close', address, 4096, fence);
+  assert.equal(store.debugState().sources, 1);
+
+  applyMembership(server, membership([membershipEntry(idlePath)], [closeFrameEntry(currentPath)]));
+  assert.equal(store.debugState().sources, 1, 'a closing reservation is not confirmed retirement');
+  applyMembership(server, membership([membershipEntry(idlePath)]));
+  assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+
+  applyMembership(server, membership([membershipEntry(idlePath), membershipEntry(currentPath)]));
+  await store.subscribe('after-reopen', 'after-reopen', address, 4096, fence);
+  assert.equal(resolutions, 2, 'reopen resolves durable detail again instead of reusing the retired cache');
+  assert.equal(store.debugState().sources, 1);
+  assert.ok(emitted.some((message) => (message as { kind?: string }).kind === 'detail.page'));
 });
 
 test('closing holds its title until confirmed removal, then releases it for reuse', async () => {

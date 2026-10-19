@@ -312,17 +312,18 @@ export function compactSubagentResultPreview(value: unknown, recursionDepth = 0)
   const source = typedChildren ?? directResults ?? nestedResults;
   if (!source) return undefined;
   const billing = getSubagentBillingEntries(value);
+  const buildResult = (resultChildren: unknown[], includeBilling: boolean): unknown => typedChildren
+    ? { kind: 'subagent', mode: value.mode, children: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
+    : directResults
+      ? { mode: value.mode, results: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
+      : { details: { mode: nestedDetails?.mode, results: resultChildren }, ...(includeBilling && billing.length > 0 ? { billing } : {}) };
 
   const children = source
     .map((child) => compactSubagentChild(child, recursionDepth))
     .filter((child): child is Record<string, unknown> => child !== undefined);
   if (children.length === 0) return undefined;
 
-  const compact = typedChildren
-    ? { kind: 'subagent', mode: value.mode, children, ...(billing.length > 0 ? { billing } : {}) }
-    : directResults
-      ? { mode: value.mode, results: children, ...(billing.length > 0 ? { billing } : {}) }
-      : { details: { mode: nestedDetails?.mode, results: children }, ...(billing.length > 0 ? { billing } : {}) };
+  const compact = buildResult(children, true);
   if (jsonBytes(compact) <= SUBAGENT_PREVIEW_MAX_BYTES) return compact;
 
   // Many parallel children can exceed the rich-preview budget even after
@@ -373,11 +374,6 @@ export function compactSubagentResultPreview(value: unknown, recursionDepth = 0)
     hasNestedToolFailure: child.hasNestedToolFailure,
     messages: compactMinimalSubagentMessages(child.messages),
   }));
-  const buildResult = (resultChildren: unknown[], includeBilling: boolean): unknown => typedChildren
-    ? { kind: 'subagent', mode: value.mode, children: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
-    : directResults
-      ? { mode: value.mode, results: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
-      : { details: { mode: nestedDetails?.mode, results: resultChildren }, ...(includeBilling && billing.length > 0 ? { billing } : {}) };
   const minimal = buildResult(minimalChildren, true);
   if (jsonBytes(minimal) <= SUBAGENT_PREVIEW_MAX_BYTES) return minimal;
 
@@ -398,11 +394,7 @@ export function compactSubagentResultPreview(value: unknown, recursionDepth = 0)
   const identity = buildResult(identityChildren, false) as Record<string, unknown>;
   if (jsonBytes(identity) <= SUBAGENT_PREVIEW_MAX_BYTES) return identity;
   let retainedChildren = identityChildren;
-  while (retainedChildren.length > 0 && jsonBytes({ ...identity, ...(typedChildren
-    ? { children: retainedChildren }
-    : directResults
-      ? { results: retainedChildren }
-      : { details: { mode: nestedDetails?.mode, results: retainedChildren } }) }) > SUBAGENT_PREVIEW_MAX_BYTES) {
+  while (retainedChildren.length > 0 && jsonBytes(buildResult(retainedChildren, false)) > SUBAGENT_PREVIEW_MAX_BYTES) {
     retainedChildren = retainedChildren.slice(0, -1);
   }
   const omittedChildren = identityChildren.length - retainedChildren.length;

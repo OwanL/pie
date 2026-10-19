@@ -145,7 +145,6 @@ export class DetailSubscriptionService {
    *  survives owner teardown, closing the pre-start window where a delayed
    *  subscribe could otherwise recreate the owner it belonged to. */
   private readonly attemptWatermarks = new Map<string, DetailAttemptWatermark>();
-  private readonly durableAnswersInFlight = new Set<string>();
   private readonly now: () => number;
   private readonly maxPageBytes: number;
   private hostGeneration = 0;
@@ -164,7 +163,6 @@ export class DetailSubscriptionService {
     this.tombstones.clear();
     this.terminalRecords.clear();
     this.attemptWatermarks.clear();
-    this.durableAnswersInFlight.clear();
   }
 
   /** Renderer reload/disconnect teardown: release every backend slot owned by
@@ -517,7 +515,6 @@ export class DetailSubscriptionService {
       );
       return;
     }
-    this.durableAnswersInFlight.add(key);
     const owner: SubscriptionOwner = {
       subscriptionId,
       detailKey: terminal.detailKey,
@@ -576,13 +573,10 @@ export class DetailSubscriptionService {
   }
 
   /** Remove an owner and (when `tombstone`) leave a bounded tombstone that
-   *  absorbs late traffic for its subscription. Clearing the durable-answer
-   *  guard here lets a later re-expand re-subscribe through the durable
-   *  authority once the previous stream is fully closed. */
+   *  absorbs late traffic for its subscription. */
   private dropOwner(owner: SubscriptionOwner, tombstone: boolean): void {
     const key = ownerKey(owner.viewGeneration, owner.rendererId, owner.rendererGeneration, owner.detailKey);
     if (this.subscriptions.get(key) === owner) this.subscriptions.delete(key);
-    this.durableAnswersInFlight.delete(key);
     if (tombstone) this.addTombstone(owner.subscriptionId, owner.viewGeneration, owner.rendererId, owner.rendererGeneration, owner.detailKey);
   }
 

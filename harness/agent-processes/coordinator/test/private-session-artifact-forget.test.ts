@@ -11,6 +11,7 @@ import { artifactDirectory as computerUseArtifactDirectory } from '../../../tool
 import { artifactDirectory as playwrightArtifactDirectory } from '../../../tools/playwright/artifacts.js';
 import { STORAGE_CUTOFF_AUTHORIZATION_ENV } from '../../../../analytics/authority/storage-cutoff-authorization.js';
 import { BackendServer } from '../server.js';
+import { DurableDetailStore } from '../../../session-storage/transcripts/durable-detail-store.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { WorkerRuntimeRouter } from '../worker-runtime-router.js';
 
@@ -51,6 +52,38 @@ async function withStorageCutoffDisabled(run: () => Promise<void>): Promise<void
     if (previous !== undefined) process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = previous;
   }
 }
+
+test('private forget removes cached durable detail and rejects exact manifest replay', async () => {
+  await withStorageCutoffDisabled(async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'pie-detail-forget-'));
+    try {
+      const sessionPath = path.join(directory, 'session.jsonl');
+      await createSession(sessionPath, randomBytes(16).toString('hex'));
+      const server = createServer(directory) as any;
+      const emitted: any[] = [];
+      const store = new DurableDetailStore({
+        resolve: async () => ({ value: { text: 'private fixture' }, sizeBytes: 26, messageId: 'm', toolCallId: 't', kind: 'tool-result' }),
+        emit: (message) => { emitted.push(message); return true; },
+      });
+      server.durableDetailStore = store;
+      const address = { sessionPath, turnId: 'turn', rootToolCallId: 't', rootAttemptId: 'attempt', lineage: [] };
+      await store.subscribe('s', 's', address, 4096, { backendGeneration: 1, coordinatorGeneration: 1 });
+      const page = emitted.find((message) => message.kind === 'detail.page');
+      assert.ok(page);
+      assert.ok(store.debugState().canonicalBytes > 0);
+      await server.forgetSession(sessionPath);
+      assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+      const before = emitted.length;
+      const normalizedAddress = { ...address, sessionPath: path.join(directory, 'nested', '..', 'session.jsonl') };
+      await assert.rejects(server.routeDetailFetch('f', { subscriptionId: 's', address: normalizedAddress, ref: page.ref, maxPageBytes: 4096 }), /forgotten/);
+      await assert.rejects(server.routeDetailSubscribe('s2', { subscriptionId: 's2', address: normalizedAddress, maxPageBytes: 4096 }), /forgotten/);
+      assert.equal(emitted.length, before);
+      await assertMissing(sessionPath);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 async function assertMissing(targetPath: string): Promise<void> {
   await assert.rejects(access(targetPath), `${targetPath} should be absent`);

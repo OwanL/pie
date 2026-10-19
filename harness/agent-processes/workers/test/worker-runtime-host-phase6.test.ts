@@ -31,6 +31,8 @@ import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 import { AUTONOMOUS_MODE_BY_SESSION_ENV } from '../../lib/rpc/settings.js';
 import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/autonomous-mode.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+import { modelExchangeRef } from '../../../session-storage/transcripts/tool-model-exchange';
+import { LIVE_PIPELINE_LIMITS } from '../../lib/rpc/live-pipeline.js';
 
 const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');
 
@@ -1391,6 +1393,56 @@ test('session.opened structural fallback keeps the worker usable and durable his
   assert.equal(followup.event, 'busy.changed', 'a subsequent lifecycle event is still sent by this worker');
   assert.equal(validateWorkerIpcFrameDraft({ ...frameBase, kind: 'runtime.event', event: followup.event, payload: followup.payload }), undefined);
   assert.deepEqual(runtimeFailures, []);
+});
+
+test('worker durable model-exchange detail applies canonical zero-size, stale, oversize, and unavailable policy', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = '/sessions/model-exchange.jsonl';
+  const toolCallId = 'captured-tool';
+  const assistant = {
+    type: 'message', id: 'assistant-entry', timestamp: '2026-09-26T10:05:00.000Z',
+    message: { role: 'assistant', content: [{ type: 'toolCall', id: toolCallId, name: 'inspect', arguments: 'display-only' }] },
+  };
+  const result = {
+    type: 'message', id: 'tool-result-entry', timestamp: '2026-09-26T10:05:01.000Z',
+    message: { role: 'toolResult', toolCallId, toolName: 'inspect', content: ['display-only'] },
+  };
+  const capture = (argumentsValue: unknown) => ({
+    type: 'custom', id: 'capture-entry', timestamp: '2026-09-26T10:04:59.000Z', customType: 'pie.tool-model-exchange',
+    data: { version: 1, toolCallId, produced: { name: 'inspect', arguments: argumentsValue } },
+  });
+  let branch: unknown[] = [capture({ exact: true }), assistant, result];
+  const context = makeSessionEventContext(sessionPath);
+  context.activeRequest = undefined;
+  context.session = { sessionManager: { getBranch: () => branch } } as any;
+  internals.context = context;
+  internals.sdk = {};
+  const ref = modelExchangeRef(sessionPath, {
+    id: toolCallId, durableEntryId: 'tool-result-entry', name: 'inspect', input: 'display-only',
+    result: 'display-only', status: 'completed',
+  });
+  const load = (detailRef = ref) => host.command('session.loadDetail', {
+    sessionPath, ref: detailRef,
+  } as any, 'model-exchange-detail') as Promise<any>;
+
+  const zeroSize = await load();
+  assert.equal(zeroSize.status, 'loaded');
+  assert.deepEqual(zeroSize.value, { produced: { name: 'inspect', arguments: { exact: true } } });
+  assert.equal(zeroSize.sizeBytes, Buffer.byteLength(JSON.stringify(zeroSize.value)));
+
+  const stale = await load({ ...ref, sizeBytes: 1 });
+  assert.equal(stale.status, 'stale');
+
+  branch = [capture('x'.repeat(LIVE_PIPELINE_LIMITS.previewBytes + 1)), assistant, result];
+  const oversized = await load();
+  assert.equal(oversized.status, 'unavailable');
+  assert.match(oversized.message, /exceeds/);
+
+  branch = [assistant, result];
+  const unavailable = await load();
+  assert.equal(unavailable.status, 'unavailable');
+  assert.match(unavailable.message, /No captured model exchange/);
 });
 
 test('session.opened refresh falls back to the cached payload when rebuilding throws', async () => {

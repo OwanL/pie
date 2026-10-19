@@ -104,6 +104,7 @@ export interface SessionLifecycleCleanerOptions {
   roots: SessionCleanupRoots;
   analytics?: AnalyticsLifecycleDeletionAdapter;
   cleanupExternalArtifact?: (artifact: LifecycleArtifactRecord) => Promise<void> | void;
+  onCleanupClaimed?: (claim: SessionLifecycleRecord) => Promise<void> | void;
   now?: () => number;
 }
 
@@ -433,6 +434,7 @@ export class SessionLifecycleCleaner {
     const operationId = claim.cleanupOperationId!;
 
     try {
+      await this.options.onCleanupClaimed?.(claim);
       for (const artifact of this.options.store.listArtifacts(sessionId)) {
         if (artifact.state === 'deleted' || artifact.locationKind !== 'external') continue;
         if (!this.options.cleanupExternalArtifact) {
