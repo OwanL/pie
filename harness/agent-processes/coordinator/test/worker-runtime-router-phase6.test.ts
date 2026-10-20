@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { WorkerRuntimeRouter } from '../worker-runtime-router.js';
 import { WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
@@ -273,6 +276,38 @@ test('phase6 replacement forwards an explicit pre-start continuation settlement 
     'message.aborted',
     { requestId: 'continue-before-replacement', sessionPath, outcome: 'superseded' },
   ]]);
+});
+
+test('phase6 provider: removal between grant and delivery rejects nonretryably and releases only the undelivered lease', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pie-router-removal-'));
+  const previous = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = dir;
+  const sent: Array<Record<string, any>> = [];
+  const leases = new CoordinatorProviderNetworkLeaseAuthority();
+  const acquire = leases.acquire.bind(leases);
+  leases.acquire = async (...args) => {
+    const lease = await acquire(...args);
+    writeFileSync(join(dir, 'providers.yaml'), JSON.stringify({ version: 1, providers: { p: { enabled: false, removed: true } } }));
+    return lease;
+  };
+  try {
+    const { router, sessionPath } = makeRouter(makeClient({ sendFrame: (frame: any) => { sent.push(frame); return true; } }), {
+      options: { providerLeases: leases },
+    });
+    const route = await router.promote(sessionPath);
+    await router.handleWorkerFrame(sessionPath, providerFrame(route, sessionPath, 'provider.acquire', {
+      requestId: 'removed-before-delivery', request: { provider: 'p', model: 'm', turnId: 't', attemptId: 'a' },
+    }));
+    assert.equal(sent.filter(frame => frame.kind === 'provider.granted').length, 0);
+    const rejected = sent.filter(frame => frame.kind === 'provider.rejected');
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].error.name, 'ProviderRemovedError');
+    assert.equal(rejected[0].error.retryable, false);
+    assert.deepEqual(leases.inspect(), { queued: 0 });
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR; else process.env.PIE_PROVIDER_CONFIG_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('phase6 provider: a queued admission cancelled via provider.cancel settles exactly once', async () => {

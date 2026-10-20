@@ -22,6 +22,7 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+import { assertProviderAdmission, PROVIDER_REMOVAL_POLL_MS } from './provider-removal.js';
 import {
 	installProviderCapacityBridge,
 	type ProviderCapacitySnapshot,
@@ -577,12 +578,24 @@ class ProviderPool {
 					reject(new ProviderGateSaturatedError(this.provider, this.queueWaitMs));
 					return;
 				}
-				timer = setTimeout(() => {
+				const checkDeadline = () => {
 					if (settled) return;
+					try { assertProviderAdmission(this.provider); } catch (error) {
+						settled = true;
+						cleanup();
+						reject(error);
+						return;
+					}
+					const left = deadline - this.now();
+					if (left > 0) {
+						timer = setTimeout(checkDeadline, Math.min(left, PROVIDER_REMOVAL_POLL_MS));
+						return;
+					}
 					settled = true;
 					cleanup();
 					reject(new ProviderGateSaturatedError(this.provider, this.queueWaitMs));
-				}, remaining);
+				};
+				timer = setTimeout(checkDeadline, Math.min(remaining, PROVIDER_REMOVAL_POLL_MS));
 			}
 			this.scheduleHoldWakeup();
 		});
@@ -1169,6 +1182,7 @@ export class ProviderGate {
 		}
 
 		const { pool, config, headerWaitMs } = match;
+		assertProviderAdmission(config.provider);
 		const sessionId = this.extractSessionId(init);
 		const requestClass = this.extractRequestClass(init);
 		const signal = extractFetchSignal(input, init);
@@ -1210,6 +1224,7 @@ export class ProviderGate {
 		// dispatching upstream. Without this fence, waiters admitted while the
 		// provider was healthy would drain into an outage or account-pause window.
 		try {
+			assertProviderAdmission(config.provider);
 			if (pool.isPaused()) {
 				throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 			}

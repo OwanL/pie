@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { assertProviderAdmission } from '../../model-providers/concurrency/provider-removal.js';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
@@ -1820,6 +1821,12 @@ export class WorkerRuntimeRouter {
             reason: 'Provider admission owner changed before the grant was delivered.',
           });
           return;
+        }
+        try {
+          assertProviderAdmission(lease.provider);
+        } catch (error) {
+          this.providerLeases.release(route.owner, lease.leaseId, 'cancelled');
+          throw error;
         }
         const sent = this.settleProviderAcquire(route, frame.requestId, { lease });
         if (!sent || !this.providerLeases.markDelivered(route.owner, frame.requestId, lease.leaseId)) {

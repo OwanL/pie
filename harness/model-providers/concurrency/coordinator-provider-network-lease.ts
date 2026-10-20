@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertProviderAdmission, PROVIDER_REMOVAL_POLL_MS } from './provider-removal.js';
 
 import type { ProviderGateMetrics } from './provider-gate.js';
 import type { SdkWorkerOwnershipIdentity } from '../../agent-processes/lib/sdk-integration/sdk.js';
@@ -322,6 +323,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
     request: { provider: string; model: string },
   ): Promise<CoordinatorProviderNetworkLease> {
     const provider = request.provider.trim() || 'unknown-provider';
+    try { assertProviderAdmission(provider); } catch (error) { return Promise.reject(error); }
     if (this.findRequest(owner, requestId)) {
       return Promise.reject(new Error(`Provider admission ${requestId} is already registered.`));
     }
@@ -512,6 +514,13 @@ export class CoordinatorProviderNetworkLeaseAuthority {
   }
 
   private grantNext(provider: string, pool: ProviderPool): void {
+    try { assertProviderAdmission(provider); } catch (error) {
+      for (const pending of pool.queue.splice(0)) {
+        this.clearQueueDeadline(pending);
+        pending.reject(error as Error);
+      }
+      return;
+    }
     this.refreshCircuit(provider, pool);
     if (pool.circuit === 'open') return;
     while (pool.queue.length > 0) {
@@ -561,9 +570,18 @@ export class CoordinatorProviderNetworkLeaseAuthority {
   private armQueueDeadline(provider: string, pool: ProviderPool, pending: PendingLease): void {
     if (pending.deadlineAt <= 0) return;
     const onDeadline = (): void => {
+      try { assertProviderAdmission(provider); } catch (error) {
+        pending.timer = undefined;
+        const index = pool.queue.indexOf(pending);
+        if (index >= 0) {
+          pool.queue.splice(index, 1);
+          pending.reject(error as Error);
+        }
+        return;
+      }
       const remaining = pending.deadlineAt - this.now();
       if (remaining > 0) {
-        pending.timer = this.setTimer(onDeadline, remaining);
+        pending.timer = this.setTimer(onDeadline, Math.min(remaining, PROVIDER_REMOVAL_POLL_MS));
         return;
       }
       pending.timer = undefined;
@@ -573,7 +591,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
       pending.reject(queueWaitError(provider, pending.queueWaitMs));
       this.grantNext(provider, pool);
     };
-    pending.timer = this.setTimer(onDeadline, pending.deadlineAt - this.now());
+    pending.timer = this.setTimer(onDeadline, Math.min(pending.deadlineAt - this.now(), PROVIDER_REMOVAL_POLL_MS));
   }
 
   private clearQueueDeadline(pending: PendingLease): void {
