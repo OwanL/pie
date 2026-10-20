@@ -3,10 +3,10 @@ import { parseProviderConfig, type ProviderConfig } from '../catalog/provider-co
 import { resolveProviderConfigPaths } from '../catalog/provider-config-paths';
 import type { RuntimeSnapshot } from './contracts';
 
-/** Visibility alone is live policy; runtime definitions, admission and credentials remain pinned. */
+/** Selector masks are live policy; runtime definitions and credential epochs remain pinned. */
 export function applyProviderSelectorPolicy(snapshot: RuntimeSnapshot, config: ProviderConfig): RuntimeSnapshot {
   return { ...snapshot, models: snapshot.models.map(row => ({ ...row,
-    visible: !(Object.hasOwn(config.providers, row.providerId)
+    visible: config.providers[row.providerId]?.removed !== true && !(Object.hasOwn(config.providers, row.providerId)
       && Object.hasOwn(config.providers[row.providerId].modelPreferences ?? {}, row.id)
       && config.providers[row.providerId].modelPreferences![row.id].visible === false),
   })) };
@@ -21,9 +21,15 @@ export function readCurrentProviderSelectorPolicy(): ProviderConfig | undefined 
   } catch { return undefined; }
 }
 
+/** Only explicit removal revokes live admission; missing/disabled entries do not. */
+export function isProviderRemoved(provider: string): boolean {
+  const config = readCurrentProviderSelectorPolicy();
+  return !!config && Object.hasOwn(config.providers, provider) && config.providers[provider].removed === true;
+}
+
 export function filterCurrentProviderSelectorModels<T extends { provider: string; id: string }>(models: T[]): T[] {
   const config = readCurrentProviderSelectorPolicy();
-  return config ? models.filter(model => !(Object.hasOwn(config.providers, model.provider)
+  return config ? models.filter(model => config.providers[model.provider]?.removed !== true && !(Object.hasOwn(config.providers, model.provider)
     && Object.hasOwn(config.providers[model.provider].modelPreferences ?? {}, model.id)
     && config.providers[model.provider].modelPreferences![model.id].visible === false)) : models;
 }

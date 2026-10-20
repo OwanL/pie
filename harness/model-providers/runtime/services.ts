@@ -3,7 +3,7 @@ import { createPiProviderAuth, isRuntimeCredentialScopeCurrent, type NativeAuthS
 import type { StagedProviderCredential } from '../management/auth-port';
 import type { CredentialSource, NativeRuntimeModel, RuntimeSnapshot } from './contracts';
 import { builtinHeaderDigest, immutable, runtimeProtocols, validNativeModel } from './projection';
-import { currentProviderSelectorSnapshot } from './selector-policy';
+import { currentProviderSelectorSnapshot, isProviderRemoved } from './selector-policy';
 
 export interface RuntimeAuthStatus { configured: boolean; source?: string; label?: string }
 /** Private structural facade consumed by the native registry/session. No credential DTO is published. */
@@ -82,15 +82,15 @@ export function availableProviderRuntimeModels(snapshot: RuntimeSnapshot, option
         && isRuntimeCredentialScopeCurrent(options.credentialFile, row.providerId, source.scope);
     } catch { return false; }
   };
-  return snapshot.models.filter(row => row.enabled && row.visible && row.model && !row.rejection
+  return snapshot.models.filter(row => !isProviderRemoved(row.providerId) && row.enabled && row.visible && row.model && !row.rejection
     && validNativeModel(row.model) && hasAuth(row)).map(row => cloneRuntimeModel(row.model!));
 }
 
-/** Parent default/subagent capture admission. Visibility is a selector mask, not dispatch permission. */
+/** Parent default/subagent admission: removal is live; visibility remains only a selector mask. */
 export function assertProviderRuntimeModel(snapshot: RuntimeSnapshot, provider: string, id: string,
   options: { subagent?: boolean; visible?: boolean } = {}): NativeRuntimeModel {
   const row = snapshot.models.find(row => row.providerId === provider && row.id === id);
-  if (!row?.enabled || !row.model || row.rejection || !validNativeModel(row.model)
+  if (isProviderRemoved(provider) || !row?.enabled || !row.model || row.rejection || !validNativeModel(row.model)
     || (options.subagent && !row.subagentEligible) || (options.visible && !row.visible)) throw modelUnavailable();
   return cloneRuntimeModel(row.model);
 }
@@ -120,7 +120,7 @@ export function createProviderRuntimeServices(
     if (previous && JSON.stringify(previous) !== JSON.stringify(source)) throw new Error('Conflicting captured credential policies');
     sources.set(row.providerId, source);
   }
-  const policy = (id: string) => sources.get(id);
+  const policy = (id: string) => isProviderRemoved(id) ? undefined : sources.get(id);
   const currentSaved = (id: string, source: Extract<CredentialSource, { source: 'saved' }>) => {
     try {
       if (!isRuntimeCredentialScopeCurrent(options.credentialFile, id, source.scope)) return undefined;
@@ -159,11 +159,15 @@ export function createProviderRuntimeServices(
     async getApiKey(id, opts) {
       const source = policy(id);
       try {
-        if (source?.source === 'legacy') return await legacy?.getApiKey?.(id, opts);
+        if (source?.source === 'legacy') {
+          const key = await legacy?.getApiKey?.(id, opts);
+          if (isProviderRemoved(id)) throw unavailable();
+          return key;
+        }
         if (source?.source === 'saved') {
           if (!source.scope) throw unavailable();
           const key = await broker.getRuntimeApiKey!(id, source.scope);
-          if (!key) throw unavailable();
+          if (!key || isProviderRemoved(id)) throw unavailable();
           return key;
         }
         if (source?.source === 'none') {
@@ -174,13 +178,13 @@ export function createProviderRuntimeServices(
         }
         if (source?.source === 'environment') {
           const key = process.env[source.name];
-          if (!key) throw unavailable();
+          if (!key || isProviderRemoved(id)) throw unavailable();
           return key;
         }
         if (source?.source === 'default') {
           // Empty native storage: only the SDK's native environment resolution, never saved/legacy.
           const key = await environment.getApiKey(id);
-          if (!key) throw unavailable();
+          if (!key || isProviderRemoved(id)) throw unavailable();
           return key;
         }
         throw unavailable();
@@ -236,7 +240,7 @@ export function createProviderRuntimeServices(
     privateModels.set(identity(row.providerId, row.id), immutable({ ...row.model!, headers: { ...builtin.headers! } }) as NativeRuntimeModel);
   }
   const model = (provider: string, id: string) => privateModels.get(identity(provider, id));
-  modelRegistry.isModelEligibleForSubagent = (provider, id) => !!admitted(provider, id)?.subagentEligible;
+  modelRegistry.isModelEligibleForSubagent = (provider, id) => !isProviderRemoved(provider) && !!admitted(provider, id)?.subagentEligible;
   modelRegistry.find = model;
   modelRegistry.getAll = () => captured.models.filter(row => admitted(row.providerId, row.id)).map(row => model(row.providerId, row.id)!);
   modelRegistry.getAvailable = () => availableProviderRuntimeModels(currentProviderSelectorSnapshot(captured), {
@@ -249,13 +253,13 @@ export function createProviderRuntimeServices(
   modelRegistry.getError = () => undefined;
   modelRegistry.hasConfiguredAuth = value => {
     const selected = model(value.provider, value.id);
-    return !!selected && (policy(value.provider)?.source === 'legacy'
+    return !isProviderRemoved(value.provider) && !!selected && (policy(value.provider)?.source === 'legacy'
       ? legacyRequestRegistry?.hasConfiguredAuth(selected) ?? legacy?.hasAuth?.(value.provider) ?? false
       : authStorage.hasAuth(value.provider));
   };
   modelRegistry.getApiKeyAndHeaders = async value => {
     const selected = model(value.provider, value.id);
-    if (!selected) return { ok: false, error: modelUnavailable().message };
+    if (!selected || isProviderRemoved(value.provider)) return { ok: false, error: modelUnavailable().message };
     try {
       // Use the captured definition, not caller-supplied endpoint/headers/cost, while retaining
       // native registry auth/header composition and OAuth engine token semantics.
@@ -263,6 +267,7 @@ export function createProviderRuntimeServices(
       if (legacyPolicy && legacyRequestRegistry?.getError?.()) throw unavailable();
       const result = await (legacyPolicy && legacyRequestRegistry
         ? legacyRequestRegistry.getApiKeyAndHeaders(selected) : nativeRequestAuth(selected));
+      if (isProviderRemoved(selected.provider)) throw unavailable();
       if (legacyPolicy && result.ok) return result;
       return result.ok && result.apiKey ? result : { ok: false, error: unavailable().message };
     } catch { return { ok: false, error: unavailable().message }; }

@@ -42,6 +42,46 @@ test('native configured auth admits entryless legacy providers only', () => {
   }).map(model => model.provider).sort(), ['managed', 'ollama']);
 });
 
+test('live explicit removal blocks captured keyless and legacy auth without deleting definitions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pie-live-removal-'));
+  const previous = process.env.PIE_PROVIDER_CONFIG_DIR;
+  process.env.PIE_PROVIDER_CONFIG_DIR = dir;
+  try {
+    const fixture = syntheticSdk();
+    const models = ['local', 'legacy', 'default'].map(provider => ({ ...native, provider }));
+    const snapshot = captureProviderRuntimeProjection({ configRevision: canonicalRevision('removal'), legacyModels: models, builtinModels: models,
+      config: { version: 1, providers: { local: { enabled: true, credentialRef: { source: 'none' } }, default: { enabled: true } } } })!;
+    const services = createProviderRuntimeServices(fixture.sdk, snapshot, fixture.legacy, { credentialFile: unopenedCredentialFile });
+    const before = services.modelRegistry.getAll();
+    for (const removed of [true, false]) {
+      await writeFile(join(dir, 'providers.yaml'), JSON.stringify({ version: 1, providers: Object.fromEntries(models.map(model => [model.provider, { enabled: false, ...(removed ? { removed: true } : {}) }])) }));
+      assert.deepEqual(services.modelRegistry.getAll(), before);
+      assert.equal(services.modelRegistry.getAvailable().length, removed ? 0 : 3);
+      const { projectRegistryModels, loadConfiguredModels } = await import('../../catalog/model-catalog');
+      assert.equal(projectRegistryModels(models as never).length, removed ? 0 : 3);
+      await writeFile(join(dir, 'models.json'), JSON.stringify({ providers: Object.fromEntries(models.map(model => [model.provider, { models: [model] }])) }));
+      const catalog = await loadConfiguredModels(dir);
+      assert.equal(catalog.ok, true);
+      assert.equal(catalog.models.length, removed ? 0 : 3);
+      for (const model of models) {
+        assert.ok(services.modelRegistry.find(model.provider, model.id));
+        assert.equal(services.authStorage.hasAuth(model.provider), !removed);
+        assert.equal(services.authStorage.getAuthStatus(model.provider).configured, !removed);
+        assert.equal(services.modelRegistry.hasConfiguredAuth(model), !removed);
+        assert.equal((await services.modelRegistry.getApiKeyAndHeaders(model)).ok, !removed);
+        if (removed) {
+          await assert.rejects(services.authStorage.getApiKey(model.provider));
+          assert.throws(() => assertProviderRuntimeModel(snapshot, model.provider, model.id));
+          assert.equal(services.modelRegistry.isModelEligibleForSubagent!(model.provider, model.id), false);
+        } else assert.ok(assertProviderRuntimeModel(snapshot, model.provider, model.id));
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PROVIDER_CONFIG_DIR; else process.env.PIE_PROVIDER_CONFIG_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 const canonicalRevision = (label: string) => `sha256:${createHash('sha256').update(label).digest('hex')}`;
 const unopenedCredentialFile = join(tmpdir(), `pie-unopened-credentials-${process.pid}.json`);
 const native: NativeRuntimeModel = { provider: 'saved', id: 'same', name: 'Captured', api: 'openai-completions', baseUrl: 'https://captured.example/v1', input: ['text'], reasoning: false, contextWindow: 1000, maxTokens: 100, cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } };
