@@ -36,6 +36,9 @@ test('rendered capability actions and host removal cancel, lock, retry, success 
     assert.equal(state.providerManagement.draft?.enabled, false);
     click('Back'); requests.length = 0;
     click('Remove'); assert.match(container.textContent!, /forgets saved Pie credentials/);
+    assert.match(container.textContent!, /blocks new requests in all chats/);
+    assert.match(container.textContent!, /Requests already admitted can finish/);
+    assert.match(container.textContent!, /removed choices show as unavailable/);
     assert.equal(buttons().some(button => button.textContent === 'Back'), false);
     const actions = container.querySelector('.provider-setup-preview-action-group')!;
     assert.deepEqual(Array.from(actions.querySelectorAll('button')).map(button => button.textContent), ['Cancel', 'Remove provider']);

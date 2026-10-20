@@ -3,7 +3,7 @@ import { createPiProviderAuth, isRuntimeCredentialScopeCurrent, type NativeAuthS
 import type { StagedProviderCredential } from '../management/auth-port';
 import type { CredentialSource, NativeRuntimeModel, RuntimeSnapshot } from './contracts';
 import { builtinHeaderDigest, immutable, runtimeProtocols, validNativeModel } from './projection';
-import { currentProviderSelectorSnapshot, isProviderRemoved } from './selector-policy';
+import { currentProviderSelectorSnapshot, isProviderRemoved, readCurrentProviderSelectorPolicy } from './selector-policy';
 
 export interface RuntimeAuthStatus { configured: boolean; source?: string; label?: string }
 /** Private structural facade consumed by the native registry/session. No credential DTO is published. */
@@ -82,7 +82,9 @@ export function availableProviderRuntimeModels(snapshot: RuntimeSnapshot, option
         && isRuntimeCredentialScopeCurrent(options.credentialFile, row.providerId, source.scope);
     } catch { return false; }
   };
-  return snapshot.models.filter(row => !isProviderRemoved(row.providerId) && row.enabled && row.visible && row.model && !row.rejection
+  // One policy read per catalog projection, not one disk read/YAML parse per model.
+  const providerPolicies = readCurrentProviderSelectorPolicy()?.providers;
+  return snapshot.models.filter(row => providerPolicies?.[row.providerId]?.removed !== true && row.enabled && row.visible && row.model && !row.rejection
     && validNativeModel(row.model) && hasAuth(row)).map(row => cloneRuntimeModel(row.model!));
 }
 

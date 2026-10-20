@@ -133,6 +133,41 @@ test('provider management is host-global, credential-free and separate from chat
     message: 'Connecting…', access: 'synthetic-private-input' } }), false);
 });
 
+test('explicit provider removal masks stale catalogs without rewriting selections or preferences', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Explicit provider removal is live policy for existing and new chats/u);
+  assert.match(contract, /already-delivered worker leases and already-dispatched legacy requests finish normally/u);
+  const { createInitialArchState, reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const { providerConfigRevision } = await import('../../harness/model-providers/catalog/provider-config.js');
+  const { isProviderManagementSnapshot } = await import('../../harness/model-providers/management/validation.js');
+  const sessionPath = '/provider-removal.jsonl';
+  const model = { id: 'model', name: 'Model', provider: 'removed', reasoning: false, inputKinds: ['text'] } satisfies ModelInfo;
+  const initial = createInitialArchState();
+  initial.settings.backendReady = true;
+  initial.settings.availableModelsBySession[sessionPath] = [model, { ...model, provider: 'retained' }];
+  initial.sessions.activeSessionPath = sessionPath;
+  initial.sessions.openTabPaths = [sessionPath];
+  initial.providerManagement.generation = 1;
+  initial.settings.prefs = { ...initial.settings.prefs, subagentProviderDefaults: { removed: true },
+    subagentBuckets: { ...initial.settings.prefs.subagentBuckets, small: [{ model: 'removed/model', thinkingLevel: 'off' }] } };
+  const snapshot = { ...initial.providerManagement.snapshot, loaded: true, revision: 1,
+    configRevision: providerConfigRevision('removed'), removedProviderIds: ['removed'] };
+  assert.equal(isProviderManagementSnapshot(snapshot), true);
+  const removed = reducer(initial, { kind: 'ProviderManagementSnapshotUpdated', generation: 1, snapshot });
+  const view = selectViewState(removed.state);
+  assert.deepEqual(view.availableModels.map(entry => entry.provider), ['retained']);
+  assert.deepEqual(view.providerManagement?.removedProviderIds, ['removed']);
+  assert.equal(removed.state.settings.prefs, initial.settings.prefs);
+  assert.equal(removed.state.sessions, initial.sessions);
+  assert.equal(removed.state.transcript, initial.transcript);
+  assert.deepEqual(removed.effects.filter(effect => effect.kind === 'HydrateModel').map(effect => effect.sessionPath), [sessionPath]);
+  const readded = reducer(removed.state, { kind: 'ProviderManagementSnapshotUpdated', generation: 1,
+    snapshot: { ...snapshot, revision: 2, configRevision: providerConfigRevision('readded'), removedProviderIds: [] } });
+  assert.deepEqual(selectViewState(readded.state).availableModels.map(entry => entry.provider), ['removed', 'retained']);
+  assert.equal(readded.state.settings.prefs, initial.settings.prefs);
+});
+
 test('notification sound contract broadcasts completion and question chimes without focus arbitration', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /Notification sounds are host-owned broadcasts/u);

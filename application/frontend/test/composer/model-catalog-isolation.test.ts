@@ -45,6 +45,32 @@ test('authoritative empty catalog shows no models rather than loading or choices
   assert.doesNotMatch(html, /Loading models|aria-label="Model"/);
 });
 
+test('removed selected provider is explicitly unavailable with empty and remaining catalogs', () => {
+  const removedManagement = {
+    view: { mode: 'management' as const, providers: [], protocols: [], draft: null, status: 'idle' as const, removedProviderIds: ['draft-provider'] },
+    onCommand: () => {},
+  };
+  const catalogs: NonNullable<Parameters<typeof ComposerToolbar>[0]['availableModels']>[] = [
+    [],
+    [{ id: 'available', name: 'Available', provider: 'other-provider', reasoning: false, inputKinds: ['text'] }],
+  ];
+  for (const availableModels of catalogs) {
+    const html = renderCatalog('authoritative', 'astra', {
+      availableModels,
+      providerManagement: removedManagement,
+      selectedProvider: 'draft-provider',
+    });
+    assert.match(html, /Unavailable \(removed provider\)/);
+    assert.doesNotMatch(html, /aria-label="Retry loading the model catalog"/);
+    if (availableModels.length > 0) {
+      assert.match(html, /aria-label="Model"/);
+      assert.doesNotMatch(html, /GPT-6 Astra/);
+    } else {
+      assert.doesNotMatch(html, /aria-label="Model"/);
+    }
+  }
+});
+
 test('failed catalog discovery renders an interactive retry affordance, not loading or choices', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);

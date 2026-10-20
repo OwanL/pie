@@ -146,7 +146,7 @@ export function ProviderSetupPreview({ view, onCommand, onConnect, onAuthRespons
         {screen === 'done' && <><p>{preview ? 'Your demo provider is saved.' : 'Your provider settings have been saved.'}</p><footer class="provider-setup-preview-action-group"><button disabled={locked} onClick={() => command({ type: 'close' })}>{inline ? 'Back to providers' : 'Close'}</button><button class="provider-setup-preview-primary" disabled={locked || !canAdd} onClick={() => command({ type: 'add' })}>Add another provider</button></footer></>}
         {screen === 'remove' && <>
           <p>Remove {selected?.name || friendly(view.flow?.providerId || '')}?</p>
-          <p>This also forgets saved Pie credentials. Existing chats may stop working. Environment variables are unchanged.</p>
+          <p>This blocks new requests in all chats and also forgets saved Pie credentials. Requests already admitted can finish. Chat history and saved model choices are kept; removed choices show as unavailable. Environment variables are unchanged.</p>
           <footer class="provider-setup-preview-action-group">
             <button disabled={locked} onClick={() => command({ type: 'back' })}>Cancel</button>
             <button class="provider-setup-preview-danger provider-setup-preview-danger-confirm" disabled={locked || view.status === 'conflict' || view.status === 'loading'} onClick={() => command({ type: 'confirm-remove' })}>

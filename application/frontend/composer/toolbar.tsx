@@ -182,12 +182,14 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   onModelChange,
   onCompact,
 }: ComposerToolbarProps) {
+  const removedProviderIds = providerManagement?.view.removedProviderIds ?? [];
+  const selectedProviderRemoved = !!selectedProvider && removedProviderIds.includes(selectedProvider);
   const filteredModels = useMemo(
     () => availableModels.filter(
-      (m) => prefs.providerToggles[m.provider] !== false
-        || (m.id === selectedModel && (!selectedProvider || m.provider === selectedProvider)),
+      (m) => !removedProviderIds.includes(m.provider) && (prefs.providerToggles[m.provider] !== false
+        || (m.id === selectedModel && (!selectedProvider || m.provider === selectedProvider))),
     ),
-    [availableModels, prefs.providerToggles, selectedModel, selectedProvider],
+    [availableModels, prefs.providerToggles, removedProviderIds, selectedModel, selectedProvider],
   );
   const modelEntries = useMemo(
     () => orderModelsForPicker(filteredModels, { useSubagentEligibility: false }),
@@ -221,9 +223,11 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   }
   const selectedModelBaseLabel = selectedModelEntry?.selectedLabel
     ?? previousModelLabel.current?.label ?? (selectedModel || fallbackModelLabel);
-  const selectedModelLabel = selectedProviderDisabled
-    ? `${selectedModelBaseLabel} (disabled)`
-    : selectedModelBaseLabel;
+  const selectedModelLabel = selectedProviderRemoved
+    ? `${selectedModelBaseLabel} · Unavailable (removed provider)`
+    : selectedProviderDisabled
+      ? `${selectedModelBaseLabel} (disabled)`
+      : selectedModelBaseLabel;
   const selectedModelIdentity = selectedModelEntry
     ? formatModelSpec(selectedModelEntry.model)
     : selectedProvider
@@ -232,6 +236,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const selectedModelTooltip = [
     selectedModelIdentity,
     selectedModelBaseLabel && selectedModelBaseLabel !== selectedModelIdentity ? selectedModelBaseLabel : null,
+    selectedProviderRemoved ? 'Selected provider was removed — select another model' : null,
     selectedProviderDisabled ? 'Selected provider is disabled — select another model' : null,
   ].filter((line): line is string => !!line).join('\n');
   const selectedThinkingLevels = getModelThinkingLevels(selectedModelEntry?.model);
