@@ -60,6 +60,7 @@ export function createProviderManagementService(options: { configFile: string; m
     const next = daoTail.then(work, work); daoTail = next.catch(() => {}); return next;
   };
   const snapshot = (): ProviderManagementSnapshot => { const catalog = list(); return ({ revision, configRevision, loaded, definitions: structuredClone(definitions), protocols: providerProtocolOptions,
+    removedProviderIds: Object.keys(config.providers).filter(id => config.providers[id].removed),
     providers: [...existing.filter(row => !Object.hasOwn(config.providers, row.id)).map(row => ({ id: row.id, modelCount: row.modelCount, credentials: row.credentials,
       name: definitions.find(d => d.id === row.id)?.name ?? row.id, origin: 'existing' as const, readOnly: !settingsSupported(row.id), capabilities: capabilities(row.id),
       configured: true, enabled: true, discovery: 'unsupported' as const })), ...Object.keys(config.providers).filter(id => !config.providers[id].removed).map((id): ProviderManagementSnapshot['providers'][number] => {
@@ -198,7 +199,7 @@ export function createProviderManagementService(options: { configFile: string; m
           }
         } catch { partial = true; }
         try { await (options.invalidateCache ?? invalidateDiscoveryCache)(options.modelCacheDir, request.id); } catch { partial = true; }
-        if (partial) error = 'Provider was removed from new chats, but credential or cache deletion is incomplete. Retry removal to finish. Existing chats may lose access to revoked credentials.';
+        if (partial) error = 'Provider was removed from model choices, but credential or cache deletion is incomplete. Retry removal to finish. Existing chats may lose access to revoked credentials.';
         publish(); return result(id, partial ? 'error' : 'ok');
       } finally { mutation = undefined; publish(); }
       });

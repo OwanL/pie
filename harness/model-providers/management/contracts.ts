@@ -37,6 +37,8 @@ export interface ProviderManagementSnapshot {
   configRevision: string | null;
   loaded: boolean;
   providers: ManagedProviderSummary[];
+  /** Complete explicit config tombstones; absent on older snapshots means none. */
+  removedProviderIds?: string[];
   definitions: ProviderDefinition[];
   protocols: readonly string[];
   auth?: ProviderAuthPrompt;

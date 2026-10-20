@@ -13,11 +13,12 @@ interface Props {
   sessionPath: string | null;
   prefs: ChatPrefs;
   availableModels: ModelInfo[];
+  removedProviderIds?: readonly string[];
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
 }
 
 /** Per-session provider filter for models eligible through subagent buckets. */
-export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSetPrefs }: Props) {
+export function SubagentProviderMenu({ sessionPath, prefs, availableModels, removedProviderIds = [], onSetPrefs }: Props) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -33,8 +34,8 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
   });
 
   const providers = useMemo(
-    () => getSubagentBucketProviders(prefs, availableModels, sessionPath),
-    [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults, prefs.subagentProviderTogglesBySession, sessionPath],
+    () => getSubagentBucketProviders(prefs, availableModels, sessionPath, removedProviderIds),
+    [availableModels, removedProviderIds, prefs.subagentBuckets, prefs.subagentProviderDefaults, prefs.subagentProviderTogglesBySession, sessionPath],
   );
   const enabledCount = providers.filter((provider) => isSubagentProviderEnabled(prefs, provider, sessionPath)).length;
   const disabledCount = providers.length - enabledCount;

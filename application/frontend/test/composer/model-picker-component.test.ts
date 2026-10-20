@@ -9,6 +9,7 @@ import { installDom } from '../helpers/dom';
 installDom();
 
 import { ModelPicker } from '../../settings/model-picker';
+import { RemovedProvidersContext } from '../../settings/removed-providers';
 import type { ModelPickerEntry } from '../../composer/model-list';
 
 function entry(id: string, overrides: Partial<ModelPickerEntry> = {}): ModelPickerEntry {
@@ -30,6 +31,19 @@ function entry(id: string, overrides: Partial<ModelPickerEntry> = {}): ModelPick
     supportsImages: overrides.supportsImages ?? false,
   };
 }
+
+test('host tombstones filter stale picker entries and retain unavailable selected identity', () => {
+  const container = document.createElement('div'); document.body.appendChild(container);
+  try {
+    act(() => render(h(RemovedProvidersContext.Provider, { value: ['test'], children: h(ModelPicker, {
+      value: 'test/old', label: 'Old', ariaLabel: 'Model', title: 'Select model', entries: [entry('old')],
+      onChange: () => assert.fail('a removed provider must not be selectable'),
+    }) }), container));
+    assert.match(container.textContent!, /test\/old · Unavailable \(removed provider\)/);
+    act(() => (container.querySelector('.model-picker-trigger') as HTMLButtonElement).click());
+    assert.equal(document.querySelector('[role=option]'), null);
+  } finally { act(() => render(null, container)); container.remove(); }
+});
 
 test('ModelPicker renders trigger with selected label', () => {
   const html = renderToString(

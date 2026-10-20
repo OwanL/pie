@@ -8,6 +8,21 @@ import { ComposerSettingsMenu } from '../../settings/settings-menu';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
 import type { ProviderSetupPreviewView, ProviderSetupCommand } from '../../../lib/protocol/provider-setup-preview';
 
+test('model and concurrency settings use explicit tombstones over stale catalogs and saved provider preferences', () => {
+  const container = document.createElement('div'); document.body.append(container);
+  const view: ProviderSetupPreviewView = { mode: 'management', providers: [], protocols: [], loaded: true, draft: null, status: 'idle', removedProviderIds: ['removed-provider'] };
+  const prefs = { ...DEFAULT_CHAT_PREFS, providerToggles: { 'removed-provider': true }, providerConcurrency: { 'removed-provider': { maxConcurrentRequests: 3 } } };
+  const update = () => act(() => render(h(ComposerSettingsMenu, { prefs, pruningSettings: DEFAULT_PRUNING_SETTINGS, pruningCatalog: { skills: [], tools: [] }, pruningResult: null, toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, availableExtensions: [], availableModels: [{ provider: 'removed-provider', id: 'old', name: 'Old', reasoning: false, inputKinds: ['text'] }], providerGateStats: EMPTY_PROVIDER_GATE_STATS, mcpServers: [], mcpPendingApply: false, onSetPrefs() { assert.fail('removal must not delete preferences'); }, onMcpListRequested() {}, onMcpSetServerEnabled() {}, onSetPruningSettings() {}, onSetToolResultPruningSettings() {}, providerManagement: { view, onCommand() {} } }), container));
+  const click = (selector: string) => act(() => (document.querySelector(selector) as HTMLButtonElement).click());
+  try {
+    update(); click('.toolbar-settings-trigger'); click('[data-tab=models]');
+    assert.doesNotMatch(document.querySelector('[role=tabpanel]')!.textContent!, /removed-provider/);
+    view.removedProviderIds = []; update();
+    assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /removed-provider/);
+    assert.equal(prefs.providerToggles['removed-provider'], true);
+  } finally { act(() => render(null, container)); container.remove(); }
+});
+
 test('management tab integrates inline navigation, Escape, tab switching and Settings closing', () => {
   const container = document.createElement('div'); document.body.append(container);
   const commands: ProviderSetupCommand[] = [];

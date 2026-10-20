@@ -692,7 +692,10 @@ function projectViewState(state: ArchState, reusableTranscript?: ChatMessage[]):
       ?? (activeOwnAvailableModels.length > 0 ? 'authoritative' : 'loading')
     : 'authoritative';
   // Never project another session's catalog while this session hydrates.
-  const activeAvailableModels = activeOwnAvailableModels;
+  const removedProviderIds = state.providerManagement.snapshot.removedProviderIds ?? [];
+  const activeAvailableModels = removedProviderIds.length > 0
+    ? activeOwnAvailableModels.filter(model => !removedProviderIds.includes(model.provider))
+    : activeOwnAvailableModels;
 
   const activeContextUsage: ContextWindowUsage | null =
     activePath ? settings.contextUsageBySession[activePath] ?? null : null;

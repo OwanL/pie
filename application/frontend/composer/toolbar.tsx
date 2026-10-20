@@ -309,6 +309,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         <SubagentProviderMenu
           sessionPath={sessionPath}
           prefs={prefs}
+          removedProviderIds={providerManagement?.view.removedProviderIds}
           availableModels={availableModels}
           onSetPrefs={onSetPrefs}
         />

@@ -15,6 +15,7 @@ import { TOOL_RESULT_PRUNER_SETTING_LABELS } from './settings-menu-tool-result-p
 import { BASH_SETTING_LABELS } from './settings-menu-bash';
 import { ASK_USER_SETTING_LABELS } from './settings-menu-ask-user';
 import { PROVIDER_SETTING_LABELS } from './settings-menu-providers';
+import { RemovedProvidersContext } from './removed-providers';
 import { ProviderSetupPreview } from './provider-setup-preview';
 import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview';
 import { MCP_SETTING_LABELS } from './settings-menu-mcp';
@@ -679,7 +680,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
               )}
               {hasSubagent && (
                 <div class="toolbar-settings-assignment-group" data-settings-section="subagent model buckets" role="group" aria-label="Subagent model buckets">
-                  <SubagentModelAssignments prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />
+                  <SubagentModelAssignments prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} removedProviderIds={props.providerSetupPreview?.view.removedProviderIds} />
                 </div>
               )}
             </div>
@@ -717,7 +718,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
       )}
       {effectiveTab === 'subagents' && hasSubagent && (
         <div data-settings-section="subagents">
-          <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} providerGateStats={providerGateStats} />
+          <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} removedProviderIds={props.providerSetupPreview?.view.removedProviderIds} providerGateStats={providerGateStats} />
         </div>
       )}
       {effectiveTab === 'appearance' && (
@@ -745,7 +746,9 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, providerManagement, providerSetupPreview, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels: catalogModels, providerGateStats, providerManagement, providerSetupPreview, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+  const removedProviderIds = (providerManagement ?? providerSetupPreview)?.view.removedProviderIds ?? [];
+  const availableModels = useMemo(() => catalogModels.filter(model => !removedProviderIds.includes(model.provider)), [catalogModels, removedProviderIds]);
   const [open, setOpen] = useState(false);
   // Keep lifecycle and navigation state mounted, but do not derive popup data
   // from every cloned host snapshot while the surface is closed. Include open
@@ -1135,7 +1138,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 onJump={jumpTo}
               />
             ) : (
-              <>
+              <RemovedProvidersContext.Provider value={removedProviderIds}>
               <SettingsTabBody
                 effectiveTab={effectiveTab}
                 expandedExt={expandedExt}
@@ -1172,7 +1175,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
                 chatModelEntries={chatModelEntries ?? modelEntries}
                 onModelChange={onModelChange ?? (() => undefined)}
               />
-              </>
+              </RemovedProvidersContext.Provider>
             )}
           </div>
           </div>

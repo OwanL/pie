@@ -28,6 +28,17 @@ async function fixture(changes: Partial<Parameters<typeof createProviderManageme
   return { service, auth, configFile, close: async () => { service.dispose(); await rm(dir, { recursive: true, force: true }); } };
 }
 
+test('startup publishes the full persisted removal list, including providers absent from inventory', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(f.configFile, 'version: 1\nproviders:\n  openai: { enabled: false, removed: true }\n  absent: { enabled: false, removed: true }\n');
+    const read = await f.service.request({ type: 'read', operationId: 'startup' });
+    assert.deepEqual(read.snapshot.removedProviderIds?.slice().sort(), ['absent', 'openai']);
+    assert.deepEqual(read.snapshot.providers, []);
+    assert.equal(isProviderManagementSnapshot(read.snapshot), true);
+  } finally { await f.close(); }
+});
+
 test('existing settings round trip writes policy only, preserves native models and never seeds template endpoints/auth', async () => {
   const f = await fixture();
   try {
@@ -96,12 +107,14 @@ test('removal tombstone fences stale writes, suppresses legacy fallback and surv
     const removed = await f.service.request(request);
     assert.equal(removed.status, 'ok'); assert.equal(removed.snapshot.mutation, undefined);
     assert.deepEqual(removed.snapshot.providers, []); assert.equal(forgot, 1);
+    assert.deepEqual(removed.snapshot.removedProviderIds, ['openai']);
     assert.equal(await f.service.request(request), removed); assert.equal(revoked, 1);
     assert.equal((await f.service.request({ ...request, id: 'different' })).status, 'conflict');
     assert.equal((await f.service.request({ type: 'save', operationId: 'stale-save', expectedRevision: null, draft: detail.draft! })).status, 'conflict');
     assert.equal((await f.service.request({ type: 'connect', operationId: 'stale-connect', expectedRevision: null, draft: freshDraft, method: 'api-key', apiKey: 'synthetic' })).status, 'conflict');
     const read = await f.service.request({ type: 'read', operationId: 'inventory-reappeared' });
     assert.deepEqual(read.snapshot.providers, []);
+    assert.deepEqual(read.snapshot.removedProviderIds, ['openai']);
     assert.deepEqual((await f.service.captureRuntimeProjection([native]))!.models, []);
     assert.match(await readFile(f.configFile, 'utf8'), /removed: true/);
     const failedSave = await f.service.request({ type: 'save', operationId: 'not-add', expectedRevision: removed.snapshot.configRevision, draft: freshDraft });
@@ -111,6 +124,7 @@ test('removal tombstone fences stale writes, suppresses legacy fallback and surv
     const reconnected = await f.service.request({ type: 'connect', operationId: 'explicit-add', expectedRevision: removed.snapshot.configRevision,
       draft: freshDraft, method: 'api-key', apiKey: 'synthetic' });
     assert.equal(reconnected.status, 'ok'); assert.equal(reconnected.snapshot.providers[0].origin, 'managed');
+    assert.deepEqual(reconnected.snapshot.removedProviderIds, []);
     assert.ok(!(await readFile(f.configFile, 'utf8')).includes('removed:'));
   } finally { await f.close(); }
 });
@@ -122,7 +136,7 @@ test('failure after tombstone remains hidden and retryable, managed revocation p
   try {
     const failed = await f.service.request({ type: 'remove', operationId: 'first', expectedRevision: null, id: 'openai' });
     assert.equal(failed.status, 'error'); assert.deepEqual(failed.snapshot.providers, []); assert.equal(forgot, 0);
-    assert.match(failed.snapshot.error!, /removed from new chats.*incomplete.*Retry removal/);
+    assert.match(failed.snapshot.error!, /removed from model choices.*incomplete.*Retry removal/);
     assert.ok(!JSON.stringify(failed).includes('PRIVATE'));
     assert.deepEqual((await f.service.captureRuntimeProjection([native]))!.models, []);
     fail = false;

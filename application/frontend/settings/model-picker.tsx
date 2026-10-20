@@ -1,7 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { RemovedProvidersContext } from './removed-providers';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
@@ -580,16 +581,20 @@ function ModelPickerDropdown({
 
 export function ModelPicker({
   value,
-  label,
+  label: currentLabel,
   ariaLabel,
   title,
-  entries,
+  entries: catalogEntries,
   onChange,
   compact,
   disabled,
   ariaDescribedBy,
   dropdownDirection = 'up',
 }: ModelPickerProps) {
+  const removedProviderIds = useContext(RemovedProvidersContext);
+  const entries = useMemo(() => catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider)), [catalogEntries, removedProviderIds]);
+  const provider = value.includes('/') ? value.slice(0, value.indexOf('/')) : '';
+  const label = removedProviderIds.includes(provider) ? `${value} · Unavailable (removed provider)` : currentLabel;
   const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
 
   useLayoutEffect(() => {

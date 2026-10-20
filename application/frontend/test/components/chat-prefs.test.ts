@@ -312,6 +312,13 @@ test('subagent provider helpers preserve explicit routes for legacy bare-id buck
     getSubagentBucketProviders(configured, contractedCatalog, '/session/a.jsonl'),
     ['anthropic', 'github-copilot', 'ollama', 'openai-codex', 'umans'],
   );
+  assert.deepEqual(
+    getSubagentBucketProviders(configured, contractedCatalog, '/session/a.jsonl', ['openai-codex', 'ollama']),
+    ['anthropic', 'github-copilot', 'umans'],
+    'only explicit tombstones override persisted routes; catalog contraction alone does not',
+  );
+  assert.equal(configured.subagentProviderDefaults['openai-codex'], true);
+  assert.equal(configured.subagentProviderTogglesBySession['/session/a.jsonl'].ollama, true);
 });
 
 test('setSubagentProviderEnabled scopes provider state to one session', () => {

@@ -177,6 +177,7 @@ export function getSubagentBucketProviders(
   prefs: ChatPrefs,
   availableModels: ModelInfo[],
   sessionPath?: string | null,
+  removedProviderIds: readonly string[] = [],
 ): string[] {
   const assignments = [
     ...prefs.subagentBuckets.small,
@@ -216,7 +217,7 @@ export function getSubagentBucketProviders(
     }
   }
 
-  return [...providers].sort((a, b) => a.localeCompare(b));
+  return [...providers].filter(provider => !removedProviderIds.includes(provider)).sort((a, b) => a.localeCompare(b));
 }
 
 /** Effective provider state in a session: explicit override → default → enabled. */

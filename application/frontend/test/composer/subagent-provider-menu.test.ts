@@ -33,6 +33,24 @@ function providerButton(container: HTMLDivElement, provider: string): HTMLButton
     .find((item) => item.textContent?.trim() === provider) as HTMLButtonElement | null;
 }
 
+test('SubagentProviderMenu excludes explicit removals despite stale bucket, default and session routes', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const prefs = prefsWith({
+    subagentBuckets: { small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }], medium: [], frontier: [] },
+    subagentProviderDefaults: { anthropic: true, openai: true },
+    subagentProviderTogglesBySession: { [SESSION_PATH]: { anthropic: true } },
+  });
+  try {
+    act(() => render(h(SubagentProviderMenu, { sessionPath: SESSION_PATH, prefs, availableModels: AVAILABLE_MODELS,
+      removedProviderIds: ['anthropic'], onSetPrefs: () => assert.fail('removal must not rewrite preferences') }), container));
+    openMenu(container);
+    assert.ok(!providerButton(container, 'anthropic'));
+    assert.ok(providerButton(container, 'openai'));
+    assert.equal(prefs.subagentProviderTogglesBySession[SESSION_PATH].anthropic, true);
+  } finally { act(() => render(null, container)); container.remove(); }
+});
+
 test('SubagentProviderMenu allows unchecking the last enabled provider', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);

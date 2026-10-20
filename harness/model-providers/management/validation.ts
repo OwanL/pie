@@ -70,9 +70,10 @@ const auth = (value: unknown) => {
 };
 /** Global host event data is a closed, credential-free projection, not configuration authority. */
 export function isProviderManagementSnapshot(value: unknown): value is ProviderManagementSnapshot {
-  return record(value) && keys(value, ['revision', 'configRevision', 'loaded', 'providers', 'definitions', 'protocols', 'auth', 'authBrowser', 'mutation', 'error'])
+  return record(value) && keys(value, ['revision', 'configRevision', 'loaded', 'providers', 'removedProviderIds', 'definitions', 'protocols', 'auth', 'authBrowser', 'mutation', 'error'])
     && integer(value.revision) && revision(value.configRevision) && boolean(value.loaded)
     && array(value.providers, summary) && array(value.definitions, definition, 1000) && array(value.protocols, entry => text(entry, 256), 1000)
+    && optional(value, 'removedProviderIds', ids => array(ids, identity))
     && optional(value, 'auth', auth)
     && optional(value, 'authBrowser', browser => record(browser) && keys(browser, ['operationId', 'url', 'instructions', 'code'])
       && identity(browser.operationId) && text(browser.url, 32_768) && optional(browser, 'instructions', text) && optional(browser, 'code', text))

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createPiProviderAuth, isRuntimeCredentialScopeCurrent } from '../pi-auth';
 import assert from 'node:assert/strict';
 import { parseProviderConfig } from '../../catalog/provider-config';
-import { isProviderManagementRequest } from '../validation';
+import { isProviderManagementRequest, isProviderManagementSnapshot } from '../validation';
 import { forgetExistingProviderCredential } from '../../../agent-processes/coordinator/provider-management';
 
 test('managed native removal targets explicit store and revokes old runtime scope', async () => {
@@ -34,6 +34,15 @@ test('legacy overlays and disabled removal tombstones are schema validated', () 
   }
   assert.equal(parseProviderConfig('version: 1\nproviders:\n  old: { enabled: false, removed: false }\n').status, 'invalid');
 });
+test('snapshot tombstones are optional but validated as explicit provider identities', () => {
+  const snapshot = { revision: 0, configRevision: null, loaded: true, providers: [], definitions: [], protocols: [] };
+  assert.equal(isProviderManagementSnapshot(snapshot), true);
+  assert.equal(isProviderManagementSnapshot({ ...snapshot, removedProviderIds: ['old'] }), true);
+  for (const removedProviderIds of [null, 'old', [''], [3], {}]) {
+    assert.equal(isProviderManagementSnapshot({ ...snapshot, removedProviderIds }), false);
+  }
+});
+
 test('private remove requires exact operation, revision and provider identity', () => {
   const remove = { type: 'remove', operationId: 'op', expectedRevision: null, id: 'old' };
   assert.equal(isProviderManagementRequest(remove), true);

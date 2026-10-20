@@ -88,6 +88,7 @@ interface BucketModelsEditorProps {
   label: string;
   hint: string;
   selected: SubagentBucketAssignment[];
+  removedProviderIds?: readonly string[];
   availableModels: ModelInfo[];
   modelEntries: ReturnType<typeof orderModelsForPicker>;
   onChange: (assignments: SubagentBucketAssignment[]) => void;
@@ -97,7 +98,7 @@ interface BucketModelsEditorProps {
  * model is a single inline flow: pick a model from the searchable picker,
  * choose a reasoning level from the exposed pill buttons (pre-selected to a
  * sensible default), and confirm with one click or the Enter key. */
-function BucketModelsEditor({ label, hint, selected, availableModels, modelEntries, onChange }: BucketModelsEditorProps) {
+function BucketModelsEditor({ label, hint, selected, availableModels, modelEntries, removedProviderIds = [], onChange }: BucketModelsEditorProps) {
   const [pendingModel, setPendingModel] = useState('');
   const [pendingThinkingLevel, setPendingThinkingLevel] = useState<ThinkingLevel | ''>('');
   const addRowRef = useRef<HTMLDivElement>(null);
@@ -105,6 +106,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
   const selectedModels = selected.map((entry) => entry.model);
   const labelFor = (spec: string): string => {
     const parsed = parseModelSpec(spec);
+    if (parsed.provider && removedProviderIds.includes(parsed.provider)) return `${spec} · Unavailable (removed provider)`;
     const match = availableModels.find((model) =>
       model.id === parsed.id && (!parsed.provider || model.provider === parsed.provider));
     return match ? `${match.provider} · ${match.name}` : spec;
@@ -112,8 +114,8 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
   const isSelected = (model: ModelInfo): boolean =>
     isModelSelectedBySpec(model, selectedModels, availableModels);
   const availableOptions = useMemo(
-    () => modelEntries.filter((entry) => !isSelected(entry.model)),
-    [availableModels, modelEntries, selectedModels.join('\u0000')],
+    () => modelEntries.filter((entry) => !removedProviderIds.includes(entry.model.provider) && !isSelected(entry.model)),
+    [availableModels, modelEntries, removedProviderIds, selectedModels.join('\u0000')],
   );
   // Resolve against the current addable picker entries, not the full catalog
   // used for persisted chip labels. This also shares the picker's legacy-id
@@ -226,7 +228,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
                   removeLabel={`Remove ${labelFor(entry.model)} from ${label}`}
                   onRemove={() => removeModel(entry.model)}
                 />
-                <ThinkingSelect
+                {!(parsed.provider && removedProviderIds.includes(parsed.provider)) && <ThinkingSelect
                   value={entry.thinkingLevel}
                   model={model ?? null}
                   ariaLabel={`Reasoning for ${labelFor(entry.model)} in ${label}`}
@@ -235,7 +237,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
                       updateThinkingLevel(entry.model, value);
                     }
                   }}
-                />
+                />}
               </div>
             );
           })}
@@ -359,6 +361,7 @@ function DropToolsEditor({ selected, onChange }: DropToolsEditorProps) {
 }
 
 interface SubagentSettingsProps {
+  removedProviderIds?: readonly string[];
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
   availableModels: ModelInfo[];
@@ -372,7 +375,7 @@ interface SubagentModelAssignmentsProps extends SubagentSettingsProps {
 }
 
 /** Models-tab editors for the subagent model buckets. */
-export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentModelAssignmentsProps) {
+export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, modelEntries, removedProviderIds = [] }: SubagentModelAssignmentsProps) {
   const bucketModelEntries = useMemo(
     () => modelEntries ?? orderModelsForPicker(
       filterEnabledProviders(availableModels, prefs.providerToggles),
@@ -392,6 +395,7 @@ export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, m
           label={def.label}
           hint={def.hint}
           selected={prefs.subagentBuckets[def.key] ?? []}
+          removedProviderIds={removedProviderIds}
           availableModels={availableModels}
           modelEntries={bucketModelEntries}
           onChange={(assignments) => onSetPrefs(setBucketAssignments(prefs, def.key, assignments))}
@@ -402,10 +406,10 @@ export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, m
 }
 
 /** Subagents-tab behavior, routing, nesting, and throughput controls. */
-export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGateStats }: SubagentSettingsProps) {
+export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGateStats, removedProviderIds = [] }: SubagentSettingsProps) {
   const subagentProviders = useMemo(
-    () => getSubagentBucketProviders(prefs, availableModels),
-    [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults],
+    () => getSubagentBucketProviders(prefs, availableModels, undefined, removedProviderIds),
+    [availableModels, removedProviderIds, prefs.subagentBuckets, prefs.subagentProviderDefaults],
   );
   const runtimeConcurrency = providerGateStats?.subagentConcurrency;
   const appliedRuntimeStatus = runtimeConcurrency?.effective

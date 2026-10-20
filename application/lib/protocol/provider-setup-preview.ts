@@ -18,6 +18,7 @@ export interface ProviderSetupPreviewView {
   draft: ProviderSetupDraft | null;
   status: 'idle' | 'loading' | 'connecting' | 'saving' | 'saved' | 'conflict' | 'error';
   loaded?: boolean;
+  removedProviderIds?: string[];
   auth?: ProviderAuthPrompt;
   authBrowser?: import('../../../harness/model-providers/management/contracts').ProviderManagementSnapshot['authBrowser'];
   message?: string;

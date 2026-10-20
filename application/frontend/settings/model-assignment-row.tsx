@@ -3,6 +3,8 @@
 
 import type { ModelInfo, ThinkingLevel } from '../../lib/protocol/index.js';
 import { ModelPicker } from './model-picker';
+import { useContext } from 'preact/hooks';
+import { RemovedProvidersContext } from './removed-providers';
 import type { ModelPickerEntry } from '../composer/model-list';
 import { formatModelSpec, normalizeThinkingLevelForModel, parseModelSpec } from '../composer/model-list';
 import { ThinkingSelect, type ThinkingSelectValue } from './thinking-select';
@@ -51,7 +53,7 @@ function findEntry(entries: ModelPickerEntry[], current: ModelAssignment | null)
 /** Shared provider-qualified model picker row and optional thinking row. */
 export function ModelAssignmentRow({
   label,
-  entries,
+  entries: catalogEntries,
   current,
   onChange,
   emptyLabel,
@@ -67,16 +69,19 @@ export function ModelAssignmentRow({
   compactLabels = false,
   ariaDescribedBy,
 }: ModelAssignmentRowProps) {
+  const removedProviderIds = useContext(RemovedProvidersContext);
+  const removed = !!current?.provider && removedProviderIds.includes(current.provider);
+  const entries = catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider));
   const selectedEntry = findEntry(entries, current);
   const fallbackMatchesCurrent = !!fallbackModel && !!current
     && fallbackModel.id === current.model
     && (!current.provider || fallbackModel.provider === current.provider);
-  const selectedModel = selectedEntry?.model
-    ?? (fallbackModel && (!current || fallbackMatchesCurrent) ? fallbackModel : null);
+  const selectedModel = removed ? null : selectedEntry?.model
+    ?? (fallbackModel && !removedProviderIds.includes(fallbackModel.provider) && (!current || fallbackMatchesCurrent) ? fallbackModel : null);
   const modelValue = current?.model
     ? (current.provider ? formatModelSpec({ provider: current.provider, id: current.model }) : current.model)
     : '';
-  const modelLabel = current?.model
+  const modelLabel = removed ? `${modelValue} · Unavailable (removed provider)` : current?.model
     ? (selectedEntry?.label ?? (current.provider ? formatModelSpec({ provider: current.provider, id: current.model }) : current.model))
     : emptyLabel;
 
@@ -140,7 +145,7 @@ export function ModelAssignmentRow({
               value={thinking.value}
               model={selectedModel}
               includeInherit={thinking.includeInherit}
-              disabled={disabled}
+              disabled={disabled || removed}
               ariaLabel={thinking.ariaLabel ?? thinkingLabel}
               ariaDescribedBy={ariaDescribedBy}
               onChange={thinking.onChange}

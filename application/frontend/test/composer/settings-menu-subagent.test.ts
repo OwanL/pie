@@ -738,6 +738,20 @@ test('SubagentSection still labels a selected bucket chip whose provider is disa
   assert.doesNotMatch(html, /<option[^>]*value="haiku"/);
 });
 
+test('explicit removal hides persisted default toggles and keeps bucket selections visibly unavailable', () => {
+  const prefs = prefsWith({
+    subagentBuckets: { small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }], medium: [], frontier: [] },
+    subagentProviderDefaults: { anthropic: true },
+  });
+  const props = { prefs, availableModels: AVAILABLE_MODELS, removedProviderIds: ['anthropic'], onSetPrefs: () => assert.fail('render must not rewrite saved preferences') };
+  const buckets = renderToString(h(SubagentSection, props));
+  assert.match(buckets, /anthropic\/haiku · Unavailable \(removed provider\)/);
+  assert.doesNotMatch(buckets, /aria-label="Reasoning for anthropic\/haiku/);
+  const defaults = renderToString(h(SubagentBehaviorSection, props));
+  assert.doesNotMatch(defaults, /anthropic/);
+  assert.equal(prefs.subagentProviderDefaults.anthropic, true);
+});
+
 test('SubagentSection can remove and edit reasoning on existing bucket assignments', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);

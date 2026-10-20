@@ -52,6 +52,17 @@ function stateWith(
   };
 }
 
+test('explicit provider tombstones override stale session catalogs without deleting them', () => {
+  let state = stateWith(ACTIVE, { [ACTIVE]: [KNOWN_MODEL] }, { [ACTIVE]: 'authoritative' });
+  assert.equal(selectViewState(state).availableModels.length, 1);
+  state = { ...state, providerManagement: { ...state.providerManagement, snapshot: { ...state.providerManagement.snapshot, removedProviderIds: ['anthropic'] } } };
+  assert.deepEqual(selectViewState(state).availableModels, []);
+  assert.deepEqual(selectViewState(state).providerManagement?.removedProviderIds, ['anthropic']);
+  assert.equal(state.settings.availableModelsBySession[ACTIVE].length, 1);
+  state = { ...state, providerManagement: { ...state.providerManagement, snapshot: { ...state.providerManagement.snapshot, removedProviderIds: [] } } };
+  assert.equal(selectViewState(state).availableModels.length, 1, 'explicit re-add restores a retained catalog');
+});
+
 test('catalog projection isolates an empty provisional session', () => {
   // The host opened the active tab before any catalog for it existed; another
   // real open tab already has the only usable catalog the host knows.
