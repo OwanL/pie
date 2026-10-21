@@ -38,6 +38,14 @@ async function readTranscriptCss() {
   return readFile(new URL('../../../styles/transcript.css', import.meta.url), 'utf8');
 }
 
+test('markdown tables and code scroll locally without forcing ordinary words to break', async () => {
+  const css = await readTranscriptCss();
+  assert.match(css, /\.message-body pre\s*\{[^}]*white-space:\s*pre;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*normal;/);
+  assert.match(css, /\.message-body table\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*100%;/);
+  assert.match(css, /\.message-body td\s*\{[^}]*min-width:\s*12ch;[^}]*max-width:\s*40ch;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*break-word;/);
+  assert.match(css, /\.transcript-jump-latest\s*\{[^}]*position:\s*absolute;[^}]*right:\s*24px;[^}]*bottom:\s*8px;/);
+});
+
 async function loadRenderMarkdown() {
   const mod = await import('../../../transcript/markdown.ts');
   return mod.renderMarkdown;

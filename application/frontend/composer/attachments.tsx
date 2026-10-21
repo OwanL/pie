@@ -6,6 +6,7 @@ import {
   composerInputDetail,
   composerInputDisplayName,
   composerInputTitle,
+  composerInputNameParts,
 } from './inputs';
 
 interface ComposerAttachmentsProps {
@@ -33,6 +34,7 @@ export function ComposerAttachments({
         {pendingComposerInputs.map((input) => {
           const displayName = composerInputDisplayName(input);
           const detail = composerInputDetail(input);
+          const nameParts = composerInputNameParts(displayName);
 
           return (
             <div key={input.id} class="attachment-card" title={composerInputTitle(input)}>
@@ -51,7 +53,10 @@ export function ComposerAttachments({
                 </div>
               )}
               <div class="attachment-card-meta">
-                <span class="attachment-card-name">{displayName}</span>
+                <span class="attachment-card-name" aria-label={displayName}>
+                  <span class="attachment-card-name-prefix">{nameParts.prefix}</span>
+                  {nameParts.suffix && <span class="attachment-card-name-suffix">{nameParts.suffix}</span>}
+                </span>
                 <span class="attachment-card-detail">{detail}</span>
               </div>
               <button

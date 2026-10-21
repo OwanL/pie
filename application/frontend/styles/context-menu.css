@@ -144,7 +144,19 @@
   white-space: nowrap;
 }
 
+.attachment-card-name-prefix {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-card-name-suffix {
+  flex: 0 0 auto;
+}
+
 .attachment-card-name {
+  display: flex;
+  min-width: 0;
   color: var(--panel-foreground);
   font-size: 10px;
   font-weight: 600;

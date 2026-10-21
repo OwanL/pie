@@ -1,4 +1,11 @@
 import type { ComposerInput } from '../../lib/protocol/index.js';
+import { formatPathWithParentDepth } from '../lib/formatting/path-utils';
+
+/** Keep the identifying tail visible while CSS clips the flexible prefix. */
+export function composerInputNameParts(name: string): { prefix: string; suffix: string } {
+  if (name.length <= 24) return { prefix: name, suffix: '' };
+  return { prefix: name.slice(0, -14), suffix: name.slice(-14) };
+}
 
 function formatSizeKb(sizeBytes: number): string {
   if (sizeBytes < 1024) return `${sizeBytes} B`;
@@ -24,7 +31,7 @@ export function formatImageMeta(input: Extract<ComposerInput, { kind: 'imageBlob
 
 export function composerInputDetail(input: ComposerInput): string {
   if (input.kind === 'filesystemPathRef') {
-    return input.path;
+    return formatPathWithParentDepth(input.path.replace(/[\\/]+$/, '') || input.path, 1);
   }
 
   if (input.kind === 'imageBlob') {
@@ -36,7 +43,7 @@ export function composerInputDetail(input: ComposerInput): string {
 
 export function composerInputTitle(input: ComposerInput): string {
   const name = composerInputDisplayName(input);
-  const detail = composerInputDetail(input);
+  const detail = input.kind === 'filesystemPathRef' ? input.path : composerInputDetail(input);
   return detail ? `${name} · ${detail}` : name;
 }
 

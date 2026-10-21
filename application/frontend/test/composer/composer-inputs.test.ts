@@ -10,6 +10,7 @@ import {
   composerInputDetail,
   composerInputDisplayName,
   composerInputTitle,
+  composerInputNameParts,
   describeComposerInputSummary,
   formatImageMeta,
 } from '../../composer/inputs';
@@ -61,8 +62,25 @@ test('attachment cards retain their accessible summary without a visual count ba
   assert.equal(renderToString(h(ComposerAttachments, { pendingComposerInputs: [], attachmentSummary: '', onRemoveInput: () => {} })), '');
 });
 
-test('composerInputDetail uses full path detail for filesystem references', () => {
-  assert.equal(composerInputDetail(pathInput), '/workspace/src/panel.tsx');
+test('filesystem detail shows the immediate parent while title preserves the full native path', () => {
+  assert.equal(composerInputDetail(pathInput), 'src/panel.tsx');
+  const windowsInput = { ...pathInput, path: 'C:\\Users\\person\\project\\other\\panel.tsx' };
+  assert.equal(composerInputDetail(windowsInput), 'other/panel.tsx');
+  assert.equal(composerInputTitle(windowsInput), 'panel.tsx · C:\\Users\\person\\project\\other\\panel.tsx');
+});
+
+test('long attachment names keep their identifying tail in a separate nonshrinking span', () => {
+  const name = 'a-very-long-report-name-production.final.json';
+  const parts = composerInputNameParts(name);
+  assert.equal(parts.prefix + parts.suffix, name);
+  assert.ok(parts.suffix.endsWith('.final.json'));
+  assert.deepEqual(composerInputNameParts('short.ts'), { prefix: 'short.ts', suffix: '' });
+  const html = renderToString(h(ComposerAttachments, {
+    pendingComposerInputs: [{ ...pathInput, name }], attachmentSummary: '1 path', onRemoveInput: () => {},
+  }));
+  assert.match(html, /attachment-card-name-prefix/);
+  assert.match(html, /attachment-card-name-suffix/);
+  assert.ok(html.includes(`aria-label="Remove ${name}"`));
 });
 
 test('composerInputTitle combines the visible label and detail for tooltips', () => {
