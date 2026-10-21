@@ -55,7 +55,7 @@ export function NumberField({
   // emits, while user-agent stepping (arrow keys, spinner, wheel) reports each
   // step with its own immediate input+change pair. Cleared by any input event
   // so a retyped draft re-commits even after a consumer rejection.
-  const committed = useRef<{ raw: string; base: number } | null>(null);
+  const committed = useRef<{ raw: string; normalized: string; base: number } | null>(null);
   // Commits emitted locally whose echo has not converged into `value` yet,
   // in emission order (the protocol carries no acknowledgements, so echoes
   // are matched by value only). An echo of an older commit must never
@@ -120,11 +120,11 @@ export function NumberField({
     }
     const burst = committed.current;
     if ((normalized !== value || pending.current.length > 0)
-        && !(burst && burst.raw === raw && burst.base === value)) {
+        && !(burst && (burst.raw === raw || burst.normalized === raw) && burst.base === value)) {
       pending.current.push(normalized);
       onChange(normalized);
     }
-    committed.current = { raw, base: value };
+    committed.current = { raw, normalized: String(normalized), base: value };
     // Keep the normalized commit on display; the echo (or a consumer
     // re-normalization) converges it later without a stale snap.
     setDraft(String(normalized));

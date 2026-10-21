@@ -174,6 +174,21 @@ test('bare typing emits nothing until blur or Enter commits it', () => {
   assert.equal(field().value, '60', 'the accepted echo converges the display');
 });
 
+test('Enter then blur deduplicates the normalized display while a delayed echo is pending', async () => {
+  useDelayedEchoConsumer(30);
+  type('100');
+  pressEnter();
+  assert.deepEqual(patches, [60], 'Enter commits the clamped value once');
+  assert.equal(field().value, '60', 'the normalized value becomes the optimistic display');
+
+  act(() => { void field().dispatchEvent(new Event('blur')); });
+  assert.deepEqual(patches, [60], 'blur of the normalized display must not emit a duplicate');
+
+  await wait(40);
+  assert.deepEqual(patches, [60]);
+  assert.equal(field().value, '60', 'the delayed echo converges without another commit');
+});
+
 test('Enter commits the typed draft once with normalized clamp', () => {
   type('40');
   assert.deepEqual(patches, [], 'typing alone never emits');
