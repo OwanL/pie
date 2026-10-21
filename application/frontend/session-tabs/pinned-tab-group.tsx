@@ -81,6 +81,8 @@ function PinnedTabGroupView({
 }: PinnedTabGroupProps) {
   const chipRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  /** Set when the open in flight was triggered from the keyboard, so focus can move to the member rows after the portal mounts. */
+  const keyboardOpenRef = useRef(false);
 
 
   const firstMember = members[0] ?? '';
@@ -111,7 +113,18 @@ function PinnedTabGroupView({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.stopPropagation();
+        // Keyboard dismissal returns focus to the chip (the tab stop that
+        // opened this layer), but only when the dropdown — or the chip
+        // itself — currently holds focus, so a pointer-opened dropdown never
+        // steals focus from wherever the user is working.
+        const chipButton = chipRef.current?.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+        const active = document.activeElement;
+        const shouldRestore = !!chipButton && (
+          (active === chipButton) ||
+          (active instanceof Node && !!(active as HTMLElement).isConnected && dropdownRef.current?.contains(active) === true)
+        );
         onClose();
+        if (shouldRestore) chipButton.focus();
       }
     };
     window.addEventListener('pointerdown', onPointerDown, true);
@@ -125,6 +138,40 @@ function PinnedTabGroupView({
   const onChipClick = useCallback(() => {
     onToggleOpen(firstMember);
   }, [onToggleOpen, firstMember]);
+
+  // Keyboard chip activation (Enter/Space) records the open so focus moves to
+  // the dropdown rows after mount; the pointer click path stays unchanged.
+  const onChipKeyDown = useCallback((event: KeyboardEvent) => {
+    handleContextMenuKeyRequest(event);
+    if (event.defaultPrevented) return;
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    event.preventDefault();
+    keyboardOpenRef.current = true;
+    onToggleOpen(firstMember);
+  }, [onToggleOpen, firstMember]);
+
+  // The dropdown is portaled to document.body, so it sits after the whole app
+  // subtree in DOM order: leaving focus on the chip after a keyboard open
+  // makes Tab walk the entire app before reaching the member rows. When the
+  // open came from keyboard activation, move focus to the active member — or
+  // the first member — right after the dropdown mounts.
+  useEffect(() => {
+    if (!open) {
+      keyboardOpenRef.current = false;
+      return;
+    }
+    if (!keyboardOpenRef.current) return;
+    keyboardOpenRef.current = false;
+    const dropdown = dropdownRef.current;
+    if (!dropdown) return;
+    const rows = dropdown.querySelectorAll<HTMLButtonElement>('.pinned-tab-group-member');
+    if (rows.length === 0) return;
+    const activeIndex = activePath !== null ? members.indexOf(activePath) : -1;
+    const target = (activeIndex >= 0 ? rows[activeIndex] : undefined)
+      ?? Array.from(rows).find((row) => !row.disabled)
+      ?? rows[0];
+    target?.focus();
+  }, [open, activePath, members]);
 
   const tiles = buildAvatarTiles(members);
 
@@ -151,7 +198,7 @@ function PinnedTabGroupView({
           onClick={onChipClick}
           onContextMenu={(event) => onContextMenu(event as MouseEvent, firstMember, { kind: 'group', members })}
           onPointerDown={(event) => onChipPointerDown(event as PointerEvent, firstMember, itemIndex)}
-          onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
+          onKeyDown={(event) => onChipKeyDown(event as KeyboardEvent)}
         >
           <span class="pinned-tab-group-grid" aria-hidden="true">
             {tiles.map((tile, index) =>

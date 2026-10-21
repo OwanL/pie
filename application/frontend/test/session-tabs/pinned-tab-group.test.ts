@@ -302,6 +302,119 @@ test('Escape closes an open group dropdown', () => {
   }
 });
 
+// Keyboard activation regression: the dropdown is portaled to body, so a
+// keyboard-opened dropdown that left focus on the chip made Tab walk the whole
+// app subtree before reaching the member rows. Keyboard opening must move
+// focus to the active member (or the first member) after the portal mounts;
+// pointer opening keeps the chip focus behavior unchanged.
+test('keyboard activation opens the dropdown and focuses the active member row', () => {
+  const restore = mockResizeObserver();
+  const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
+  const { container, unmount } = mount(baseProps({
+    sessions,
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [['/a', '/b']],
+    activeSession: sessions[1],
+  }));
+  try {
+    const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+    assert.ok(chipButton);
+    act(() => {
+      chipButton!.focus();
+      chipButton!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    const dropdown = queryDropdown();
+    assert.ok(dropdown, 'keyboard activation opens the dropdown');
+    const focused = document.activeElement as HTMLElement | null;
+    assert.ok(focused, 'focus moved out of the chip');
+    assert.ok(focused.classList.contains('pinned-tab-group-member'), 'focus is a member row');
+    assert.ok(focused.classList.contains('active'), 'focus is the active member row');
+    assert.match(focused.textContent ?? '', /Beta/);
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test('keyboard activation focuses the first member when no member is active', () => {
+  const restore = mockResizeObserver();
+  const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
+  const { container, unmount } = mount(baseProps({
+    sessions,
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [['/a', '/b']],
+  }));
+  try {
+    const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+    assert.ok(chipButton);
+    act(() => {
+      chipButton!.focus();
+      chipButton!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    assert.ok(queryDropdown(), 'keyboard activation opens the dropdown');
+    const focused = document.activeElement as HTMLElement | null;
+    assert.ok(focused?.classList.contains('pinned-tab-group-member'), 'focus is a member row');
+    assert.match(focused.textContent ?? '', /Alpha/, 'focus is the first member row');
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test('Escape on a keyboard-opened dropdown restores chip focus', () => {
+  const restore = mockResizeObserver();
+  const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
+  const { container, unmount } = mount(baseProps({
+    sessions,
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [['/a', '/b']],
+  }));
+  try {
+    const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+    assert.ok(chipButton);
+    act(() => {
+      chipButton!.focus();
+      chipButton!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    assert.ok(queryDropdown());
+    const member = document.body.querySelector<HTMLElement>('.pinned-tab-group-member');
+    assert.equal(document.activeElement, member, 'focus is on a member row before Escape');
+    act(() => { member!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.equal(queryDropdown(), null, 'Escape closes the dropdown');
+    assert.equal(document.activeElement, chipButton, 'Escape restores focus to the group chip');
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test('pointer opening keeps focus on the chip (no focus transfer)', () => {
+  const restore = mockResizeObserver();
+  const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
+  const { container, unmount } = mount(baseProps({
+    sessions,
+    openTabPaths: ['/a', '/b'],
+    pinnedTabPaths: ['/a', '/b'],
+    pinnedTabGroups: [['/a', '/b']],
+  }));
+  try {
+    const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+    assert.ok(chipButton);
+    act(() => {
+      chipButton!.focus();
+      chipButton!.click();
+    });
+    assert.ok(queryDropdown(), 'pointer click opens the dropdown');
+    assert.equal(document.activeElement, chipButton, 'pointer opening leaves focus on the chip');
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
 test('right-clicking a group chip opens its dedicated menu without Close Group', () => {
   const restore = mockResizeObserver();
   const sessions = [session('/a', 'Alpha'), session('/b', 'Beta'), session('/c', 'Gamma'), session('/d', 'Delta')];
