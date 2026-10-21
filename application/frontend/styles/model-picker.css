@@ -219,13 +219,17 @@
 }
 
 .model-picker-name {
+  display: -webkit-box;
+  min-width: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
   overflow: hidden;
   color: inherit;
   font-size: 10.5px;
   font-weight: 550;
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 /* ── Compact choice picker (reasoning) ──────────────────────────────────── */

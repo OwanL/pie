@@ -159,7 +159,7 @@ export function orderModelsForPicker(
     const titleParts = [model.name];
 
     const sub = model.subagent;
-    if (sub?.pricing && (sub.pricing.input > 0 || sub.pricing.output > 0)) {
+    if (sub?.pricing) {
       titleParts.push(
         `Pricing: $${sub.pricing.input.toFixed(2)}/M in, $${sub.pricing.output.toFixed(2)}/M out`,
       );
@@ -175,8 +175,8 @@ export function orderModelsForPicker(
     let tokenInPrice = '';
     let tokenOutPrice = '';
     if (sub?.pricing) {
-      if (sub.pricing.input > 0) tokenInPrice = `$${sub.pricing.input.toFixed(2)}`;
-      if (sub.pricing.output > 0) tokenOutPrice = `$${sub.pricing.output.toFixed(2)}`;
+      tokenInPrice = `$${sub.pricing.input.toFixed(2)}`;
+      tokenOutPrice = `$${sub.pricing.output.toFixed(2)}`;
     }
 
     return {

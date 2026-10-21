@@ -546,7 +546,7 @@ function ModelPickerDropdown({
       </div>
       <div id={listId} class="model-picker-rows" role="listbox" aria-label={ariaLabel}>
         {entries.length === 0 ? (
-          <div class="model-picker-empty">{`No models match "${query}"`}</div>
+          <div class="model-picker-empty">{query.trim() ? `No models match "${query}"` : 'No models available'}</div>
         ) : (
           entries.map((entry, i) => {
             const isSelected = formatModelSpec(entry.model) === value || entry.model.id === value;

@@ -123,6 +123,15 @@ test('orderModelsForPicker includes pricing and image support in entries', () =>
   assert.equal(free.supportsImages, false);
 });
 
+test('explicit zero pricing stays known in prices and tooltip', () => {
+  const [entry] = orderModelsForPicker([model('zero', {
+    subagent: { eligible: true, pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+  })]);
+  assert.equal(entry.tokenInPrice, '$0.00');
+  assert.equal(entry.tokenOutPrice, '$0.00');
+  assert.match(entry.title, /Pricing: \$0\.00\/M in, \$0\.00\/M out/);
+});
+
 test('legacy bare selections keep duplicate provider-qualified choices available for upgrade', () => {
   const catalog = [
     model('shared', { provider: 'github-copilot' }),

@@ -10,7 +10,7 @@ installDom();
 
 import { ModelPicker } from '../../settings/model-picker';
 import { RemovedProvidersContext } from '../../settings/removed-providers';
-import type { ModelPickerEntry } from '../../composer/model-list';
+import { orderModelsForPicker, type ModelPickerEntry } from '../../composer/model-list';
 
 function entry(id: string, overrides: Partial<ModelPickerEntry> = {}): ModelPickerEntry {
   return {
@@ -100,6 +100,42 @@ test('ModelPicker option names describe prices per million tokens and image supp
     act(() => render(null, container));
     container.remove();
   }
+});
+
+test('ModelPicker distinguishes empty catalogs from unmatched searches', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    act(() => render(h(ModelPicker, {
+      value: '', label: 'Select model', ariaLabel: 'Model', title: 'Select model', entries: [], onChange: () => {},
+    }), container));
+    act(() => container.querySelector<HTMLButtonElement>('button')!.click());
+    assert.equal(document.querySelector('.model-picker-empty')?.textContent, 'No models available');
+    const input = document.querySelector<HTMLInputElement>('.model-picker-search')!;
+    act(() => { input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+    assert.equal(document.querySelector('.model-picker-empty')?.textContent, 'No models match "missing"');
+  } finally { act(() => render(null, container)); container.remove(); }
+});
+
+test('ModelPicker retains long provider-qualified identity and announces zero prices', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const name = 'A very long model name that must wrap without losing its provider identity';
+  const entries = orderModelsForPicker([entry('long', { model: {
+    id: 'long', provider: 'long-provider', name, inputKinds: ['text'], reasoning: false,
+    subagent: { eligible: true, pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+  } }).model]);
+  try {
+    act(() => render(h(ModelPicker, {
+      value: '', label: 'Select model', ariaLabel: 'Model', title: 'Select model', entries, onChange: () => {},
+    }), container));
+    act(() => container.querySelector<HTMLButtonElement>('button')!.click());
+    const option = document.querySelector<HTMLElement>('[role="option"]')!;
+    assert.equal(option.querySelector('.model-picker-name')?.textContent, `long-provider · ${name}`);
+    assert.match(option.getAttribute('aria-label')!, /input price \$0\.00 per million tokens, output price \$0\.00 per million tokens/);
+    assert.match(option.title, new RegExp(name));
+    assert.equal(option.querySelectorAll('.model-picker-col-price')[0].textContent?.trim(), '$0.00');
+  } finally { act(() => render(null, container)); container.remove(); }
 });
 
 test('ModelPicker renders dropdown with columns when open is simulated', () => {
