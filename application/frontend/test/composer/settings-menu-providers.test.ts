@@ -7,9 +7,26 @@ import { installDom } from '../helpers/dom';
 installDom();
 
 import { DEFAULT_CHAT_PREFS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
+import type { ProviderGateStats } from '../../../lib/protocol/index.js';
 import { validateWebviewToHostMessage } from '../../../lib/validation/protocol-validation';
+import { withRenderCount } from '../helpers/render-counter';
 import { initialArchState, reducer } from '../../../backend/conversation-state/reducer';
 import { ProvidersSection } from '../../settings/settings-menu-providers';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function pausedOpenaiMetrics(pausedUntilMs: number, strikeCount = 2): ProviderGateStats {
+  return {
+    enabled: true,
+    providers: [{
+      provider: 'openai', activeRequests: 0, queuedRequests: 0,
+      maxConcurrentRequests: 3, maxConcurrentRequestsSource: 'environment-override',
+      afterburnSeconds: 0, queueWaitSeconds: 30, paused: true, pausedUntilMs, strikeCount,
+    }],
+  };
+}
 
 async function maxConcurrencyHelp(container: HTMLElement): Promise<string> {
   const help = container.querySelector<HTMLButtonElement>('[aria-label="About Max concurrent"]');
@@ -238,5 +255,122 @@ test('provider sliders survive validated host preference round trips without res
     });
   } finally {
     act(() => render(null, container));
+  }
+});
+
+function renderPausedProvidersSection(
+  container: HTMLElement,
+  providerGateStats: ProviderGateStats,
+): void {
+  act(() => render(h(ProvidersSection, {
+    providers: ['openai'],
+    prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { openai: { maxConcurrentRequests: 2 } } },
+    providerGateStats,
+    onSetPrefs: () => undefined,
+  }), container));
+}
+
+function expandOpenai(container: HTMLElement): void {
+  act(() => container
+    .querySelector<HTMLButtonElement>('[aria-label="Expand openai concurrency settings"]')!
+    .click());
+}
+
+test('paused provider countdown ticks down per second from a component-local interval', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const counts = new Map<string, number>();
+  const Counted = withRenderCount(ProvidersSection, counts, () => 'section');
+  const sectionProps = {
+    providers: ['openai'],
+    prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { openai: { maxConcurrentRequests: 2 } } },
+    providerGateStats: pausedOpenaiMetrics(Date.now() + 5_000),
+    onSetPrefs: () => undefined,
+  };
+  act(() => render(h(Counted, sectionProps), container));
+
+  try {
+    expandOpenai(container);
+    assert.equal(counts.get('section'), 1);
+    assert.match(container.textContent ?? '', /⏸ Paused — 5s remaining \(strike 2\)/);
+
+    await act(async () => {
+      await sleep(1_100);
+    });
+    assert.match(container.textContent ?? '', /Paused — 4s remaining/);
+    assert.equal(counts.get('section'), 1, 'per-second ticks must not re-render the section');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
+test('stale pause deadlines clamp at zero instead of counting negative', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  renderPausedProvidersSection(container, pausedOpenaiMetrics(Date.now() - 30_000));
+
+  try {
+    expandOpenai(container);
+    assert.match(container.textContent ?? '', /⏸ Paused — 0s remaining \(strike 2\)/);
+    await act(async () => {
+      await sleep(1_100);
+    });
+    assert.match(container.textContent ?? '', /Paused — 0s remaining/, 'clamped remaining stays at zero');
+    assert.doesNotMatch(container.textContent ?? '', /-\d+s remaining/);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
+test('the paused countdown interval is cleared on unmount and on resume', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const createdIntervals: unknown[] = [];
+  const clearedIntervals: unknown[] = [];
+  globalThis.setInterval = ((handler: () => void, ms?: number) => {
+    const id = originalSetInterval(handler, ms);
+    createdIntervals.push(id);
+    return id;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((id: unknown) => {
+    clearedIntervals.push(id);
+    return originalClearInterval(id as Parameters<typeof originalClearInterval>[0]);
+  }) as typeof clearInterval;
+
+  try {
+    renderPausedProvidersSection(container, pausedOpenaiMetrics(Date.now() + 9_000));
+    expandOpenai(container);
+    assert.equal(createdIntervals.length, 1, 'one component-local interval while paused');
+    assert.deepEqual(clearedIntervals, []);
+
+    act(() => render(null, container));
+    assert.deepEqual(clearedIntervals, createdIntervals, 'unmount clears the interval');
+
+    // Resume: the paused row unmounts when the host stops reporting a pause.
+    renderPausedProvidersSection(container, {
+      enabled: true,
+      providers: [{
+        provider: 'openai', activeRequests: 1, queuedRequests: 0,
+        maxConcurrentRequests: 3, maxConcurrentRequestsSource: 'environment-override',
+        afterburnSeconds: 0, queueWaitSeconds: 30, paused: false, pausedUntilMs: 0, strikeCount: 2,
+      }],
+    });
+    expandOpenai(container);
+    assert.match(container.textContent ?? '', /Live: 1 active \/ 0 queued/);
+    assert.deepEqual(clearedIntervals, createdIntervals, 'no new interval after resume');
+    await act(async () => {
+      await sleep(1_100);
+    });
+    assert.match(container.textContent ?? '', /Live: 1 active \/ 0 queued/,
+      'no stale countdown writes after resume');
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    act(() => render(null, container));
+    container.remove();
   }
 });

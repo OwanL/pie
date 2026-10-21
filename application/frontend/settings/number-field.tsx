@@ -1,8 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useId, useState } from 'preact/hooks';
-import type { JSX } from 'preact';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 
 function clamp(value: number, min?: number, max?: number): number {
   let next = value;
@@ -25,7 +24,11 @@ export interface NumberFieldProps {
   unit?: string;
 }
 
-/** A shared labeled numeric input that clamps finite user input. */
+/** A shared labeled numeric input. Typed drafts commit once — normalized
+ *  clamped — on blur or Enter; native spinner/arrow stepping still commits
+ *  immediately through the change events the user agent fires for it. The
+ *  displayed value converges to the consumer's applied value, including when
+ *  it rejects or re-normalizes a commit. */
 export function NumberField({
   label,
   value,
@@ -40,17 +43,41 @@ export function NumberField({
 }: NumberFieldProps) {
   const [draft, setDraft] = useState(String(value));
   const unitId = `settings-number-unit-${useId()}`;
+  // Active commit burst: the change event a browser fires when focus (or an
+  // Enter keypress) commits typed input, plus the companion blur/keydown.
+  // Preact's onChange is the native change event here, so typing alone never
+  // emits, while user-agent stepping (arrow keys, spinner, wheel) reports each
+  // step with its own immediate input+change pair. Cleared by any input event
+  // so a retyped draft re-commits even after a consumer rejection.
+  const committed = useRef<{ raw: string; base: number } | null>(null);
 
   useEffect(() => setDraft(String(value)), [value, disabled]);
 
-  const handleChange = (event: JSX.TargetedEvent<HTMLInputElement>) => {
+  // Projects the authoritative applied value into the control. The direct
+  // value write keeps the native display truthful even when a same-string
+  // state update would bail out of re-rendering (Preact restores the rendered
+  // value only when it differs from the live DOM one).
+  const projectApplied = (input: HTMLInputElement): void => {
+    const applied = String(value);
+    input.value = applied;
+    setDraft(applied);
+  };
+
+  const commit = (input: HTMLInputElement): void => {
     if (disabled) return;
-    const raw = event.currentTarget.value;
-    setDraft(raw);
-    if (raw === '') return;
-    const next = Number(raw);
-    if (!Number.isFinite(next)) return;
-    onChange(clamp(next, min, max));
+    const raw = input.value;
+    if (raw === String(value)) return;
+    if (raw === '' || !Number.isFinite(Number(raw))) {
+      projectApplied(input);
+      return;
+    }
+    const normalized = clamp(Number(raw), min, max);
+    const burst = committed.current;
+    if (normalized !== value && !(burst && burst.raw === raw && burst.base === value)) {
+      onChange(normalized);
+    }
+    committed.current = { raw, base: value };
+    setDraft(String(normalized));
   };
 
   return (
@@ -68,8 +95,22 @@ export function NumberField({
           aria-label={ariaLabel ?? label}
           aria-describedby={unit ? unitId : undefined}
           title={title}
-          onChange={handleChange}
-          onBlur={() => setDraft(String(value))}
+          onInput={() => {
+            committed.current = null;
+          }}
+          onChange={(event) => commit(event.currentTarget)}
+          onKeyDown={(event) => {
+            // Enter commits the typed draft like blur does; Escape is
+            // deliberately inert.
+            if (event.key === 'Enter') {
+              commit(event.currentTarget);
+              projectApplied(event.currentTarget);
+            }
+          }}
+          onBlur={(event) => {
+            commit(event.currentTarget);
+            projectApplied(event.currentTarget);
+          }}
         />
         {unit && <span id={unitId} class="toolbar-settings-number-unit">{unit}</span>}
       </span>

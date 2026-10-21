@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useId, useState } from 'preact/hooks';
+import { useEffect, useId, useState } from 'preact/hooks';
 import type { ChatPrefs, ProviderGateStats, ProviderGateProviderMetrics } from '../../lib/protocol/index.js';
 import {
   PROVIDER_MAX_CONCURRENT_REQUESTS,
@@ -32,6 +32,31 @@ interface ProviderItemProps {
   metrics?: ProviderGateProviderMetrics;
   expanded: boolean;
   onToggleExpand: () => void;
+}
+
+/** Seconds until a host-supplied resume deadline, clamped so a stale or
+ *  elapsed deadline never shows a negative countdown. */
+function remainingSeconds(pausedUntilMs: number): number {
+  return Math.max(0, Math.ceil((pausedUntilMs - Date.now()) / 1000));
+}
+
+/** Ticking pause status for one provider's gate strike. The interval lives
+ *  only inside this row, so the per-second countdown updates without
+ *  re-rendering the surrounding settings panel; the effect clears it on
+ *  unmount and when the host stops reporting the provider as paused. */
+function PausedProviderStatus({ metrics }: { metrics: ProviderGateProviderMetrics }) {
+  const [remaining, setRemaining] = useState(() => remainingSeconds(metrics.pausedUntilMs));
+  useEffect(() => {
+    const pausedUntilMs = metrics.pausedUntilMs;
+    const interval = setInterval(() => {
+      setRemaining((previous) => {
+        const next = remainingSeconds(pausedUntilMs);
+        return next === previous ? previous : next;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [metrics.pausedUntilMs]);
+  return <>⏸ Paused — {remaining}s remaining (strike {metrics.strikeCount})</>;
 }
 
 function ProviderConcurrencyControls({
@@ -160,7 +185,7 @@ function ProviderConcurrencyControls({
         {metrics && (
           <div class="toolbar-settings-item-hint" style="margin-top: 4px;">
             {metrics.paused
-              ? `⏸ Paused — ${Math.ceil((metrics.pausedUntilMs - Date.now()) / 1000)}s remaining (strike ${metrics.strikeCount})`
+              ? <PausedProviderStatus metrics={metrics} />
               : `Live: ${metrics.activeRequests} active / ${metrics.queuedRequests} queued`}
           </div>
         )}
