@@ -756,6 +756,32 @@ test('compound labels focus keep pickers, bucket add controls, defaults and drop
   }
 });
 
+test('provider limits search matches keyword tokens and jumps to the selected provider', () => {
+  const models: ModelInfo[] = [
+    { id: 'm1', name: 'M1', provider: 'alpha', reasoning: false, inputKinds: ['text'] },
+    { id: 'm2', name: 'M2', provider: 'beta', reasoning: false, inputKinds: ['text'] },
+  ];
+  mount([], models, undefined, {
+    prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { alpha: { maxConcurrentRequests: 3 }, beta: { maxConcurrentRequests: 5 } } },
+  });
+  const menu = openMenu();
+  const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  act(() => {
+    input.value = 'provider limits';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  const results = [...menu.querySelectorAll('.toolbar-settings-search-result-jump')];
+  assert.equal(results.length, 8, 'each provider exposes the four concurrency controls');
+  assert.deepEqual([...new Set(results.map((result) => result.querySelector('.toolbar-settings-search-result-context')?.textContent))].sort(), ['alpha', 'beta']);
+  const betaResult = results.find((result) => result.querySelector('.toolbar-settings-search-result-context')?.textContent === 'beta');
+  assert.ok(betaResult);
+  act(() => { click(betaResult!); });
+  assert.equal(document.activeElement?.getAttribute('aria-label'), 'Max concurrent requests for beta');
+  assert.equal(menu.querySelector('[data-settings-provider="beta"] [aria-expanded]')?.getAttribute('aria-expanded'), 'true');
+  assert.equal(menu.querySelector('[data-settings-provider="alpha"] [aria-expanded]')?.getAttribute('aria-expanded'), 'false');
+});
+
 test('provider search expands the identified provider before focusing its control', () => {
   mount([], [{ id: 'm', name: 'M', provider: 'test', reasoning: false, inputKinds: ['text'] }], undefined, {
     prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { test: { maxConcurrentRequests: 3 } } },

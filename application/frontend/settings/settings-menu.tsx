@@ -286,7 +286,7 @@ function buildSettingsSearchIndex(
     for (const label of PROVIDER_SETTING_LABELS) {
       entries.push({ type: 'jump', id: `concurrency:${provider}:${label}`, label,
         section: 'providers', tab: 'models', provider,
-        haystack: `models providers ${provider} ${label}`.toLowerCase() });
+        haystack: `models providers ${provider} ${label} provider limits concurrency maxconcurrent max concurrent queuewait queue wait headerwait header wait`.toLowerCase() });
     }
   }
   pushSettings(HISTORY_COMPACTION_BEHAVIOR_SETTING_LABELS, 'context', 'history compaction');
@@ -871,8 +871,10 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   const q = query.trim().toLowerCase();
   const searchResults = useMemo(() => {
     if (!q) return { jumps: [], toggles: [] };
-    const jumps = searchIndex.filter((e): e is SearchJumpEntry => e.type === 'jump' && e.haystack.includes(q));
-    const toggles = searchIndex.filter((e): e is SearchToggleEntry => e.type === 'toggle' && e.haystack.includes(q));
+    const queryTokens = q.split(/\s+/).filter(Boolean);
+    const matches = (entry: SearchEntry) => queryTokens.every((token) => entry.haystack.includes(token));
+    const jumps = searchIndex.filter((e): e is SearchJumpEntry => e.type === 'jump' && matches(e));
+    const toggles = searchIndex.filter((e): e is SearchToggleEntry => e.type === 'toggle' && matches(e));
     return { jumps, toggles };
   }, [q, searchIndex]);
 
