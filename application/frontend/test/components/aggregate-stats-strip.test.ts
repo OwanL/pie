@@ -12,6 +12,7 @@ import {
   ProviderLegend,
   aggregateStatsSignature,
   todayCostTooltipNode,
+  tokensTooltipNode,
   weekCostTooltipNode,
   userInputTooltipNode,
   workTooltipNode,
@@ -345,6 +346,11 @@ test('daily and weekly cost tooltips render canonical graphs and token counts', 
   const todayHtml = renderToString(todayCostTooltipNode(stats));
   const weekHtml = renderToString(weekCostTooltipNode(stats));
 
+  for (const html of [todayHtml, weekHtml]) {
+    assert.match(html, /API-equivalent estimate; not an invoice/);
+    assert.doesNotMatch(html, /All-time|subscriptions|invoices are not reconciled/);
+  }
+  assert.match(todayHtml, /Across all sessions · 2 runs/);
   assert.match(todayHtml, /<svg\b/);
   assert.match(todayHtml, /↓1\.2k in {2}↑3\.4k out/);
   assert.match(todayHtml, /model-a/);
@@ -389,6 +395,12 @@ test('aggregate strip keeps cost and token segments clean while provenance detai
 
   const todayTooltip = renderToString(todayCostTooltipNode(stats));
   assert.match(todayTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\) today/);
+  const tokens = renderToString(tokensTooltipNode(stats));
+  assert.match(tokens, /Known subtotal · 1 invocation/);
+  assert.equal((tokens.match(/↓1\.2k/g) ?? []).length, 1);
+  assert.match(tokens, /aria-label="Token chart series"/);
+  assert.match(tokens, />Input<\/button>/);
+  assert.match(tokens, />Output<\/button>/);
   const weekTooltip = renderToString(weekCostTooltipNode(stats));
   assert.match(weekTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\)/);
 });
@@ -686,10 +698,10 @@ test('User-input tooltip uses one continuous adjusted-character line with Today 
   assert.doesNotMatch(html, /<rect\b/, 'the user-input trend is not discretized into bars');
   assert.doesNotMatch(html, />900<\/td>/, 'the chart is scoped to the same seven-day window as its headline');
 
-  assert.match(html, /Composer prompts and successfully answered ask_user option or custom answers are flattened to Unicode-character samples/);
-  assert.match(html, /Values above the rolling 14-day P95 cap are capped/);
-  assert.match(html, /fewer than 5 samples the maximum is used/);
-  assert.match(html, /Cancelled or disabled asks add no sample/);
+  assert.match(html, /Prompt and answered ask_user characters/);
+  assert.match(html, /rolling 14-day P95 cap/);
+  assert.doesNotMatch(html, /fewer than 5 samples/);
+  assert.match(html, /≥ marks incomplete legacy or malformed-answer coverage/);
   assert.doesNotMatch(html, /prompt text|prompt tok|prompts<|answered ask_user<|input tokens/i,
     'count, raw-prompt, token-estimate, and provider-token prose are absent');
 });
@@ -768,7 +780,7 @@ test('User-input tooltip reports cancellations without reverting to answer count
   };
   const html = renderToString(userInputTooltipNode(stats));
   assert.match(html, /1 ask cancelled/);
-  assert.match(html, /Cancelled or disabled asks add no sample/);
+  assert.match(html, /≥ marks incomplete legacy or malformed-answer coverage/);
   assert.doesNotMatch(html, /answered ask_user<|2 answers|answer count|rich-tooltip-legend-val/i);
 });
 

@@ -110,6 +110,17 @@ test('agent-created sessions render a muted bot icon and preserve provenance too
   assert.doesNotMatch(humanHtml, /Agent-created session/);
 });
 
+test('tabs prioritize active unpinned titles without changing pinned sizing or scrolling', async () => {
+  const css = await readFile(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
+  assert.match(css, /--session-tab-min-width: 120px/);
+  assert.match(css, /--session-tab-max-width: 232px/);
+  assert.match(css, /\.session-tab\.active:not\(\.pinned\)\s*\{\s*min-width: 180px;/);
+  assert.match(css, /\.session-tab\.pinned\s*\{[^}]*min-width: 40px;[^}]*max-width: 40px;[^}]*flex: 0 0 40px;/);
+  assert.match(css, /\.session-tab-main\s*\{[^}]*padding: 0 6px 0 10px;/);
+  assert.match(css, /\.session-tab-label\s*\{[^}]*text-overflow: ellipsis;[^}]*font-size: 12px;/);
+  assert.match(css, /\.session-tabs-strip\s*\{[^}]*overflow-x: auto;/);
+});
+
 test('agent icon stays muted without a surface or accent style', async () => {
   const tabsCss = await readFile(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
 

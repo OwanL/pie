@@ -336,6 +336,11 @@ body.session-tab-dragging {
   z-index: 2;
 }
 
+/* Keep the current title readable before inactive tabs force scrolling. */
+.session-tab.active:not(.pinned) {
+  min-width: 180px;
+}
+
 .session-tab.active .session-tab-shell {
   box-shadow:
     inset 0 0 0 1px var(--session-tab-active-outline),
@@ -416,7 +421,7 @@ body.session-tab-dragging {
   min-width: 0;
   flex: 1 1 auto;
   width: 0;
-  padding: 0 8px 0 12px;
+  padding: 0 6px 0 10px;
   border: none;
   background: transparent;
   cursor: pointer;

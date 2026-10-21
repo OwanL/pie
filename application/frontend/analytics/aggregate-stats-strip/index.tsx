@@ -433,7 +433,7 @@ export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
         <span>Estimated token cost today</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
-      <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
+      <div class="rich-tooltip-sub">API-equivalent estimate; not an invoice</div>
       <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>
       {!!s.billableAccounting && (
         s.billableAccounting.todayUnknownInvocationCount > 0
@@ -457,13 +457,6 @@ export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
           models: modelValuesForProvider(s.todayCostSeries, p.provider, formatCostAdaptive),
         }))} />
       )}
-      <div class="rich-tooltip-sub">
-        All-time {formatCostAdaptive(s.totalCost)} · {s.runCount} runs · {s.sessionCount} sessions
-        {!!s.billableAccounting && (s.billableAccounting.unknownInvocationCount > 0
-          || s.billableAccounting.unpricedInvocationCount > 0)
-          ? ` · incomplete: ${s.billableAccounting.unknownInvocationCount} unknown, ${s.billableAccounting.unpricedInvocationCount} unpriced`
-          : ''}
-      </div>
     </div>
   );
 }
@@ -477,7 +470,7 @@ export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
         <span>Estimated token cost (7d)</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.weekCost)}</span>
       </div>
-      <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
+      <div class="rich-tooltip-sub">API-equivalent estimate; not an invoice</div>
       <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
       {tokenSummary && <div class="rich-tooltip-sub">Token counts by provider · {tokenSummary}</div>}
       {!!s.billableAccounting && (s.billableAccounting.weekUnknownInvocationCount > 0
@@ -504,7 +497,7 @@ export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
   );
 }
 
-function tokensTooltipNode(s: AggregateStats): JSX.Element {
+export function tokensTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
   return <TokensTooltip stats={s} />;
 }
@@ -521,7 +514,6 @@ function TokensTooltip({ stats }: { stats: AggregateStats }): JSX.Element {
           ↓{formatCompactTokens(stats.todayInputTokens)} · ↑{formatCompactTokens(stats.todayOutputTokens)}
         </span>
       </div>
-      <div class="rich-tooltip-sub">↓{formatCompactTokens(stats.todayInputTokens)} in  ·  ↑{formatCompactTokens(stats.todayOutputTokens)} out</div>
       {(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 && (
         <div class="rich-tooltip-sub">
           Known subtotal · {stats.billableAccounting?.todayInstrumentationGapInvocationCount} invocation(s) have incomplete token usage
@@ -656,7 +648,7 @@ export function userInputTooltipNode(s: AggregateStats): JSX.Element {
         />
       </div>
       <div class="rich-tooltip-sub aggregate-strip-user-input-note">
-        Composer prompts and successfully answered ask_user option or custom answers are flattened to Unicode-character samples. Values above the rolling 14-day P95 cap are capped; with fewer than 5 samples the maximum is used, so no value is adjusted. Cancelled or disabled asks add no sample. ≥ marks incomplete legacy or malformed-answer coverage.
+        Prompt and answered ask_user characters, adjusted by the rolling 14-day P95 cap. ≥ marks incomplete legacy or malformed-answer coverage.
       </div>
     </div>
   );
