@@ -20,6 +20,7 @@ import {
 function installFakeTimers(): {
   scheduled: Map<number, { callback: () => void; delay: number }>;
   fireByDelay(delay: number): void;
+  fireOptionalByDelay(delay: number): boolean;
   restore(): void;
 } {
   const originals = {
@@ -47,6 +48,13 @@ function installFakeTimers(): {
       assert.ok(match, `expected a ${delay}ms timer`);
       scheduled.delete(match[0]);
       match[1].callback();
+    },
+    fireOptionalByDelay(delay) {
+      const match = [...scheduled].find(([, timer]) => timer.delay === delay);
+      if (!match) return false;
+      scheduled.delete(match[0]);
+      match[1].callback();
+      return true;
     },
     restore() {
       globalThis.setTimeout = originals.globalSet;
@@ -329,4 +337,100 @@ test('tooltip description is cleaned up and click activation is preserved', () =
   act(() => fire('contextmenu'));
   assert.equal(anchor.getAttribute('aria-describedby'), 'existing-help');
   assert.equal(host.querySelector('[data-testid="image-path-preview"]'), null);
+});
+
+test('focus moving from the anchor through the preview image and out dismisses and cleans the description', () => {
+  anchor.tabIndex = 0;
+  act(() => fire('focusin'));
+  act(() => timers.fireByDelay(350));
+  const request = posts.find((post) => post.type === 'requestImagePreview');
+  assert.ok(request && request.type === 'requestImagePreview');
+  act(() => receiveImagePreviewResult({
+    type: 'imagePreviewResult',
+    requestId: request.requestId,
+    sessionPath: request.sessionPath,
+    viewGeneration: 1,
+    status: 'ready',
+    data: { mimeType: 'image/png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' },
+  }));
+  const popover = host.querySelector<HTMLElement>('[data-testid="image-path-preview"]');
+  assert.ok(popover);
+  assert.equal(anchor.getAttribute('aria-describedby'), request.requestId);
+  const image = popover.querySelector('img');
+  assert.ok(image);
+
+  // Tab from the anchor into the preview image: focus ownership transfers.
+  act(() => fire('focusout', anchor, image));
+  act(() => fire('focusin', image, anchor));
+  assert.equal(timers.fireOptionalByDelay(220), false);
+  assert.ok(host.querySelector('[data-testid="image-path-preview"]'));
+
+  // Focus leaves the preview image entirely: the release schedules dismissal.
+  act(() => fire('focusout', image, document.body));
+  act(() => timers.fireByDelay(220));
+  assert.equal(host.querySelector('[data-testid="image-path-preview"]'), null);
+  assert.equal(anchor.getAttribute('aria-describedby'), null);
+});
+
+test('pointer out does not close a preview while the preview image holds focus', () => {
+  const request = startPointerPreview();
+  act(() => receiveImagePreviewResult({
+    type: 'imagePreviewResult',
+    requestId: request.requestId,
+    sessionPath: request.sessionPath,
+    viewGeneration: 1,
+    status: 'ready',
+    data: { mimeType: 'image/png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' },
+  }));
+  const popover = host.querySelector<HTMLElement>('[data-testid="image-path-preview"]');
+  assert.ok(popover);
+  const image = popover.querySelector('img');
+  assert.ok(image);
+
+  act(() => fire('focusin', image, anchor));
+  act(() => {
+    fire('pointerout', anchor, document.body);
+    fire('pointerout', popover, document.body);
+    fire('mouseleave', popover, document.body);
+  });
+  assert.equal(timers.fireOptionalByDelay(220), false);
+  assert.ok(host.querySelector('[data-testid="image-path-preview"]'));
+
+  act(() => fire('focusout', image, document.body));
+  act(() => timers.fireByDelay(220));
+  assert.equal(host.querySelector('[data-testid="image-path-preview"]'), null);
+  assert.equal(anchor.getAttribute('aria-describedby'), null);
+});
+
+test('Escape dismisses while the preview image holds focus and restores prior description', () => {
+  anchor.setAttribute('aria-describedby', 'existing-help');
+  const request = startPointerPreview();
+  act(() => receiveImagePreviewResult({
+    type: 'imagePreviewResult',
+    requestId: request.requestId,
+    sessionPath: request.sessionPath,
+    viewGeneration: 1,
+    status: 'ready',
+    data: { mimeType: 'image/png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' },
+  }));
+  const popover = host.querySelector<HTMLElement>('[data-testid="image-path-preview"]');
+  assert.ok(popover);
+  const image = popover.querySelector('img');
+  assert.ok(image);
+  act(() => fire('focusin', image, anchor));
+
+  act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+  assert.equal(host.querySelector('[data-testid="image-path-preview"]'), null);
+  assert.equal(anchor.getAttribute('aria-describedby'), 'existing-help');
+});
+
+test('keyboard-focused anchor blurring outside schedules dismissal without pointer involvement', () => {
+  anchor.tabIndex = 0;
+  act(() => fire('focusin'));
+  act(() => timers.fireByDelay(350));
+  assert.ok(host.querySelector('[data-testid="image-path-preview"]'));
+  act(() => fire('focusout', anchor, document.body));
+  act(() => timers.fireByDelay(220));
+  assert.equal(host.querySelector('[data-testid="image-path-preview"]'), null);
+  assert.equal(anchor.getAttribute('aria-describedby'), null);
 });

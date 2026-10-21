@@ -24,10 +24,13 @@ export function ErrorDetailWithFallback({ message }: { message: ChatMessage }) {
 
 export function ErrorDetail({ detail, onDismiss }: { detail: string; onDismiss?: () => void }) {
   const [expanded, setExpanded] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+  // Dismissal stays scoped to the exact detail string it was invoked for: a
+  // rerender with the same error keeps the dismissal, but a new error (the
+  // detail evolves) must surface again — never reset on every rerender.
+  const [dismissedDetail, setDismissedDetail] = useState<string | null>(null);
   const isLong = detail.length > ERROR_TRUNCATE;
 
-  if (dismissed) return null;
+  if (dismissedDetail === detail) return null;
 
   return (
     <div class="message-error-detail">
@@ -48,7 +51,7 @@ export function ErrorDetail({ detail, onDismiss }: { detail: string; onDismiss?:
         >
           Copy
         </button>
-        <button class="message-error-detail-btn" onClick={() => { if (onDismiss) onDismiss(); else setDismissed(true); }} title="Dismiss" aria-label="Dismiss error detail">✕</button>
+        <button class="message-error-detail-btn" onClick={() => { if (onDismiss) onDismiss(); else setDismissedDetail(detail); }} title="Dismiss" aria-label="Dismiss error detail">✕</button>
       </span>
     </div>
   );

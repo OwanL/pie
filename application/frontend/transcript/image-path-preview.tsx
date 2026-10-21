@@ -34,6 +34,7 @@ interface ActivePreview {
   pointerOver: boolean;
   focused: boolean;
   popoverHovered: boolean;
+  popoverFocused: boolean;
   showTimer?: number;
   hideTimer?: number;
   timeout?: number;
@@ -111,11 +112,13 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
     };
 
     const scheduleDismiss = (owner: ActivePreview) => {
-      if (owner.pointerOver || owner.focused || owner.popoverHovered || owner.hideTimer !== undefined) return;
+      if (owner.pointerOver || owner.focused || owner.popoverHovered || owner.popoverFocused
+        || owner.hideTimer !== undefined) return;
       owner.hideTimer = window.setTimeout(() => {
         owner.hideTimer = undefined;
         if (activeRef.current === owner
-          && !owner.pointerOver && !owner.focused && !owner.popoverHovered) dismiss();
+          && !owner.pointerOver && !owner.focused && !owner.popoverHovered
+          && !owner.popoverFocused) dismiss();
       }, DISMISS_DELAY_MS);
     };
 
@@ -142,6 +145,7 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
         pointerOver: source === 'pointer',
         focused: source === 'focus',
         popoverHovered: false,
+        popoverFocused: false,
       };
       activeRef.current = owner;
       owner.showTimer = window.setTimeout(() => {
@@ -217,13 +221,33 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
     };
     const onFocusIn = (event: FocusEvent) => {
       const anchor = pathElement(event.target, root);
-      if (anchor) beginPreview(anchor, 'focus');
+      if (anchor) {
+        beginPreview(anchor, 'focus');
+        return;
+      }
+      // Focus entering the preview popover (its image/button) transfers the
+      // anchor's focus claim so the anchor can release its own ownership.
+      const owner = activeRef.current;
+      if (owner && popoverRef.current?.contains(event.target as Node)) owner.popoverFocused = true;
     };
     const onFocusOut = (event: FocusEvent) => {
       const owner = activeRef.current;
-      if (!owner || !owner.anchor.contains(event.target as Node)) return;
-      if (event.relatedTarget instanceof Node
-        && (owner.anchor.contains(event.relatedTarget) || popoverRef.current?.contains(event.relatedTarget))) return;
+      if (!owner) return;
+      if (popoverRef.current?.contains(event.target as Node)) {
+        if (event.relatedTarget instanceof Node && popoverRef.current.contains(event.relatedTarget)) return;
+        owner.popoverFocused = false;
+        scheduleDismiss(owner);
+        return;
+      }
+      if (!owner.anchor.contains(event.target as Node)) return;
+      if (event.relatedTarget instanceof Node && owner.anchor.contains(event.relatedTarget)) return;
+      if (event.relatedTarget instanceof Node && popoverRef.current?.contains(event.relatedTarget)) {
+        // Focus is moving into the preview popover: the anchor no longer owns
+        // it, and the popover's focusin takes over so the preview stays open.
+        owner.focused = false;
+        owner.popoverFocused = true;
+        return;
+      }
       owner.focused = false;
       scheduleDismiss(owner);
     };
