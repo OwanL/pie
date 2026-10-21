@@ -35,6 +35,19 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
   const [inputs, setInputs] = useState<ComposerInput[]>(initialInputs);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [pendingTransfers, setPendingTransfers] = useState(0);
+  const transferOwner = useRef({ active: true, pending: 0, tail: Promise.resolve() });
+  useLayoutEffect(() => {
+    const owner = { active: true, pending: 0, tail: Promise.resolve() };
+    transferOwner.current = owner;
+    setPendingTransfers(0);
+    setAttachmentError(null);
+    return () => { owner.active = false; };
+  }, [initialText, initialInputs]);
+  const cancel = useCallback(() => {
+    transferOwner.current.active = false;
+    onCancel();
+  }, [onCancel]);
   // Enter and Save are two independent paths into `onConfirm`, and the host
   // mints a fresh `localId` per submission — so a double-fire issues two edits
   // that both truncate and send. The editor unmounts on the host's next
@@ -57,7 +70,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
   }, []);
 
   const submit = useCallback((nextText: string, nextInputs: ComposerInput[]) => {
-    if (submittedRef.current) return;
+    if (submittedRef.current || !transferOwner.current.active || transferOwner.current.pending > 0) return;
     if (!nextText.trim() && nextInputs.length === 0) return;
     submittedRef.current = true;
     onConfirm(nextText.trim(), nextInputs);
@@ -91,22 +104,43 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
       e.preventDefault();
       submit(text, inputs);
     } else if (e.key === 'Escape') {
-      onCancel();
+      cancel();
     }
-  }, [text, inputs, submit, onCancel]);
+  }, [text, inputs, submit, cancel]);
 
   // Mirrors the composer's `applyComposerTransfer` but appends to LOCAL state
   // (no host RPC). Accepts the same input kinds the composer accepts
   // (imageBlob + filesystemPathRef); arbitrary blob files are rejected and
   // surfaced via `attachmentError`.
   const applyTransfer = useCallback(async (dataTransfer: DataTransfer | null, source: 'drop' | 'paste') => {
-    const { inputs: drafts, rejectedFiles } = await extractComposerInputs(dataTransfer, source);
-    const materialized: ComposerInput[] = drafts.map((draft) => ({
-      ...draft,
-      id: createUuidV4(),
-    }) as ComposerInput);
-    setInputs((prev) => [...prev, ...materialized]);
-    setAttachmentError(formatComposerTransferError(rejectedFiles));
+    const owner = transferOwner.current;
+    if (!owner.active || submittedRef.current) return;
+    owner.pending += 1;
+    setPendingTransfers(owner.pending);
+    setAttachmentError(null);
+    // Start extraction immediately (DataTransfer is event-scoped), but commit
+    // results in gesture order even when later reads finish first.
+    const result = extractComposerInputs(dataTransfer, source).then(
+      (value) => ({ value, error: false as const }),
+      () => ({ value: null, error: true as const }),
+    );
+    const task = owner.tail.then(async () => {
+      const outcome = await result;
+      if (!owner.active) return;
+      if (outcome.error) {
+        setAttachmentError('Could not attach files. Please try again.');
+      } else {
+        const { inputs: drafts, rejectedFiles } = outcome.value;
+        const materialized = drafts.map((draft) => ({ ...draft, id: createUuidV4() }) as ComposerInput);
+        setInputs((prev) => [...prev, ...materialized]);
+        setAttachmentError(formatComposerTransferError(rejectedFiles));
+      }
+    }).finally(() => {
+      owner.pending -= 1;
+      if (owner.active) setPendingTransfers(owner.pending);
+    });
+    owner.tail = task;
+    await task;
   }, []);
 
   const handlePaste = useCallback((event: ClipboardEvent) => {
@@ -166,11 +200,11 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
           {/* In-flow footer region below the scrolling textarea (same shell,
               never an overlay): actions remain anchored at the bottom-right. */}
           <div class="inline-editor-actions">
-            <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>
+            <button class="action-btn secondary" type="button" onClick={cancel}>Cancel</button>
             <button
               class="action-btn primary"
               type="button"
-              disabled={!text.trim() && inputs.length === 0}
+              disabled={pendingTransfers > 0 || (!text.trim() && inputs.length === 0)}
               onClick={() => submit(text, inputs)}
             >{queued ? 'Save' : 'Send'}</button>
           </div>

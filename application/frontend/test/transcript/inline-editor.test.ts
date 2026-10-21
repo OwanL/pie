@@ -12,6 +12,7 @@ Object.defineProperty(globalThis, 'CSS', {
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
+import type { ComposerInput } from '../../../lib/protocol/index.js';
 import { InlineEditor } from '../../transcript/inline-editor';
 import { MessageItemShell } from '../../transcript/message-item/inner';
 
@@ -194,7 +195,7 @@ test('InlineEditor preserves newline, IME, empty submission and Escape safeguard
   key({ key: 'Escape' });
   assert.equal(cancellations, 1);
   assert.equal(key({ key: 'Enter' }).defaultPrevented, true);
-  assert.equal(confirmations, 1);
+  assert.equal(confirmations, 0);
 });
 
 test('InlineEditor permits attachment-only submission and preserves inputs', () => {
@@ -209,6 +210,60 @@ test('InlineEditor permits attachment-only submission and preserves inputs', () 
   act(() => { save.click(); save.click(); });
   assert.deepEqual(confirmations, [{ text: '', inputs }]);
 });
+
+for (const finish of ['send', 'cancel', 'unmount', 'reject'] as const) {
+  test(`pending inline transfers guard submission and settle safely: ${finish}`, async () => {
+    const confirmations: Array<{ text: string; inputs: ComposerInput[] }> = [];
+    act(() => render(h(InlineEditor, {
+      queued: false, initialText: 'draft', initialInputs: [], capturedHeight: null,
+      onConfirm: (text, inputs) => confirmations.push({ text, inputs }), onCancel: () => {},
+    }), container));
+    const textarea = container.querySelector('textarea')!;
+    const send = container.querySelector<HTMLButtonElement>('button.primary')!;
+    const pending = [0, 1].map(() => {
+      let resolve!: (value: ArrayBuffer) => void;
+      let reject!: () => void;
+      const promise = new Promise<ArrayBuffer>((yes, no) => { resolve = yes; reject = no; });
+      return { promise, resolve, reject };
+    });
+    act(() => {
+      pending.forEach((item, index) => {
+        const event = new Event('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'clipboardData', { value: {
+          files: [{ name: `${index}.gif`, type: 'image/gif', arrayBuffer: () => item.promise }],
+        } });
+        textarea.dispatchEvent(event);
+      });
+      send.click();
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    });
+    assert.equal(send.disabled, true);
+    assert.equal(confirmations.length, 0);
+    if (finish === 'cancel') act(() => container.querySelector<HTMLButtonElement>('button.secondary')!.click());
+    if (finish === 'unmount') act(() => render(null, container));
+    await act(async () => { pending[1].resolve(new ArrayBuffer(1)); });
+    if (finish !== 'unmount') assert.equal(send.disabled, true);
+    await act(async () => {
+      if (finish === 'reject') pending[0].reject();
+      else pending[0].resolve(new ArrayBuffer(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(confirmations.length, 0);
+    if (finish === 'unmount') return;
+    act(() => {
+      send.click();
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    });
+    if (finish === 'cancel') {
+      assert.equal(confirmations.length, 0);
+    } else {
+      assert.equal(confirmations.length, 1);
+      assert.equal(confirmations[0].text, 'draft');
+      assert.deepEqual(confirmations[0].inputs.map((input) => input.name), finish === 'reject' ? ['1.gif'] : ['0.gif', '1.gif']);
+      assert.equal(new Set(confirmations[0].inputs.map((input) => input.id)).size, confirmations[0].inputs.length);
+    }
+  });
+}
 
 for (const moved of [false, true]) {
   test('editor removal restores shell only while focus is owned: ' + moved, async () => {
