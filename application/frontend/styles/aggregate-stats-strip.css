@@ -3,8 +3,7 @@
    Focused on recent (today / this-week) + current (live / open) activity.
    Per-provider breakdowns and all-time context live in each segment's scoped
    custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
-   chips. Wide panels keep a single thin line; portrait panels separate the
-   scrollable metrics from always-visible session counts.
+   chips. Wide panels keep a single thin line; all panels retain only complete metrics in strict priority order.
    Custom tooltips are used
    instead of native `title` because the strip re-renders ~7×/sec during
    streaming — native `title` tooltips close on every re-render and flicker. Host-owned: a pure projection of ViewState.aggregateStats
@@ -25,24 +24,38 @@
   letter-spacing: 0.01em;
   color: color-mix(in srgb, var(--panel-foreground) 58%, var(--panel-muted));
   white-space: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
   user-select: none;
 }
 
-.aggregate-strip::-webkit-scrollbar { height: 3px; }
-.aggregate-strip::-webkit-scrollbar-track { background: transparent; }
-.aggregate-strip::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--vscode-scrollbarSlider-background);
+.aggregate-strip-metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-/* Flatten the metrics wrapper into the original desktop flex line. */
-.aggregate-strip-metrics {
-  display: contents;
+.aggregate-strip-item {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.aggregate-strip-item .pie-tooltip-trigger {
+  flex: 0 0 auto;
+  max-width: none;
+}
+
+.aggregate-strip-measurements {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  width: max-content;
+  top: 0;
+  left: 0;
 }
 
 .aggregate-strip--placeholder {
@@ -105,21 +118,6 @@
 .aggregate-strip-user-input-total {
   color: inherit;
   font-variant-numeric: tabular-nums;
-}
-
-/* Keep the user-input and work segments together as one right-aligned status
-   cluster. The tooltip wrappers are the flex items, so the cluster owns the
-   auto margin rather than either inner segment. */
-.aggregate-strip-status-cluster {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-.aggregate-strip-status-cluster .pie-tooltip-trigger {
-  flex-shrink: 0;
 }
 
 .aggregate-strip-user-input-section {
@@ -203,94 +201,4 @@
 
 .aggregate-strip-deferred:hover {
   background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
-}
-
-.aggregate-strip-deferred-icon {
-  font-size: 11px;
-  line-height: 1;
-}
-
-.aggregate-strip-deferred-count {
-  font-size: inherit;
-}
-
-.aggregate-strip-sep {
-  color: color-mix(in srgb, var(--panel-muted) 50%, transparent);
-  flex-shrink: 0;
-}
-
-@media (max-width: 520px) {
-  .aggregate-strip {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0;
-    height: 62px;
-    min-width: 0;
-    font-size: 11px;
-    overflow: hidden;
-  }
-
-  /* Only metrics scroll: provider/deferred segments remain reachable without
-     ever pushing the working/open counts out of the viewport. */
-  .aggregate-strip-metrics {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex: 0 0 33px;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    scrollbar-width: thin;
-    scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
-  }
-
-  /* A narrow, non-intercepting cue; metrics and their focus targets retain
-     their full width. Each fade disappears when its scroll edge is reached. */
-  .aggregate-strip-metrics--fade-left { --aggregate-fade-left: transparent; }
-  .aggregate-strip-metrics--fade-right { --aggregate-fade-right: transparent; }
-  .aggregate-strip-metrics {
-    mask-image: linear-gradient(to right,
-      var(--aggregate-fade-left, #000), #000 10px,
-      #000 calc(100% - 10px), var(--aggregate-fade-right, #000));
-  }
-
-  .aggregate-strip-metrics::-webkit-scrollbar { height: 5px; }
-  .aggregate-strip-metrics::-webkit-scrollbar-track { background: transparent; }
-  .aggregate-strip-metrics::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: var(--vscode-scrollbarSlider-background);
-  }
-
-  .aggregate-strip-metrics > .pie-tooltip-trigger {
-    flex-shrink: 0;
-    max-width: none;
-  }
-
-  .aggregate-strip-status-cluster {
-    display: flex;
-    justify-content: space-between;
-    flex: 0 0 28px;
-    min-width: 0;
-    margin-left: 0;
-  }
-
-  .aggregate-strip-status-sep,
-  .aggregate-strip-status-cluster > .aggregate-strip-sep {
-    display: none;
-  }
-
-  .aggregate-strip-seg {
-    min-height: 28px;
-  }
-
-  .aggregate-strip-counts {
-    padding-left: 0;
-  }
-}
-
-@media (max-width: 520px) and (pointer: coarse) {
-  .aggregate-strip {
-    font-size: 12px;
-  }
 }

@@ -1,8 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { h } from 'preact';
-import renderToString from 'preact-render-to-string';
+import { h, render, type VNode } from 'preact';
+import rawRenderToString from 'preact-render-to-string';
+import { act } from 'preact/test-utils';
+import { installDom } from '../helpers/dom';
+installDom();
+
+function renderToString(node: VNode): string {
+  if (node.type !== AggregateStatsStrip) return rawRenderToString(node);
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
+  };
+  const root = document.createElement('div');
+  document.body.appendChild(root);
+  try {
+    act(() => render(node, root));
+    return root.innerHTML;
+  } finally {
+    act(() => render(null, root));
+    root.remove();
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
+}
 
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
 import type { DeferredTriggerView } from '../../../lib/protocol/index.js';
@@ -119,10 +140,9 @@ test('aggregate stats strip retains all three counts including zeros in order', 
       snoozedSessionCount: count,
       deferredTriggers: [], onOpenDeferredMenu: () => {},
     }));
-    assert.ok(html.includes(count + ' open, ' + count + ' snoozed. Focus for 14-day work trend.'));
-    const counts = html.slice(html.indexOf('class="aggregate-strip-seg aggregate-strip-counts"'));
-    assert.ok(counts.indexOf(count + ' working') < counts.indexOf(count + ' open'));
-    assert.ok(counts.indexOf(count + ' open') < counts.indexOf(count + ' snoozed'));
+    const counts = html.slice(html.indexOf('data-stat="open"'));
+    assert.ok(counts.indexOf(count + ' open') < counts.indexOf(count + ' working'));
+    assert.ok(counts.indexOf(count + ' working') < counts.indexOf(count + ' snoozed'));
     assert.doesNotMatch(html, /aggregate-strip-active-dot/);
   }
 });
@@ -147,7 +167,7 @@ test('aggregate stats strip omits the character indicator while retaining sessio
     onOpenDeferredMenu: () => {},
   }));
   assert.doesNotMatch(html, /aggregate-strip-user-input| chars<\/span>/);
-  assert.match(html, /aggregate-strip-counts"><span>0 working<\/span>.*<span>4 open<\/span>.*<span>0 snoozed<\/span>/);
+  assert.match(html, /data-stat="open".*4 open.*data-stat="working".*0 working.*data-stat="snoozed".*0 snoozed/);
   const productivityTooltip = renderToString(userInputTooltipNode({
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -163,54 +183,15 @@ test('aggregate stats strip omits the character indicator while retaining sessio
   assert.match(productivityTooltip, /1\.4k chars/);
 });
 
-test('aggregate strip separates scrollable metrics from the persistent session-count row', () => {
-  const providers = Array.from({ length: 12 }, (_, index) => ({
-    provider: `long-provider-name-${index}`, activeRequests: index, queuedRequests: 2,
-    maxConcurrentRequests: 20, afterburnSeconds: 0, paused: false,
-    pausedUntilMs: 0, strikeCount: 0,
-  }));
+test('aggregate strip uses one measured priority row and inert measurement copies', () => {
   const html = renderToString(h(AggregateStatsStrip, {
-    stats: {
-      ...EMPTY_AGGREGATE_STATS,
-      ready: true,
-      todayCost: 0.0123,
-      weekCost: 1.25,
-      runningSessionCount: 12,
-      openTabCount: 123,
-      todayProductivity: {
-        ...EMPTY_AGGREGATE_STATS.todayProductivity,
-        adjustedUserInputChars: 1_450,
-        expectedUserInputCharSampleCount: 1,
-      },
-      lastRun: {
-        cost: 0.0045, durationMs: 2_000,
-        startedAt: null, endedAt: null, modelId: 'model', provider: 'provider',
-        inputTokens: 10, outputTokens: 20, turnSeries: [],
-      },
-      providerGate: { enabled: true, providers },
-    },
-    deferredTriggers: [{
-      id: 'pending', sessionPath: '/workspace/session.jsonl',
-      triggers: [{ kind: 'timer', ms: 1000 }], note: 'resume work',
-      registeredAt: '2026-09-03T10:00:00.000Z', deliveryState: 'pending',
-    }],
-    onOpenDeferredMenu: () => {},
+    stats: { ...EMPTY_AGGREGATE_STATS, ready: true }, deferredTriggers: [], onOpenDeferredMenu: () => {},
   }));
-  const metrics = html.match(/<div class="aggregate-strip-metrics">([\s\S]*?)<\/div><span[^>]*class="aggregate-strip-sep aggregate-strip-status-sep"/)?.[1];
-  const status = html.match(/<div class="aggregate-strip-status-cluster">([\s\S]*)/)?.[1];
-  assert.ok(metrics, 'metrics have their own scroll container');
-  assert.ok(status, 'live status is a separate sibling row');
-  for (const segment of ['tdy', 'wk', 'aggregate-strip-tokens', 'aggregate-strip-providers', 'aggregate-strip-deferred']) {
-    assert.ok(metrics.includes(segment), `${segment} stays in the reachable metrics row`);
-  }
-  for (const provider of providers.filter((p) => p.activeRequests > 0)) assert.ok(metrics.includes(provider.provider));
-  assert.match(metrics, /\$0\.0123/);
-  assert.doesNotMatch(metrics, /\$0\.0045|\blast\b|>today /);
-  assert.match(metrics, /<button[^>]*aria-label="1 pending wakeup timer/);
-  assert.doesNotMatch(metrics, /aggregate-strip-user-input|aggregate-strip-counts/);
-  assert.doesNotMatch(status, /aggregate-strip-user-input| chars/);
-  assert.match(status, /12 working<\/span>.*<span>123 open/);
-  assert.doesNotMatch(status, /aggregate-strip-cost|aggregate-strip-providers|aggregate-strip-deferred/);
+  const keys = [...html.matchAll(/data-stat="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(keys, ['today', 'week', 'input', 'output', 'open', 'working', 'snoozed']);
+  assert.doesNotMatch(html, /status-cluster|fade-left|fade-right/);
+  const measurements = html.slice(html.indexOf('class="aggregate-strip-measurements"'));
+  assert.doesNotMatch(measurements, /tabindex|<button|pie-tooltip| id=/);
 });
 
 test('provider concurrency hides idle and unlimited capacity, including queued or paused providers', () => {
@@ -259,8 +240,7 @@ test('provider segment and its separator disappear when no capacity is visible o
       onOpenDeferredMenu: () => {},
     }));
     assert.doesNotMatch(html, /aggregate-strip-providers|Provider concurrency:/);
-    assert.equal((html.match(/class="aggregate-strip-sep"/g) ?? []).length, 4,
-      'cost/token and status separators remain');
+    assert.equal((html.match(/class="aggregate-strip-sep"/g) ?? []).length, 0);
   }
 });
 
@@ -301,17 +281,27 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
 
   const segmentTags = [...html.matchAll(/<span[^>]*class="[^"]*aggregate-strip-seg[^"]*"[^>]*>/g)].map((match) => match[0]);
   const focusableSegments = segmentTags.filter((tag) => tag.includes('tabindex="0"') && tag.includes('aria-label="'));
-  assert.equal(focusableSegments.length, 5, 'today, week, tokens, provider gate, and work are focusable');
+  assert.equal(focusableSegments.length, 8, 'independent cost, token, status, and provider items are focusable');
   for (const tag of focusableSegments) assert.ok(tag.length > 80, 'each segment has a meaningful label');
   assert.match(html, /Today's estimated token cost/);
   assert.match(html, /Estimated token cost this week/);
-  assert.match(html, /Today's tokens:/);
+  assert.match(html, /Today's input tokens:/);
+  assert.match(html, /Today's output tokens:/);
   assert.doesNotMatch(html, /Latest completed run|\blast\b/);
   assert.match(html, />tdy /);
   assert.doesNotMatch(html, />today /);
   assert.match(html, /Provider concurrency:/);
   assert.doesNotMatch(html, /Today's adjusted user input|character-volume details/);
   assert.match(html, /Focus for 14-day work trend/);
+});
+
+test('independent token popovers open on their own series and retain the toggle', () => {
+  const stats = { ...EMPTY_AGGREGATE_STATS, ready: true };
+  for (const kind of ['input', 'output'] as const) {
+    const html = renderToString(tokensTooltipNode(stats, kind));
+    assert.match(html, new RegExp(`aria-pressed="true">${kind === 'input' ? 'Input' : 'Output'}`));
+    assert.match(html, /Token chart series/);
+  }
 });
 
 test('daily and weekly cost tooltips omit routine scope rows and retain graphs and legends', () => {
