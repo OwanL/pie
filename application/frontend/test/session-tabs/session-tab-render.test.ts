@@ -110,15 +110,51 @@ test('agent-created sessions render a muted bot icon and preserve provenance too
   assert.doesNotMatch(humanHtml, /Agent-created session/);
 });
 
-test('tabs prioritize active unpinned titles without changing pinned sizing or scrolling', async () => {
+test('tabs size to natural content with capped titles, fixed pinned chips, and scroll overflow', async () => {
   const css = await readFile(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
-  assert.match(css, /--session-tab-min-width: 120px/);
+  // No forced widths: the rejected 120px min (and the 180px active min) made
+  // tabs wider than their content or squeezed them; natural sizing + cap +
+  // non-shrink keeps titles readable and lets the strip scroll on overflow.
+  assert.doesNotMatch(css, /--session-tab-min-width/);
+  assert.doesNotMatch(css, /min-width:\s*180px/);
   assert.match(css, /--session-tab-max-width: 232px/);
-  assert.match(css, /\.session-tab\.active:not\(\.pinned\)\s*\{\s*min-width: 180px;/);
+  assert.match(css, /\.session-tab\s*\{[^}]*max-width: var\(--session-tab-max-width\);[^}]*flex: 0 0 auto;/);
   assert.match(css, /\.session-tab\.pinned\s*\{[^}]*min-width: 40px;[^}]*max-width: 40px;[^}]*flex: 0 0 40px;/);
   assert.match(css, /\.session-tab-main\s*\{[^}]*padding: 0 6px 0 10px;/);
   assert.match(css, /\.session-tab-label\s*\{[^}]*text-overflow: ellipsis;[^}]*font-size: 12px;/);
   assert.match(css, /\.session-tabs-strip\s*\{[^}]*overflow-x: auto;/);
+});
+
+test('tab keeps its full title on hover even when the label truncates', () => {
+  const label = 'Investigate why invited users cannot open shared dashboards after reload';
+  const tabPath = '/sessions/truncated';
+  const summary: SessionSummary = {
+    path: tabPath,
+    name: label,
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 3,
+  };
+  const html = renderToString(h(SessionTab, {
+    tabPath,
+    index: 0,
+    sessionByPath: new Map([[tabPath, summary]]),
+    openIndexByPath: new Map([[tabPath, 0]]),
+    runningPathSet: new Set<string>(),
+    startingModelPathSet: new Set<string>(),
+    unreadFinishedPathSet: new Set<string>(),
+    activePath: null,
+    hasPendingExtensionUIRequest: false,
+    isPinned: false,
+    isDropTarget: false,
+    hasDeferredTriggers: false,
+    hasDeferredTimer: false,
+    onContextMenu: () => undefined,
+    onPointerDown: () => undefined,
+    onClick: () => undefined,
+    onClose: () => undefined,
+  }));
+  assert.match(html, new RegExp(`title="${label}"`));
 });
 
 test('agent icon stays muted without a surface or accent style', async () => {

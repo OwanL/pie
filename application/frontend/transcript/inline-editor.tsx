@@ -132,6 +132,12 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
           showAttachmentSummary={inputs.length > 1}
           onRemoveInput={removeInput}
         />
+        {/* Transfer rejections render ABOVE the textarea, in normal flow, so a
+            two-line message grows the editor downward instead of colliding with
+            the overlay strip pinned to the textarea's reserved bottom band. */}
+        {attachmentError && (
+          <div class="composer-hint composer-hint-error" role="status">{attachmentError}</div>
+        )}
         <textarea
           ref={textareaRef}
           class="inline-editor-textarea"
@@ -142,19 +148,20 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
           aria-label="Edit message"
           placeholder="Edit message…"
         />
-        {attachmentError && (
-          <div class="composer-hint composer-hint-error" role="status">{attachmentError}</div>
-        )}
-        {!queued && <p class="inline-editor-hint">Resending replaces later messages.</p>}
-        <p class="inline-editor-hint">Enter {queued ? 'save' : 'save & resend'} · Shift+Enter newline · Esc cancel</p>
-        <div class="inline-editor-actions">
-          <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>
-          <button
-            class="action-btn primary"
-            type="button"
-            disabled={!text.trim() && inputs.length === 0}
-            onClick={() => submit(text, inputs)}
-          >{queued ? 'Save' : 'Save & resend'}</button>
+        <div class="inline-editor-footer">
+          {/* The one durable warning: resending an edited message replaces
+              later turns. Queued edits only update the undelivered message, so
+              they stay warning-free and keep the old bare action strip. */}
+          {!queued && <p class="inline-editor-note" title="Resending replaces later messages.">Resending replaces later messages.</p>}
+          <div class="inline-editor-actions">
+            <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>
+            <button
+              class="action-btn primary"
+              type="button"
+              disabled={!text.trim() && inputs.length === 0}
+              onClick={() => submit(text, inputs)}
+            >{queued ? 'Save' : 'Save & resend'}</button>
+          </div>
         </div>
       </div>
     </div>

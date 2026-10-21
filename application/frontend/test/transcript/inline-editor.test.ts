@@ -101,9 +101,26 @@ for (const queued of [false, true]) {
     }), container));
     assert.equal(container.querySelector('button.primary')?.textContent, queued ? 'Save' : 'Save & resend');
     assert.equal(container.textContent?.includes('Resending replaces later messages.'), !queued);
-    assert.ok(container.textContent?.includes(`Enter ${queued ? 'save' : 'save & resend'} · Shift+Enter newline · Esc cancel`));
+    // The rejected shortcut paragraph stays gone: keys are documented behavior
+    // (Enter saves, Shift+Enter newlines, Esc cancels), tested below.
+    assert.doesNotMatch(container.textContent ?? '', /Shift\+Enter|Esc cancel|Enter save/);
+    // Actions live in the compact overlay strip again.
+    assert.ok(container.querySelector('.inline-editor-footer .inline-editor-actions'));
   });
 }
+
+test('inline editor restores the compact overlay strip with a readable warning', async () => {
+  const css = await readFile(new URL('../../styles/inline-editor.css', import.meta.url), 'utf8');
+  assert.match(css, /\.inline-editor-footer\s*\{[^}]*position:\s*absolute;/);
+  assert.match(css, /\.inline-editor-note\s*\{[^}]*color: color-mix\(in srgb, var\(--panel-warning\) 30%, var\(--panel-user-foreground\)\)/);
+  assert.match(css, /\.inline-editor-actions\s*\{[^}]*margin-left:\s*auto;/);
+  assert.doesNotMatch(css, /\.inline-editor-note\s*\{[^}]*--panel-muted/);
+  assert.doesNotMatch(css, /inline-editor-hint/);
+  assert.match(css, /\.inline-editor-textarea\s*\{[^}]*padding-bottom: 40px;/);
+  // On narrow viewports the note wraps onto its own line with a matching
+  // larger textarea reserve, so scrolling text still cannot hit the strip.
+  assert.match(css, /@media \(max-width: 440px\)[\s\S]*\.inline-editor-textarea\s*\{[^}]*padding-bottom: 66px;/);
+});
 
 test('InlineEditor preserves newline, IME, empty submission and Escape safeguards', () => {
   let confirmations = 0;
