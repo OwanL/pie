@@ -698,6 +698,81 @@ test('search routes display prefs and the visible Mono font label to Appearance'
   }
 });
 
+test('search arrow keys move native result focus and Enter retains button activation', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  act(() => {
+    input.value = 'compaction';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const results = Array.from(menu.querySelectorAll<HTMLElement>('.toolbar-settings-search-result'));
+  act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })));
+  assert.equal(document.activeElement, results[0]);
+  assert.ok(results[0].matches('button'), 'real focus announces the native result name');
+  act(() => results[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })));
+  assert.equal(document.activeElement, results.at(-1));
+  const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  act(() => { input.focus(); input.dispatchEvent(tab); });
+  assert.equal(tab.defaultPrevented, false, 'search does not intercept ordinary Tab');
+});
+
+test('category click clears search without stealing category focus and Server config is not actionable', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  act(() => {
+    input.value = 'server config';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  assert.equal(menu.querySelectorAll('.toolbar-settings-search-result').length, 0);
+  const category = menu.querySelector<HTMLElement>('[data-tab="models"]')!;
+  act(() => { category.focus(); click(category); });
+  assert.equal(input.value, '');
+  assert.equal(document.activeElement, category);
+});
+
+test('compound labels focus keep pickers, bucket add controls, defaults and drop tools', () => {
+  const models: ModelInfo[] = [{ id: 'm', name: 'M', provider: 'test', reasoning: false, inputKinds: ['text'] }];
+  mount([
+    { id: 'skill-pruner', label: 'Skill Pruner', description: '' },
+    { id: 'subagent', label: 'Subagent', description: '' },
+  ], [...models, { ...models[0], id: 'm2', name: 'M2' }], undefined, { pruningCatalog: { skills: ['test-skill'], tools: ['read'] }, prefs: { ...DEFAULT_CHAT_PREFS, subagentBuckets: { small: [{ model: 'm', provider: 'test' }], medium: [], frontier: [] } } });
+  const menu = openMenu();
+  const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  for (const label of ['Omitted skills (never pruned)', 'Omitted tools (never pruned)', 'Small bucket models', 'Medium bucket models', 'Frontier bucket models', 'Default providers', 'Drop tools for subagents']) {
+    act(() => {
+      input.value = label;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const result = menu.querySelector('.toolbar-settings-search-result-jump');
+    assert.ok(result, label);
+    act(() => click(result));
+    assert.notEqual(document.activeElement, input, label);
+    if (label.startsWith('Omitted')) assert.equal(document.activeElement?.getAttribute('aria-label'), label);
+    if (label.endsWith('bucket models')) assert.ok(document.activeElement?.closest('.toolbar-settings-keep-picker-wrap'), label);
+    if (label === 'Drop tools for subagents') assert.equal(document.activeElement?.getAttribute('aria-label'), 'Add a tool name to drop for subagents');
+    if (label === 'Default providers') assert.equal(document.activeElement?.getAttribute('role'), 'checkbox');
+  }
+});
+
+test('provider search expands the identified provider before focusing its control', () => {
+  mount([], [{ id: 'm', name: 'M', provider: 'test', reasoning: false, inputKinds: ['text'] }], undefined, {
+    prefs: { ...DEFAULT_CHAT_PREFS, providerConcurrency: { test: { maxConcurrentRequests: 3 } } },
+  });
+  const menu = openMenu();
+  const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
+  act(() => {
+    input.value = 'afterburn';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const result = menu.querySelector('.toolbar-settings-search-result-jump');
+  assert.match(result?.textContent ?? '', /test/);
+  act(() => click(result));
+  assert.equal(document.activeElement?.getAttribute('aria-label'), 'Afterburn sticky-slot window for test');
+  assert.equal(menu.querySelector('[data-settings-provider="test"] [aria-expanded]')?.getAttribute('aria-expanded'), 'true');
+});
+
 test('search finds continuous settings by name and offers a jump to their tab', () => {
   mount();
   const menu = openMenu();

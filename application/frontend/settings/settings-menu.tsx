@@ -214,6 +214,7 @@ interface SearchJumpEntry {
   tab: SettingsTab;
   /** Extension id to expand inline after switching to the Extensions tab. */
   expandExt?: string;
+  provider?: string;
 }
 
 interface SearchToggleEntry {
@@ -237,6 +238,7 @@ function buildSettingsSearchIndex(
   providers: string[],
   prefs: ChatPrefs,
   onSetPrefs: (p: Partial<ChatPrefs>) => void,
+  providerGateStats: ProviderGateStats,
 ): SearchEntry[] {
   const entries: SearchEntry[] = [];
   const extIds = new Set(availableExtensions.map((e) => e.id));
@@ -279,10 +281,17 @@ function buildSettingsSearchIndex(
   pushSettings(CHAT_DEFAULT_MODEL_SETTING_LABELS, 'models', 'chat default');
   pushSettings(SESSION_TITLES_MODEL_SETTING_LABELS, 'models', 'session titles');
   pushSettings(HISTORY_COMPACTION_MODEL_SETTING_LABELS, 'models', 'compaction summary');
-  pushSettings(PROVIDER_SETTING_LABELS, 'models', 'providers');
+  for (const provider of providers) {
+    if (!(provider in prefs.providerConcurrency) && !providerGateStats.providers.some(metrics => metrics.provider === provider)) continue;
+    for (const label of PROVIDER_SETTING_LABELS) {
+      entries.push({ type: 'jump', id: `concurrency:${provider}:${label}`, label,
+        section: 'providers', tab: 'models', provider,
+        haystack: `models providers ${provider} ${label}`.toLowerCase() });
+    }
+  }
   pushSettings(HISTORY_COMPACTION_BEHAVIOR_SETTING_LABELS, 'context', 'history compaction');
   pushSettings(APPEARANCE_SETTING_LABELS, 'appearance', 'appearance');
-  pushSettings(MCP_SETTING_LABELS, 'mcp', 'mcp');
+  pushSettings(MCP_SETTING_LABELS.filter(label => label !== 'Server config'), 'mcp', 'mcp');
   if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm bash', 'warm-bash');
   if (extIds.has('ask-user')) pushSettings(ASK_USER_SETTING_LABELS, 'extensions', 'ask user', 'ask-user');
   if (hasSkillPruner) {
@@ -489,7 +498,7 @@ function SettingsSearchResults({ query, jumps, toggles, onJump }: SettingsSearch
         >
           <span class="toolbar-settings-search-result-label">{entry.label}</span>
           {entry.section.toLowerCase() !== getTabLabel(entry.tab).toLowerCase() && (
-            <small class="toolbar-settings-search-result-context">{entry.section}</small>
+            <small class="toolbar-settings-search-result-context">{entry.provider ?? entry.section}</small>
           )}
           <span class="toolbar-settings-search-result-meta" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m6 3 5 5-5 5" /></svg></span>
         </button>
@@ -561,6 +570,8 @@ function SettingsTabList({ visibleTabs, effectiveTab, tabpanelId, orientation, t
 
 interface SettingsTabBodyProps {
   effectiveTab: SettingsTab;
+  expandedProvider: string | null;
+  setExpandedProvider: (provider: string | null) => void;
   expandedExt: string | null;
   setExpandedExt: (id: string | null) => void;
   prefs: ChatPrefs;
@@ -688,7 +699,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
 
           <div class="toolbar-settings-section" data-settings-section="providers">
             <div class="toolbar-settings-section-label">Providers</div>
-            <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
+            <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} expandedProvider={props.expandedProvider} onExpandedProviderChange={props.setExpandedProvider} />
           </div>
         </>
       )}
@@ -783,6 +794,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
     [open, availableModels, prefs.providerToggles],
   );
   const [expandedExt, setExpandedExt] = useState<string | null>(null);
+  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
@@ -849,8 +861,8 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   // plus jump entries for the continuous (slider/select/stepper/text) controls,
   // so a single search box can find any setting without hunting through tabs.
   const searchIndex = useMemo<SearchEntry[]>(
-    () => open ? buildSettingsSearchIndex(visibleTabs, availableExtensions, providers, prefs, onSetPrefs) : [],
-    [open, visibleTabs, availableExtensions, providers, prefs, onSetPrefs],
+    () => open ? buildSettingsSearchIndex(visibleTabs, availableExtensions, providers, prefs, onSetPrefs, providerGateStats) : [],
+    [open, visibleTabs, availableExtensions, providers, prefs, onSetPrefs, providerGateStats],
   );
 
   const q = query.trim().toLowerCase();
@@ -870,11 +882,14 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   };
   const selectCategory = (tab: SettingsTab) => {
     setActiveTab(tab);
-    if (queryRef.current) clearSearch();
+    pendingFocusRef.current = null;
+    queryRef.current = '';
+    setQuery('');
   };
   const jumpTo = (entry: SearchJumpEntry) => {
     setActiveTab(entry.tab);
     if (entry.expandExt) setExpandedExt(entry.expandExt);
+    if (entry.provider) setExpandedProvider(entry.provider);
     pendingFocusRef.current = entry;
     queryRef.current = '';
     setQuery('');
@@ -891,8 +906,10 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       const menuBody = settingsMenuRef.current?.querySelector('.toolbar-settings-menu-body');
       // Repeated labels (especially Thinking) only identify a control within
       // its source group. A missing group must not focus another assignment.
-      const body = Array.from(menuBody?.querySelectorAll<HTMLElement>('[data-settings-section]') ?? [])
+      let body = Array.from(menuBody?.querySelectorAll<HTMLElement>('[data-settings-section]') ?? [])
         .find((section) => section.getAttribute('data-settings-section') === pending.section);
+      if (pending.provider) body = Array.from(body?.querySelectorAll<HTMLElement>('[data-settings-provider]') ?? [])
+        .find(row => row.dataset.settingsProvider === pending.provider);
       const controlSelector = 'button:not(.toolbar-settings-help-button), input, select, textarea';
       const controls = body?.querySelectorAll<HTMLElement>(controlSelector);
       destination = Array.from(controls ?? []).find((control) =>
@@ -902,19 +919,25 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
           .find((element) => element.getAttribute('data-settings-label') === pending.label);
         destination = row?.querySelector<HTMLElement>(controlSelector) ?? null;
       }
+      if (!destination && pending.label === 'Default providers') {
+        const heading = Array.from(body?.querySelectorAll<HTMLElement>('.toolbar-settings-ui-group-label') ?? [])
+          .find(element => element.firstChild?.textContent?.trim() === pending.label);
+        const next = heading?.nextElementSibling as HTMLElement | null;
+        destination = next?.matches(controlSelector) ? next : next?.querySelector<HTMLElement>(controlSelector) ?? null;
+      }
       if (!destination) {
         const label = Array.from(body?.querySelectorAll<HTMLElement>('span, label, div') ?? [])
-          .find((element) => element.textContent?.trim() === pending.label
-            && (element.children.length === 0 || element.matches('.toolbar-settings-ui-control-label, .toolbar-settings-item-label')));
-        const row = label?.closest<HTMLElement>('.toolbar-settings-ui-control, .toolbar-settings-item, .toolbar-settings-ext-row');
-        destination = row?.matches(controlSelector) ? row : row?.querySelector<HTMLElement>(controlSelector) ?? null;
+          .find((element) => (element.textContent?.trim() === pending.label || (pending.label.endsWith(' bucket models') && element.classList.contains('toolbar-settings-keep-picker-label') && element.firstChild?.textContent?.trim() === pending.label.replace(' bucket models', '')))
+            && (element.children.length === 0 || element.matches('.toolbar-settings-ui-control-label, .toolbar-settings-item-label, .toolbar-settings-keep-picker-label')));
+        const row = label?.closest<HTMLElement>('.toolbar-settings-ui-control, .toolbar-settings-item, .toolbar-settings-ext-row, .toolbar-settings-keep-picker');
+        destination = row?.matches(controlSelector) ? row : row?.querySelector<HTMLElement>('.toolbar-settings-keep-picker-wrap input, .toolbar-settings-keep-picker-wrap select, .toolbar-settings-keep-picker-wrap button') ?? row?.querySelector<HTMLElement>(controlSelector) ?? null;
       }
     }
     // Host-projected disabling can make a matched control unfocusable. Never
     // abandon keyboard focus on the removed result or jump to a sibling setting.
     if (destination?.matches(':disabled') || destination?.getAttribute('aria-disabled') === 'true') destination = null;
     (destination ?? searchInputRef.current)?.focus();
-  }, [open, searching, effectiveTab, expandedExt]);
+  }, [open, searching, effectiveTab, expandedExt, expandedProvider]);
 
   // The portaled popup has stable category-independent height. Position and
   // height share one measurement on scroll/resize: prefer above the trigger,
@@ -992,6 +1015,21 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Tab') {
+        const active = document.activeElement as HTMLElement | null;
+        // Nested dialogs and model pickers own their own keyboard lifecycle.
+        if (active?.closest('.model-picker-dropdown, [data-provider-subflow="active"]')) return;
+        const menu = settingsMenuRef.current;
+        if (!menu || !active || !menu.contains(active)) return;
+        const controls = Array.from(menu.querySelectorAll<HTMLElement>('button, input, select, textarea, [tabindex]'))
+          .filter(control => control.tabIndex >= 0 && !control.matches(':disabled') && !control.closest('[hidden], [inert]'));
+        const edge = event.shiftKey ? controls[0] : controls[controls.length - 1];
+        if (active === edge) {
+          event.preventDefault();
+          (event.shiftKey ? controls[controls.length - 1] : controls[0])?.focus();
+        }
+        return;
+      }
       if (event.key !== 'Escape') return;
       // If a nested overlay (e.g. the ModelPicker dropdown rendered inside this
       // menu) owns focus, defer to its own Escape handler so only the picker
@@ -1044,6 +1082,20 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
     });
   };
 
+  // Keep native button/checkbox semantics and Tab order. Arrow navigation
+  // moves real focus, so the result's accessible name and state are announced.
+  const onSearchKeyDown = (event: KeyboardEvent) => {
+    if (!searching || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')) return;
+    const target = event.target as HTMLElement;
+    if (target !== searchInputRef.current && !target.closest('.toolbar-settings-search-result')) return;
+    const results = Array.from(settingsMenuRef.current?.querySelectorAll<HTMLButtonElement>('.toolbar-settings-search-result') ?? []);
+    if (!results.length) return;
+    const index = results.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === 'ArrowDown' ? (index + 1) % results.length : (index < 0 ? results.length - 1 : (index - 1 + results.length) % results.length);
+    event.preventDefault();
+    results[next].focus();
+  };
+
   const tabpanelId = 'toolbar-settings-tabpanel';
 
   return (
@@ -1067,7 +1119,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       </Tooltip>
 
       {open && typeof document !== 'undefined' && createPortal(
-        <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Settings">
+        <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Settings" onKeyDown={onSearchKeyDown}>
           <div class="toolbar-settings-header">
             <span class="toolbar-settings-title">Settings</span>
             <button
@@ -1141,6 +1193,8 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
               <RemovedProvidersContext.Provider value={removedProviderIds}>
               <SettingsTabBody
                 effectiveTab={effectiveTab}
+                expandedProvider={expandedProvider}
+                setExpandedProvider={setExpandedProvider}
                 expandedExt={expandedExt}
                 setExpandedExt={setExpandedExt}
                 prefs={prefs}

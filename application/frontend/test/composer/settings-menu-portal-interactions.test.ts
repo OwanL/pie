@@ -69,6 +69,26 @@ function mount() {
   return { setPruningCalls };
 }
 
+test('Tab wraps at outer settings boundaries without affecting ordinary interior Tab', () => {
+  mount();
+  act(() => click(container.querySelector('.toolbar-settings-trigger')));
+  const menu = document.querySelector('.toolbar-settings-menu')!;
+  const controls = Array.from(menu.querySelectorAll<HTMLElement>('button, input, select, textarea, [tabindex]'))
+    .filter(control => control.tabIndex >= 0 && !control.matches(':disabled'));
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  const press = (target: HTMLElement, shiftKey = false) => {
+    const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    act(() => { target.focus(); target.dispatchEvent(event); });
+    return event;
+  };
+  assert.equal(press(last).defaultPrevented, true);
+  assert.equal(document.activeElement, first);
+  assert.equal(press(first, true).defaultPrevented, true);
+  assert.equal(document.activeElement, last);
+  assert.equal(press(controls[1]).defaultPrevented, false);
+});
+
 test('popup geometry recomputes its height on scroll and resize within viewport margins', async () => {
   mount();
   const trigger = container.querySelector('.toolbar-settings-trigger') as HTMLButtonElement;

@@ -199,7 +199,7 @@ function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggle
   const hasConcurrency = !!metrics || provider in prefs.providerConcurrency;
   const controlsId = `provider-concurrency-${useId()}`;
   return (
-    <div class="toolbar-settings-ext-group">
+    <div class="toolbar-settings-ext-group" data-settings-provider={provider}>
       <div class="toolbar-settings-ext-row">
         <SettingCheckbox
           label={provider}
@@ -231,10 +231,14 @@ interface ProvidersSectionProps {
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
   providerGateStats: ProviderGateStats;
+  expandedProvider?: string | null;
+  onExpandedProviderChange?: (provider: string | null) => void;
 }
 
-export function ProvidersSection({ providers, prefs, onSetPrefs, providerGateStats }: ProvidersSectionProps) {
-  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
+export function ProvidersSection({ providers, prefs, onSetPrefs, providerGateStats, expandedProvider: controlledProvider, onExpandedProviderChange }: ProvidersSectionProps) {
+  const [localProvider, setLocalProvider] = useState<string | null>(null);
+  const expandedProvider = controlledProvider === undefined ? localProvider : controlledProvider;
+  const setExpandedProvider = onExpandedProviderChange ?? setLocalProvider;
   const metricsByProvider = new Map(
     providerGateStats.providers.map((m) => [m.provider, m]),
   );
