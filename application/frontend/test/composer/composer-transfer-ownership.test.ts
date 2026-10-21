@@ -62,3 +62,38 @@ for (const source of ['paste', 'drop'] as const) {
     });
   }
 }
+
+for (const transition of ['same', 'session', 'alias'] as const) {
+  test(`attachment error ownership: ${transition}`, async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let composer!: ReturnType<typeof useComposerInput>;
+    function Harness({ path }: { path: string }) {
+      composer = useComposerInput({ busy: false, onSend: () => {}, onRetrySend: () => {},
+        pendingComposerInputsLength: 0, initialRows: 1, sessionPath: path, draftText: '',
+        postMessage: () => {}, onAddInput: () => {}, supportsImageInputs: false,
+        commandsAvailable: true });
+      return null;
+    }
+    const initialPath = transition === 'alias' ? '__pending__:A' : '/A';
+    const image = (arrayBuffer: () => Promise<ArrayBuffer>) => ({ files: [
+      { name: 'image.gif', type: 'image/gif', size: 1, arrayBuffer },
+    ] }) as unknown as DataTransfer;
+    let resolve!: (buffer: ArrayBuffer) => void;
+    try {
+      act(() => render(h(Harness, { path: initialPath }), container));
+      await act(async () => { await composer.applyComposerTransfer(image(async () => new ArrayBuffer(1)), 'paste'); });
+      const error = composer.attachmentError;
+      assert.match(error ?? '', /does not support image/);
+      const completion = composer.applyComposerTransfer(image(() => new Promise((done) => { resolve = done; })), 'drop');
+      const path = transition === 'session' ? '/B' : transition === 'alias' ? '/A' : initialPath;
+      act(() => render(h(Harness, { path }), container));
+      assert.equal(composer.attachmentError, transition === 'session' ? null : error);
+      await act(async () => { resolve(new ArrayBuffer(1)); await completion; });
+      assert.equal(composer.attachmentError, transition === 'session' ? null : error);
+    } finally {
+      act(() => render(null, container));
+      container.remove();
+    }
+  });
+}

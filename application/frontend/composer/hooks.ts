@@ -371,6 +371,10 @@ export function useComposerInput({
       return;
     }
 
+    // Attachment feedback belongs to the logical session, not the mounted
+    // composer. Pending-path resolution above preserves that ownership.
+    if (prevSessionPath !== sessionPath) setAttachmentError(null);
+
     // A genuine tab switch can happen inside the 300 ms draft debounce. Its
     // cleanup cancels the pending timer before it posts, so explicitly commit
     // the outgoing session's live value at the ownership boundary. Without
