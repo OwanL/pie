@@ -15,6 +15,7 @@ import { buildUserPromptEntries } from './user-prompt-context';
 import { isReusableTranscriptMeasurementElement, isReusableTranscriptMeasurementRow, transcriptMeasurementCache } from './transcript-measurement-cache';
 import { ToolCallItem } from './tool-call-item';
 import { useTranscriptScroll } from './use-transcript-scroll';
+import { useTranscriptLatestDock } from './use-transcript-latest-dock';
 import { useTranscriptScrollAnchor } from './use-transcript-scroll-anchor';
 import { handleTranscriptClick } from './transcript-click-handler';
 import { cx } from '../lib/components/cx';
@@ -484,6 +485,15 @@ export function TranscriptVirtualList({
     totalSize,
   });
 
+  const latestDock = useTranscriptLatestDock({
+    scrollRef,
+    autoFollowRef,
+    hasNewer: transcriptWindow.hasNewer,
+    hidden: isInitialPositioning,
+    totalSize,
+    isAtBottom,
+  });
+
   // Disable tanstack virtual's built-in scroll-position correction. Scroll
   // ownership must be exclusive: bottom-follow is handled by exact pinning and
   // the scrolled-up viewport is handled by useTranscriptScrollAnchor below.
@@ -584,18 +594,6 @@ export function TranscriptVirtualList({
           </div>
         </div>
 
-        {(!isAtBottom || transcriptWindow.hasNewer) && (
-          <button
-            type="button"
-            class="transcript-jump-latest"
-            aria-label="Jump to latest"
-            title="Jump to latest"
-            onClick={jumpToLatest}
-          >
-            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
-            <span>Latest</span>
-          </button>
-        )}
         <MessageRail
           rows={rows}
           virtualizer={virtualizer}
@@ -614,6 +612,20 @@ export function TranscriptVirtualList({
           hidden={isInitialPositioning}
         />
       </div>
+      {latestDock.visible && (
+        <div class="transcript-latest-dock" ref={latestDock.dockRef}>
+          <button
+            type="button"
+            class="transcript-jump-latest"
+            aria-label="Jump to latest"
+            title="Jump to latest"
+            onClick={jumpToLatest}
+          >
+            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
+            <span>Latest</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

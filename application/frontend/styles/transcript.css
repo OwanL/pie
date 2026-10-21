@@ -248,12 +248,16 @@
 }
 
 /* ── Jump-to-latest button ───────────────────────────────────────────────── */
-/* Floats inside the transcript viewport, never over the composer or footer. */
+/* Conditional normal-flow dock: never covers transcript text, and reserves
+   no space while following the latest content. */
+.transcript-latest-dock {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 24px 4px 8px;
+}
 
 .transcript-jump-latest {
-  position: absolute;
-  right: 24px;
-  bottom: 8px;
   min-width: 32px;
   height: 32px;
   display: inline-flex;
@@ -271,7 +275,6 @@
   line-height: 1;
   padding: 0 12px;
   cursor: pointer;
-  z-index: 280;
   box-shadow: var(--panel-shadow-sm);
   transition:
     background var(--panel-transition-fast),

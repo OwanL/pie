@@ -43,7 +43,11 @@ test('markdown tables and code scroll locally without forcing ordinary words to 
   assert.match(css, /\.message-body pre\s*\{[^}]*white-space:\s*pre;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*normal;/);
   assert.match(css, /\.message-body table\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*100%;/);
   assert.match(css, /\.message-body td\s*\{[^}]*min-width:\s*12ch;[^}]*max-width:\s*40ch;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*break-word;/);
-  assert.match(css, /\.transcript-jump-latest\s*\{[^}]*position:\s*absolute;[^}]*right:\s*24px;[^}]*bottom:\s*8px;/);
+  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*flex:\s*0 0 auto;[^}]*display:\s*flex;[^}]*justify-content:\s*flex-end;/);
+  const latestRule = css.match(/\.transcript-jump-latest\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.doesNotMatch(latestRule, /position:\s*absolute|bottom:|right:/);
+  const source = await readFile(new URL('../../../transcript/virtual-list.tsx', import.meta.url), 'utf8');
+  assert.match(source, /<TranscriptScrollbar[\s\S]*?<\/div>\s*\{latestDock.visible && \(\s*<div class="transcript-latest-dock"/);
 });
 
 async function loadRenderMarkdown() {
@@ -387,12 +391,11 @@ test('transcript.css styles the enhanced code-block affordances', async () => {
   assert.match(css, /\.md-table-wrap\s*\{[\s\S]*?overflow-x:\s*auto;/);
 });
 
-test('jump-to-latest anchors inside the transcript instead of assuming composer or footer height', async () => {
+test('jump-to-latest stays in its flow dock without assuming composer or footer height', async () => {
   const css = await readTranscriptCss();
   const rule = css.match(/\.transcript-jump-latest\s*\{[\s\S]*?\n\}/);
   assert.ok(rule, 'expected .transcript-jump-latest rule in transcript.css');
-  assert.match(rule![0], /position:\s*absolute;/);
-  assert.match(rule![0], /bottom:\s*8px;/);
-  assert.doesNotMatch(rule![0], /--composer-height|position:\s*fixed;/);
+  assert.doesNotMatch(rule![0], /--composer-height|position:\s*(?:fixed|absolute);|bottom:/);
+  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*padding:\s*4px 24px 4px 8px;/);
   assert.match(css, /@media \(pointer: coarse\)\s*\{\s*\.transcript-jump-latest \{ height: 44px;/);
 });
