@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren, RefObject } from 'preact';
+import { useRef } from 'preact/hooks';
 
 import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput, InlineEditDraft } from '../../../lib/protocol/index.js';
 import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
@@ -63,6 +64,17 @@ export function MessageItemShell({
   children,
 }: MessageItemShellProps) {
   const isSyntheticSend = role === 'user' && customType !== undefined && customType !== AGENT_MESSAGE_CUSTOM_TYPE;
+
+  // Persistent per-instance "has entered editing" marker. Any row whose inline
+  // editor has opened must permanently opt out of the entrance animation: the
+  // `[data-editing]` opt-out alone loses its CSS state when the editor closes,
+  // and removing it lets the (already finished) entrance animation restart,
+  // replaying opacity 0→1 as a visible flash on cancel. This attribute is
+  // captured on the row instance so it survives every edit→cancel re-render.
+  const everEditedRef = useRef(false);
+  if (isEditing) {
+    everEditedRef.current = true;
+  }
   return (
     <div
       class={cx(
@@ -88,6 +100,7 @@ export function MessageItemShell({
       data-queued={role === 'user' && status === 'queued' ? 'true' : undefined}
       data-entered={entered ? 'true' : undefined}
       data-editing={isEditing ? 'true' : undefined}
+      data-edited={everEditedRef.current || isEditing ? 'true' : undefined}
       data-streaming={isCurrentlyStreaming ? 'true' : undefined}
       // Keyboard access to the row context menu: the shell is a tab stop so the
       // ContextMenu key / Shift+F10 can open the generic message menu from the

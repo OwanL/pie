@@ -13,12 +13,45 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { InlineEditor } from '../../transcript/inline-editor';
+import { MessageItemShell } from '../../transcript/message-item/inner';
 
-test('restored editing rows show the completed entrance animation without restarting on exit', async () => {
+test('editing rows permanently opt out of the entrance animation (no restart flash on cancel)', async () => {
   const css = await readFile(new URL('../../styles/transcript.css', import.meta.url), 'utf8');
   assert.match(css, /\[data-role\]\[data-entered\]\s*\{\s*animation: panel-entrance/);
-  assert.match(css, /\[data-role\]\[data-editing="true"\]\s*\{\s*animation-delay: calc\(0s - var\(--panel-duration-entrance\)\);\s*animation-play-state: paused;/);
+  assert.match(css, /\[data-role\]\[data-editing="true"\],\s*\[data-role\]\[data-edited="true"\]\s*\{\s*animation: none;/);
+  // The negative-delay "seek and pause" hack must stay gone: it holds the
+  // row at the transparent first frame in some restored states and restarts
+  // the finished animation on cancel because the delay resets.
+  assert.doesNotMatch(css, /animation-delay: calc\(0s - var\(--panel-duration-entrance\)\)/);
   assert.doesNotMatch(css, /\[data-role\]\[data-editing="true"\]\s*\{[^}]*animation:\s*none/);
+});
+
+const shellProps = (isEditing: boolean) => ({
+  messageId: 'm1',
+  renderIdentity: 'm1',
+  role: 'user' as const,
+  status: 'completed' as const,
+  isCurrentlyStreaming: false,
+  isClickableUserMsg: true,
+  isEditing,
+});
+
+test('MessageItemShell keeps the edited marker after exiting edit mode (persistent opt-out)', () => {
+  act(() => { render(h(MessageItemShell, shellProps(true), 'content'), container); });
+  const shell = container.querySelector<HTMLElement>('[data-role="user"]');
+  assert.ok(shell);
+  assert.equal(shell.hasAttribute('data-editing'), true);
+  assert.equal(shell.getAttribute('data-edited'), 'true');
+
+  act(() => { render(h(MessageItemShell, shellProps(false), 'content'), container); });
+  assert.equal(shell.hasAttribute('data-editing'), false);
+  assert.equal(shell.getAttribute('data-edited'), 'true');
+});
+
+test('MessageItemShell never claims the edited marker before editing', () => {
+  act(() => { render(h(MessageItemShell, shellProps(false), 'content'), container); });
+  assert.equal(container.querySelector('[data-edited="true"]'), null);
+  assert.equal(container.querySelector('[data-editing="true"]'), null);
 });
 
 let container: HTMLElement;
