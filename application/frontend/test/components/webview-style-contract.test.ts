@@ -364,7 +364,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(toolCallCss, /@media \(forced-colors: active\)[\s\S]*?\.tool-call-card\[data-provisional="true"\]/);
   assert.match(transcriptCss, /\.reasoning-block\[data-streaming="true"\]\[data-provisional="true"\]\s*\{[^}]*border-inline-start:\s*2px/);
   assert.match(transcriptCss, /\.message-item-shell\[data-role="user"\]\[data-queued="true"\] \.status-chip-neutral\s*\{[^}]*color:\s*var\(--panel-user-foreground\);[^}]*opacity:\s*1/);
-  assert.doesNotMatch(toolCallCss, /(?:linear|radial)-gradient|backdrop-filter|filter:\s*blur/);
+  // Gradient *paint* and blur decorations are banned on tool cards; the one
+  // allowed gradient is the functional mask-image overflow cue (Tabs-4 edge
+  // fade on clipped tool-output panes), not a painted surface.
+  assert.doesNotMatch(toolCallCss, /(?:background|filter|backdrop-filter)\s*:[^;{}]*?(?:linear|radial)-gradient/);
+  assert.doesNotMatch(toolCallCss, /backdrop-filter|filter:\s*blur/);
 
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
   // The measured strict-priority row allocates complete items instead of

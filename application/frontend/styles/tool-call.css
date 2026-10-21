@@ -444,6 +444,29 @@
   white-space: pre;
 }
 
+/* Horizontal-overflow affordance (same conditional edge-fade mask pattern as
+   the session tab strip): while a tool output pane has clipped columns
+   towards an edge, fade that edge so the cut reads as "scrolls" rather than
+   dead truncation. No wrap change; no global CSS. Direction classes are
+   measured and toggled by ResizablePre / TerminalOutput from live
+   scrollWidth/scrollLeft, so only the genuinely clipped edge fades and the
+   fade clears once the user reaches the end. */
+.tool-call-pre.fade-left,
+.tool-call-terminal-pre.fade-left {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 14px);
+  mask-image: linear-gradient(to right, transparent 0, black 14px);
+}
+.tool-call-pre.fade-right,
+.tool-call-terminal-pre.fade-right {
+  -webkit-mask-image: linear-gradient(to left, transparent 0, black 14px);
+  mask-image: linear-gradient(to left, transparent 0, black 14px);
+}
+.tool-call-pre.fade-left.fade-right,
+.tool-call-terminal-pre.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 14px, black calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, black 14px, black calc(100% - 14px), transparent 100%);
+}
+
 /* Tool-call result pres are vertically scrollable + resizable (see
    ResizablePre / useResizableHeight). The default max-height applies until
    the user drags a resize handle, after which an inline height takes over. */
@@ -453,18 +476,27 @@
   overscroll-behavior: contain;
 }
 
-/* Desktop result panes get an explicit thin inner scrollbar: compact thumbs
-   (rather than the default full-width bar) while the pane itself stays
-   independently resizable and scrollable. Coarse pointers keep native
-   overlay scrollbars and their touch behaviour. */
+/* Desktop tool-output panes (resizable result pres + terminal output) get an
+   explicit thin inner scrollbar: a subtle but always-visible thumb whenever
+   the pane scrolls in either axis. The previous `--panel-border` thumb sat
+   at ~13% contrast on the dark code surface — invisible at rest, so clipped
+   horizontal lines had no affordance at all. The slider tokens match the
+   webview-wide scrollbar styling and stay themeable. Coarse pointers keep
+   native overlay scrollbars and their touch behaviour. */
 @media (hover: hover) and (pointer: fine) {
-  .tool-call-pre.tool-call-pre-resizable {
+  .tool-call-pre.tool-call-pre-resizable,
+  .tool-call-terminal-pre {
     scrollbar-width: thin;
-    scrollbar-color: var(--panel-border) transparent;
+    scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
   }
-  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar { width: 6px; height: 6px; }
-  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-track { background: transparent; }
-  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar,
+  .tool-call-terminal-pre::-webkit-scrollbar { width: 6px; height: 6px; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-track,
+  .tool-call-terminal-pre::-webkit-scrollbar-track { background: transparent; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-thumb,
+  .tool-call-terminal-pre::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 4px; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-thumb:hover,
+  .tool-call-terminal-pre::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); }
 }
 
 /* The opt-in cue lives outside selectable code and never adds desktop noise. */
@@ -563,6 +595,14 @@
 
 .tool-call-result-image {
   display: block;
+  /* The container is a column flex whose default `align-items: stretch`
+     widens the element to full card width; once the max-height clamp breaks
+     the box/bitmap ratio, `object-fit: contain` paints wide dark
+     `--panel-code-surface` bands around the bitmap. Pinning the element to
+     the start edge keeps the box on the bitmap's intrinsic aspect ratio
+     (bounded by max-width/max-height, 1:1 pixel quality, no letterboxing,
+     no cropping), while text parts above/below still stretch full width. */
+  align-self: flex-start;
   max-width: 100%;
   max-height: var(--expanded-section-max-height);
   height: auto;

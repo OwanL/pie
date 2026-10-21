@@ -72,13 +72,46 @@ test('failed ordinary results take a quiet danger edge through existing data-sta
   assert.doesNotMatch(css, /\.tool-call-card\[data-status="failed"\][^}]*content:/);
 });
 
-test('desktop resizable result panes scroll with an explicit thin inner scrollbar', async () => {
+test('desktop tool output panes scroll with an explicit thin always-visible scrollbar', async () => {
   const css = await readToolCallCss();
-  const block = css.slice(css.indexOf('/* Desktop result panes get an explicit thin inner scrollbar'));
+  const block = css.slice(css.indexOf('/* Desktop tool-output panes'));
   const desktop = block.slice(0, block.indexOf('@media (pointer: coarse)'));
-  assert.match(desktop, /@media \(hover: hover\) and \(pointer: fine\)\s*\{\s*\.tool-call-pre\.tool-call-pre-resizable\s*\{\s*scrollbar-width:\s*thin;\s*scrollbar-color:\s*var\(--panel-border\) transparent;/);
+  assert.match(desktop, /@media \(hover: hover\) and \(pointer: fine\)\s*\{\s*\.tool-call-pre\.tool-call-pre-resizable,\s*\.tool-call-terminal-pre\s*\{\s*scrollbar-width:\s*thin;\s*scrollbar-color:\s*var\(--vscode-scrollbarSlider-background\) transparent;/);
   assert.match(desktop, /::-webkit-scrollbar\s*\{\s*width:\s*6px;\s*height:\s*6px;/);
-  assert.match(desktop, /::-webkit-scrollbar-thumb\s*\{\s*background:\s*var\(--panel-border\);\s*border-radius:\s*4px;/);
+  assert.match(desktop, /::-webkit-scrollbar-thumb\s*\{\s*background:\s*var\(--vscode-scrollbarSlider-background\);\s*border-radius:\s*4px;/);
+});
+
+test('tool output panes fade a genuinely clipped horizontal edge, scoped to the panes', async () => {
+  const css = await readToolCallCss();
+  // The mask is scoped to the tool output panes (no global CSS) and follows
+  // the session-tab strip's conditional edge-fade pattern; ResizablePre and
+  // TerminalOutput toggle the direction classes from live scroll metrics
+  // (behavior tests under test/components/resizable-overflow.test.ts and
+  // test/transcript/tools/terminal-output-edge-fade.test.ts).
+  assert.match(css, /\.tool-call-pre\.fade-left,\s*\.tool-call-terminal-pre\.fade-left\s*\{[\s\S]*?mask-image:\s*linear-gradient\(to right,\s*transparent 0, black 14px\)/);
+  assert.match(css, /\.tool-call-pre\.fade-right,\s*\.tool-call-terminal-pre\.fade-right\s*\{[\s\S]*?mask-image:\s*linear-gradient\(to left,\s*transparent 0, black 14px\)/);
+  assert.match(css, /\.tool-call-pre\.fade-left\.fade-right,\s*\.tool-call-terminal-pre\.fade-left\.fade-right\s*\{[\s\S]*?mask-image:\s*linear-gradient\(to right,\s*transparent 0, black 14px, black calc\(100% - 14px\), transparent 100%\)/);
+  // Code never defaults to wrapping; the fade is the only affordance change.
+  assert.match(css, /\.tool-call-pre\s*\{\s*white-space:\s*pre;\s*\}/);
+});
+
+test('tool-result images size to the bitmap aspect ratio without flex letterboxing', async () => {
+  const css = await readToolCallCss();
+  const rule = css.match(/\.tool-call-result-image\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /align-self:\s*flex-start;/, 'column-flex container stretches img boxes to full card width; pinning keeps the box on the bitmap ratio (no dark contain-fit bands)');
+  assert.match(rule, /width:\s*auto;/);
+  assert.match(rule, /height:\s*auto;/);
+  assert.match(rule, /max-width:\s*100%;/);
+  assert.match(rule, /max-height:\s*var\(--expanded-section-max-height\);/);
+});
+
+test('user image attachments size to the bitmap aspect ratio inside the bubble', async () => {
+  const css = await readTranscriptCss();
+  const rule = css.match(/\.message-user-image-element\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /align-self:\s*flex-start;/, 'the column-flex figure stretches an auto-width element back to full bubble width; pinning keeps the box on the bitmap ratio (no dark pillarbox bars on the light bubble)');
+  assert.match(rule, /width:\s*auto;/);
+  assert.match(rule, /max-width:\s*min\(320px, 100%\);/);
+  assert.match(rule, /max-height:\s*240px;/);
 });
 
 test('diff lines soft-wrap inside .tool-call-diff only, preserving the +/- marker column', async () => {

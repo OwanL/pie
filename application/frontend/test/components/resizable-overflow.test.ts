@@ -233,3 +233,42 @@ test('only overflowing output becomes a named keyboard scroll region', () => {
   renderPre('short again');
   assert.equal(pre.hasAttribute('tabindex'), false);
 });
+
+// ── Horizontal-scroll edge-fade affordance ─────────────────────────────────
+
+function mockScrollBox(el: HTMLElement, scrollWidth: number, clientWidth: number, scrollLeft: number): void {
+  Object.defineProperty(el, 'scrollWidth', { configurable: true, value: scrollWidth });
+  Object.defineProperty(el, 'clientWidth', { configurable: true, value: clientWidth });
+  Object.defineProperty(el, 'scrollLeft', { configurable: true, value: scrollLeft });
+}
+
+test('a clipped right edge fades right; scrolling to the end moves the fade left; fits remove it', () => {
+  renderPre(h('code', null, 'x'));
+  const pre = scrollEl()!;
+  mockScrollBox(pre, 500, 200, 0);
+  renderPre(h('code', null, 'x'));
+  assert.ok(pre.classList.contains('fade-right'), 'clipped right columns fade as a visible scroll cue');
+  assert.ok(!pre.classList.contains('fade-left'), 'no fade on an edge with nothing clipped');
+
+  mockScrollBox(pre, 500, 200, 300);
+  act(() => { pre.dispatchEvent(new Event('scroll')); });
+  assert.ok(pre.classList.contains('fade-left'), 'scrolled-away start edge fades instead');
+  assert.ok(!pre.classList.contains('fade-right'), 'the fade clears once the direction is scrolled to the end');
+  assert.equal(pre.tabIndex, 0, 'keyboard scroll region stays while clipped');
+
+  mockScrollBox(pre, 200, 200, 0);
+  act(() => { pre.dispatchEvent(new Event('scroll')); });
+  assert.ok(!pre.classList.contains('fade-left') && !pre.classList.contains('fade-right'), 'content that fits fades nothing');
+});
+
+test('fade metrics remeasure on resize without keeping stale direction classes', () => {
+  renderPre(h('code', null, 'x'));
+  const pre = scrollEl()!;
+  mockScrollBox(pre, 500, 200, 0);
+  renderPre(h('code', null, 'x'));
+  assert.ok(pre.classList.contains('fade-right'));
+  // Window resize relayouts the pane; a newly fitting pane drops the fade.
+  mockScrollBox(pre, 200, 200, 0);
+  act(() => { window.dispatchEvent(new Event('resize')); });
+  assert.ok(!pre.classList.contains('fade-right') && !pre.classList.contains('fade-left'));
+});

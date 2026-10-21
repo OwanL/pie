@@ -1635,8 +1635,17 @@
 
 .message-user-image-element {
   display: block;
-  width: min(320px, 100%);
-  max-width: 100%;
+  /* Size the element to the bitmap's intrinsic aspect ratio within the
+     320×240 bounds (`max-width: min(320px, 100%)` + max-height). The old
+     fixed `width: min(320px, 100%)` letterboxed every attachment smaller
+     than the box with dark contain-fit pillarbox bars on the light user
+     bubble; intrinsic sizing also keeps pixel dimensions honest (no upscale
+     blur). The column-flex figure would otherwise stretch an auto-width
+     element back to full bubble width (ditto no stretch), so pin it to the
+     start edge. */
+  align-self: flex-start;
+  width: auto;
+  max-width: min(320px, 100%);
   max-height: 240px;
   border-radius: var(--panel-radius-lg);
   border: 1px solid var(--panel-border);

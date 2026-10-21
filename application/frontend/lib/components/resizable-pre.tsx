@@ -41,12 +41,20 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
     reset,
   } = useResizableHeight<HTMLPreElement>({ minHeight, maxHeight, onResizeStart });
   const [overflows, setOverflows] = useState(false);
+  // Conditional edge fades (Tabs-4 pattern, classes styled in tool-call.css):
+  // while clipped columns sit towards an edge, fade it as a visible scroll
+  // affordance; fades clear once that direction is scrolled to the end.
+  const [fades, setFades] = useState({ left: false, right: false });
   const measureHint = useCallback(() => {
     const el = scrollRef.current;
+    if (!el) return;
     const next = Boolean(el && (
       el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
     ));
     setOverflows((previous) => previous === next ? previous : next);
+    const nextLeft = el.scrollLeft > 1;
+    const nextRight = el.scrollWidth - el.clientWidth - el.scrollLeft > 1;
+    setFades((previous) => previous.left === nextLeft && previous.right === nextRight ? previous : { left: nextLeft, right: nextRight });
   }, [scrollRef]);
   // Content and user height/reset changes can change scroll dimensions without
   // changing the observed box. Measure after render as well as on box resize.
@@ -57,9 +65,13 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measureHint) : undefined;
     observer?.observe(el);
     if (typeof window !== 'undefined') window.addEventListener('resize', measureHint);
+    // Horizontal scroll position only changes which edge (if any) is clipped;
+    // keep the fades faithful while the user scrolls.
+    el.addEventListener('scroll', measureHint, { passive: true });
     return () => {
       observer?.disconnect();
       if (typeof window !== 'undefined') window.removeEventListener('resize', measureHint);
+      el.removeEventListener('scroll', measureHint);
     };
   }, [scrollHint, scrollRef, measureHint]);
   return (
@@ -80,7 +92,7 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
         tabIndex={overflows ? 0 : undefined}
         role={overflows ? 'region' : undefined}
         aria-label={overflows ? 'Tool output' : undefined}
-        class={cx('resizable-scroll-area-scroll', className)}
+        class={cx('resizable-scroll-area-scroll', fades.left && 'fade-left', fades.right && 'fade-right', className)}
         onScroll={onScroll}
         style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}
       >
