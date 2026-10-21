@@ -367,37 +367,37 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.doesNotMatch(toolCallCss, /(?:linear|radial)-gradient|backdrop-filter|filter:\s*blur/);
 
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
-  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*thin/);
-  // Portrait deliberately uses two rows; desktop retains its original thin line.
-  assert.match(aggregateCss, /\.aggregate-strip-metrics\s*\{[^}]*display:\s*contents/);
+  // The measured strict-priority row allocates complete items instead of
+  // horizontally scrolling an overflowing line: the footer never scrolls.
+  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*overflow:\s*hidden/);
+  assert.doesNotMatch(aggregateCss, /overflow-x:\s*auto|scrollbar-width/);
+  assert.match(aggregateCss, /\.aggregate-strip-metrics\s*\{[^}]*display:\s*flex/);
+  assert.match(aggregateCss, /\.aggregate-strip-measurements\s*\{[^}]*visibility:\s*hidden/);
+  assert.doesNotMatch(aggregateCss, /aggregate-strip-status-cluster/);
   assert.match(tabsCss, /@media \(max-width: 520px\)[\s\S]*?--session-tabs-scrollbar-height:\s*5px/);
   assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
 });
 
-test('portrait aggregate footer scrolls metrics only and keeps readable character and work counts visible', async () => {
+test('aggregate footer allocates one measured priority row at every width instead of scrolling', async () => {
   const css = await readStyleSource('aggregate-stats-strip.css');
-  const narrow = css.slice(css.indexOf('@media (max-width: 520px)'));
-  const strip = narrow.match(/\.aggregate-strip\s*\{([^}]*)\}/)?.[1] ?? '';
-  const metrics = narrow.match(/\.aggregate-strip-metrics\s*\{([^}]*)\}/)?.[1] ?? '';
-  const status = narrow.match(/\.aggregate-strip-status-cluster\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(strip, /flex-direction:\s*column/);
-  assert.match(strip, /height:\s*62px/);
-  assert.match(strip, /font-size:\s*11px/);
+  const strip = css.match(/\.aggregate-strip\s*\{([^}]*)\}/)?.[1] ?? '';
+  const measurements = css.match(/\.aggregate-strip-measurements\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(strip, /height:\s*20px/);
+  assert.match(strip, /font-size:\s*9\.5px/);
+  assert.match(strip, /white-space:\s*nowrap/);
   assert.match(strip, /overflow:\s*hidden/);
-  assert.match(metrics, /display:\s*flex/);
-  assert.match(metrics, /min-width:\s*0/);
-  assert.match(metrics, /overflow-x:\s*auto/);
-  assert.match(metrics, /overflow-y:\s*hidden/);
-  assert.match(metrics, /overscroll-behavior-x:\s*contain/);
-  assert.match(narrow, /\.aggregate-strip-metrics::-webkit-scrollbar\s*\{\s*height:\s*5px/);
-  assert.match(narrow, /\.aggregate-strip-metrics > \.pie-tooltip-trigger\s*\{[^}]*flex-shrink:\s*0;[^}]*max-width:\s*none/);
-  assert.match(status, /justify-content:\s*space-between/);
-  assert.match(status, /margin-left:\s*0/);
-  assert.doesNotMatch(status, /overflow|white-space|text-overflow/);
-  assert.match(narrow, /\.aggregate-strip-seg\s*\{[^}]*min-height:\s*28px/);
-  assert.match(narrow, /@media \(max-width: 520px\) and \(pointer: coarse\)[\s\S]*font-size:\s*12px/);
-  assert.doesNotMatch(narrow, /aggregate-strip-(?:cost|tokens|providers|deferred|user-input|counts)[^{]*\{[^}]*display:\s*none/,
-    'no statistics are hidden in portrait');
+  // Portraits have no separate stacked or scrolled layout: measured
+  // strict-priority allocation (allocation.ts) applies at every width.
+  assert.doesNotMatch(css, /@media \(max-width: 520px\)/,
+    'the footer keeps one compact row in narrow panels; allocation owns narrow widths');
+  assert.doesNotMatch(css, /overflow-x:\s*auto|scrollbar-width|::-webkit-scrollbar/,
+    'metrics are allocated, never scrolled');
+  // The inert measurement row is invisible by construction.
+  assert.match(measurements, /position:\s*absolute/);
+  assert.match(measurements, /visibility:\s*hidden/);
+  assert.match(measurements, /pointer-events:\s*none/);
+  assert.doesNotMatch(css, /aggregate-strip-(?:cost|tokens|providers|deferred|user-input|counts)[^{]*\{[^}]*display:\s*none/,
+    'no statistics are hidden by CSS: allocation priority owns visible retention');
 });
 
 test('the session tab context menu is viewport-capped and scrolls tall dynamic group lists', async () => {

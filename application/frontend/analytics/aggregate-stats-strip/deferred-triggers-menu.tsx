@@ -105,7 +105,11 @@ export function DeferredTriggersMenu({
                 type="button"
                 role="menuitem"
                 aria-label={`Cancel wakeup timer for ${name}`}
-                title="Cancel this wakeup timer"
+                // No native `title`: the button's visible text and its
+                // `aria-label` already carry the action; a native title would
+                // duplicate them with a second tooltip over a crowded menu.
+                // The item-name/note/wait titles stay: they are truncation
+                // tooltips with no custom-tooltip replacement.
                 onClick={() => onCancel(t.sessionPath, t.id)}
               >
                 Cancel

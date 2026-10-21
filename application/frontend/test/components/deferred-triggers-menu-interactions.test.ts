@@ -14,8 +14,16 @@ import { AggregateStatsStrip } from '../../analytics/aggregate-stats-strip';
 import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 
 let container: HTMLElement;
+let originalRect: typeof HTMLElement.prototype.getBoundingClientRect;
 
 beforeEach(() => {
+  // The strip relies on layout measurement (MeasuredRow): the test DOM has no
+  // stylesheet, so stub the row to an ample width like the sibling strip tests
+  // do — every item becomes genuinely interactive and inspectable.
+  originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
+  };
   container = document.createElement('div');
   document.body.appendChild(container);
 });
@@ -23,6 +31,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => render(null, container));
   container.remove();
+  HTMLElement.prototype.getBoundingClientRect = originalRect;
 });
 
 const pending: DeferredTriggerView = {

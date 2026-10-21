@@ -295,12 +295,75 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
   assert.match(html, /Focus for 14-day work trend/);
 });
 
-test('independent token popovers open on their own series and retain the toggle', () => {
+test("independent token popovers open on their anchor's series and retain the toggle", () => {
   const stats = { ...EMPTY_AGGREGATE_STATS, ready: true };
   for (const kind of ['input', 'output'] as const) {
     const html = renderToString(tokensTooltipNode(stats, kind));
     assert.match(html, new RegExp(`aria-pressed="true">${kind === 'input' ? 'Input' : 'Output'}`));
     assert.match(html, /Token chart series/);
+  }
+});
+
+test("token popovers persist each anchor's explicit toggle across reopen without cross-anchor bleed", async () => {
+  const stats = { ...EMPTY_AGGREGATE_STATS, ready: true, todayInputTokens: 100, todayOutputTokens: 200 };
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
+  };
+  const root = document.createElement('div');
+  document.body.appendChild(root);
+  try {
+    act(() => render(h(AggregateStatsStrip, {
+      stats,
+      deferredTriggers: [],
+      onOpenDeferredMenu: () => {},
+    }), root));
+    const openAnchor = async (key: string) => {
+      const seg = root.querySelector<HTMLElement>(`[data-stat="${key}"] [tabindex]`);
+      assert.ok(seg, `anchor ${key} renders an interactive trigger`);
+      await act(async () => {
+        seg.focus();
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
+      });
+      const region = document.getElementById(seg.getAttribute('aria-describedby')!);
+      assert.ok(region, `anchor ${key} opens its rich token tooltip`);
+      return region;
+    };
+    const closePopover = (seg: HTMLElement) => {
+      act(() => { seg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+      act(() => seg.blur());
+    };
+    const selected = (region: HTMLElement) =>
+      region.querySelector<HTMLButtonElement>('[role="group"] button[aria-pressed="true"]')?.textContent;
+    const toggleButton = (region: HTMLElement, label: string) =>
+      [...region.querySelectorAll<HTMLButtonElement>('[role="group"] button')]
+        .find((button) => button.textContent === label);
+
+    // Fresh selection: clicking an anchor naturally presents its own series.
+    const inputSeg = root.querySelector<HTMLElement>('[data-stat="input"] [tabindex]')!;
+    const outputSeg = root.querySelector<HTMLElement>('[data-stat="output"] [tabindex]')!;
+    assert.equal(selected(await openAnchor('input')), 'Input');
+    closePopover(inputSeg);
+    assert.equal(selected(await openAnchor('output')), 'Output');
+    closePopover(outputSeg);
+
+    // Explicit toggles persist per anchor across reopen.
+    const inputRegion = await openAnchor('input');
+    act(() => toggleButton(inputRegion, 'Output')!.click());
+    assert.equal(selected(inputRegion), 'Output', 'the toggle applies within the open popover');
+    closePopover(inputSeg);
+    const outputRegion = await openAnchor('output');
+    act(() => toggleButton(outputRegion, 'Input')!.click());
+    assert.equal(selected(outputRegion), 'Input');
+    closePopover(outputSeg);
+    assert.equal(selected(await openAnchor('input')), 'Output', 'the input anchor replays its own explicit toggle');
+    closePopover(inputSeg);
+    assert.equal(selected(await openAnchor('output')), 'Input', 'the output anchor replays its own explicit toggle');
+    closePopover(outputSeg);
+  } finally {
+    act(() => render(null, root));
+    root.remove();
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
   }
 });
 
@@ -385,7 +448,7 @@ test('aggregate strip keeps cost and token segments clean while provenance detai
 
   const todayTooltip = renderToString(todayCostTooltipNode(stats));
   assert.match(todayTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\) today/);
-  const tokens = renderToString(tokensTooltipNode(stats));
+  const tokens = renderToString(tokensTooltipNode(stats, 'input'));
   assert.match(tokens, /Known subtotal · 1 invocation/);
   assert.equal((tokens.match(/↓1\.2k/g) ?? []).length, 1);
   assert.match(tokens, /aria-label="Token chart series"/);
@@ -412,6 +475,18 @@ test('provider legend entries are focusable and expose provider-qualified nested
   assert.match(html, /aria-describedby="pie-provider-legend-detail-/);
   assert.match(html, /shared-model/);
   assert.match(html, /\(copilot\)/);
+});
+
+test('provider legend ids are per-instance pure: identical across renders and never cross-linked', () => {
+  const items = [{ key: 'alpha', value: '$1.00', models: [] }];
+  const draw = () => renderToString(h(ProviderLegend, { items }));
+  const ids = (html: string) => [...html.matchAll(/aria-describedby="(pie-provider-legend-detail-[^"]+)"/g)].map((match) => match[1]);
+  const first = ids(draw());
+  assert.ok(first.length > 0);
+  assert.deepEqual(ids(draw()), first, 'identical legends render deterministic ids regardless of prior render order');
+  const pairIds = ids(renderToString(h('div', {}, h(ProviderLegend, { items }), h(ProviderLegend, { items }))));
+  assert.equal(new Set(pairIds).size, pairIds.length, 'two mounted legends never share a detail id');
+  assert.equal(pairIds.length, first.length * 2, 'each legend item keeps exactly one described-by id');
 });
 
 test('aggregate memo signature includes interior redistribution and new token/week series', () => {

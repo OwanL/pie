@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useId, useState } from 'preact/hooks';
 
 import { PROVIDER_UNLIMITED_CONCURRENCY } from '../../../lib/protocol/provider-concurrency.js';
 import { concurrencySourceLabel } from '../../../../lib/concurrency-config.js';
@@ -52,6 +52,9 @@ interface AggregateStatsStripProps {
   onOpenDeferredMenu: (x: number, y: number, triggerEl: HTMLElement) => void;
 }
 
+/** Series selectable inside a token tooltip; also the strip's token anchors. */
+type TokenSeriesKind = 'input' | 'output';
+
 function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
   const {
     ready,
@@ -71,6 +74,19 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
   const number = (value: number, format: (n: number) => string, width: number) => (
     <span class="aggregate-strip-num" style={`min-width:${Math.max(width, format(value).length)}ch`}>{format(value)}</span>
   );
+  // Per-anchor token-series selection. Each anchor opens on its own matching
+  // series (input → input, output → output) on a fresh selection — one anchor's
+  // explicit toggle never bleeds into the other anchor's default — and an
+  // explicit toggle is preserved when the same anchor's tooltip is reopened.
+  // The selection lives in the parent (not the tooltip) because the tooltip
+  // subtree unmounts every time the popover hides; the parent state replays it
+  // through the tooltip's `initialKind` prop on the next mount.
+  const [tokenSeriesByAnchor, setTokenSeriesByAnchor] = useState<{ input: TokenSeriesKind; output: TokenSeriesKind }>(() => ({
+    input: 'input', output: 'output',
+  }));
+  const setTokenSeries = (anchor: TokenSeriesKind, series: TokenSeriesKind) => {
+    setTokenSeriesByAnchor((previous) => previous[anchor] === series ? previous : { ...previous, [anchor]: series });
+  };
   const items: StripItem[] = [{
     key: 'today', body: <span>tdy {number(todayCost, formatCostAdaptive, 8)}</span>,
     tooltip: todayCostTooltipNode(stats),
@@ -92,7 +108,7 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
     const value = kind === 'input' ? todayInputTokens : todayOutputTokens;
     items.push({
       key: kind, body: <span>{kind === 'input' ? '↓' : '↑'}{number(value, formatCompactTokens, 5)}</span>,
-      tooltip: tokensTooltipNode(stats, kind), className: 'aggregate-strip-tokens',
+      tooltip: tokensTooltipNode(stats, tokenSeriesByAnchor[kind], (series) => setTokenSeries(kind, series)), className: 'aggregate-strip-tokens',
       label: `Today's ${kind} tokens: ${formatCompactTokens(value)}${(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; known subtotal with incomplete invocation usage' : ''}. Focus for token chart and provider details.`,
     });
   }
@@ -288,15 +304,16 @@ interface ProviderLegendItem {
  * detail is a sibling rather than a descendant of the button so its model rows
  * remain in the accessibility tree while the outer rich surface uses a valid
  * non-tooltip role for its interactive controls. */
-let providerLegendDetailId = 0;
-
 export function ProviderLegend({ items }: { items: ProviderLegendItem[] }): JSX.Element {
+  // Unique per legend instance (not a module render counter): `useId` is stable
+  // across re-renders and deterministic per instance, so a legend's described-by
+  // ids never drift between renders or depend on how many legends rendered before.
+  const idBase = useId();
   const colors = colorsFor(items.map((item) => item.key));
   return (
     <div class="rich-tooltip-legend">
       {items.map((it, index) => {
-        providerLegendDetailId += 1;
-        const detailId = `pie-provider-legend-detail-${providerLegendDetailId}-${index}`;
+        const detailId = `pie-provider-legend-detail-${idBase}-${index}`;
         return (
           <div class="rich-tooltip-legend-item" key={it.key}>
             <button
@@ -426,13 +443,32 @@ export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
   );
 }
 
-export function tokensTooltipNode(s: AggregateStats, initialKind: 'input' | 'output' = 'output'): JSX.Element {
+/** `initialKind` is required: each token anchor must name its own matching
+ *  series, so an input anchor never silently falls back to the (misleading)
+ *  output default. The selection is parent-owned (see the strip's
+ *  per-anchor state) and reaches the tooltip through these props. */
+export function tokensTooltipNode(
+  s: AggregateStats,
+  initialKind: TokenSeriesKind,
+  onKindChange?: (kind: TokenSeriesKind) => void,
+): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
-  return <TokensTooltip stats={s} initialKind={initialKind} />;
+  return <TokensTooltip stats={s} initialKind={initialKind} onKindChange={onKindChange} />;
 }
 
-function TokensTooltip({ stats, initialKind }: { stats: AggregateStats; initialKind: 'input' | 'output' }): JSX.Element {
-  const [kind, setKind] = useState<'input' | 'output'>(initialKind);
+function TokensTooltip({ stats, initialKind, onKindChange }: {
+  stats: AggregateStats;
+  initialKind: TokenSeriesKind;
+  onKindChange?: (kind: TokenSeriesKind) => void;
+}): JSX.Element {
+  const [kind, setKind] = useState<TokenSeriesKind>(initialKind);
+  /** The popover subtree stays frozen while visible, so the toggle updates its
+   *  own internal state; the parent's per-anchor copy (via `onKindChange`) is
+   *  what replays the explicit selection on the next reopen. */
+  const selectKind = (next: TokenSeriesKind) => {
+    setKind(next);
+    onKindChange?.(next);
+  };
   const input = kind === 'input';
   const series = input ? stats.todayInputTokenSeries : stats.todayTokenSeries;
   return (
@@ -449,8 +485,8 @@ function TokensTooltip({ stats, initialKind }: { stats: AggregateStats; initialK
         </div>
       )}
       <div class="rich-tooltip-toggle" role="group" aria-label="Token chart series">
-        <button type="button" aria-pressed={input} onClick={() => setKind('input')}>Input</button>
-        <button type="button" aria-pressed={!input} onClick={() => setKind('output')}>Output</button>
+        <button type="button" aria-pressed={input} onClick={() => selectKind('input')}>Input</button>
+        <button type="button" aria-pressed={!input} onClick={() => selectKind('output')}>Output</button>
       </div>
       <StackedAreaChart points={series} mode="cumulative" formatY={formatCompactTokens} formatX={formatTimeOfDay}
         colorKeys={stats.todayCostByProvider.map((p) => p.provider)} />
