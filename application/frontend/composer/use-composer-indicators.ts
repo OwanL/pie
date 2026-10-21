@@ -42,7 +42,6 @@ import {
   systemPromptsSignature,
 } from './indicator-signature';
 import { resolveComposerModelState } from './model-state';
-import { useTokenRateIndicator } from '../analytics/use-token-rate';
 import { useWorkingTimeIndicator } from '../analytics/use-working-time';
 import contextBreakdownWorkerUrl from '../context-inspector/breakdown-worker?worker&url';
 import { documentAllowsContextBreakdownWorker } from '../context-inspector/worker-policy';
@@ -372,7 +371,6 @@ export function useComposerIndicators({
     [sessionTokenUsage, fallbackPricing, selectedModelInfo?.name, completedCostSummary, subagentCostSummary, pruningResult, resolvePricing, liveCostEstimate, selectedModel, selectedProvider, effectiveSessionUsage],
   );
 
-  const tokenRateIndicator = useTokenRateIndicator({ sessionPath, tokenRateBySession });
   const workingTimeIndicator = useWorkingTimeIndicator({ sessionPath, workingTimeBySession });
 
   // The canonical activity/facet read is a host-bounded optional snapshot field;
@@ -412,7 +410,6 @@ export function useComposerIndicators({
     contextIndicator,
     sessionCostIndicator,
     canonicalActivitySummary,
-    tokenRateIndicator,
     workingTimeIndicator,
   };
 }

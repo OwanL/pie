@@ -146,7 +146,6 @@ function props(overrides: Partial<Parameters<typeof ComposerToolbar>[0]> = {}): 
     contextIndicator: null,
     contextBreakdown: null,
     sessionCostIndicator: null,
-    tokenRateIndicator: { label: '', ariaLabel: '', tooltip: '', state: 'idle', paused: false },
     workingTimeIndicator: { label: '0s', ariaLabel: 'Working time', tooltip: 'Working time' },
     runStatus: { text: 'LIVE', tone: 'open', title: 'Run is live' },
     compacting: false,
@@ -534,12 +533,11 @@ test('disabled selected model tooltip keeps the provider warning beside model id
   assert.match(tooltip, /Selected provider is disabled — select another model/);
 });
 
-test('overflow removes secondary controls, then speed, duration, cost, and context regardless of presentation order', () => {
+test('overflow removes secondary controls, then duration, cost, and context regardless of presentation order', () => {
   const items = [
     { key: 'system-prompts', kind: 'control' as const, width: 10 },
     { key: 'browser-network', kind: 'control' as const, width: 10 },
     { key: 'session-cost', kind: 'indicator' as const, width: 10 },
-    { key: 'token-rate', kind: 'indicator' as const, width: 10 },
     { key: 'working-time', kind: 'indicator' as const, width: 10 },
     { key: 'run-status', kind: 'indicator' as const, width: 10 },
     { key: 'context-window', kind: 'indicator' as const, width: 10 },
@@ -556,14 +554,14 @@ test('overflow removes secondary controls, then speed, duration, cost, and conte
   } as const;
   const allocate = (availableWidth: number) => allocateComposerOverflow({ ...input, availableWidth });
   assert.deepEqual(allocate(190), items.map(({ key }) => key), 'all items fit before the trigger is needed');
-  assert.deepEqual(allocate(189), [
-    'system-prompts', 'session-cost', 'token-rate', 'working-time', 'run-status', 'context-window',
+  assert.deepEqual(allocate(189), items.map(({ key }) => key), 'all items still fit without needing the trigger');
+  assert.deepEqual(allocate(179), [
+    'system-prompts', 'session-cost', 'working-time', 'run-status', 'context-window',
   ], 'the last secondary control is removed first, with the trigger width charged');
-  assert.deepEqual(allocate(184), [
-    'session-cost', 'token-rate', 'working-time', 'run-status', 'context-window',
+  assert.deepEqual(allocate(174), [
+    'session-cost', 'working-time', 'run-status', 'context-window',
   ], 'all secondary controls leave before any indicator');
-  assert.deepEqual(allocate(174), ['session-cost', 'token-rate', 'working-time', 'context-window'], 'transient run status yields before metrics');
-  assert.deepEqual(allocate(164), ['session-cost', 'working-time', 'context-window'], 'speed yields before duration, cost, and context');
+  assert.deepEqual(allocate(164), ['session-cost', 'working-time', 'context-window'], 'transient run status yields before metrics');
   assert.deepEqual(allocate(154), ['session-cost', 'context-window'], 'duration yields before cost and context');
   assert.deepEqual(allocate(144), ['context-window'], 'cost yields before context');
   assert.deepEqual(allocate(134), [], 'context is the last indicator removed');

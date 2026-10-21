@@ -18,7 +18,6 @@ import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseMod
 import { ContextWindowBreakdownChart } from '../context-inspector/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-inspector/breakdown';
 import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setup-preview.js';
-import type { TokenRateIndicatorState } from '../analytics/use-token-rate';
 import type { WorkingTimeIndicatorState } from '../analytics/use-working-time';
 import type {
   CanonicalSessionActivitySummary,
@@ -128,7 +127,6 @@ interface ComposerToolbarProps {
   /** Canonical root-session activity/facet summary for the active session;
    *  null when absent (legacy authority) — renders nothing. */
   canonicalActivitySummary?: CanonicalSessionActivitySummary | null;
-  tokenRateIndicator: TokenRateIndicatorState;
   workingTimeIndicator: WorkingTimeIndicatorState;
   runStatus: ComposerToolbarStatus | null;
   /** True while the active session runs a history-compaction LLM call. */

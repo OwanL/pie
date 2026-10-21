@@ -11,7 +11,6 @@ export type BooleanPrefKey =
   | 'subagentFallbackOnProviderFailure'
   | 'runtimeAuditLog'
   | 'hideStatusStrip'
-  | 'hideTokenRate'
   | 'hideSessionCost'
   | 'hideContextIndicator'
   | 'hideRunStatus';
@@ -63,10 +62,6 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
       {
         key: 'hideStatusStrip',
         label: 'Hide bottom usage strip',
-      },
-      {
-        key: 'hideTokenRate',
-        label: 'Hide tokens/sec',
       },
       {
         key: 'hideSessionCost',

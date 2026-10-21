@@ -50,12 +50,11 @@ export interface ComposerToolbarAllocation {
 export const COMPOSER_MODEL_COMPACT_MIN_WIDTH = 96;
 
 const INDICATOR_REMOVAL_PRIORITY: Readonly<Record<string, number>> = {
-  // Run and compaction status are transient; let these yield before the
-  // requested speed, duration, cost, and context indicators.
+  // Run and compaction status are transient; let these yield before duration,
+  // cost, and context indicators.
   'run-status': 0,
   compacting: 0,
   'last-compaction': 0,
-  'token-rate': 1,
   'working-time': 2,
   'session-cost': 3,
   'context-window': 4,

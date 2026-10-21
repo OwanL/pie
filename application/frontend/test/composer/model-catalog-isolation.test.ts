@@ -19,7 +19,7 @@ function catalog(status: 'loading' | 'provisional' | 'authoritative' | 'error', 
     onSetSystemPromptToggles: () => {}, onSetPruningSettings: () => {}, onSetToolResultPruningSettings: () => {}, onSetSessionTitlesSettings: () => {},
     availableExtensions: [], availableModels: [], availableModelsStatus: status, systemPrompts: [],
     selectedModel, selectedProvider: 'draft-provider', selectedLevel: 'high', supportsReasoning: false,
-    contextIndicator: null, contextBreakdown: null, sessionCostIndicator: null, tokenRateIndicator: { label: '', ariaLabel: '', tooltip: '', state: 'idle', paused: false },
+    contextIndicator: null, contextBreakdown: null, sessionCostIndicator: null,
     workingTimeIndicator: { label: '', ariaLabel: '', tooltip: '' }, runStatus: { text: '', tone: 'open', title: '' }, compacting: false, lastCompaction: null,
     onModelChange: () => {}, onCompact: () => {}, ...overrides,
   });

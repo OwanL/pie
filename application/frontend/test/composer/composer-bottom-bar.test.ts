@@ -109,13 +109,6 @@ test('composer controls render in the agreed bottom-bar order', () => {
         sources: [{ key: 'conversation', label: 'Main conversation', cost: 0.01, hasKnownCost: true, unpricedTokens: 0, tokens: 1_100 }],
       },
     },
-    tokenRateIndicator: {
-      label: '12 tok/s',
-      ariaLabel: 'Token rate',
-      tooltip: 'Token rate',
-      state: 'generating',
-      paused: false,
-    },
     workingTimeIndicator: {
       label: '1m 23s',
       ariaLabel: 'Total agent working time: 1 minute, 23 seconds',

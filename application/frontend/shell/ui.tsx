@@ -234,7 +234,6 @@ function ComposerView({
     contextIndicator,
     sessionCostIndicator,
     canonicalActivitySummary,
-    tokenRateIndicator,
     workingTimeIndicator,
   } = useComposerIndicators({
     activeModelId,
@@ -506,7 +505,6 @@ function ComposerView({
             contextBreakdown={contextBreakdown}
             sessionCostIndicator={sessionCostIndicator}
             canonicalActivitySummary={canonicalActivitySummary}
-            tokenRateIndicator={tokenRateIndicator}
             workingTimeIndicator={workingTimeIndicator}
             runStatus={operationRunStatus ?? runControls.status}
             compacting={compacting}

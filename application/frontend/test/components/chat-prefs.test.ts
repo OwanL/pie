@@ -116,7 +116,7 @@ test('chat pref menu sections expose transcript, display, notifications, and dia
   assert.equal(CHAT_PREF_MENU_SECTIONS[1]?.id, 'display');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[1]?.items.map((item) => item.key),
-    ['hideStatusStrip', 'hideTokenRate', 'hideSessionCost', 'hideContextIndicator', 'hideRunStatus'],
+    ['hideStatusStrip', 'hideSessionCost', 'hideContextIndicator', 'hideRunStatus'],
   );
   assert.equal(CHAT_PREF_MENU_SECTIONS[2]?.id, 'notifications');
   assert.deepEqual(
