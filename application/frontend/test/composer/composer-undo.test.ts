@@ -123,6 +123,25 @@ function beforeinput(textarea: HTMLTextAreaElement, inputType: 'historyUndo' | '
   return event;
 }
 
+// Some engines cannot cancel the native mutation behind historyUndo/historyRedo
+// (noncancelable beforeinput) and additionally deliver the matched trusted
+// input event after the mutation landed.
+function beforeinputNoncancelable(textarea: HTMLTextAreaElement, inputType: 'historyUndo' | 'historyRedo') {
+  const event = new InputEvent('beforeinput', { bubbles: true, cancelable: false, inputType });
+  act(() => {
+    textarea.dispatchEvent(event);
+  });
+  return event;
+}
+
+/** A native pair gesture: noncancelable beforeinput followed by its matched
+ * trusted input over a natively mutated DOM value (the blocker engine shape). */
+function nativePair(textarea: HTMLTextAreaElement, inputType: 'historyUndo' | 'historyRedo', nativeValue: string) {
+  const event = beforeinputNoncancelable(textarea, inputType);
+  nativeHistoryInput(textarea, inputType, nativeValue);
+  return event;
+}
+
 function keydown(textarea: HTMLTextAreaElement, init: KeyboardEventInit) {
   act(() => {
     textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }));
@@ -666,6 +685,249 @@ test('undo/redo leave the caret at the end of the restored text', () => {
     assert.equal(textarea.value, 'hello world again');
     assert.equal(textarea.selectionStart, 'hello world again'.length, 'caret at end after redo');
     assert.equal(textarea.selectionEnd, 'hello world again'.length, 'selection end after redo');
+  } finally {
+    restoreTimers();
+  }
+});
+
+// --- beforeinput/input pair coordination (review blocker: a noncancelable
+// --- beforeinput(historyUndo) followed by input(historyUndo) applied twice) ---
+
+test('noncancelable beforeinput + matched input applies the undo exactly once', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    // The engine cannot stop the native mutation: beforeinput reports
+    // cancelable=false and the matched trusted input follows the mutation.
+    beforeinputNoncancelable(textarea, 'historyUndo');
+    assert.equal(
+      textarea.value,
+      'second',
+      'the noncancelable beforeinput does not apply the custom history early',
+    );
+
+    // The matched input must repair the native DOM mutation and apply the
+    // custom history once — not repeat the traversal twice.
+    nativeHistoryInput(textarea, 'historyUndo', 'native garbage');
+    assert.equal(textarea.value, 'first', 'the pair applies exactly one undo step');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('cancelable beforeinput then a stray matched input does not repeat the traversal', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    const evt = beforeinput(textarea, 'historyUndo');
+    assert.ok(evt.defaultPrevented, 'cancelable historyUndo is prevented');
+    assert.equal(textarea.value, 'first', 'the cancelable beforeinput applies exactly once');
+
+    // An engine that still delivers the matched input after a prevented
+    // beforeinput must not make our history step a second time.
+    nativeHistoryInput(textarea, 'historyUndo', 'stray garbage');
+    assert.equal(textarea.value, 'first', 'the stray input only repairs, never repeats');
+
+    // And the same for a prevented redo.
+    typeRapid(textarea, 'first again');
+    const evtRedo = beforeinput(textarea, 'historyRedo');
+    assert.ok(evtRedo.defaultPrevented);
+    assert.equal(textarea.value, 'first again');
+    nativeHistoryInput(textarea, 'historyRedo', 'stray garbage');
+    assert.equal(textarea.value, 'first again', 'stray redo input does not repeat the traversal');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('a later genuine input-only gesture after a cancelable beforeinput still applies', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    beforeinput(textarea, 'historyUndo');
+    assert.equal(textarea.value, 'first');
+
+    // Task boundary: the applied marker expires so a later GENUINE native
+    // gesture (no wallclock gap required) is never swallowed as its echo.
+    act(() => {
+      flushTimers();
+    });
+    nativeHistoryInput(textarea, 'historyUndo', 'native garbage');
+    assert.equal(textarea.value, '', 'the later genuine input-only undo applies');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('keydown undo followed by a noncancelable beforeinput+input echo pair applies exactly once', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'first');
+
+    // Both echo events of the same keydown gesture: neither may re-apply.
+    beforeinputNoncancelable(textarea, 'historyUndo');
+    nativeHistoryInput(textarea, 'historyUndo', 'echo garbage');
+    assert.equal(textarea.value, 'first', 'the echo pair is swallowed after the keydown route applied');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('keydown undo followed by a cancelable beforeinput+input echo pair applies exactly once', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'first');
+
+    const echoed = beforeinput(textarea, 'historyUndo');
+    assert.ok(echoed.defaultPrevented, 'echo beforeinput is still prevented');
+    nativeHistoryInput(textarea, 'historyUndo', 'echo garbage');
+    assert.equal(textarea.value, 'first', 'the echo pair is swallowed after the keydown route applied');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('input-only echo right after a keyboard undo is swallowed without a task-gap requirement', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'first');
+    typeValue(textarea, 'second');
+
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'first');
+
+    // An input-only echo (no beforeinput at all) inside the same task-chain
+    // window as the keydown must not step the custom history a second time.
+    nativeHistoryInput(textarea, 'historyUndo', 'echo garbage');
+    assert.equal(textarea.value, 'first', 'the input-only echo does not double-apply');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('rapid successive native pair gestures each apply exactly once', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'one');
+    typeValue(textarea, 'two');
+    typeValue(textarea, 'three');
+
+    // Back-to-back pair gestures, no flushTimers between them, no wallclock
+    // gap: every pair applies exactly one step.
+    nativePair(textarea, 'historyUndo', 'garbage 1');
+    assert.equal(textarea.value, 'two', 'first pair applies one undo step');
+    nativePair(textarea, 'historyUndo', 'garbage 2');
+    assert.equal(textarea.value, 'one', 'second pair is not deduped away');
+
+    nativePair(textarea, 'historyRedo', 'garbage 3');
+    assert.equal(textarea.value, 'two', 'first pair applies one redo step');
+    nativePair(textarea, 'historyRedo', 'garbage 4');
+    assert.equal(textarea.value, 'three', 'second pair is not deduped away');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('native undo pair over a pending live burst records the burst and steps exactly once', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'A');
+    typeRapid(textarea, 'AB');
+
+    // The pending burst must be captured before the step; the pair itself is
+    // one gesture, so the result is exactly 'A' (never an extra empty step).
+    nativePair(textarea, 'historyUndo', 'native garbage');
+    assert.equal(textarea.value, 'A', 'the pair undoes exactly the burst');
+
+    // The captured burst remains recoverable.
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'AB', 'the burst is recoverable after the pair undo');
+
+    // And the mirrored burst case for redo: a pending burst on top of an
+    // undone state flush-discards through a full pair gesture; the burst
+    // becomes the live present and the redo stack is cleared.
+    typeRapid(textarea, 'A2');
+    nativePair(textarea, 'historyRedo', 'native garbage');
+    assert.equal(textarea.value, 'A2', 'a redo pair flush-discards and preserves the live burst');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'AB', 'undo after the pair steps to the checkpoint the burst was flushed onto');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('input echo pair of a flush-discarded keyboard redo never overwrites the live text', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'A');
+    typeValue(textarea, 'B');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'A');
+    typeRapid(textarea, 'A2');
+
+    // The keyboard redo is consumed by the flush-discard; the paired echo
+    // events must not rewrite the live value with a stale future entry.
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'A2');
+    beforeinput(textarea, 'historyRedo');
+    nativeHistoryInput(textarea, 'historyRedo', 'stale garbage');
+    assert.equal(textarea.value, 'A2', 'the echo pair preserves the live burst');
+
+    // The live value is still the real editor state: history converges on it.
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'A');
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'A2');
   } finally {
     restoreTimers();
   }

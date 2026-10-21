@@ -30,6 +30,20 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
 const CHECKPOINT_DEBOUNCE_MS = 500;
 const DICTATION_START_ACK_TIMEOUT_MS = 15_000;
 
+/** Coordination snapshot for one native historyUndo/historyRedo gesture
+ * between the beforeinput and input handlers. */
+interface PendingNativeUndoRedo {
+  kind: 'undo' | 'redo';
+  /** Composer text before the native gesture (the repair snapshot). */
+  preGestureText: string;
+  /** The custom history already processed the gesture (keydown echo or a
+   * cancelable beforeinput); the matched input must not repeat it. */
+  applied: boolean;
+  /** The text the applied gesture produced (the repair target for the
+   * matched input). Unused while `applied` is false. */
+  targetText: string;
+}
+
 function mobileVisibleHeight(): number | undefined {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function'
     || !window.matchMedia('(pointer: coarse)').matches) return undefined;
@@ -142,8 +156,42 @@ export function useComposerInput({
   // all apply regardless of how close they are.
   const undoRedoEchoLatchRef = useRef<'undo' | 'redo' | null>(null);
   const undoRedoEchoLatchResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Pending native history gesture: the handoff between a native
+  // historyUndo/historyRedo beforeinput and its matched trusted input event.
+  // The native mutation cannot always be canceled (noncancelable beforeinput,
+  // or an engine that also delivers the input after a prevented beforeinput);
+  // the snapshot lets the input handler repair the DOM and apply the custom
+  // history exactly once instead of repeating the application. Markers are
+  // consumed by the matched input, overwritten by the next gesture, or expire
+  // at the next task boundary (for applied markers) — never wallclock-deduped.
+  const pendingNativeUndoRedoRef = useRef<PendingNativeUndoRedo | null>(null);
+  const pendingNativeUndoRedoResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPendingNativeUndoRedo = useCallback(() => {
+    if (pendingNativeUndoRedoResetRef.current) {
+      clearTimeout(pendingNativeUndoRedoResetRef.current);
+      pendingNativeUndoRedoResetRef.current = null;
+    }
+    pendingNativeUndoRedoRef.current = null;
+  }, []);
+  const setPendingNativeUndoRedo = useCallback((snapshot: PendingNativeUndoRedo) => {
+    pendingNativeUndoRedoRef.current = snapshot;
+    if (!snapshot.applied) return;
+    // Conforming engines deliver no input after a cancelable (prevented)
+    // beforeinput; expire the applied marker at the next event-task boundary
+    // (setTimeout(0), the echo-latch boundary) so a later GENUINE input-only
+    // gesture is never mistaken for the stray echo of the applied one.
+    // Deferred markers stay armed: their matched input is spec-guaranteed.
+    if (pendingNativeUndoRedoResetRef.current) clearTimeout(pendingNativeUndoRedoResetRef.current);
+    pendingNativeUndoRedoResetRef.current = setTimeout(() => {
+      pendingNativeUndoRedoResetRef.current = null;
+      if (pendingNativeUndoRedoRef.current?.applied) pendingNativeUndoRedoRef.current = null;
+    }, 0);
+  }, []);
   const armUndoRedoEchoLatch = useCallback((kind: 'undo' | 'redo') => {
     undoRedoEchoLatchRef.current = kind;
+    // A native pair cannot legitimately span a fresh keydown gesture; drop any
+    // leaked snapshot so it cannot swallow a later genuine gesture.
+    clearPendingNativeUndoRedo();
     if (undoRedoEchoLatchResetRef.current) clearTimeout(undoRedoEchoLatchResetRef.current);
     // setTimeout(0), not queueMicrotask: the echo, when present, is delivered
     // in a separate event task right after the keydown task, and the latch
@@ -153,7 +201,7 @@ export function useComposerInput({
       undoRedoEchoLatchResetRef.current = null;
       undoRedoEchoLatchRef.current = null;
     }, 0);
-  }, []);
+  }, [clearPendingNativeUndoRedo]);
   const pendingStartRef = useRef<{ recordingId: string; baselineText: string; editGeneration: number } | null>(null);
   const cancelledStartDraftRef = useRef<{ sessionPath: string; editGeneration: number } | null>(null);
   const pendingStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -213,11 +261,12 @@ export function useComposerInput({
     return true;
   }, [clearCheckpointTimer, setHistory, text, history.present]);
 
-  // Drop any pending checkpoint timer if the composer unmounts (e.g. the panel is
-  // disposed) so it can't fire setHistory on a stale instance.
+  // Drop any pending checkpoint timer and native pair snapshot if the composer
+  // unmounts (e.g. the panel is disposed) so neither can fire on a stale instance.
   useEffect(() => () => {
     clearCheckpointTimer();
-  }, [clearCheckpointTimer]);
+    clearPendingNativeUndoRedo();
+  }, [clearCheckpointTimer, clearPendingNativeUndoRedo]);
 
   // Re-fit the textarea height after any text change (typing, undo/redo, draft
   // seed/restore). Running in a post-commit effect means dom.value already
@@ -332,6 +381,9 @@ export function useComposerInput({
 
     clearCheckpointTimer();
     // Start a fresh undo history per session — undo never crosses sessions.
+    // A native beforeinput/input pair cannot span a session switch, so any
+    // pending snapshot here is a leaked one; drop it with the history.
+    clearPendingNativeUndoRedo();
     resetHistory(draftText);
     setTextState(draftText);
     submitting.current = false;
@@ -508,34 +560,40 @@ export function useComposerInput({
     resetComposer();
   }, [busy, sendBlocked, activeDictation, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
-  const undoComposer = useCallback(() => {
+  // Returns the text the gesture produced, or null when nothing was applied
+  // (boundary reached, or a redo consumed by the flush-discard). The value lets
+  // the native gesture routes record the exact repair target for the matched
+  // or stray input event that follows the native mutation.
+  const undoComposer = useCallback((): string | null => {
     cancelDictation();
     // Record the live burst first (see flushPendingCheckpoint) so its edits are
     // recoverable, then step to the pre-burst checkpoint. A flushed burst becomes
     // the new present; without a burst the previous checkpoint is the target.
     const burstRecorded = flushPendingCheckpoint();
-    if (!burstRecorded && !canUndo) return;
+    if (!burstRecorded && !canUndo) return null;
     const target = burstRecorded
       ? history.present
       : history.past[history.past.length - 1] ?? '';
     undo();
     setText(target);
+    return target;
     // Height is re-fit by the [text] effect above — we intentionally do NOT
     // write textarea.value directly here. Setting it before Preact commits the
     // controlled value can desync the input in real browsers.
   }, [canUndo, flushPendingCheckpoint, history.present, history.past, undo, setText, cancelDictation]);
 
-  const redoComposer = useCallback(() => {
+  const redoComposer = useCallback((): string | null => {
     cancelDictation();
     // Flush any pending burst first: every pending checkpoint comes from typing
     // after the last undo/redo, and recording it clears the redo stack
     // (word-processor behavior — new edits discard redo), so nothing further
     // may be redone on top of the live value.
-    if (flushPendingCheckpoint()) return;
-    if (!canRedo) return;
+    if (flushPendingCheckpoint()) return null;
+    if (!canRedo) return null;
     const target = history.future[0] ?? '';
     redo();
     setText(target);
+    return target;
     // See undoComposer: height is handled by the [text] effect, not a direct
     // textarea.value write.
   }, [canRedo, flushPendingCheckpoint, history.future, redo, setText, cancelDictation]);
@@ -581,12 +639,47 @@ export function useComposerInput({
     const target = e.target as HTMLTextAreaElement;
     const inputType = (e as InputEvent).inputType;
     if (inputType === 'historyUndo' || inputType === 'historyRedo') {
+      const kind = inputType === 'historyUndo' ? 'undo' : 'redo';
+      // Coordinate with the beforeinput handler via the pending native gesture
+      // snapshot: this input repairs the native DOM mutation and applies the
+      // custom history exactly once, never repeating an application the
+      // beforeinput (or keydown) route already made.
+      const pendingNative = pendingNativeUndoRedoRef.current;
+      if (pendingNative?.kind === kind) {
+        pendingNativeUndoRedoRef.current = null;
+        if (pendingNative.applied) {
+          // Already applied by the keydown or cancelable-beforeinput route.
+          // The matched or stray input only restores the applied target text.
+          target.value = pendingNative.targetText;
+          return;
+        }
+        // Matched input of a deferred noncancelable beforeinput: the native
+        // mutation landed, so restore the pre-gesture value first (the flush
+        // below must observe it), then apply the custom history once.
+        target.value = pendingNative.preGestureText;
+        if (kind === 'undo') undoComposer();
+        else redoComposer();
+        return;
+      }
+      if (undoRedoEchoLatchRef.current === kind) {
+        // Input-only echo of the just-applied keyboard gesture (an engine
+        // whose echo carries no beforeinput): swallow it exactly like the
+        // beforeinput echo path.
+        undoRedoEchoLatchRef.current = null;
+        if (undoRedoEchoLatchResetRef.current) {
+          clearTimeout(undoRedoEchoLatchResetRef.current);
+          undoRedoEchoLatchResetRef.current = null;
+        }
+        target.value = text;
+        return;
+      }
       // Chromium execCommand (and some native editing routes) emits input
-      // without a cancelable beforeinput. Its native stack is stale after our
-      // controlled writes. Restore the pre-event value before flushing a live
-      // burst, then use our history rather than checkpointing native corruption.
+      // without a beforeinput for an UNSEEN gesture. Its native stack is stale
+      // after our controlled writes. Restore the pre-event value before
+      // flushing a live burst, then use our history rather than checkpointing
+      // native corruption.
       target.value = text;
-      if (inputType === 'historyUndo') undoComposer();
+      if (kind === 'undo') undoComposer();
       else redoComposer();
       return;
     }
@@ -645,6 +738,12 @@ export function useComposerInput({
   // engine's echo is swallowed without applying it a second time. Native-only
   // gestures (no keydown) never arm the echo latch, so genuine back-to-back
   // native gestures all apply.
+  //
+  // Cancelability decides WHO applies: a cancelable beforeinput stops the
+  // native mutation and applies the custom history immediately; a noncancelable
+  // one cannot stop the native mutation and its matched input event follows —
+  // so it only records a pending snapshot and the input handler repairs the
+  // DOM and applies the gesture exactly once (see handleInput).
   const handleBeforeInput = useCallback((event: Event) => {
     const inputType = (event as InputEvent).inputType;
     if (inputType !== 'historyUndo' && inputType !== 'historyRedo') return;
@@ -658,11 +757,28 @@ export function useComposerInput({
         clearTimeout(undoRedoEchoLatchResetRef.current);
         undoRedoEchoLatchResetRef.current = null;
       }
+      // Some engines deliver a matched input event as part of the echo pair:
+      // the snapshot makes handleInput repair the DOM without re-applying.
+      // `text` is the value the keydown route applied and committed before
+      // this echo task.
+      setPendingNativeUndoRedo({ kind, preGestureText: text, applied: true, targetText: text });
       return;
     }
-    if (kind === 'undo') undoComposer();
-    else redoComposer();
-  }, [undoComposer, redoComposer]);
+    if (!event.cancelable) {
+      // Noncancelable beforeinput: the native mutation is already on its way
+      // and the matched input event follows immediately. Defer — the input
+      // handler repairs the DOM from this pre-gesture snapshot and applies the
+      // custom history exactly once; applying here AND there would repeat the
+      // traversal.
+      setPendingNativeUndoRedo({ kind, preGestureText: text, applied: false, targetText: '' });
+      return;
+    }
+    // Cancelable beforeinput: the native mutation is blocked, so the custom
+    // history applies here. A stray matched input (if any engine delivers one
+    // after the prevented event) must only repair, not repeat, this gesture.
+    const targetText = kind === 'undo' ? undoComposer() : redoComposer();
+    setPendingNativeUndoRedo({ kind, preGestureText: text, applied: true, targetText: targetText ?? text });
+  }, [undoComposer, redoComposer, setPendingNativeUndoRedo, text]);
 
   const toggleDictation = useCallback(() => {
     if (activeDictation) {
