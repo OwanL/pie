@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { PROVIDER_UNLIMITED_CONCURRENCY } from '../../../lib/protocol/provider-concurrency.js';
 import { concurrencySourceLabel } from '../../../../lib/concurrency-config.js';
@@ -64,6 +64,32 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
     openTabCount,
   } = stats;
 
+  const metricsRef = useRef<HTMLDivElement>(null);
+  const [fadeLeft, setFadeLeft] = useState(false);
+  const [fadeRight, setFadeRight] = useState(false);
+
+  // Like the tab strip, only fade edges with more content beyond them.
+  // Reconnect after content updates, including newly added provider/timer items;
+  // observe the items too so font/number width changes are measured as well.
+  useLayoutEffect(() => {
+    const metrics = metricsRef.current;
+    if (!metrics) return;
+    const update = () => {
+      const overflow = metrics.clientWidth > 0 && metrics.scrollWidth - metrics.clientWidth > 1;
+      setFadeLeft(overflow && metrics.scrollLeft > 1);
+      setFadeRight(overflow && metrics.scrollLeft + metrics.clientWidth < metrics.scrollWidth - 1);
+    };
+    update();
+    metrics.addEventListener('scroll', update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(metrics);
+    for (const child of metrics.children) observer.observe(child);
+    return () => {
+      metrics.removeEventListener('scroll', update);
+      observer.disconnect();
+    };
+  });
+
   const visibleProviders = stats.providerGate.providers.filter((p) =>
     p.activeRequests > 0
     && p.maxConcurrentRequests !== PROVIDER_UNLIMITED_CONCURRENCY
@@ -75,7 +101,10 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
       role="status"
       aria-label={ariaLabel(stats, snoozedSessionCount)}
     >
-      <div class="aggregate-strip-metrics">
+      <div
+        ref={metricsRef}
+        class={cx('aggregate-strip-metrics', fadeLeft && 'aggregate-strip-metrics--fade-left', fadeRight && 'aggregate-strip-metrics--fade-right')}
+      >
         <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible richRole="region">
           <span
             class="aggregate-strip-seg aggregate-strip-seg--primary"

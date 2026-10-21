@@ -245,6 +245,16 @@
     scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
   }
 
+  /* A narrow, non-intercepting cue; metrics and their focus targets retain
+     their full width. Each fade disappears when its scroll edge is reached. */
+  .aggregate-strip-metrics--fade-left { --aggregate-fade-left: transparent; }
+  .aggregate-strip-metrics--fade-right { --aggregate-fade-right: transparent; }
+  .aggregate-strip-metrics {
+    mask-image: linear-gradient(to right,
+      var(--aggregate-fade-left, #000), #000 10px,
+      #000 calc(100% - 10px), var(--aggregate-fade-right, #000));
+  }
+
   .aggregate-strip-metrics::-webkit-scrollbar { height: 5px; }
   .aggregate-strip-metrics::-webkit-scrollbar-track { background: transparent; }
   .aggregate-strip-metrics::-webkit-scrollbar-thumb {
