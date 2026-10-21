@@ -60,24 +60,6 @@
   align-self: flex-start;
 }
 
-/* Overflow summary badge when the strip is too narrow to show all cards */
-.composer-attachments-summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid var(--panel-border-subtle);
-  background: var(--panel-control-surface);
-  color: var(--panel-muted);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
 .composer-attachments-strip {
   display: flex;
   align-items: center;

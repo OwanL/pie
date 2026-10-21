@@ -129,7 +129,6 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
         <ComposerAttachments
           pendingComposerInputs={inputs}
           attachmentSummary={describeComposerInputSummary(inputs)}
-          showAttachmentSummary={inputs.length > 1}
           onRemoveInput={removeInput}
         />
         {/* Transfer rejections render ABOVE the textarea, in normal flow, so a

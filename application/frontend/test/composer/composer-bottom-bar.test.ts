@@ -215,8 +215,32 @@ test('working-time tooltip preserves mocked phase totals instead of zeroing late
   assert.match(html, /Tool execution[\s\S]*3s/);
   assert.match(html, /Retry wait[\s\S]*2s/);
   assert.match(html, /Auxiliary model calls[\s\S]*1s/);
-  assert.match(html, /Other work[\s\S]*0s/);
+  assert.doesNotMatch(html, /Other work/);
   assert.match(html, /overlapping phase totals may exceed working time/);
+});
+
+test('working-time tooltip omits zero phases from its legend and accessible description', () => {
+  const html = renderToString(h(WorkingTimeTooltip, {
+    elapsedMs: 500,
+    state: {
+      accumulatedMs: 500, activeSince: null,
+      breakdown: {
+        generationMs: 500, toolExecutionMs: 0, estimatedToolExecutionMs: 0,
+        retryWaitMs: 0, estimatedRetryWaitMs: 0, auxiliaryGenerationMs: 0,
+        toolDurationMsByName: {}, toolCallCountByName: {},
+      },
+    },
+  }));
+  assert.match(html, /aria-label="Generation: &lt;1s"/);
+  assert.doesNotMatch(html, /Tool execution|Retry wait|Auxiliary model calls|Other work/);
+  assert.match(html, /working-time-legend-label">Generation/);
+});
+
+test('working-time tooltip preserves unavailable detail notes for empty legacy timing', () => {
+  const html = renderToString(h(WorkingTimeTooltip, { elapsedMs: 0, state: undefined }));
+  assert.match(html, /Detailed phase timing is unavailable/);
+  assert.doesNotMatch(html, /working-time-legend-item|working-time-bar-segment/);
+  assert.doesNotMatch(html, /Generation:|Tool execution:|Retry wait:|Other work:/);
 });
 
 test('working-time tooltip attributes a mocked active MCP call to tools', () => {

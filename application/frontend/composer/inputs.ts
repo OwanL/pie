@@ -1,6 +1,7 @@
 import type { ComposerInput } from '../../lib/protocol/index.js';
 
 function formatSizeKb(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
 }
 

@@ -388,7 +388,6 @@ function ComposerView({
     () => describeComposerInputSummary(pendingComposerInputs),
     [pendingComposerInputs],
   );
-  const showAttachmentSummary = pendingComposerInputs.length > 1;
   const composerPlaceholder = 'Ask anything…';
   const recording = commandsAvailable && dictation?.available && dictation.phase === 'recording'
     && !!sessionPath && dictation.sessionPath === sessionPath;
@@ -438,7 +437,6 @@ function ComposerView({
         <ComposerAttachments
           pendingComposerInputs={pendingComposerInputs}
           attachmentSummary={attachmentSummary}
-          showAttachmentSummary={showAttachmentSummary}
           onRemoveInput={onRemoveInput}
         />
         <textarea

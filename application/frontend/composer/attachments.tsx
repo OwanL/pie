@@ -11,7 +11,6 @@ import {
 interface ComposerAttachmentsProps {
   pendingComposerInputs: ComposerInput[];
   attachmentSummary: string;
-  showAttachmentSummary: boolean;
   onRemoveInput: (inputId: string) => void;
 }
 
@@ -22,7 +21,6 @@ function imagePreviewSrc(input: Extract<ComposerInput, { kind: 'imageBlob' }>): 
 export function ComposerAttachments({
   pendingComposerInputs,
   attachmentSummary,
-  showAttachmentSummary,
   onRemoveInput,
 }: ComposerAttachmentsProps) {
   if (pendingComposerInputs.length === 0) {
@@ -31,7 +29,6 @@ export function ComposerAttachments({
 
   return (
     <div class="composer-attachments" role="group" aria-label={`Pending attachments: ${attachmentSummary}`}>
-      {showAttachmentSummary && <span class="composer-attachments-summary">{attachmentSummary}</span>}
       <div class="composer-attachments-strip">
         {pendingComposerInputs.map((input) => {
           const displayName = composerInputDisplayName(input);

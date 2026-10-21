@@ -21,7 +21,7 @@ export function WorkingTimeTooltip({
   elapsedMs: number;
 }) {
   const breakdown = state?.breakdown;
-  const categories = timeCategories(state, elapsedMs);
+  const categories = timeCategories(state, elapsedMs).filter((category) => category.durationMs > 0);
   const denominator = Math.max(
     elapsedMs,
     categories.reduce((total, category) => total + category.durationMs, 0),
@@ -57,7 +57,7 @@ export function WorkingTimeTooltip({
         role="img"
         aria-label={categories.map((category) => `${category.label}: ${formatTooltipDuration(category.durationMs)}`).join(', ')}
       >
-        {categories.filter((category) => category.durationMs > 0).map((category) => (
+        {categories.map((category) => (
           <span
             class={`working-time-bar-segment working-time-color--${category.key}`}
             style={`width:${(category.durationMs / denominator) * 100}%`}
