@@ -759,8 +759,11 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
 
 export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels: catalogModels, providerGateStats, providerManagement, providerSetupPreview, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
   const removedProviderIds = (providerManagement ?? providerSetupPreview)?.view.removedProviderIds ?? [];
-  const availableModels = useMemo(() => catalogModels.filter(model => !removedProviderIds.includes(model.provider)), [catalogModels, removedProviderIds]);
   const [open, setOpen] = useState(false);
+  const availableModels = useMemo(
+    () => open ? catalogModels.filter(model => !removedProviderIds.includes(model.provider)) : [],
+    [open, catalogModels, removedProviderIds],
+  );
   // Keep lifecycle and navigation state mounted, but do not derive popup data
   // from every cloned host snapshot while the surface is closed. Include open
   // in each memo so reopening always derives from the latest authoritative props.

@@ -707,10 +707,10 @@ test('search arrow keys move native result focus and Enter retains button activa
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   const results = Array.from(menu.querySelectorAll<HTMLElement>('.toolbar-settings-search-result'));
-  act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })));
+  act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })); });
   assert.equal(document.activeElement, results[0]);
   assert.ok(results[0].matches('button'), 'real focus announces the native result name');
-  act(() => results[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })));
+  act(() => { results[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); });
   assert.equal(document.activeElement, results.at(-1));
   const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
   act(() => { input.focus(); input.dispatchEvent(tab); });
@@ -737,7 +737,7 @@ test('compound labels focus keep pickers, bucket add controls, defaults and drop
   mount([
     { id: 'skill-pruner', label: 'Skill Pruner', description: '' },
     { id: 'subagent', label: 'Subagent', description: '' },
-  ], [...models, { ...models[0], id: 'm2', name: 'M2' }], undefined, { pruningCatalog: { skills: ['test-skill'], tools: ['read'] }, prefs: { ...DEFAULT_CHAT_PREFS, subagentBuckets: { small: [{ model: 'm', provider: 'test' }], medium: [], frontier: [] } } });
+  ], [...models, { ...models[0], id: 'm2', name: 'M2' }], undefined, { pruningCatalog: { skills: ['test-skill'], tools: ['read'] }, prefs: { ...DEFAULT_CHAT_PREFS, subagentBuckets: { small: [{ model: 'test/m', thinkingLevel: 'low' }], medium: [], frontier: [] } } });
   const menu = openMenu();
   const input = menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!;
   for (const label of ['Omitted skills (never pruned)', 'Omitted tools (never pruned)', 'Small bucket models', 'Medium bucket models', 'Frontier bucket models', 'Default providers', 'Drop tools for subagents']) {
