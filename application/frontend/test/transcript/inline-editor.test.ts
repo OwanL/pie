@@ -209,3 +209,23 @@ test('InlineEditor permits attachment-only submission and preserves inputs', () 
   act(() => { save.click(); save.click(); });
   assert.deepEqual(confirmations, [{ text: '', inputs }]);
 });
+
+for (const moved of [false, true]) {
+  test('editor removal restores shell only while focus is owned: ' + moved, async () => {
+    const shell = document.createElement('div');
+    shell.className = 'message-item-shell';
+    shell.tabIndex = 0;
+    container.appendChild(shell);
+    const outside = document.createElement('button');
+    container.appendChild(outside);
+    act(() => render(h(InlineEditor, {
+      queued: false, initialText: 'edit', initialInputs: [], capturedHeight: null,
+      onConfirm: () => {}, onCancel: () => {},
+    }), shell));
+    shell.querySelector('textarea')!.focus();
+    if (moved) outside.focus();
+    act(() => render(null, shell));
+    await Promise.resolve();
+    assert.equal(document.activeElement, moved ? outside : shell);
+  });
+}

@@ -15,6 +15,8 @@
  * via `className` so the primitive stays presentation-only.
  */
 
+import { announceCopyResult } from './transcript-click-handler';
+
 export type StatusTone =
   | 'neutral'
   | 'running'
@@ -61,10 +63,15 @@ async function copyToClipboard(text: string): Promise<boolean> {
     textarea.style.left = '0';
     textarea.style.opacity = '0';
     document.body.appendChild(textarea);
-    textarea.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    return ok;
+    const focused = document.activeElement as HTMLElement | null;
+    try {
+      textarea.select();
+      return document.execCommand('copy');
+    } finally {
+      const ownedFocus = document.activeElement === textarea;
+      textarea.remove();
+      if (ownedFocus && focused?.isConnected) focused.focus({ preventScroll: true });
+    }
   } catch {
     return false;
   }
@@ -83,6 +90,7 @@ export function StatusChip({ tone, label, className, copyText, copyAriaLabel, ti
 
   const copy = async (target: HTMLElement) => {
     const ok = await copyToClipboard(copyText);
+    announceCopyResult(target, ok);
     if (!ok) return;
     target.dataset.copied = '';
     setTimeout(() => {

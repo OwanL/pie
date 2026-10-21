@@ -43,16 +43,15 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
   const [overflows, setOverflows] = useState(false);
   const measureHint = useCallback(() => {
     const el = scrollRef.current;
-    const next = Boolean(scrollHint && el && (
+    const next = Boolean(el && (
       el.scrollWidth - el.clientWidth > 1 || el.scrollHeight - el.clientHeight > 1
     ));
     setOverflows((previous) => previous === next ? previous : next);
-  }, [scrollHint, scrollRef]);
+  }, [scrollRef]);
   // Content and user height/reset changes can change scroll dimensions without
   // changing the observed box. Measure after render as well as on box resize.
-  useLayoutEffect(() => { if (scrollHint) measureHint(); });
+  useLayoutEffect(() => { measureHint(); });
   useLayoutEffect(() => {
-    if (!scrollHint) { setOverflows(false); return; }
     const el = scrollRef.current;
     if (!el) return;
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measureHint) : undefined;
@@ -78,6 +77,9 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
       )}
       <pre
         ref={scrollRef}
+        tabIndex={overflows ? 0 : undefined}
+        role={overflows ? 'region' : undefined}
+        aria-label={overflows ? 'Tool output' : undefined}
         class={cx('resizable-scroll-area-scroll', className)}
         onScroll={onScroll}
         style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}

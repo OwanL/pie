@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import type { ComposerInput } from '../../lib/protocol/index.js';
 import { ComposerAttachments } from '../composer/attachments';
@@ -40,6 +40,21 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
   // that both truncate and send. The editor unmounts on the host's next
   // snapshot, not synchronously, so guard locally.
   const submittedRef = useRef(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const editor = wrapperRef.current;
+    const shell = editor?.closest<HTMLElement>('.message-item-shell');
+    return () => {
+      if (submittedRef.current || !editor?.contains(document.activeElement)) return;
+      // Wait until removal completes: session changes remove the shell too.
+      queueMicrotask(() => {
+        if (!shell?.isConnected) return;
+        const active = document.activeElement;
+        if (active !== document.body && active !== null && !editor.contains(active)) return;
+        shell.focus({ preventScroll: true });
+      });
+    };
+  }, []);
 
   const submit = useCallback((nextText: string, nextInputs: ComposerInput[]) => {
     if (submittedRef.current) return;
@@ -118,7 +133,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
     : undefined;
 
   return (
-    <div class="inline-editor-wrapper" style={wrapperStyle}>
+    <div ref={wrapperRef} class="inline-editor-wrapper" style={wrapperStyle}>
       <div
         class={cx('inline-editor', isDragActive && 'border-accent/40 bg-accent/5 shadow-md')}
         ref={composerShellRef}

@@ -134,3 +134,14 @@ test('viewport resize refreshes marker positions via the ResizeObserver', () => 
   const markers = [...container.querySelectorAll<HTMLDivElement>('.transcript-message-rail-marker')];
   assert.equal(markers[1]!.style.top, '240px', '600 / 1000 × 400');
 });
+
+test('rail uses one tab stop with arrow navigation', () => {
+  act(() => render(h(MessageRail, railProps()), container));
+  const buttons = container.querySelectorAll<HTMLButtonElement>('button');
+  assert.deepEqual(Array.from(buttons, (button) => button.tabIndex), [0, -1]);
+  act(() => { buttons[0].focus(); buttons[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
+  assert.equal(document.activeElement, buttons[1]);
+  assert.deepEqual(Array.from(buttons, (button) => button.tabIndex), [-1, 0]);
+  act(() => { buttons[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })); });
+  assert.equal(document.activeElement, buttons[0]);
+});

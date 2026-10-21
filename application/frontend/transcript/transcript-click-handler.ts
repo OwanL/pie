@@ -12,6 +12,22 @@
  * `.subagent-messages`).
  */
 
+/** A scoped, nonvisual live region; never append feedback to copied code. */
+export function announceCopyResult(control: Element, ok: boolean): void {
+  const scope = control.parentElement;
+  if (!scope) return;
+  let status = scope.querySelector<HTMLElement>('[data-copy-status]');
+  if (!status) {
+    status = document.createElement('span');
+    status.className = 'sr-only';
+    status.dataset.copyStatus = '';
+    status.setAttribute('role', 'status');
+    scope.appendChild(status);
+  }
+  status.textContent = '';
+  window.setTimeout(() => { if (status?.isConnected) status.textContent = ok ? 'Copied to clipboard' : 'Copy failed'; }, 0);
+}
+
 interface CodeBlockClickHandler {
   selector: string;
   handle: (target: HTMLElement, btn: Element) => void;
@@ -24,9 +40,18 @@ const CODE_BLOCK_CLICK_HANDLERS: CodeBlockClickHandler[] = [
       const code = btn.closest('.code-block')?.querySelector('code');
       const text = code?.textContent ?? '';
       if (text) {
-        void navigator.clipboard?.writeText(text);
-        btn.classList.add('copied');
-        window.setTimeout(() => btn.classList.remove('copied'), 1200);
+        void (async () => {
+          try {
+            if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+            await navigator.clipboard.writeText(text);
+            btn.classList.add('copied');
+            announceCopyResult(btn, true);
+            window.setTimeout(() => btn.classList.remove('copied'), 1200);
+          } catch {
+            btn.classList.remove('copied');
+            announceCopyResult(btn, false);
+          }
+        })();
       }
     },
   },

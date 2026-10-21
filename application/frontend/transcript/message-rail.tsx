@@ -165,6 +165,8 @@ function MessageRailView({
     [rows, measurements, railHeight, totalSize, markerHitHeight],
   );
 
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const tabStopId = markers.some((marker) => marker.messageId === activeId) ? activeId : markers[0]?.messageId;
   const jumpControllerRef = useRef<MessageRailJumpController | null>(null);
   useEffect(() => {
     // The transcript surface supplies one controller shared with the context
@@ -199,11 +201,22 @@ function MessageRailView({
 
   return (
     <div class="transcript-message-rail" aria-label="User message navigation">
-      {markers.map((marker) => (
+      {markers.map((marker, index) => (
         <button
           type="button"
           key={marker.messageId}
           class="transcript-message-rail-marker"
+          tabIndex={marker.messageId === tabStopId ? 0 : -1}
+          onFocus={() => setActiveId(marker.messageId)}
+          onKeyDown={(event) => {
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? markers.length - 1
+              : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? Math.min(index + 1, markers.length - 1)
+                : event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? Math.max(0, index - 1) : null;
+            if (next === null) return;
+            event.preventDefault();
+            const buttons = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('button');
+            buttons?.[next]?.focus();
+          }}
           title={marker.preview}
           aria-label={`Jump to message: ${marker.preview}`}
           style={{ top: `${marker.top}px`, height: `${markerHitHeight}px` }}

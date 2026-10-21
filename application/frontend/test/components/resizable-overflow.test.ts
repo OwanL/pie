@@ -218,3 +218,18 @@ test('reset (double-click) hides handles again when content no longer overflows'
   renderPre(h('code', null, 'line\n'.repeat(50)));
   assert.equal(handles().length, 0, 'handles hide after reset when content fits');
 });
+
+
+test('only overflowing output becomes a named keyboard scroll region', () => {
+  renderPre('short');
+  const pre = scrollEl()!;
+  assert.equal(pre.hasAttribute('tabindex'), false);
+  mockOverflow(pre, 600, 240);
+  renderPre('long');
+  assert.equal(pre.tabIndex, 0);
+  assert.equal(pre.getAttribute('role'), 'region');
+  assert.equal(pre.getAttribute('aria-label'), 'Tool output');
+  mockOverflow(pre, 100, 240);
+  renderPre('short again');
+  assert.equal(pre.hasAttribute('tabindex'), false);
+});
