@@ -7,8 +7,8 @@ import { act } from 'preact/test-utils';
 import { installDom } from '../helpers/dom';
 installDom();
 
-function renderToString(node: VNode): string {
-  if (node.type !== AggregateStatsStrip) return rawRenderToString(node);
+function renderToString<P>(node: VNode<P>): string {
+  if ((node.type as unknown) !== AggregateStatsStrip) return rawRenderToString(node);
   const original = HTMLElement.prototype.getBoundingClientRect;
   HTMLElement.prototype.getBoundingClientRect = function () {
     return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
