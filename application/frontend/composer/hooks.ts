@@ -28,6 +28,10 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
 /** Idle window that groups a typing burst into a single undo checkpoint,
  * mirroring how word processors undo by word/action rather than per keystroke. */
 const CHECKPOINT_DEBOUNCE_MS = 500;
+/** Window in which a native beforeinput historyUndo/historyRedo is treated as the same edit
+ * already applied through the keyboard route (non-compliant engines echo the gesture) rather
+ * than a fresh undo/redo. Well under any human cadence between two separate gestures. */
+const UNDO_REDO_DUPLICATE_WINDOW_MS = 250;
 const DICTATION_START_ACK_TIMEOUT_MS = 15_000;
 
 function mobileVisibleHeight(): number | undefined {
@@ -132,6 +136,10 @@ export function useComposerInput({
   const [history, { set: setHistory, reset: resetHistory, undo, redo, canUndo, canRedo }] =
     useUndo<string>('');
   const checkpointTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Direction and timestamp of the last undo/redo this hook applied. beforeinput delivers a
+  // native historyUndo/historyRedo echo right after our keydown route on engines that ignore
+  // keydown prevention — the same-direction echo must not apply the edit a second time.
+  const lastUndoRedoGestureRef = useRef<{ kind: 'undo' | 'redo'; at: number } | null>(null);
   const pendingStartRef = useRef<{ recordingId: string; baselineText: string; editGeneration: number } | null>(null);
   const cancelledStartDraftRef = useRef<{ sessionPath: string; editGeneration: number } | null>(null);
   const pendingStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,6 +182,22 @@ export function useComposerInput({
       setHistory(value, true);
     }, CHECKPOINT_DEBOUNCE_MS);
   }, [clearCheckpointTimer, setHistory]);
+
+  // Commit a pending (not yet debounced) checkpoint immediately, using the live
+  // textarea value, so an undo/redo started mid-burst accounts for the burst:
+  // without this flush the burst's edits exist only in the timer and the first
+  // Ctrl+Z of rapid typing (including the very first burst after a session
+  // seed) would step over the live text and lose it from the history entirely.
+  // Returns true when a checkpoint was recorded (the burst became the present).
+  const flushPendingCheckpoint = useCallback((): boolean => {
+    if (checkpointTimerRef.current === null) return false;
+    clearCheckpointTimer();
+    const textarea = textareaRef.current;
+    const live = textarea ? textarea.value : text;
+    if (live === history.present) return false;
+    setHistory(live, true);
+    return true;
+  }, [clearCheckpointTimer, setHistory, text, history.present]);
 
   // Drop any pending checkpoint timer if the composer unmounts (e.g. the panel is
   // disposed) so it can't fire setHistory on a stale instance.
@@ -472,26 +496,37 @@ export function useComposerInput({
 
   const undoComposer = useCallback(() => {
     cancelDictation();
-    if (!canUndo) return;
-    clearCheckpointTimer();
-    const target = history.past[history.past.length - 1] ?? '';
+    // Record the live burst first (see flushPendingCheckpoint) so its edits are
+    // recoverable, then step to the pre-burst checkpoint. A flushed burst becomes
+    // the new present; without a burst the previous checkpoint is the target.
+    const burstRecorded = flushPendingCheckpoint();
+    if (!burstRecorded && !canUndo) return;
+    const target = burstRecorded
+      ? history.present
+      : history.past[history.past.length - 1] ?? '';
     undo();
     setText(target);
+    lastUndoRedoGestureRef.current = { kind: 'undo', at: performance.now() };
     // Height is re-fit by the [text] effect above — we intentionally do NOT
     // write textarea.value directly here. Setting it before Preact commits the
     // controlled value can desync the input in real browsers.
-  }, [canUndo, clearCheckpointTimer, history.past, undo, cancelDictation]);
+  }, [canUndo, flushPendingCheckpoint, history.present, history.past, undo, setText, cancelDictation]);
 
   const redoComposer = useCallback(() => {
     cancelDictation();
+    // Flush any pending burst first: every pending checkpoint comes from typing
+    // after the last undo/redo, and recording it clears the redo stack
+    // (word-processor behavior — new edits discard redo), so nothing further
+    // may be redone on top of the live value.
+    if (flushPendingCheckpoint()) return;
     if (!canRedo) return;
-    clearCheckpointTimer();
     const target = history.future[0] ?? '';
     redo();
     setText(target);
+    lastUndoRedoGestureRef.current = { kind: 'redo', at: performance.now() };
     // See undoComposer: height is handled by the [text] effect, not a direct
     // textarea.value write.
-  }, [canRedo, clearCheckpointTimer, history.future, redo, cancelDictation]);
+  }, [canRedo, flushPendingCheckpoint, history.future, redo, setText, cancelDictation]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -573,16 +608,23 @@ export function useComposerInput({
     void applyComposerTransfer(dataTransfer, 'paste');
   }, [applyComposerTransfer]);
 
-  // Block the browser's native textarea undo/redo at the input level so it can
-  // never partially apply on top of our history (undo/redo is driven from
-  // handleKeyDown). Native undo would otherwise fight the controlled value
-  // after our programmatic changes and produce garbled/doubled text.
+  // Block the browser's native textarea undo/redo (undo/redo is driven by our
+  // history: native undo fights the controlled value after our programmatic
+  // changes and cannot survive the programmatic clear on send), but route the
+  // native gesture through the SAME undo/redo: engines that bypass the keydown
+  // route (e.g. mobile keyboards) deliver historyUndo/historyRedo only here.
+  // When the keyboard route already applied the same gesture inside the
+  // duplicate window, swallow the echo without applying it a second time.
   const handleBeforeInput = useCallback((event: Event) => {
     const inputType = (event as InputEvent).inputType;
-    if (inputType === 'historyUndo' || inputType === 'historyRedo') {
-      event.preventDefault();
-    }
-  }, []);
+    if (inputType !== 'historyUndo' && inputType !== 'historyRedo') return;
+    event.preventDefault();
+    const last = lastUndoRedoGestureRef.current;
+    if (last && performance.now() - last.at < UNDO_REDO_DUPLICATE_WINDOW_MS
+      && last.kind === (inputType === 'historyUndo' ? 'undo' : 'redo')) return;
+    if (inputType === 'historyUndo') undoComposer();
+    else redoComposer();
+  }, [undoComposer, redoComposer]);
 
   const toggleDictation = useCallback(() => {
     if (activeDictation) {
