@@ -69,6 +69,12 @@ function mount(props: SessionTabsProps): { container: HTMLElement; unmount: () =
   };
 }
 
+/** The dropdown is portaled to document.body, so queries for it must not be
+ *  scoped to the mount container. */
+function queryDropdown(scope: ParentNode = document.body): HTMLElement | null {
+  return scope.querySelector('.pinned-tab-group-dropdown');
+}
+
 test('a pinned group renders a single chip with data-pinned-item-group and a 2×2 avatar grid', () => {
   const restore = mockResizeObserver();
   const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
@@ -86,7 +92,7 @@ test('a pinned group renders a single chip with data-pinned-item-group and a 2×
     // 2 members → 2 avatar tiles in the grid.
     assert.equal(chip!.querySelectorAll('.pinned-tab-group-tile:not(.pinned-tab-group-plus)').length, 2);
     // No dropdown yet.
-    assert.equal(container.querySelectorAll('.pinned-tab-group-dropdown').length, 0);
+    assert.equal(queryDropdown(), null);
   } finally {
     unmount();
     restore();
@@ -132,7 +138,7 @@ test('agent icons identify group members without labeling a mixed group as all-a
     const chipButton = chip!.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.click(); });
-    const members = container.querySelectorAll('.pinned-tab-group-member');
+    const members = document.body.querySelectorAll('.pinned-tab-group-member');
     assert.equal(members.length, 2);
     assert.equal(members[0].querySelectorAll('.session-tab-agent-icon').length, 1);
     assert.equal(members[1].querySelectorAll('.session-tab-agent-icon').length, 0);
@@ -176,7 +182,7 @@ test('clicking a group chip opens a dropdown listing each member', () => {
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
-    const dropdown = container.querySelector('.pinned-tab-group-dropdown') as HTMLElement | null;
+    const dropdown = queryDropdown() as HTMLElement | null;
     assert.ok(dropdown, 'dropdown opens on chip click');
     assert.equal(dropdown!.querySelectorAll('.pinned-tab-group-member').length, 2);
     assert.ok(dropdown!.querySelector('.pinned-tab-group-member-label.session-title-loading'));
@@ -203,12 +209,12 @@ test('selecting a member fires onSelect and leaves the dropdown open', () => {
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
-    const members = container.querySelectorAll<HTMLButtonElement>('.pinned-tab-group-member');
+    const members = document.body.querySelectorAll<HTMLButtonElement>('.pinned-tab-group-member');
     assert.equal(members.length, 2);
     act(() => { members[1].dispatchEvent(new window.Event('click', { bubbles: true })); });
     assert.equal(selected, '/b');
     // Dropdown stays open after member select.
-    assert.ok(container.querySelector('.pinned-tab-group-dropdown'), 'dropdown stays open after member select');
+    assert.ok(queryDropdown(), 'dropdown stays open after member select');
   } finally {
     unmount();
     restore();
@@ -230,7 +236,7 @@ test('an open dropdown re-associates with the surviving group when its first mem
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
-    assert.ok(container.querySelector('.pinned-tab-group-dropdown'), 'dropdown opens');
+    assert.ok(queryDropdown(), 'dropdown opens');
     // Simulate the first member /a being ungrouped to the front: it leaves the
     // group and becomes a standalone chip; the group survives as [/b, /c].
     props = {
@@ -240,9 +246,9 @@ test('an open dropdown re-associates with the surviving group when its first mem
     };
     act(() => render(h(SessionTabs, props), container));
     // The dropdown stays open, now associated with the surviving group.
-    assert.ok(container.querySelector('.pinned-tab-group-dropdown'), 'dropdown stays open on the surviving group');
+    assert.ok(queryDropdown(), 'dropdown stays open on the surviving group');
     // It lists the surviving members (not the dragged-out /a).
-    assert.equal(container.querySelectorAll('.pinned-tab-group-member').length, 2);
+    assert.equal(document.body.querySelectorAll('.pinned-tab-group-member').length, 2);
   } finally {
     unmount();
     restore();
@@ -263,11 +269,11 @@ test('an open dropdown closes when its group fully dissolves (no surviving group
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
-    assert.ok(container.querySelector('.pinned-tab-group-dropdown'));
+    assert.ok(queryDropdown());
     // The group dissolves entirely (both members become standalone).
     props = { ...props, pinnedTabGroups: [] };
     act(() => render(h(SessionTabs, props), container));
-    assert.equal(container.querySelectorAll('.pinned-tab-group-dropdown').length, 0, 'dropdown closes when the group dissolves');
+    assert.equal(queryDropdown(), null, 'dropdown closes when the group dissolves');
   } finally {
     unmount();
     restore();
@@ -287,9 +293,9 @@ test('Escape closes an open group dropdown', () => {
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
-    assert.ok(container.querySelector('.pinned-tab-group-dropdown'));
+    assert.ok(queryDropdown());
     act(() => { window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-    assert.equal(container.querySelectorAll('.pinned-tab-group-dropdown').length, 0, 'Escape closes the dropdown');
+    assert.equal(queryDropdown(), null, 'Escape closes the dropdown');
   } finally {
     unmount();
     restore();
@@ -341,10 +347,10 @@ test('right-clicking a dropdown member opens the full session menu with its grou
     const chip = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chip);
     act(() => { chip!.click(); });
-    const member = container.querySelector<HTMLButtonElement>('.pinned-tab-group-member');
+    const member = document.body.querySelector<HTMLButtonElement>('.pinned-tab-group-member');
     assert.ok(member);
     act(() => { member!.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 12 })); });
-    assert.equal(container.querySelector('.pinned-tab-group-dropdown'), null, 'opening member menu closes the dropdown');
+    assert.equal(queryDropdown(), null, 'opening member menu closes the dropdown');
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu);
     const menuText = menu!.textContent ?? '';
@@ -384,7 +390,7 @@ test('a grouped dropdown member exposes Close tab and closes that session', () =
     const chip = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chip);
     act(() => { chip!.click(); });
-    const members = container.querySelectorAll<HTMLButtonElement>('.pinned-tab-group-member');
+    const members = document.body.querySelectorAll<HTMLButtonElement>('.pinned-tab-group-member');
     assert.equal(members.length, 2);
     act(() => { members[1].dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 12 })); });
     const menu = container.querySelector('.session-tab-context-menu');
@@ -540,10 +546,10 @@ test('Shift+F10 on a dropdown member closes the dropdown and opens its member me
     const chipButton = container.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
     assert.ok(chipButton);
     act(() => { chipButton!.click(); });
-    const member = container.querySelector<HTMLElement>('.pinned-tab-group-member');
+    const member = document.body.querySelector<HTMLElement>('.pinned-tab-group-member');
     assert.ok(member);
     act(() => { member!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); });
-    assert.equal(container.querySelector('.pinned-tab-group-dropdown'), null, 'opening the member menu closes the dropdown (same as right-click)');
+    assert.equal(queryDropdown(), null, 'opening the member menu closes the dropdown (same as right-click)');
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu, 'the keyboard request opens the member menu');
     assert.match(menu!.textContent ?? '', /Remove from group/);
@@ -573,13 +579,37 @@ test('group dropdown clamps at the right edge and flips above a low chip', () =>
   }));
   try {
     act(() => container.querySelector<HTMLButtonElement>('.pinned-tab-group-main')!.click());
-    const dropdown = container.querySelector<HTMLElement>('.pinned-tab-group-dropdown')!;
+    const dropdown = queryDropdown() as HTMLElement;
     assert.equal(dropdown.dataset.placement, 'up');
     assert.ok(parseFloat(dropdown.style.left) + parseFloat(dropdown.style.width) <= window.innerWidth - 8);
     assert.ok(parseFloat(dropdown.style.maxHeight) <= 420);
   } finally {
     unmount();
     HTMLElement.prototype.getBoundingClientRect = originalRect;
+    restore();
+  }
+});
+
+// Seam regression: the dropdown must be portaled to document.body. When it
+// rendered inside the strip, the strip's overflow-x scrolling and edge-fade
+// mask-image clipped the fixed-position menu's painted subtree, so bounds
+// looked correct while the menu was visually cut below the tabstrip.
+test('the open dropdown portals to document.body outside the strip mask', () => {
+  const restore = mockResizeObserver();
+  const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];
+  const { container, unmount } = mount(baseProps({
+    sessions,
+    openTabPaths: ['/a', '/b'], pinnedTabPaths: ['/a', '/b'], pinnedTabGroups: [['/a', '/b']],
+  }));
+  try {
+    act(() => container.querySelector<HTMLButtonElement>('.pinned-tab-group-main')!.click());
+    const dropdown = queryDropdown() as HTMLElement;
+    assert.equal(dropdown.parentElement, document.body, 'dropdown is a direct body child');
+    const strip = container.querySelector<HTMLElement>('.session-tabs-strip');
+    assert.ok(strip, 'the masked strip renders');
+    assert.ok(!strip!.contains(dropdown), 'dropdown is not painted inside the masked/scrollable strip');
+  } finally {
+    unmount();
     restore();
   }
 });

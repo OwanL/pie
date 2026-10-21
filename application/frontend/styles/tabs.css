@@ -1058,6 +1058,8 @@ body.session-tab-dragging {
 }
 
 /* ── Group dropdown (anchored below the bar) ──────────────────────────────── */
+/* Portaled to document.body (fixed descendants would still be clipped by the
+   strip's overflow and edge-fade mask); placement is viewport-anchored. */
 .pinned-tab-group-dropdown {
   position: fixed;
   z-index: 20;

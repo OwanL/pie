@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useCallback, useEffect, useRef } from 'preact/hooks';
-import { memo } from 'preact/compat';
+import { createPortal, memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../lib/protocol/index.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
@@ -175,7 +175,7 @@ function PinnedTabGroupView({
           {allMembersAgentCreated && <AgentIcon compact />}
         </button>
       </div>
-      {open && (
+      {open && createPortal(
         <div
           ref={dropdownRef}
           class="pinned-tab-group-dropdown"
@@ -235,7 +235,11 @@ function PinnedTabGroupView({
               </button>
             );
           })}
-        </div>
+        </div>,
+        // Portaled to body so the strip's overflow and edge-fade mask cannot
+        // clip the floating menu (fixed descendants still paint inside the
+        // masked subtree); placement still tracks the chip via rect.
+        document.body,
       )}
     </>
   );
