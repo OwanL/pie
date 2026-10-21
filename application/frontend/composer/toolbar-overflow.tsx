@@ -5,11 +5,18 @@ import type { ComponentChildren, JSX } from 'preact';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
-import { allocateComposerModelWidthBudget, allocateComposerOverflow } from './toolbar-overflow-allocation';
+import { allocateComposerToolbar } from './toolbar-overflow-allocation';
 
 export interface ComposerToolbarItem {
   key: string;
   kind: 'control' | 'indicator';
+  /** Short visible action name shown beside the icon in the overflow panel
+   *  only; the row keeps icon-only triggers and the accessible names are those
+   *  of the trigger itself. Indicators already render their own text labels. */
+  shortLabel?: string;
+  /** Explicit removal priority consumed by the allocator; lower values move the
+   *  item behind the trigger earlier (see {@link ComposerOverflowItemWidth}). */
+  removalPriority?: number;
   content: ComponentChildren;
 }
 
@@ -107,6 +114,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
         key: item.key,
         kind: item.kind,
         width: element ? measured : itemWidthsRef.current.get(item.key) || 0,
+        ...(item.removalPriority === undefined ? {} : { removalPriority: item.removalPriority }),
       };
     });
     const sectionGap = readGap(root, 'columnGap', FALLBACK_SECTION_GAP);
@@ -114,9 +122,13 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
     // The probe shares the trigger's CSS sizing even before More is needed,
     // without counting its width in the row or measuring interaction transforms.
     const overflowTriggerWidth = readWidth(triggerMeasurementRef.current) || FALLBACK_OVERFLOW_TRIGGER_WIDTH;
-    const visibleItemKeys = allocateComposerOverflow({
+    // One allocation decides the retained items and the model label budget
+    // together, so the compact label and the indicators it protects can never
+    // disagree about the row they share.
+    const { visibleItemKeys, modelWidthBudget } = allocateComposerToolbar({
       availableWidth,
-      pinnedWidth: pinnedNaturalWidth,
+      pinnedNaturalWidth,
+      modelNaturalWidth,
       actionsWidth: readWidth(actions),
       items: itemWidths,
       controlGap,
@@ -125,16 +137,6 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
       overflowTriggerWidth,
     });
     if (modelPicker) {
-      const modelWidthBudget = allocateComposerModelWidthBudget({
-        availableWidth,
-        pinnedNaturalWidth,
-        modelNaturalWidth,
-        actionsWidth: readWidth(actions),
-        sectionGap,
-        controlGap,
-        overflowTriggerWidth,
-        hasOverflow: visibleItemKeys.length < itemWidths.length,
-      });
       const widthValue = `${Math.round(modelWidthBudget * 100) / 100}px`;
       if (pinned.style.getPropertyValue('--composer-model-picker-max-width') !== widthValue) {
         pinned.style.setProperty('--composer-model-picker-max-width', widthValue);
@@ -303,6 +305,9 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
           aria-disabled={!commandsAvailable}
         >
           {item.content}
+          {inPopover && item.shortLabel ? (
+            <span class="composer-toolbar-item-label" aria-hidden="true">{item.shortLabel}</span>
+          ) : null}
         </fieldset>
       );
     }

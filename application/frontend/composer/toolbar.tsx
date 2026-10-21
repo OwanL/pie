@@ -61,6 +61,16 @@ function compactionFreedTokens(lastCompaction: LastCompactionSummary): number | 
   return Math.max(0, tokensBefore - estimatedTokensAfter);
 }
 
+/** The session-cost chip renders a bare em dash — never a fabricated zero —
+ *  when no priced usage is known ("unavailable", not "$0.00"). Such a bare chip
+ *  says nothing in-row, so it yields to the overflow panel before every other
+ *  indicator; the chip itself is never discarded and keeps its tooltip there. */
+const UNKNOWN_SESSION_COST_LABEL = /^—/u;
+
+function isUnknownSessionCost(sessionCostIndicator: SessionCostIndicatorState): boolean {
+  return UNKNOWN_SESSION_COST_LABEL.test(sessionCostIndicator.label);
+}
+
 interface ComposerToolbarStatus {
   text: string;
   tone: string;
@@ -310,6 +320,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'subagent-providers',
       kind: 'control',
+      shortLabel: 'Subagents',
       content: (
         <SubagentProviderMenu
           sessionPath={sessionPath}
@@ -323,16 +334,19 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'system-prompts',
       kind: 'control',
+      shortLabel: 'Prompts',
       content: <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />,
     },
     {
       key: 'mcp',
       kind: 'control',
+      shortLabel: 'MCP',
       content: <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />,
     },
     {
       key: 'compact-context',
       kind: 'control',
+      shortLabel: 'Compact',
       content: (
         <CompactionButton
           availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : !canCompact ? 'busy' : 'available'}
@@ -343,6 +357,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'autonomous-mode',
       kind: 'control',
+      shortLabel: 'Autonomous',
       content: (
         <button
           type="button"
@@ -366,6 +381,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'privacy-mode',
       kind: 'control',
+      shortLabel: 'Privacy',
       content: (
         <button
           type="button"
@@ -386,6 +402,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'browser-network',
       kind: 'control',
+      shortLabel: 'Browser',
       content: (
         <BrowserServerMenu
           browserServer={browserServer}
@@ -398,6 +415,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     {
       key: 'pruning-refresh',
       kind: 'control',
+      shortLabel: 'Refresh',
       content: (
         <button
           type="button"
@@ -418,6 +436,9 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     ...(sessionCostIndicator && !prefs.hideSessionCost ? [{
       key: 'session-cost',
       kind: 'indicator' as const,
+      // A bare em-dash chip has nothing to show in-row: move it behind the
+      // trigger ahead of every other item, keeping its tooltip in the panel.
+      ...(isUnknownSessionCost(sessionCostIndicator) ? { removalPriority: 0 as const } : {}),
       content: (
         <ToolbarIndicatorChip
           kind="cost"
