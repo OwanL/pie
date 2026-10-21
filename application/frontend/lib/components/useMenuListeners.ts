@@ -33,7 +33,10 @@ interface MenuListenerEntry {
 const menuStack: MenuListenerEntry[] = [];
 
 function enabledItems(ref: MenuRef): HTMLButtonElement[] {
-  return Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button.context-menu-item:not(:disabled)') ?? []);
+  const root = ref.current;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLButtonElement>('button.context-menu-item:not(:disabled)'))
+    .filter((item) => item.closest('[role="menu"]') === root);
 }
 
 function moveFocus(event: KeyboardEvent, ref: MenuRef): void {

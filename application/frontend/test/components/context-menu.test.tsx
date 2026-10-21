@@ -6,7 +6,7 @@ installDom();
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 
 import { ContextMenu, type ContextMenuState } from '../../lib/components/context-menu';
 import { useAppHandlers, type AppHandlers } from '../../shell/use-app-handlers';
@@ -49,6 +49,19 @@ function PrimitiveMenu({
     h('button', { class: 'context-menu-item', type: 'button' }, 'First'),
     h('button', { class: 'context-menu-item', type: 'button', disabled: true }, 'Disabled'),
     showLast ? h('button', { class: 'context-menu-item', type: 'button' }, 'Last') : null);
+}
+
+function ParentChildMenu({ onClose }: { onClose: () => void }) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const childRef = useRef<HTMLDivElement>(null);
+  useMenuListeners(parentRef, onClose);
+  useMenuListeners(childRef, onClose);
+  return h('div', { ref: parentRef, role: 'menu' },
+    h('button', { class: 'context-menu-item', type: 'button' }, 'Parent first'),
+    h('button', { class: 'context-menu-item', type: 'button' }, 'Parent second'),
+    h('div', { ref: childRef, role: 'menu' },
+      h('button', { class: 'context-menu-item', type: 'button' }, 'Child first'),
+      h('button', { class: 'context-menu-item', type: 'button' }, 'Child second')));
 }
 
 function keydown(key: string): void {
@@ -194,6 +207,29 @@ test('shared menu navigation wraps and skips disabled items', () => {
   assert.equal(document.activeElement, items[0]);
   keydown('End');
   assert.equal(document.activeElement, items[2]);
+
+  act(() => render(null, container));
+  container.remove();
+});
+
+test('nested menu Home and End navigation stays within the focused owning menu', () => {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  act(() => render(h(ParentChildMenu, { onClose: () => {} }), container));
+  const [parentFirst, parentSecond, childFirst, childSecond] =
+    Array.from(container.querySelectorAll<HTMLButtonElement>('.context-menu-item'));
+
+  childSecond.focus();
+  keydown('Home');
+  assert.equal(document.activeElement, childFirst, 'Home starts at the child menu beginning');
+  keydown('End');
+  assert.equal(document.activeElement, childSecond, 'End stops at the child menu end');
+
+  parentSecond.focus();
+  keydown('Home');
+  assert.equal(document.activeElement, parentFirst, 'parent Home ignores descendant child items');
+  keydown('End');
+  assert.equal(document.activeElement, parentSecond, 'parent End ignores descendant child items');
 
   act(() => render(null, container));
   container.remove();
