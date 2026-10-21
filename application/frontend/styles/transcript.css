@@ -1165,7 +1165,7 @@
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel-foreground) 24%, transparent);
 }
 
-.message-item-shell[data-role="user"][data-queued="true"] {
+.message-item-shell[data-role="user"][data-queued="true"]:not([data-editing="true"]) {
   opacity: 0.78;
 }
 

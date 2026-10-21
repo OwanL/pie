@@ -90,7 +90,6 @@ export function MessageItemShell({
         role === 'assistant' && 'self-start w-full max-w-full px-1 py-2',
         role === 'user' && 'w-fit max-w-[88%] self-end rounded-lg px-2 py-1.5',
         role === 'system' && 'w-auto max-w-none self-stretch px-2 py-2',
-        role === 'user' && status === 'queued' && 'opacity-60',
         isClickableUserMsg && 'cursor-pointer',
       )}
       data-message-id={messageId}

@@ -169,7 +169,7 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
   }));
 
   assert.match(editingHtml, /inline-editor-textarea/);
-  assert.match(editingHtml, />Save</);
+  assert.match(editingHtml, />Save &amp; resend</);
   assert.match(editingHtml, />Cancel</);
   assert.match(editingHtml, /self-end/);
 
