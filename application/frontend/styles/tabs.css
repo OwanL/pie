@@ -1061,8 +1061,11 @@ body.session-tab-dragging {
 .pinned-tab-group-dropdown {
   position: fixed;
   z-index: 20;
-  min-width: 168px;
+  min-width: 0;
   max-width: 240px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -1075,6 +1078,7 @@ body.session-tab-dragging {
 }
 
 .pinned-tab-group-member {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;

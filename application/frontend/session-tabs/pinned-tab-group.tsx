@@ -1,12 +1,13 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../lib/protocol/index.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { handleContextMenuKeyRequest } from '../lib/components/context-menu-key';
+import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { AgentIcon } from './icons';
 import { getSessionTabTooltip } from './session-tab';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
@@ -80,25 +81,23 @@ function PinnedTabGroupView({
 }: PinnedTabGroupProps) {
   const chipRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null);
+
 
   const firstMember = members[0] ?? '';
   const hasActiveMember = activePath !== null && members.includes(activePath);
   const hasAgentCreatedMember = members.some((memberPath) => agentCreatedPathSet.has(memberPath));
   const allMembersAgentCreated = members.length > 0 && members.every((memberPath) => agentCreatedPathSet.has(memberPath));
 
-  // Measure the chip's viewport rect when the dropdown opens so the dropdown
-  // can be fixed-positioned just below it (escaping the strip's overflow).
-  useLayoutEffect(() => {
-    if (!open) {
-      setAnchor(null);
-      return;
-    }
-    const chip = chipRef.current;
-    if (!chip) return;
-    const rect = chip.getBoundingClientRect();
-    setAnchor({ top: rect.bottom + 2, left: rect.left });
-  }, [open]);
+  useAnchoredOverlay({
+    open,
+    triggerRef: chipRef,
+    overlayRef: dropdownRef,
+    preferredDirection: 'down',
+    preferredWidth: 240,
+    gap: 2,
+    minHeight: 80,
+    maxHeight: 420,
+  });
 
   // Close on outside pointerdown / Escape while open.
   useEffect(() => {
@@ -176,11 +175,10 @@ function PinnedTabGroupView({
           {allMembersAgentCreated && <AgentIcon compact />}
         </button>
       </div>
-      {open && anchor && (
+      {open && (
         <div
           ref={dropdownRef}
           class="pinned-tab-group-dropdown"
-          style={{ top: `${anchor.top}px`, left: `${anchor.left}px` }}
           role="list"
           aria-label="Pinned group members"
         >

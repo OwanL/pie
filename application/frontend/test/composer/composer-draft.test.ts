@@ -67,11 +67,13 @@ interface TestHarnessProps {
   sessionPath: string | null;
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
+  focusTrigger?: string;
 }
 
-function TestHarness({ sessionPath, draftText, postMessage }: TestHarnessProps) {
+function TestHarness({ sessionPath, draftText, postMessage, focusTrigger }: TestHarnessProps) {
   const { text, textareaRef, handleInput } = useComposerInput({
     busy: false,
+    focusTrigger,
     onSend: () => {},
     onRetrySend: () => {},
     pendingComposerInputsLength: 0,
@@ -322,4 +324,27 @@ test('useComposerInput preserves in-progress text across pending→resolved path
   } finally {
     restoreTimers();
   }
+});
+
+
+test('session focus triggers preserve tablist focus and normal autofocus', () => {
+  const tabs = document.createElement('div');
+  tabs.setAttribute('role', 'tablist');
+  const tab = document.createElement('button');
+  tabs.appendChild(tab);
+  document.body.appendChild(tabs);
+  const draw = (path: string) => act(() => render(h(TestHarness, {
+    sessionPath: path, draftText: '', postMessage: () => {}, focusTrigger: path,
+  }), container));
+  try {
+    draw('/a');
+    const textarea = container.querySelector('textarea');
+    assert.equal(document.activeElement, textarea);
+    tab.focus();
+    draw('/b');
+    assert.equal(document.activeElement, tab);
+    textarea!.focus();
+    draw('/c');
+    assert.equal(document.activeElement, textarea);
+  } finally { tabs.remove(); }
 });

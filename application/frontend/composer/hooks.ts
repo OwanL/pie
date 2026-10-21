@@ -219,7 +219,8 @@ export function useComposerInput({
   const submitting = useRef(false);
 
   useEffect(() => {
-    if (focusTrigger !== undefined) {
+    // Keyboard tab navigation owns focus until the user leaves the tablist.
+    if (focusTrigger !== undefined && !document.activeElement?.closest('[role="tablist"]')) {
       textareaRef.current?.focus();
     }
   }, [focusTrigger]);

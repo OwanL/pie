@@ -74,6 +74,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
   const triggerRef = useRef<HTMLButtonElement>(null);
   const triggerMeasurementRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const focusOnOpenRef = useRef(false);
   const itemElementsRef = useRef(new Map<string, HTMLElement>());
   const itemWidthsRef = useRef(new Map<string, number>());
   const observerRef = useRef<ResizeObserver | null>(null);
@@ -261,6 +262,13 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
 
   useLayoutEffect(() => {
     if (popoverRef.current) popoverRef.current.inert = !open;
+    if (open && focusOnOpenRef.current) {
+      focusOnOpenRef.current = false;
+      const control = popoverRef.current?.querySelector<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      );
+      (control ?? popoverRef.current)?.focus();
+    }
   }, [open, hiddenKeySignature]);
 
   useAnchoredOverlay({
@@ -301,8 +309,9 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
     return <div {...common}>{item.content}</div>;
   }
 
-  const openMenu = () => {
+  const openMenu = (keyboard = false) => {
     if (hiddenItems.length === 0) return;
+    focusOnOpenRef.current = keyboard;
     setOpen(true);
   };
 
@@ -336,7 +345,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
             onKeyDown={(event) => {
               if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                openMenu();
+                openMenu(true);
               }
             }}
           >

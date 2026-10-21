@@ -609,3 +609,20 @@ test('disconnection closes a portaled model picker and disables pinned menu trig
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Reasoning level"]')?.disabled, true);
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Settings"]')?.disabled, true);
 });
+
+
+test('keyboard opening focuses the first control and Escape restores More', () => {
+  rowWidth = 265;
+  mount();
+  const trigger = container.querySelector<HTMLButtonElement>('.composer-controls > .composer-overflow-trigger')!;
+  act(() => {
+    trigger.focus();
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+  });
+  const popover = container.querySelector<HTMLElement>('.composer-toolbar-overflow-popover')!;
+  assert.equal(document.activeElement, popover.querySelector('button:not(:disabled)'));
+  act(() => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+  assert.equal(document.activeElement, trigger);
+  click(trigger);
+  assert.equal(document.activeElement, trigger, 'pointer opening does not move focus');
+});

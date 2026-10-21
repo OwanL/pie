@@ -555,3 +555,31 @@ test('Shift+F10 on a dropdown member closes the dropdown and opens its member me
     restore();
   }
 });
+
+
+test('group dropdown clamps at the right edge and flips above a low chip', () => {
+  const restore = mockResizeObserver();
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('pinned-tab-group')) {
+      return { top: window.innerHeight - 30, bottom: window.innerHeight - 4,
+        left: window.innerWidth - 30, right: window.innerWidth - 4, width: 26, height: 26 } as DOMRect;
+    }
+    return originalRect.call(this);
+  };
+  const { container, unmount } = mount(baseProps({
+    sessions: [session('/a', 'Alpha'), session('/b', 'Beta')],
+    openTabPaths: ['/a', '/b'], pinnedTabPaths: ['/a', '/b'], pinnedTabGroups: [['/a', '/b']],
+  }));
+  try {
+    act(() => container.querySelector<HTMLButtonElement>('.pinned-tab-group-main')!.click());
+    const dropdown = container.querySelector<HTMLElement>('.pinned-tab-group-dropdown')!;
+    assert.equal(dropdown.dataset.placement, 'up');
+    assert.ok(parseFloat(dropdown.style.left) + parseFloat(dropdown.style.width) <= window.innerWidth - 8);
+    assert.ok(parseFloat(dropdown.style.maxHeight) <= 420);
+  } finally {
+    unmount();
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
+    restore();
+  }
+});
