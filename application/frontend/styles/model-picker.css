@@ -70,6 +70,20 @@
   white-space: nowrap;
 }
 
+/* Settings assignments need the full identity, including version suffixes.
+ * Keep composer chips compact; only settings triggers may grow vertically. */
+.toolbar-settings-menu .model-picker-trigger {
+  height: auto;
+}
+
+.toolbar-settings-menu .model-picker-trigger-label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  line-height: 1.3;
+  text-align: left;
+}
+
 .picker-popover,
 .model-picker-dropdown {
   position: fixed;

@@ -117,7 +117,7 @@ export function ModelAssignmentRow({
             value={modelValue}
             label={modelLabel}
             ariaLabel={modelAriaLabel ?? label}
-            title={modelTitle ?? `Select ${label.toLowerCase()}`}
+            title={modelValue ? `${modelTitle ?? `Select ${label.toLowerCase()}`} · ${modelValue}` : (modelTitle ?? `Select ${label.toLowerCase()}`)}
             entries={entries}
             disabled={disabled}
             ariaDescribedBy={ariaDescribedBy}
