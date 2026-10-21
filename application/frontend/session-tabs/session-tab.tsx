@@ -185,9 +185,17 @@ export const SessionTabPresentation = memo(function SessionTabPresentation({
           type="button"
           aria-label={`Close ${label}`}
           title={hasDeferredTriggers ? deferredBlockTitle : `Close ${label}`}
+          // A pending deferred trigger blocks closing, but the × must stay in
+          // the tab order: hard-disabled buttons are unreachable for keyboard
+          // users and their reason tooltip (below) is undiscoverable. Guarded
+          // activation keeps the blocked release from closing the tab, and
+          // focus stays on the button (a click must not fall through).
           aria-disabled={hasDeferredTriggers ? 'true' : undefined}
-          disabled={hasDeferredTriggers}
-          onClick={() => onClose(tabPath)}
+          aria-description={hasDeferredTriggers ? deferredBlockTitle : undefined}
+          onClick={() => {
+            if (hasDeferredTriggers) return;
+            onClose(tabPath);
+          }}
         >
           ×
         </button>

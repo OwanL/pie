@@ -30,8 +30,16 @@
   cursor: default;
 }
 
+/* aria-disabled items stay focusable (native tooltip reachable for keyboard
+   users); activation is guarded by the owning component. */
+.context-menu-item[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Disabled items must not change appearance on hover */
-.context-menu-item:disabled:hover {
+.context-menu-item:disabled:hover,
+.context-menu-item[aria-disabled='true']:hover {
   background: transparent;
   color: var(--panel-foreground);
 }

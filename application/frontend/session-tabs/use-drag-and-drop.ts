@@ -23,6 +23,7 @@ import {
   runPointerUp,
   runPointerCancel,
   runWindowBlur,
+  runDragKeyDown,
   runOnClick,
 } from './drag-and-drop/pointer-handlers';
 import {
@@ -64,6 +65,7 @@ export function useTabDragAndDrop({
   const pointerUpHandlerRef = useRef<(event: PointerEvent) => void>(() => undefined);
   const pointerCancelHandlerRef = useRef<(event: PointerEvent) => void>(() => undefined);
   const windowBlurHandlerRef = useRef<() => void>(() => undefined);
+  const keydownHandlerRef = useRef<(event: KeyboardEvent) => void>(() => undefined);
   const autoScrollTickRef = useRef<() => void>(() => undefined);
   const [dragState, setDragState] = useState<SessionTabDragState | null>(null);
 
@@ -83,6 +85,9 @@ export function useTabDragAndDrop({
   const windowBlurListener = useCallback(() => {
     windowBlurHandlerRef.current();
   }, []);
+  const keydownListener = useCallback((event: KeyboardEvent) => {
+    keydownHandlerRef.current(event);
+  }, []);
   const autoScrollRunner = useCallback(() => {
     autoScrollTickRef.current();
   }, []);
@@ -96,16 +101,18 @@ export function useTabDragAndDrop({
     window.addEventListener('pointerup', pointerUpListener);
     window.addEventListener('pointercancel', pointerCancelListener);
     window.addEventListener('blur', windowBlurListener);
-  }, [pointerMoveListener, pointerUpListener, pointerCancelListener, windowBlurListener]);
+    window.addEventListener('keydown', keydownListener);
+  }, [pointerMoveListener, pointerUpListener, pointerCancelListener, windowBlurListener, keydownListener]);
 
   const endTracking = useCallback(() => {
     window.removeEventListener('pointermove', pointerMoveListener);
     window.removeEventListener('pointerup', pointerUpListener);
     window.removeEventListener('pointercancel', pointerCancelListener);
     window.removeEventListener('blur', windowBlurListener);
+    window.removeEventListener('keydown', keydownListener);
     stopAutoScrollLoop();
     document.body.classList.remove('session-tab-dragging');
-  }, [pointerMoveListener, pointerUpListener, pointerCancelListener, windowBlurListener, stopAutoScrollLoop]);
+  }, [pointerMoveListener, pointerUpListener, pointerCancelListener, windowBlurListener, keydownListener, stopAutoScrollLoop]);
 
   const syncDragFromPointer = useCallback((clientX: number, clientY: number) => {
     runSyncDragFromPointer(clientX, clientY, dragStateRef, stripRef, setDragState, pinnedTabPathsRef, pinnedTabGroupsRef);
@@ -184,6 +191,10 @@ export function useTabDragAndDrop({
 
   windowBlurHandlerRef.current = () => {
     runWindowBlur(dragCandidateRef, resetDrag);
+  };
+
+  keydownHandlerRef.current = (event: KeyboardEvent) => {
+    runDragKeyDown(event, dragCandidateRef, resetDrag);
   };
 
   useDragEffects({

@@ -140,6 +140,22 @@ export function runPointerCancel(
   resetDrag(false);
 }
 
+/** Escape pressed while tab/group/member drag tracking is active: cancel the
+ *  drag exactly like pointercancel/window-blur — candidate tracking, ghost
+ *  state and any pending reorder are cleared, and because the tracking refs
+ *  are nulled the trailing pointerup (the mouse button is still down) commits
+ *  nothing. */
+export function runDragKeyDown(
+  event: KeyboardEvent,
+  dragCandidateRef: { current: TabDragCandidate | null },
+  resetDrag: (suppressClick: boolean) => void,
+): void {
+  if (event.key !== 'Escape' || !dragCandidateRef.current) {
+    return;
+  }
+  resetDrag(false);
+}
+
 export function runWindowBlur(
   dragCandidateRef: { current: TabDragCandidate | null },
   resetDrag: (suppressClick: boolean) => void,

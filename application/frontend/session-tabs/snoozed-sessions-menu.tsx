@@ -120,10 +120,14 @@ function SnoozedMenu({ sessions, trigger, onRestore, onCloseSession, onClose, av
       <div class="session-tab-context-title">Snoozed sessions · select to restore early</div>
       {sessions.map((session) => (
         <button key={session.path} class="context-menu-item snoozed-session-item" role="menuitem" type="button"
-          disabled={!available} title={session.name} data-session-path={session.path}
+          // Backend-not-ready rows must remain focusable so the native title
+          // tooltip and the disabled state stay reachable for keyboard users;
+          // activation is guarded instead of hard-disabled.
+          aria-disabled={!available ? 'true' : undefined} title={session.name}
+          data-session-path={session.path}
           onFocus={() => { focusedPath.current = session.path; }}
           aria-label={`Restore early: ${session.name}`}
-          onClick={() => onRestore(session.path)}
+          onClick={() => { if (!available) return; onRestore(session.path); }}
           onContextMenu={openEntry}
           onKeyDown={(event) => {
             if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return;

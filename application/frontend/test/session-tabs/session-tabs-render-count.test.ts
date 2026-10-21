@@ -162,7 +162,9 @@ test('cloned snapshots, status, selection and creation changes respect per-tab r
     const tab = container.querySelector('[data-tab-path="/sessions/c"]')!;
     assert.ok(tab.classList.contains('deferred-timer'));
     assert.ok(!tab.classList.contains('unread-finished'));
-    assert.equal((tab.querySelector('.session-tab-close') as HTMLButtonElement).disabled, true);
+    const closeButton = tab.querySelector('.session-tab-close') as HTMLButtonElement;
+    assert.equal(closeButton.disabled, false, 'blocked close stays focusable (aria-disabled, not disabled)');
+    assert.equal(closeButton.getAttribute('aria-disabled'), 'true');
     current = { ...cloneHostSnapshot(current), pendingExtensionUIRequestsBySession: {
       '/sessions/c': { request: {} as never },
     } };

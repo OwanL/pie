@@ -356,3 +356,35 @@ test('tab context menu: pending tabs cannot offer or pin (pin disabled)', () => 
   assert.equal((copy as HTMLButtonElement).disabled, true);
   cleanupContextMenu(menu.host);
 });
+
+test('tab context menu: pending Duplicate gives an explanation matching sibling disabled titles', () => {
+  const pendingMenu = renderContextMenu({ tabPath: `${PENDING_SESSION_PREFIX}dup` });
+  try {
+    const duplicate = Array.from(pendingMenu.host.querySelectorAll('button'))
+      .find((el) => el.textContent?.trim().includes('Duplicate tab'));
+    assert.ok(duplicate, 'expected a Duplicate tab button');
+    assert.equal((duplicate as HTMLButtonElement).disabled, true, 'duplicate is disabled for pending tabs');
+    assert.equal(
+      (duplicate as HTMLButtonElement).getAttribute('title'),
+      'A pending session cannot be duplicated yet.',
+    );
+    // The pending-disabled explanations spell the same sentence pattern as the
+    // sibling Pin item's title so the menu reads coherently.
+    const pin = Array.from(pendingMenu.host.querySelectorAll('button'))
+      .find((el) => el.textContent?.trim().includes('Pin tab')) as HTMLButtonElement;
+    assert.equal(pin.getAttribute('title'), 'A pending session cannot be pinned yet.');
+    clickButton(pendingMenu.host, 'Duplicate tab');
+    assert.deepEqual(pendingMenu.actions, [], 'a disabled duplicate must not dispatch');
+  } finally {
+    cleanupContextMenu(pendingMenu.host);
+  }
+  const readyMenu = renderContextMenu({ tabPath: '/sessions/ready' });
+  try {
+    const duplicate = Array.from(readyMenu.host.querySelectorAll('button'))
+      .find((el) => el.textContent?.trim().includes('Duplicate tab')) as HTMLButtonElement;
+    assert.equal(duplicate.disabled, false);
+    assert.equal(duplicate.getAttribute('title'), null);
+  } finally {
+    cleanupContextMenu(readyMenu.host);
+  }
+});

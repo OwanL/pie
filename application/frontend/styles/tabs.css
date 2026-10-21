@@ -13,10 +13,16 @@
   word-break: break-word;
   flex-shrink: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 6px;
   animation: notice-enter var(--panel-duration-entrance) var(--panel-ease-out-expo);
 }
+
+/* flex-wrap above lets the action buttons drop to their own row below the
+ * message on narrow panels instead of squeezing the text column; a wide panel
+ * keeps message + buttons on one line. Row gap doubles as the wrapped-row
+ * spacing. */
 
 @keyframes notice-enter {
   from {
@@ -49,7 +55,10 @@
 
 
 .notice-content {
-  flex: 1;
+  /* Real 65% flex-basis (not basis 0) so the wrap detection above sees a
+   * readable message column: when the buttons no longer fit beside that
+   * column they wrap below it and the message grows to the full row width. */
+  flex: 1 1 65%;
   min-width: 0;
 }
 
@@ -60,8 +69,12 @@
 .notice-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 2px;
-  flex-shrink: 0;
+  /* Shrinkable so a wrapped actions row that alone exceeds a very narrow
+   * line shrinks to its content minimum and its own flex-wrap stacks the
+   * buttons instead of overflowing the banner. */
+  flex: 0 1 auto;
 }
 
 .notice-btn {
@@ -684,13 +697,28 @@ body.session-tab-dragging {
 
 /* ── Deferred-trigger disabled states ─────────────────────────────────────── */
 /* A tab whose session owns a pending deferred trigger cannot be closed until
-   the trigger is cancelled. Surface the close button as disabled so the reason
-   remains discoverable in its tooltip. */
+   the trigger is cancelled. The close button stays focusable (aria-disabled
+   instead of :disabled) so the reason tooltip remains discoverable for
+   keyboard users; activation is guarded in the component. */
 
 .session-tab-close:disabled {
   cursor: not-allowed;
   opacity: 0.4;
   pointer-events: none;
+}
+
+.session-tab-close[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* A blocked close button must not light up on hover/focus like an active one. */
+.session-tab-close[aria-disabled='true']:hover,
+.session-tab-close[aria-disabled='true']:focus-visible {
+  background: transparent;
+  border-color: var(--session-tab-outline);
+  color: inherit;
+  outline: none;
 }
 
 /* ── Drop indicators ─────────────────────────────────────────────────────── */

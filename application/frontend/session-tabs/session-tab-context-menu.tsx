@@ -211,6 +211,7 @@ export function SessionTabContextMenu({
         role="menuitem"
         type="button"
         disabled={isPending}
+        title={isPending ? 'A pending session cannot be duplicated yet.' : undefined}
         onClick={() => onContextAction('duplicate', tabContextMenu.tabPath)}
       >
         Duplicate tab

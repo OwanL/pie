@@ -377,9 +377,10 @@ test('left-click restore and keyboard context-menu dismissal coexist', () => fix
 }));
 
 test('host membership updates dismiss removed entry actions and focus the neighboring row', () => fixture((container) => {
+  const restored: string[] = [];
   const publish = (sessions: typeof snoozedEntries, backendReady = true) => act(() => render(h(SessionTabs, {
     ...tabsProps, snoozedSessions: sessions, openTabPaths: [], activeSession: null,
-    onRestoreSnoozed: noop, backendReady,
+    onRestoreSnoozed: (path: string) => restored.push(path), backendReady,
   }), container));
   publish(snoozedEntries);
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Manage snoozed sessions"]')!.click());
@@ -390,7 +391,11 @@ test('host membership updates dismiss removed entry actions and focus the neighb
   openEntryViaRightClick(container, 'Alpha');
   publish([snoozedEntries[0]], false);
   assert.equal(container.querySelector('[aria-label="Alpha snoozed session actions"]'), null);
-  assert.equal(snoozedRow(container, 'Alpha').disabled, true);
+  const backendDownRow = snoozedRow(container, 'Alpha');
+  assert.equal(backendDownRow.disabled, false, 'backend-not-ready row stays focusable (aria-disabled)');
+  assert.equal(backendDownRow.getAttribute('aria-disabled'), 'true');
+  act(() => backendDownRow.click());
+  assert.deepEqual(restored, [], 'a backend-not-ready row must not restore');
   publish([]);
   assert.equal(document.activeElement, container.querySelector('[aria-label="New session"]'));
 }));
