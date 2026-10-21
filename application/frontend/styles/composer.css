@@ -776,7 +776,10 @@
   justify-content: center;
   width: 14px;
   height: 14px;
-  border: 1px solid var(--panel-border-strong);
+  /* Undefined var() would invalidate the whole shorthand, leaving the
+     unchecked box borderless and near-invisible; a 40% foreground mix stays
+     visible on every dark panel surface (--panel-border* alone is too faint). */
+  border: 1px solid color-mix(in srgb, var(--panel-foreground) 40%, transparent);
   border-radius: 4px;
   background: color-mix(in srgb, var(--panel-control-surface) 70%, transparent);
   color: var(--panel-accent);
