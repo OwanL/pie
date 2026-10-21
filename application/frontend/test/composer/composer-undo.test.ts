@@ -581,6 +581,61 @@ test('repeated undo/redo steps exactly per checkpoint and stops at both boundari
   }
 });
 
+// This models the observed Chromium execCommand event sequence, not a
+// synthetic beforeinput stand-in: trusted native input arrives after mutation
+// with NO beforeinput. Browser availability still needs browser qualification.
+function nativeHistoryInput(textarea: HTMLTextAreaElement, inputType: 'historyUndo' | 'historyRedo', nativeValue: string) {
+  act(() => {
+    textarea.value = nativeValue;
+    textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+  });
+}
+
+test('input-only native history after keyboard undo/redo uses custom checkpoints', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeRapid(textarea, 'exact draft');
+    ctrlZ(textarea);
+    ctrlShiftZ(textarea);
+    act(() => flushTimers()); // distinct native command, not a keyboard echo
+    assert.equal(textarea.value, 'exact draft');
+    nativeHistoryInput(textarea, 'historyUndo', 'exact draft');
+    assert.equal(textarea.value, '', 'even a no-change native undo steps custom history');
+    nativeHistoryInput(textarea, 'historyRedo', 'exact draftexact draftexact draft');
+    assert.equal(textarea.value, 'exact draft', 'stale native redo cannot corrupt text');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, '');
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'exact draft');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('input-only history flushes the pre-native live burst and preserves boundary values', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {} }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'A');
+    typeRapid(textarea, 'AB');
+    nativeHistoryInput(textarea, 'historyUndo', 'native garbage');
+    assert.equal(textarea.value, 'A');
+    nativeHistoryInput(textarea, 'historyRedo', 'native garbage');
+    assert.equal(textarea.value, 'AB', 'redo recovers live text, not the mutated native value');
+    nativeHistoryInput(textarea, 'historyRedo', 'native garbage');
+    assert.equal(textarea.value, 'AB', 'no-op redo repairs native DOM mutation');
+  } finally {
+    restoreTimers();
+  }
+});
+
 test('undo/redo leave the caret at the end of the restored text', () => {
   installFakeTimers();
   try {

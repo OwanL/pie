@@ -579,12 +579,23 @@ export function useComposerInput({
 
   const handleInput = useCallback((e: Event) => {
     const target = e.target as HTMLTextAreaElement;
+    const inputType = (e as InputEvent).inputType;
+    if (inputType === 'historyUndo' || inputType === 'historyRedo') {
+      // Chromium execCommand (and some native editing routes) emits input
+      // without a cancelable beforeinput. Its native stack is stale after our
+      // controlled writes. Restore the pre-event value before flushing a live
+      // burst, then use our history rather than checkpointing native corruption.
+      target.value = text;
+      if (inputType === 'historyUndo') undoComposer();
+      else redoComposer();
+      return;
+    }
     cancelDictation();
     if (pendingStartRef.current) editGenerationRef.current++;
     setTextState(target.value);
     resizeComposerTextarea(target);
     scheduleCheckpoint(target.value);
-  }, [scheduleCheckpoint, cancelDictation]);
+  }, [scheduleCheckpoint, cancelDictation, text, undoComposer, redoComposer]);
 
   const applyComposerTransfer = useCallback(async (dataTransfer: DataTransfer | null, source: 'drop' | 'paste') => {
     const owner = transferOwnerRef.current;
