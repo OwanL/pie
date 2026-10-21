@@ -32,10 +32,14 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
   }, [postMessage, sessionPath]);
 
   const rootClass = variant === 'card' ? 'ext-prompt ext-prompt--card' : 'ext-prompt';
+  // Keying each prompt by request id remounts on same-method replacement, so
+  // prior answers, custom-input mode, and roving focus never leak across
+  // requests of the same prompt kind.
   switch (request.method) {
     case 'confirm':
       return (
         <ConfirmPrompt
+          key={request.id}
           id={request.id}
           title={request.title}
           message={request.message}
@@ -50,6 +54,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
     case 'select':
       return (
         <SelectPrompt
+          key={request.id}
           id={request.id}
           title={request.title}
           options={request.options}
@@ -65,6 +70,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
     case 'input':
       return (
         <InputPrompt
+          key={request.id}
           id={request.id}
           title={request.title}
           placeholder={request.placeholder}
@@ -144,6 +150,7 @@ function ConfirmPrompt({ id, title, message, timeout, extensionId, rootClass, co
     const node = containerRef.current;
     if (!node) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
         // Let focused buttons handle Enter via their native click (so Enter on
         // Deny denies instead of confirming). Only confirm when focus is on the
@@ -239,6 +246,7 @@ function SelectPrompt({ id, title, options, allowCustom, timeout, extensionId, r
     const node = containerRef.current;
     if (!node) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Escape') { e.preventDefault(); onRespond({ id, cancelled: true }); }
     };
     node.addEventListener('keydown', handler);
@@ -246,6 +254,7 @@ function SelectPrompt({ id, title, options, allowCustom, timeout, extensionId, r
   }, [id, onRespond]);
 
   const handleOptionsKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
       e.preventDefault();
       const next = (focusIndex + 1) % displayedOptions.length;
@@ -276,6 +285,7 @@ function SelectPrompt({ id, title, options, allowCustom, timeout, extensionId, r
   }, [id, customValue, onRespond]);
 
   const handleCustomKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && customValue.trim()) {
       e.preventDefault();
       onRespond({ id, value: customValue.trim() });
@@ -386,6 +396,7 @@ function InputPrompt({ id, title, placeholder, timeout, extensionId, rootClass, 
   }, [remaining, id, onRespond]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && value.trim()) {
       e.preventDefault();
       onRespond({ id, value });

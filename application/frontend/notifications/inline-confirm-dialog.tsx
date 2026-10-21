@@ -1,6 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useEffect, useRef } from 'preact/hooks';
+
 import type { HostToWebviewMessage } from '../../lib/protocol/index.js';
 
 export type InlineConfirmState = Extract<HostToWebviewMessage, { type: 'inlineConfirm' }>;
@@ -11,6 +13,10 @@ export type InlineConfirmState = Extract<HostToWebviewMessage, { type: 'inlineCo
  * browser renderer as a typed imperative; this dialog renders it and replies
  * `inlineConfirmResponse`. The host proceeds only on explicit confirm;
  * disconnect cancels the pending confirmation.
+ *
+ * Modal a11y: the Cancel button takes initial focus (safety default), Tab is
+ * trapped inside the dialog, Escape answers Cancel, and focus returns to the
+ * previously focused element when the dialog unmounts.
  */
 export function InlineConfirmDialog({
   confirm,
@@ -19,6 +25,55 @@ export function InlineConfirmDialog({
   confirm: InlineConfirmState;
   onRespond: (confirmed: boolean) => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+
+  // Initial focus lands on Cancel (the safe choice). The previously focused
+  // element is restored when the dialog unmounts so keyboard users are not
+  // stranded after the confirmation resolves.
+  useEffect(() => {
+    restoreFocusRef.current = document.activeElement as HTMLElement | null;
+    cancelButtonRef.current?.focus();
+    return () => {
+      restoreFocusRef.current?.focus();
+    };
+  }, []);
+
+  const messageId = `inline-confirm-message-${confirm.confirmId}`;
+
+  // Escape answers Cancel; Tab is trapped within the dialog's controls.
+  useEffect(() => {
+    const node = dialogRef.current;
+    if (!node) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onRespond(false);
+        return;
+      }
+      if (e.key === 'Tab') {
+        const focusable = Array.from(
+          node.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])'),
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || !node.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !node.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    node.addEventListener('keydown', handler);
+    return () => node.removeEventListener('keydown', handler);
+  }, [onRespond]);
+
   return (
     <div
       data-inline-confirm
@@ -33,8 +88,10 @@ export function InlineConfirmDialog({
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={messageId}
         style={{
           maxWidth: 420,
           width: 'calc(100% - 32px)',
@@ -47,12 +104,16 @@ export function InlineConfirmDialog({
           lineHeight: 1.5,
         }}
       >
-        <div style={{ marginBottom: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        <div
+          id={messageId}
+          style={{ marginBottom: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
           {confirm.message}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button
             type="button"
+            ref={cancelButtonRef}
             data-inline-confirm-cancel
             onClick={() => onRespond(false)}
             style={buttonStyle(false)}
