@@ -912,3 +912,163 @@ test('SubagentSection Enter on reasoning pill selects that level instead of addi
     document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
   }
 });
+
+test('DropToolsEditor accumulates rapid edits as intents instead of stale host selections', () => {
+  // The host echo round-trips through snapshots; the editor must read the
+  // previous intent, not the stale `selected` prop, when a burst of edits
+  // lands before any echo. Echoes here follow the host's monotonic in-order
+  // contract only.
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  const renderPrefs = (dropTools: string[]) => {
+    act(() => render(h(SubagentBehaviorSection, {
+      prefs: prefsWith({ subagentDropTools: dropTools }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+    }), container));
+  };
+  const typeTool = (name: string) => {
+    act(() => {
+      const input = container.querySelector<HTMLInputElement>('[aria-label="Add a tool name to drop for subagents"]')!;
+      input.value = name;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector<HTMLInputElement>('[aria-label="Add a tool name to drop for subagents"]')!
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+  };
+  const removeTool = (name: string) => {
+    act(() => {
+      const button = [...container.querySelectorAll('.toolbar-settings-keep-chip-remove')]
+        .find((candidate) => (candidate as HTMLElement).getAttribute('aria-label') === `Stop dropping ${name}`);
+      assert.ok(button, `remove chip for ${name} exists`);
+      (button as HTMLElement).click();
+    });
+  };
+  const chips = () => [...container.querySelectorAll('.toolbar-settings-keep-chip > span')].map((chip) => chip.textContent);
+  try {
+    renderPrefs([]);
+    typeTool('ask_user');
+    typeTool('mcp');
+    assert.deepEqual(calls, [
+      { subagentDropTools: ['ask_user'] },
+      { subagentDropTools: ['ask_user', 'mcp'] },
+    ], 'the second rapid add keeps the first intent');
+
+    // Delayed in-order echo of the first commit: the newer intent still leads.
+    renderPrefs(['ask_user']);
+    assert.deepEqual(chips(), ['ask_user', 'mcp']);
+
+    removeTool('ask_user');
+    assert.deepEqual(calls.at(-1)?.subagentDropTools, ['mcp']);
+    assert.deepEqual(chips(), ['mcp']);
+
+    // Converge on the echoed results in order.
+    renderPrefs(['ask_user', 'mcp']);
+    assert.deepEqual(chips(), ['mcp']);
+    renderPrefs(['mcp']);
+    assert.deepEqual(chips(), ['mcp']);
+
+    // Duplicates are guarded against the optimistic selection.
+    typeTool('mcp');
+    assert.equal(calls.length, 3, 'no duplicate emit');
+    assert.deepEqual(chips(), ['mcp']);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
+test('DropToolsEditor projects an external echo that matches no local edit', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  const renderPrefs = (dropTools: string[]) => {
+    act(() => render(h(SubagentBehaviorSection, {
+      prefs: prefsWith({ subagentDropTools: dropTools }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+    }), container));
+  };
+  try {
+    renderPrefs([]);
+    act(() => {
+      const input = container.querySelector<HTMLInputElement>('[aria-label="Add a tool name to drop for subagents"]')!;
+      input.value = 'ask_user';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector<HTMLInputElement>('[aria-label="Add a tool name to drop for subagents"]')!
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    assert.deepEqual(calls, [{ subagentDropTools: ['ask_user'] }]);
+
+    // Authoritative external (or rejected) value: matches no local commit.
+    renderPrefs(['other_tool']);
+    const chips = [...container.querySelectorAll('.toolbar-settings-keep-chip > span')].map((chip) => chip.textContent);
+    assert.deepEqual(chips, ['other_tool'], 'host truth is projected');
+    renderPrefs(['other_tool']);
+    assert.deepEqual(
+      [...container.querySelectorAll('.toolbar-settings-keep-chip > span')].map((chip) => chip.textContent),
+      ['other_tool'],
+      'stable after projecting',
+    );
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
+test('reasoning pill changes keep focus after the one-time add-row handoff', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  try {
+    act(() => render(h(SubagentSection, {
+      prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      modelEntries: orderModelsForPicker(AVAILABLE_MODELS),
+    }), container));
+
+    const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
+    act(() => { chooseModel.click(); });
+    const modelRow = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Sonnet'));
+    act(() => { modelRow!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // Initial handoff: the Add button receives focus once the add row appears.
+    const addBtn = container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement;
+    assert.ok(document.activeElement === addBtn, 'Add button is focused on initial model selection');
+
+    // Clicking reasoning pills must not re-steal focus each change.
+    const high = [...container.querySelectorAll('.toolbar-settings-bucket-level')]
+      .find((button) => button.textContent?.trim() === 'High') as HTMLButtonElement;
+    act(() => { high.focus(); high.click(); });
+    assert.equal(container.querySelector('.toolbar-settings-bucket-level.selected')?.textContent?.trim(), 'High');
+    assert.ok(document.activeElement === high, 'reasoning focus stays on the pill');
+    const xhigh = [...container.querySelectorAll('.toolbar-settings-bucket-level')]
+      .find((button) => button.textContent?.trim() === 'X-High') as HTMLButtonElement;
+    act(() => { xhigh.click(); });
+    assert.equal(container.querySelector('.toolbar-settings-bucket-level.selected')?.textContent?.trim(), 'X-High');
+    assert.ok(document.activeElement === high, 'focus is not stolen per change');
+
+    // Handoff is one-shot per pending model: reselecting a model re-fires it.
+    const cancel = container.querySelector('[aria-label="Cancel adding model"]') as HTMLButtonElement;
+    act(() => { cancel.click(); });
+    const chooseModel2 = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
+    act(() => { chooseModel2.click(); });
+    const modelRow2 = [...document.querySelectorAll('.model-picker-row')]
+      .find((row) => row.textContent?.includes('Haiku'));
+    act(() => { modelRow2!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const addBtn2 = container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement;
+    assert.ok(document.activeElement === addBtn2, 'handoff re-fires for the next pending model');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+    document.querySelectorAll('.model-picker-dropdown').forEach((element) => element.remove());
+  }
+});

@@ -1,8 +1,9 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useMemo } from 'preact/hooks';
 import { ChipEditor } from './chip-editor';
+import { useIntendedSelection } from './optimistic-selection';
 
 /**
  * Filter a keep catalog by hiding already-selected names.
@@ -27,43 +28,30 @@ interface AlwaysKeepPickerProps {
 /** Chip picker backed by a fixed catalog (the never-pruned skills/tools in the
  *  skill-pruner settings). Adds happen through an enum <select> offering every
  *  not-yet-selected name, so users can't introduce unknown names. Built on the
- *  shared {@link ChipEditor} foundation; the catalog select is the add slot and
- *  duplicate selection is guarded both by that filtering and by an optimistic
- *  pending-name lock below. */
+ *  shared {@link ChipEditor} foundation; the catalog select is the add slot.
+ *  Duplicate selection is guarded both by that filtering (the option
+ *  disappears from the catalog immediately) and by an optimistic intent check
+ *  before editing (see {@link useIntendedSelection}). */
 export function AlwaysKeepPicker({ label, selected, catalog, category, onChange }: AlwaysKeepPickerProps) {
-  const availableOptions = useMemo(() => filterKeepCatalog(catalog, selected), [catalog, selected]);
-
-  // Optimistic names just added but not yet reflected in the host-persisted
-  // `selected` prop. `selected` only updates after a host round-trip, so
-  // without this gate the user can re-select an item (the <select> resets to
-  // "" while availableOptions still lists it) before the host state arrives,
-  // firing a duplicate setPruningSettings.
-  const [pending, setPending] = useState<string[]>([]);
-
-  // Release optimistic entries once the host-persisted `selected` catches up.
-  useEffect(() => {
-    if (pending.length === 0) return;
-    const remaining = pending.filter((name) => !selected.includes(name));
-    if (remaining.length !== pending.length) {
-      setPending(remaining);
-    }
-  }, [selected, pending]);
+  // Optimistic intended selection. `selected` only updates after the host
+  // round-trip, so edits must accumulate from the local intent instead: a
+  // rapid add → add → remove burst computed against the stale host prop would
+  // drop every earlier intent. The chip list and addable catalog reflect the
+  // intent while delayed echoes converge; an echo matching no local edit is
+  // authoritative host truth (external change or rejected commit) and
+  // projects it.
+  const selection = useIntendedSelection(selected, onChange);
+  const display = selection.value;
+  const availableOptions = useMemo(() => filterKeepCatalog(catalog, display), [catalog, display]);
 
   const addName = (rawName: string) => {
     const name = rawName.trim();
-    if (!name) return;
-    if (selected.includes(name) || pending.includes(name)) return;
-    setPending((current) => [...current, name]);
-    onChange([...selected, name]);
-    // Safety net: if the host round-trip never arrives, release the lock so
-    // the item becomes selectable again.
-    window.setTimeout(() => {
-      setPending((current) => current.filter((entry) => entry !== name));
-    }, 2000);
+    if (!name || display.includes(name)) return;
+    selection.update([...display, name]);
   };
 
   const removeName = (name: string) => {
-    onChange(selected.filter((n) => n !== name));
+    selection.update(display.filter((n) => n !== name));
   };
 
   const addControl = (
@@ -94,7 +82,7 @@ export function AlwaysKeepPicker({ label, selected, catalog, category, onChange 
   return (
     <ChipEditor
       label={label}
-      selected={selected}
+      selected={display}
       onRemove={removeName}
       addControl={addControl}
     />

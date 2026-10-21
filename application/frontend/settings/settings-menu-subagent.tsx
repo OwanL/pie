@@ -32,6 +32,7 @@ import { PickerTag } from '../lib/components/PickerTag';
 import { ModelPicker } from './model-picker';
 import { ThinkingSelect } from './thinking-select';
 import { ChipEditor } from './chip-editor';
+import { useIntendedSelection } from './optimistic-selection';
 import { SettingCheckbox } from './setting-checkbox';
 import { SettingsHelp } from './settings-help';
 import { SliderRow } from './slider-row';
@@ -147,11 +148,14 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
       current && pendingSupportedLevels.includes(current) ? current : defaultLevel);
   }, [pendingModel, pendingEligible, pendingSupportedLevelsKey]);
 
-  // Focus management: move focus into the add row when it appears with a
-  // selected reasoning level, and back to the picker trigger when a pending
+  // Focus management: hand focus into the add row once when it appears with
+  // a selected reasoning level, and back to the picker trigger when a pending
   // add is cancelled or completed so keyboard users stay in context. The
-  // previous-value guard prevents stealing focus on initial mount.
+  // previous-value guard prevents stealing focus on initial mount, and the
+  // one-shot handoff keeps later reasoning-level changes (pill clicks) from
+  // re-stealing focus — those keep the reasoning focus where the user put it.
   const prevPendingModel = useRef(pendingModel);
+  const focusHandedOff = useRef(false);
   useEffect(() => {
     if (!pendingModel) {
       if (prevPendingModel.current) {
@@ -159,10 +163,12 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
         if (trigger && !trigger.disabled) trigger.focus();
       }
       prevPendingModel.current = '';
+      focusHandedOff.current = false;
       return;
     }
     prevPendingModel.current = pendingModel;
-    if (!pendingThinkingLevel) return;
+    if (!pendingThinkingLevel || focusHandedOff.current) return;
+    focusHandedOff.current = true;
     const addBtn = addRowRef.current?.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement | null;
     if (addBtn && !addBtn.disabled) {
       addBtn.focus();
@@ -325,19 +331,24 @@ interface DropToolsEditorProps {
  *  free-text Enter-to-add slot; reuses the keep-picker chip styling for
  *  visual consistency. */
 function DropToolsEditor({ selected, onChange }: DropToolsEditorProps) {
+  // Optimistic intended selection: rapid add → add → remove bursts read the
+  // local intent, not the stale host prop, so later intents survive delayed
+  // echoes; an echo matching no local edit (external/rejected) projects.
+  const selection = useIntendedSelection(selected, onChange);
+  const display = selection.value;
   const [draft, setDraft] = useState('');
   const addTool = () => {
     const name = draft.trim();
     setDraft('');
-    if (!name || selected.includes(name)) return;
-    onChange([...selected, name]);
+    if (!name || display.includes(name)) return;
+    selection.update([...display, name]);
   };
-  const removeTool = (name: string) => onChange(selected.filter((t) => t !== name));
+  const removeTool = (name: string) => selection.update(display.filter((t) => t !== name));
   return (
     <ChipEditor
       label="Drop tools for subagents"
       hint={<>Remove these tools from every subagent, including explicit <code>tools:</code> lists and unrestricted agents. Example: <code>ask_user</code> prevents mid-delegation prompts.</>}
-      selected={selected}
+      selected={display}
       onRemove={removeTool}
       removeLabel={(name) => `Stop dropping ${name}`}
       addControl={
