@@ -1668,9 +1668,11 @@
 }
 
 /* A restored edit can mount at the first (transparent) entrance frame.
-   Disable rather than pause the animation so the row is immediately visible. */
+   Seek to the end and pause: the row is visible immediately, and leaving edit
+   mode resumes the already-finished animation instead of restarting entrance. */
 [data-role][data-editing="true"] {
-  animation: none;
+  animation-delay: calc(0s - var(--panel-duration-entrance));
+  animation-play-state: paused;
 }
 
 

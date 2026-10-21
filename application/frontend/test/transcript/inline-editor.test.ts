@@ -14,10 +14,11 @@ import { act } from 'preact/test-utils';
 
 import { InlineEditor } from '../../transcript/inline-editor';
 
-test('restored editing rows disable entrance animation instead of freezing its transparent frame', async () => {
+test('restored editing rows show the completed entrance animation without restarting on exit', async () => {
   const css = await readFile(new URL('../../styles/transcript.css', import.meta.url), 'utf8');
-  assert.match(css, /\[data-role\]\[data-editing="true"\]\s*\{\s*animation: none;/);
-  assert.doesNotMatch(css, /animation-play-state: paused/);
+  assert.match(css, /\[data-role\]\[data-entered\]\s*\{\s*animation: panel-entrance/);
+  assert.match(css, /\[data-role\]\[data-editing="true"\]\s*\{\s*animation-delay: calc\(0s - var\(--panel-duration-entrance\)\);\s*animation-play-state: paused;/);
+  assert.doesNotMatch(css, /\[data-role\]\[data-editing="true"\]\s*\{[^}]*animation:\s*none/);
 });
 
 let container: HTMLElement;
