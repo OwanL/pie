@@ -75,6 +75,10 @@ test('long attachment names keep their identifying tail in a separate nonshrinki
   assert.equal(parts.prefix + parts.suffix, name);
   assert.ok(parts.suffix.endsWith('.final.json'));
   assert.deepEqual(composerInputNameParts('short.ts'), { prefix: 'short.ts', suffix: '' });
+  const emojiName = `${'a'.repeat(11)}😀${'b'.repeat(13)}`;
+  assert.deepEqual(composerInputNameParts(emojiName), { prefix: 'a'.repeat(11), suffix: `😀${'b'.repeat(13)}` });
+  const combiningName = `${'a'.repeat(10)}e\u0301${'b'.repeat(13)}`;
+  assert.deepEqual(composerInputNameParts(combiningName), { prefix: combiningName, suffix: '' });
   const html = renderToString(h(ComposerAttachments, {
     pendingComposerInputs: [{ ...pathInput, name }], attachmentSummary: '1 path', onRemoveInput: () => {},
   }));

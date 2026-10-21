@@ -3,8 +3,9 @@ import { formatPathWithParentDepth } from '../lib/formatting/path-utils';
 
 /** Keep the identifying tail visible while CSS clips the flexible prefix. */
 export function composerInputNameParts(name: string): { prefix: string; suffix: string } {
-  if (name.length <= 24) return { prefix: name, suffix: '' };
-  return { prefix: name.slice(0, -14), suffix: name.slice(-14) };
+  const graphemes = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), ({ segment }) => segment);
+  if (graphemes.length <= 24) return { prefix: name, suffix: '' };
+  return { prefix: graphemes.slice(0, -14).join(''), suffix: graphemes.slice(-14).join('') };
 }
 
 function formatSizeKb(sizeBytes: number): string {
