@@ -550,19 +550,26 @@ function costEvidenceToolCall(usage: Record<string, number> | undefined): ToolCa
   } as unknown as ToolCall;
 }
 
-test('subagent tooltip omits unknown metrics but preserves known zero values', async () => {
-  const toolCall = costEvidenceToolCall({ output: 0, cacheRead: 0 });
+test('subagent tooltip omits unknown and known-zero cache rows while preserving output zero', async () => {
+  const toolCall = costEvidenceToolCall({ output: 0, cacheRead: 0, cacheWrite: 0 });
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Output0 tok/);
-  assert.match(host.textContent ?? '', /Cache read0 tok/);
+  assert.doesNotMatch(host.textContent ?? '', /Cache read|Cache write/, 'known-zero cache rows are omitted');
+  assert.doesNotMatch(host.textContent ?? '', /More usage/, 'no empty additional-metrics section');
   const rowLabels = Array.from(host.querySelectorAll<HTMLElement>('.subagent-detail-row'), (row) => row.firstElementChild?.textContent);
-  assert.deepEqual(rowLabels, ['Output', 'Cache read'], 'unknown metrics are omitted while reported zero is preserved');
+  assert.deepEqual(rowLabels, ['Output'], 'unknown and known-zero metrics are omitted');
+
+  act(() => render(null, container));
+  mount(costEvidenceToolCall({ input: 10, output: 5, cacheRead: 0, cacheWrite: 20 }), prefsWith({ autoExpandSubagentCalls: false }));
+  const cacheHost = await openModelTooltip();
+  assert.doesNotMatch(cacheHost.textContent ?? '', /Cache read/);
+  assert.match(cacheHost.textContent ?? '', /Cache write20 tok/, 'nonzero reported cache traffic still renders');
 });
 
-test('subagent tooltip distinguishes task-only, inherited, empty, and unavailable context concisely', async () => {
+test('subagent tooltip omits the handoff section for task-only calls but distinguishes inherited, empty, and unavailable context', async () => {
   const cases = [
-    { name: 'task-only', expected: /Task only · no parent context requested/ },
+    { name: 'task-only', expected: undefined as RegExp | undefined },
     { name: 'inherited', expected: /Inherited latest context · 1 user prompt/ },
     { name: 'empty', expected: /Empty all context · task only/ },
     { name: 'unavailable', expected: /Requested latest context · exact packet unavailable/ },
@@ -584,11 +591,16 @@ test('subagent tooltip distinguishes task-only, inherited, empty, and unavailabl
     act(() => render(null, container));
     mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
     const host = await openModelTooltip();
-    assert.match(host.textContent ?? '', entry.expected, `${entry.name} context summary`);
-    const summary = Array.from(host.querySelectorAll<HTMLElement>('.subagent-context-tooltip-summary'))
-      .find((item) => item.previousElementSibling?.textContent === 'Context handoff');
-    assert.ok(summary, `${entry.name} has a concise context summary line`);
-    assert.ok((summary.textContent?.length ?? Infinity) < 100, `${entry.name} summary should stay concise`);
+    if (entry.expected) {
+      assert.match(host.textContent ?? '', entry.expected, `${entry.name} context summary`);
+      const summary = Array.from(host.querySelectorAll<HTMLElement>('.subagent-context-tooltip-summary'))
+        .find((item) => item.previousElementSibling?.textContent === 'Context handoff');
+      assert.ok(summary, `${entry.name} has a concise context summary line`);
+      assert.ok((summary.textContent?.length ?? Infinity) < 100, `${entry.name} summary should stay concise`);
+    } else {
+      assert.doesNotMatch(host.textContent ?? '', /Context handoff|Task only|Delegated task|report cost evidence/,
+        'explicit task-only calls render no handoff section');
+    }
   }
 });
 

@@ -291,6 +291,9 @@ function latestThroughputSample(result: SubagentSingleResult) {
 
 function ContextHandoffDetails({ result, requestedMode }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode }) {
   const summary = subagentContextHandoffSummary(result, requestedMode);
+  // Explicit task-only delegation had no parent context to hand off; render
+  // no handoff section so the tooltip stays tight.
+  if (summary.state === 'task-only') return null;
   return (
     <>
       <div class="subagent-context-tooltip-section">Context handoff</div>
@@ -324,6 +327,11 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
   const outputTokensUsed = knownNonNegative(usage?.output);
   const cacheReadTokens = knownNonNegative(usage?.cacheRead);
   const cacheWriteTokens = knownNonNegative(usage?.cacheWrite);
+  // Known-zero cache rows are noise (every provider reports at least one cache
+  // class as 0); only nonzero reported cache traffic renders. Unknown cache
+  // classes stay absent rather than shown as fake zeros.
+  const hasCacheReadTokens = (cacheReadTokens ?? 0) > 0;
+  const hasCacheWriteTokens = (cacheWriteTokens ?? 0) > 0;
   const turns = knownNonNegative(usage?.turns);
   const throughput = latestThroughputSample(result);
   const generationOutputTokens = throughput ? knownNonNegative(throughput.outputTokens) : undefined;
@@ -334,8 +342,8 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
   const hasContextData = contextTokens !== undefined || contextWindow !== undefined;
   const hasPrimaryMetrics = hasContextData || displayCost !== undefined || outputTokensUsed !== undefined
     || throughput !== undefined && tokensPerSecond !== undefined;
-  const hasAdditionalMetrics = inputTokens !== undefined || cacheReadTokens !== undefined
-    || cacheWriteTokens !== undefined || turns !== undefined;
+  const hasAdditionalMetrics = inputTokens !== undefined || turns !== undefined
+    || hasCacheReadTokens || hasCacheWriteTokens;
   const retryCount = knownNonNegative(result.retryCount);
   const failedModel = result.failedModel?.trim() || undefined;
   const recovered = result.exitCode === 0
@@ -405,8 +413,8 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
 
       {hasAdditionalMetrics && <div class="subagent-context-tooltip-section">More usage</div>}
       {inputTokens !== undefined && <div class="subagent-detail-row"><span>Input</span><span>{formatDetailTokens(inputTokens)} tok</span></div>}
-      {cacheReadTokens !== undefined && <div class="subagent-detail-row"><span>Cache read</span><span>{formatDetailTokens(cacheReadTokens)} tok</span></div>}
-      {cacheWriteTokens !== undefined && <div class="subagent-detail-row"><span>Cache write</span><span>{formatDetailTokens(cacheWriteTokens)} tok</span></div>}
+      {hasCacheReadTokens && <div class="subagent-detail-row"><span>Cache read</span><span>{formatDetailTokens(cacheReadTokens!)} tok</span></div>}
+      {hasCacheWriteTokens && <div class="subagent-detail-row"><span>Cache write</span><span>{formatDetailTokens(cacheWriteTokens!)} tok</span></div>}
       {turns !== undefined && <div class="subagent-detail-row"><span>Provider turns</span><span>{formatDetailTokens(turns)}</span></div>}
       <ContextHandoffDetails result={result} requestedMode={requestedMode} />
     </div>
