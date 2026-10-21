@@ -15,6 +15,11 @@ let target: HTMLDivElement;
 let value = 30;
 let patches: number[];
 let disabled = false;
+// Swappable consumer seam so tests can echo changes back either
+// synchronously (an optimistic local settings update) or after a real
+// delayed host round trip, like prefs applied by the host.
+let onCommit: (next: number) => void = (next) => { patches.push(next); };
+let echoTimers: ReturnType<typeof setTimeout>[] = [];
 
 function renderField(): void {
   act(() => render(
@@ -24,9 +29,7 @@ function renderField(): void {
       min={1}
       max={60}
       disabled={disabled}
-      onChange={(next) => {
-        if (Number.isInteger(next)) patches.push(next);
-      }}
+      onChange={(next) => onCommit(next)}
     />,
     target,
   ));
@@ -61,16 +64,43 @@ function pressEnter(): void {
   });
 }
 
+function stepByUserAgent(nextRaw: string): void {
+  // The native stepping seam: arrow keys and spinners fire an input+change
+  // pair per step with no blur, and the native value is already stepped.
+  act(() => {
+    field().value = nextRaw;
+    field().dispatchEvent(new Event('input', { bubbles: true }));
+    field().dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
+/** Echoes each accepted commit back through the prop after `delayMs`, the
+ *  way a host that applies delayed prefs re-syncs the webview. */
+function useDelayedEchoConsumer(delayMs = 30): void {
+  onCommit = (next) => {
+    patches.push(next);
+    echoTimers.push(setTimeout(() => {
+      value = next;
+      renderField();
+    }, delayMs));
+  };
+}
+const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
   value = 30;
   patches = [];
   disabled = false;
+  echoTimers = [];
+  onCommit = (next) => { patches.push(next); };
   renderField();
 });
 
 afterEach(() => {
+  for (const timer of echoTimers) clearTimeout(timer);
+  echoTimers = [];
   act(() => render(null, target));
   target.remove();
 });
@@ -86,11 +116,7 @@ test('blur restores a cleared input to the latest projected value without a patc
 test('blur restores a rejected fractional timeout to the latest projected value', () => {
   changeTo('30.5');
   assert.deepEqual(patches, [], 'the timeout consumer rejects fractional values');
-  renderField(); // Rejection projects the unchanged host value back into the component.
-  act(() => { void field().dispatchEvent(new Event('blur')); });
-
-  assert.equal(field().value, '30');
-  assert.deepEqual(patches, []);
+  assert.equal(field().value, '30', 'integer-step fields refuse fractional input locally, no re-render needed');
 });
 
 test('external projected changes replace a pending draft and valid changes keep clamping', () => {
@@ -115,13 +141,24 @@ test('disabled fields discard drafts and do not emit changes', () => {
   assert.deepEqual(patches, []);
 });
 
-test('step does not restrict fractional input accepted by a consumer', () => {
+test('integer-step fields refuse fractional typed input locally, without an echo', () => {
   act(() => render(
-    <NumberField label="Fraction" value={1.25} step={1} onChange={(next) => patches.push(next)} />,
+    <NumberField label="Seconds" value={30} min={1} max={60} step={1} onChange={(next) => patches.push(next)} />,
     target,
   ));
-  changeTo('1.5');
-  assert.deepEqual(patches, [1.5]);
+  changeTo('30.5');
+  assert.deepEqual(patches, [], 'no patch waits on a delayed host rejection');
+  assert.equal(field().value, '30', 'the applied value is restored immediately');
+});
+
+test('fractional-step fields keep accepting fractional commits', () => {
+  act(() => render(
+    <NumberField label="Fraction" value={1.25} step={0.5} onChange={(next) => patches.push(next)} />,
+    target,
+  ));
+  changeTo('1.75');
+  assert.deepEqual(patches, [1.75]);
+  assert.equal(field().value, '1.75');
 });
 
 test('bare typing emits nothing until blur or Enter commits it', () => {
@@ -130,7 +167,7 @@ test('bare typing emits nothing until blur or Enter commits it', () => {
 
   act(() => { void field().dispatchEvent(new Event('blur')); });
   assert.deepEqual(patches, [60], 'blur commits the typed draft with normalized clamp');
-  assert.equal(field().value, '30', 'the rejected-over-max text reconciles to the applied value');
+  assert.equal(field().value, '60', 'the normalized commit stays on display optimistically');
 
   value = 60;
   renderField();
@@ -142,7 +179,7 @@ test('Enter commits the typed draft once with normalized clamp', () => {
   assert.deepEqual(patches, [], 'typing alone never emits');
   pressEnter();
   assert.deepEqual(patches, [40]);
-  assert.equal(field().value, '30', 'display keeps the applied value until the echo arrives');
+  assert.equal(field().value, '40', 'display keeps the normalized commit while the echo is pending');
 
   act(() => { void field().dispatchEvent(new Event('change', { bubbles: true })); });
   act(() => { void field().dispatchEvent(new Event('blur')); });
@@ -156,6 +193,7 @@ test('Enter commits the typed draft once with normalized clamp', () => {
 test('blur and change commits do not double-emit while the echo is pending', () => {
   changeTo('45');
   assert.deepEqual(patches, [45]);
+  assert.equal(field().value, '45', 'the accepted commit stays on display');
   act(() => { void field().dispatchEvent(new Event('blur')); });
   assert.deepEqual(patches, [45], 'the companion blur must not re-commit the same burst');
   value = 45;
@@ -180,17 +218,97 @@ test('Escape is deliberately inert: no commit, no reversion flow', () => {
 });
 
 test('user-agent stepping commits immediately through its change event without blur', () => {
-  // Mimic the real seam: arrow keys and spinners fire an input+change pair
-  // per step with no blur, and the native value is already stepped.
-  act(() => {
-    field().value = '31';
-    field().dispatchEvent(new Event('input', { bubbles: true }));
-    field().dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  stepByUserAgent('31');
   assert.deepEqual(patches, [31], 'stepping emits immediately');
   assert.equal(field().value, '31', 'the stepped value is not reverted before the echo');
 
   value = 31;
   renderField();
   assert.equal(field().value, '31', 'echo converges without a visible snap');
+});
+
+test('accepted blur keeps its display through a delayed host echo', async () => {
+  useDelayedEchoConsumer(30);
+  changeTo('40');
+  assert.deepEqual(patches, [40]);
+  assert.equal(field().value, '40', 'no immediate snap back to the stale applied value');
+
+  await wait(15);
+  assert.equal(field().value, '40', 'the optimistic display outlasts a pending echo');
+
+  await wait(25);
+  assert.equal(field().value, '40', 'the delayed echo converges without a visible snap');
+  assert.equal(field().value, '40', 'final display is the applied value');
+});
+
+test('pending Enter then ArrowUp: arrows step from the optimistic commit, not the stale value', async () => {
+  useDelayedEchoConsumer(30);
+  type('40');
+  pressEnter();
+  assert.deepEqual(patches, [40]);
+  assert.equal(field().value, '40');
+
+  // The user adjusts again before any echo arrives: the native ArrowUp seam
+  // steps from the optimistic display 40 → 41 and commits immediately.
+  stepByUserAgent('41');
+  assert.deepEqual(patches, [40, 41], 'the stepped value builds on the optimistic commit');
+  assert.equal(field().value, '41');
+
+  await wait(20);
+  assert.equal(field().value, '41', 'the older echoed 40 must not overwrite the newer 41');
+
+  await wait(30);
+  assert.equal(field().value, '41', 'the newer echo converges to 41 with no snap back');
+});
+
+test('a stale echo never overwrites a newer local commit', async () => {
+  useDelayedEchoConsumer(30);
+  changeTo('40');
+  assert.deepEqual(patches, [40]);
+  type('50');
+  pressEnter();
+  assert.deepEqual(patches, [40, 50]);
+  assert.equal(field().value, '50', 'the newest local commit owns the display');
+
+  await wait(20);
+  assert.equal(field().value, '50', 'the echoed 40 is consumed without overwriting');
+
+  await wait(30);
+  assert.equal(field().value, '50', 'the echo of the newer commit converges the display');
+});
+
+test('a typed draft survives an echo that arrives mid-edit', async () => {
+  useDelayedEchoConsumer(10);
+  changeTo('40');
+  assert.deepEqual(patches, [40]);
+  type('4');
+  assert.equal(field().value, '4', 'the keystroke is tracked in draft state');
+
+  await wait(15);
+  assert.equal(field().value, '4', 'the in-flight echo must not restore over the typed draft');
+
+  type('46');
+  assert.equal(field().value, '46');
+  act(() => { void field().dispatchEvent(new Event('blur')); });
+  assert.deepEqual(patches, [40, 46], 'the finished draft commits against the newest applied value');
+  value = 46;
+  renderField();
+  assert.equal(field().value, '46');
+});
+
+test('retyping the stale applied value while an echo is pending emits an explicit revert', async () => {
+  useDelayedEchoConsumer(30);
+  changeTo('40');
+  assert.deepEqual(patches, [40]);
+  // The display shows the optimistic 40; the user types back the old 30.
+  type('30');
+  act(() => { void field().dispatchEvent(new Event('blur')); });
+  assert.deepEqual(patches, [40, 30], 'the revert reaches the consumer instead of being swallowed');
+  assert.equal(field().value, '30');
+
+  await wait(20);
+  assert.equal(field().value, '30', 'the stale echoed 40 is consumed without overwriting the revert');
+
+  await wait(30);
+  assert.equal(field().value, '30', 'the echoed revert converges the display');
 });

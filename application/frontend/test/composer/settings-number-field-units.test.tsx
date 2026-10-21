@@ -32,7 +32,7 @@ test('number units describe the control without changing its name or numeric val
     });
     assert.deepEqual(updates, [60], 'existing numeric clamping is unchanged');
     act(() => { input.focus(); input.blur(); });
-    assert.equal(input.value, '40', 'blur still restores the authoritative projected value');
+    assert.equal(input.value, '60', 'an accepted commit keeps its optimistic display on blur (echo pending)');
     act(() => paint());
     assert.equal(input.getAttribute('aria-describedby'), null);
     assert.equal(target.querySelector('.toolbar-settings-number-unit'), null);
