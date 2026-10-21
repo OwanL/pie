@@ -111,10 +111,11 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
     setInputs((prev) => prev.filter((i) => i.id !== id));
   }, []);
 
-  // min-height locks the container to prevent scroll shift
+  // min-height locks the container to prevent scroll shift; the footer is a
+  // separate in-flow region of the shell (no absolutely positioned children).
   const containerStyle = capturedHeight != null
-    ? `min-height:${capturedHeight}px;position:relative`
-    : 'position:relative';
+    ? `min-height:${capturedHeight}px`
+    : undefined;
 
   return (
     <div class="inline-editor-wrapper">
@@ -149,9 +150,8 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
           placeholder="Edit message…"
         />
         <div class="inline-editor-footer">
-          {/* The one durable warning: resending an edited message replaces
-              later turns. Queued edits only update the undelivered message, so
-              they stay warning-free and keep the old bare action strip. */}
+          {/* In-flow footer region below the scrolling textarea (same shell,
+              never an overlay): the one durable resend warning plus actions. */}
           {!queued && <p class="inline-editor-note" title="Resending replaces later messages.">Resending replaces later messages.</p>}
           <div class="inline-editor-actions">
             <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>

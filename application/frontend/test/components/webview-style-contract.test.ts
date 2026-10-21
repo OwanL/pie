@@ -316,7 +316,7 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(promptContextRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
   assert.match(transcriptCss, /\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body code\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(transcriptCss, /\.message-user-image-caption\s*\{\s*color:\s*color-mix\(in srgb, var\(--panel-user-foreground\) 78%, var\(--panel-user-surface\)\)/);
-  assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor-textarea\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
+  assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(messageShell, /role === 'assistant' && 'self-start w-full max-w-full px-1 py-2'/);
   assert.match(messageShell, /role === 'user' && 'w-fit max-w-\[88%\] self-end rounded-lg px-2 py-1\.5/);
   assert.match(promptContextRule, /max-width:\s*88%/);

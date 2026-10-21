@@ -34,22 +34,24 @@ const shellProps = (isEditing: boolean) => ({
   isCurrentlyStreaming: false,
   isClickableUserMsg: true,
   isEditing,
+  handleMessageClick: undefined,
+  children: 'content' as const,
 });
 
 test('MessageItemShell keeps the edited marker after exiting edit mode (persistent opt-out)', () => {
-  act(() => { render(h(MessageItemShell, shellProps(true), 'content'), container); });
+  act(() => { render(h(MessageItemShell, shellProps(true)), container); });
   const shell = container.querySelector<HTMLElement>('[data-role="user"]');
   assert.ok(shell);
   assert.equal(shell.hasAttribute('data-editing'), true);
   assert.equal(shell.getAttribute('data-edited'), 'true');
 
-  act(() => { render(h(MessageItemShell, shellProps(false), 'content'), container); });
+  act(() => { render(h(MessageItemShell, shellProps(false)), container); });
   assert.equal(shell.hasAttribute('data-editing'), false);
   assert.equal(shell.getAttribute('data-edited'), 'true');
 });
 
 test('MessageItemShell never claims the edited marker before editing', () => {
-  act(() => { render(h(MessageItemShell, shellProps(false), 'content'), container); });
+  act(() => { render(h(MessageItemShell, shellProps(false)), container); });
   assert.equal(container.querySelector('[data-edited="true"]'), null);
   assert.equal(container.querySelector('[data-editing="true"]'), null);
 });
@@ -104,22 +106,55 @@ for (const queued of [false, true]) {
     // The rejected shortcut paragraph stays gone: keys are documented behavior
     // (Enter saves, Shift+Enter newlines, Esc cancels), tested below.
     assert.doesNotMatch(container.textContent ?? '', /Shift\+Enter|Esc cancel|Enter save/);
-    // Actions live in the compact overlay strip again.
+    // Actions live in the compact footer row of the integrated shell.
     assert.ok(container.querySelector('.inline-editor-footer .inline-editor-actions'));
   });
 }
 
-test('inline editor restores the compact overlay strip with a readable warning', async () => {
+test('inline editor is one integrated surface with a separate in-flow footer', async () => {
   const css = await readFile(new URL('../../styles/inline-editor.css', import.meta.url), 'utf8');
-  assert.match(css, /\.inline-editor-footer\s*\{[^}]*position:\s*absolute;/);
+  // One surface: border/background/focus ring live on the shell...
+  assert.match(css, /\.inline-editor\s*\{[^}]*border: 1px solid var\(--panel-accent\);/);
+  assert.match(css, /\.inline-editor\s*\{[^}]*border-radius: 10px;/);
+  assert.match(css, /\.inline-editor:focus-within\s*\{/);
+  // ...never on the textarea, which scrolls normally above the footer.
+  assert.doesNotMatch(css, /\.inline-editor-textarea\s*\{[^}]*border:/);
+  assert.doesNotMatch(css, /\.inline-editor-textarea\s*\{[^}]*background: var/);
+  // The footer is a layout region, NOT an overlay: no absolute positioning,
+  // and the old reserved padding bands (40px/66px) are gone entirely.
+  assert.doesNotMatch(css, /\.inline-editor-footer\s*\{[^}]*position:\s*absolute/);
+  assert.doesNotMatch(css, /\.inline-editor-textarea\s*\{[^}]*padding-bottom:/);
+  assert.doesNotMatch(css, /padding-bottom: 66px/);
+  // The textarea caps at the same 240px height as the non-field-sizing
+  // autoSize clamp, so long text scrolls but the editor stays compact.
+  assert.match(css, /\.inline-editor-textarea\s*\{[^}]*max-height: 240px;/);
+  assert.match(css, /\.inline-editor-textarea\s*\{[^}]*overflow-y: auto;/);
+  // Warning stays readable against the user bubble (warning hue tint, not
+  // muted gray); the shortcut paragraph stays gone.
   assert.match(css, /\.inline-editor-note\s*\{[^}]*color: color-mix\(in srgb, var\(--panel-warning\) 30%, var\(--panel-user-foreground\)\)/);
-  assert.match(css, /\.inline-editor-actions\s*\{[^}]*margin-left:\s*auto;/);
   assert.doesNotMatch(css, /\.inline-editor-note\s*\{[^}]*--panel-muted/);
   assert.doesNotMatch(css, /inline-editor-hint/);
-  assert.match(css, /\.inline-editor-textarea\s*\{[^}]*padding-bottom: 40px;/);
-  // On narrow viewports the note wraps onto its own line with a matching
-  // larger textarea reserve, so scrolling text still cannot hit the strip.
-  assert.match(css, /@media \(max-width: 440px\)[\s\S]*\.inline-editor-textarea\s*\{[^}]*padding-bottom: 66px;/);
+  // Shell floor keeps the bubble editor-suitable at short text.
+  assert.match(css, /\.inline-editor\s*\{[^}]*min-width: 260px;/);
+});
+
+test('InlineEditor renders textarea and footer as flow siblings of one shell', () => {
+  act(() => render(h(InlineEditor, {
+    queued: false, initialText: 'question', initialInputs: [], capturedHeight: null,
+    onConfirm: () => {}, onCancel: () => {},
+  }), container));
+  const shell = container.querySelector('.inline-editor')!;
+  const textarea = shell.querySelector('.inline-editor-textarea')!;
+  const footer = shell.querySelector('.inline-editor-footer')!;
+  assert.ok(shell && textarea && footer);
+  // Footer follows the textarea in document order (in-flow region below the
+  // scrolling surface), and nothing inside the shell is positioned as an
+  // overlay (no absolutely positioned children to collide with scrolling
+  // text).
+  assert.ok(
+    footer.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_PRECEDING,
+    'footer must come after the textarea in document order',
+  );
 });
 
 test('InlineEditor preserves newline, IME, empty submission and Escape safeguards', () => {

@@ -1,5 +1,5 @@
 /* ── Inline editor ───────────────────────────────────────────────────────── */
-/* Editable textarea with an overlaid footer strip (warning + actions)     */
+/* Editable textarea with a separate footer layout region (warning + actions) */
 /*
  * The editor appears in-place of the message body when the user clicks a
  * user message to edit it. The .inline-editor-wrapper provides the entry
@@ -24,45 +24,54 @@
 }
 
 /* ── Editor layout ───────────────────────────────────────────────────────── */
+/* One surface: the border/background/focus ring live on the shell, the
+   textarea fills its top region, and the footer (warning + actions) is a
+   separate in-flow layout region at its bottom — never an overlay, so
+   scrolling text can never paint beneath the controls. */
 
 .inline-editor {
   display: flex;
   flex-direction: column;
-  position: relative;
+  border: 1px solid var(--panel-accent);
+  border-radius: 10px;
+  background: var(--vscode-input-background, var(--panel-surface));
+  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  transition:
+    border-color var(--panel-transition-fast),
+    box-shadow var(--panel-transition-normal);
   /* Without stacked hint paragraphs, the `w-fit` message bubble would shrink
-     to the textarea's natural content width, leaving the overlaid strip
-     nothing to sit in (the old overlap bug at short text). A modest floor
-     keeps the bubble editor-suitable without pinning it to the full width. */
+     to the textarea's natural content width, leaving the footer nothing to
+     sit in (the old overlap bug at short text). A modest floor keeps the
+     bubble editor-suitable without pinning it to the full width. */
   min-width: 260px;
+}
+
+.inline-editor:focus-within {
+  border-color: var(--panel-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 16%, transparent);
 }
 
 .inline-editor-textarea {
   width: 100%;
   field-sizing: content;
   min-height: 54px;
+  /* Matches the non-field-sizing autoSize clamp in inline-editor.tsx, so the
+     editor stays compact and scrolls once content exceeds the cap. The footer
+     sits below in normal flow — outside the scrolled layer entirely. */
+  max-height: 240px;
   resize: none;
-  border: 1px solid var(--panel-accent);
-  border-radius: 10px;
   padding: 8px 10px;
-  /* Reserve a bottom band inside the textarea so its scrolling content can
-     never run under the footer strip overlaid there (matches the strip
-     height: 32px controls + 8px inset below). */
-  padding-bottom: 40px;
-  background: var(--vscode-input-background, var(--panel-surface));
-  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  background: transparent;
+  color: inherit;
   font: inherit;
   font-size: var(--panel-font-size, 11px);
   line-height: 1.6;
   outline: none;
   overflow-y: auto;
-  transition:
-    border-color var(--panel-transition-fast),
-    box-shadow var(--panel-transition-normal);
 }
 
 .inline-editor-textarea:focus {
-  border-color: var(--panel-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 16%, transparent);
+  outline: none;
 }
 
 .inline-editor-textarea::placeholder {
@@ -70,22 +79,18 @@
   font-size: 11px;
 }
 
-/* ── Overlay footer strip ────────────────────────────────────────────────── */
-/* Restored overlay placement: the strip is absolutely positioned inside the
- * textarea's reserved bottom band, so it costs no extra stacked rows. The
- * one durable resend warning sits left of the right-aligned actions; on very
- * narrow viewports it drops to its own wrapped line and the textarea grows
- * its reserve so scrolling text still cannot reach the strip. */
+/* ── Footer layout region ────────────────────────────────────────────────── */
+/* A separate in-flow band inside the shell, below the scrolling textarea:
+   the one durable resend warning sits left of the right-aligned actions; on
+   very narrow viewports it wraps to its own line and the footer simply grows
+   (still in flow), so the no-overlap invariant is structural. */
 
 .inline-editor-footer {
-  position: absolute;
-  left: 10px;
-  right: 8px;
-  bottom: 8px;
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
+  padding: 0 8px 8px 10px;
   animation: inline-editor-footer-enter var(--panel-duration-entrance) var(--panel-ease-out-expo) both;
   animation-delay: 60ms;
 }
@@ -108,9 +113,9 @@
  * (see the media query below). */
 
 .inline-editor-note {
-  /* Grows to fill the strip so the controls stay pinned to the old
-     bottom-right position; shrinks with ellipsis only when the line is
-     genuinely too tight. */
+  /* Grows to fill the row so the controls stay pinned to the bottom-right
+     position; shrinks with ellipsis only when the line is genuinely too
+     tight. */
   flex: 1 1 max-content;
   min-width: 0;
   overflow: hidden;
@@ -120,6 +125,9 @@
   color: color-mix(in srgb, var(--panel-warning) 30%, var(--panel-user-foreground));
   font-size: 11px;
   line-height: 1.3;
+  /* Only applies in the wrapped-line case, keeping the note clear of the
+     controls above it. */
+  margin-top: 4px;
 }
 
 .inline-editor-actions {
@@ -127,16 +135,12 @@
   justify-content: flex-end;
   gap: 8px;
   flex-shrink: 0;
-  /* Restores the old bottom-right control placement in every case —
-     with, without, or wrapped away from the warning. */
+  /* Keeps the controls bottom-right in every case — with, without, or
+     wrapped away from the warning. */
   margin-left: auto;
 }
 
 @media (max-width: 440px) {
-  .inline-editor-textarea {
-    padding-bottom: 66px;
-  }
-
   .inline-editor-footer {
     flex-wrap: wrap;
     row-gap: 4px;
@@ -158,13 +162,13 @@
   box-shadow: inset 0 1px 0 var(--panel-user-highlight);
 }
 
-[data-role="user"][data-editing="true"] .inline-editor-textarea {
+[data-role="user"][data-editing="true"] .inline-editor {
   background: color-mix(in srgb, var(--panel-user-surface) 92%, var(--panel-black));
   border-color: var(--panel-user-border);
   color: var(--panel-user-foreground);
 }
 
-[data-role="user"][data-editing="true"] .inline-editor-textarea:focus {
+[data-role="user"][data-editing="true"] .inline-editor:focus-within {
   border-color: color-mix(in srgb, var(--panel-user-foreground) 38%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--panel-user-foreground) 12%, transparent);
 }
@@ -174,7 +178,7 @@
 }
 
 @media (forced-colors: active) {
-  .inline-editor-textarea {
+  .inline-editor {
     border-color: Highlight;
   }
 }
