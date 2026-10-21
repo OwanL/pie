@@ -85,7 +85,11 @@ export function useCaptureHeight(messageRole: ChatMessage['role']) {
     const el = messageBodyRef.current;
     if (!el || messageRole !== 'user') return;
     const ro = new ResizeObserver(([entry]) => {
-      if (entry) setCapturedHeight(entry.contentRect.height);
+      // Removing the body to open its editor can deliver a detached 0x0
+      // observation before effect cleanup. Preserve the last usable height.
+      if (entry && el.isConnected && entry.contentRect.height > 0) {
+        setCapturedHeight(entry.contentRect.height);
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
