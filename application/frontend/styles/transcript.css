@@ -1653,9 +1653,7 @@
 
 /* ── Message entrance animation ─────────────────────────────────────────── */
 /* Applied via the message-item shell for a subtle fade-up on appearance.    */
-/* Uses animation-play-state to avoid re-triggering when toggling edit mode:   */
-/* [data-editing] pauses the animation (rather than removing it) so the      */
-/* message doesn't flash back to opacity:0 when exiting edit mode.            */
+/* Editing rows must stay visible even when restored before entrance runs.  */
 
 /* Gated on [data-entered]: the shell only sets that attribute the first time a
    message id is mounted (genuinely new), so virtualized remounts (overscan
@@ -1669,10 +1667,10 @@
   animation: none;
 }
 
-/* Editing messages: pause the entrance animation so it doesn't re-trigger   */
-/* when exiting edit mode. The animation has already played by this point.  */
+/* A restored edit can mount at the first (transparent) entrance frame.
+   Disable rather than pause the animation so the row is immediately visible. */
 [data-role][data-editing="true"] {
-  animation-play-state: paused;
+  animation: none;
 }
 
 

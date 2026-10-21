@@ -1,5 +1,5 @@
 /* ── Inline editor ───────────────────────────────────────────────────────── */
-/* Editable textarea with overlay action buttons (save/cancel)               */
+/* Editable textarea with hints and action buttons (save/cancel)             */
 /*
  * The editor appears in-place of the message body when the user clicks a
  * user message to edit it. The .inline-editor-wrapper provides the entry
@@ -39,8 +39,6 @@
   border: 1px solid var(--panel-accent);
   border-radius: 10px;
   padding: 8px 10px;
-  /* Extra bottom padding creates room for the overlay action buttons */
-  padding-bottom: 40px;
   background: var(--vscode-input-background, var(--panel-surface));
   color: var(--vscode-input-foreground, var(--vscode-foreground));
   font: inherit;
@@ -63,15 +61,21 @@
   font-size: 11px;
 }
 
-/* ── Overlay actions ─────────────────────────────────────────────────────── */
+/* ── Hints and actions ───────────────────────────────────────────────────── */
+
+.inline-editor-hint {
+  margin: 6px 0 0;
+  color: var(--panel-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
 
 .inline-editor-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
   animation: inline-editor-actions-enter var(--panel-duration-entrance) var(--panel-ease-out-expo) both;
   animation-delay: 60ms;
 }

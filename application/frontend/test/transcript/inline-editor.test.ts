@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import { installDom } from '../helpers/dom';
 installDom();
@@ -12,6 +13,12 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { InlineEditor } from '../../transcript/inline-editor';
+
+test('restored editing rows disable entrance animation instead of freezing its transparent frame', async () => {
+  const css = await readFile(new URL('../../styles/transcript.css', import.meta.url), 'utf8');
+  assert.match(css, /\[data-role\]\[data-editing="true"\]\s*\{\s*animation: none;/);
+  assert.doesNotMatch(css, /animation-play-state: paused/);
+});
 
 let container: HTMLElement;
 
@@ -30,6 +37,7 @@ test('InlineEditor confirms at most once when Save and Enter both submit', () =>
 
   act(() => {
     render(h(InlineEditor, {
+      queued: false,
       initialText: 'edited question',
       initialInputs: [],
       capturedHeight: null,
@@ -49,4 +57,59 @@ test('InlineEditor confirms at most once when Save and Enter both submit', () =>
   });
 
   assert.deepEqual(confirmations, [{ text: 'edited question', inputCount: 0 }]);
+});
+
+for (const queued of [false, true]) {
+  test(`InlineEditor explains ${queued ? 'queued save' : 'durable resend'}`, () => {
+    act(() => render(h(InlineEditor, {
+      queued, initialText: 'question', initialInputs: [], capturedHeight: null,
+      onConfirm: () => {}, onCancel: () => {},
+    }), container));
+    assert.equal(container.querySelector('button.primary')?.textContent, queued ? 'Save' : 'Save & resend');
+    assert.equal(container.textContent?.includes('Resending replaces later messages.'), !queued);
+    assert.ok(container.textContent?.includes(`Enter ${queued ? 'save' : 'save & resend'} · Shift+Enter newline · Esc cancel`));
+  });
+}
+
+test('InlineEditor preserves newline, IME, empty submission and Escape safeguards', () => {
+  let confirmations = 0;
+  let cancellations = 0;
+  act(() => render(h(InlineEditor, {
+    queued: false, initialText: '   ', initialInputs: [], capturedHeight: null,
+    onConfirm: () => { confirmations++; }, onCancel: () => { cancellations++; },
+  }), container));
+  const textarea = container.querySelector('textarea')!;
+  const key = (init: KeyboardEventInit) => {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+    act(() => { textarea.dispatchEvent(event); });
+    return event;
+  };
+  assert.equal(container.querySelector<HTMLButtonElement>('button.primary')!.disabled, true);
+  key({ key: 'Enter' });
+  assert.equal(confirmations, 0);
+  act(() => {
+    textarea.value = 'edited';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  assert.equal(key({ key: 'Enter', shiftKey: true }).defaultPrevented, false);
+  assert.equal(key({ key: 'Enter', isComposing: true }).defaultPrevented, false);
+  key({ key: 'Enter', keyCode: 229 });
+  assert.equal(confirmations, 0);
+  key({ key: 'Escape' });
+  assert.equal(cancellations, 1);
+  assert.equal(key({ key: 'Enter' }).defaultPrevented, true);
+  assert.equal(confirmations, 1);
+});
+
+test('InlineEditor permits attachment-only submission and preserves inputs', () => {
+  const inputs = [{ id: 'path-1', kind: 'filesystemPathRef' as const, path: '/workspace/test.ts', name: 'test.ts', source: 'picker' as const }];
+  const confirmations: unknown[] = [];
+  act(() => render(h(InlineEditor, {
+    queued: true, initialText: ' ', initialInputs: inputs, capturedHeight: null,
+    onConfirm: (text, nextInputs) => confirmations.push({ text, inputs: nextInputs }), onCancel: () => {},
+  }), container));
+  const save = container.querySelector<HTMLButtonElement>('button.primary')!;
+  assert.equal(save.disabled, false);
+  act(() => { save.click(); save.click(); });
+  assert.deepEqual(confirmations, [{ text: '', inputs }]);
 });

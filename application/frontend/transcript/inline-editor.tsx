@@ -17,6 +17,8 @@ import { createUuidV4 } from '../../../lib/uuid';
 
 interface InlineEditorProps {
   initialText: string;
+  /** Queued edits update an undelivered message rather than replacing later turns. */
+  queued: boolean;
   /** Existing image inputs seeded from the message being edited. The inline
    *  editor owns its OWN local `inputs` state (NOT the host-owned pending
    *  composer inputs) — additions/removals here don't touch the host until the
@@ -28,7 +30,7 @@ interface InlineEditorProps {
   onCancel: () => void;
 }
 
-export function InlineEditor({ initialText, initialInputs, capturedHeight, onConfirm, onCancel }: InlineEditorProps) {
+export function InlineEditor({ initialText, initialInputs, capturedHeight, queued, onConfirm, onCancel }: InlineEditorProps) {
   const [text, setText] = useState(initialText);
   const [inputs, setInputs] = useState<ComposerInput[]>(initialInputs);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -143,6 +145,8 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
         {attachmentError && (
           <div class="composer-hint composer-hint-error" role="status">{attachmentError}</div>
         )}
+        {!queued && <p class="inline-editor-hint">Resending replaces later messages.</p>}
+        <p class="inline-editor-hint">Enter {queued ? 'save' : 'save & resend'} · Shift+Enter newline · Esc cancel</p>
         <div class="inline-editor-actions">
           <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>
           <button
@@ -150,7 +154,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
             type="button"
             disabled={!text.trim() && inputs.length === 0}
             onClick={() => submit(text, inputs)}
-          >Save</button>
+          >{queued ? 'Save' : 'Save & resend'}</button>
         </div>
       </div>
     </div>

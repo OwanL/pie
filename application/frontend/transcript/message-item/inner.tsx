@@ -221,6 +221,7 @@ export function MessageItemInner({
           initialText={editingDraft?.messageId === message.id ? editingDraft.text : message.markdown}
           initialInputs={editingDraft?.messageId === message.id ? editingDraft.inputs : initialInputs}
           capturedHeight={capturedHeight}
+          queued={message.status === 'queued'}
           onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs, message.status === 'queued')}
           onCancel={onEditCancel}
         />
