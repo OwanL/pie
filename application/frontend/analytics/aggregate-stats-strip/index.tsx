@@ -420,21 +420,12 @@ function ariaLabel(s: AggregateStats, snoozedSessionCount: number): string {
 
 export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
-  const sub: string[] = [`Across all sessions · ${s.todayRunCount} run${s.todayRunCount === 1 ? '' : 's'}`];
-  if (s.todayInputTokens > 0 || s.todayOutputTokens > 0) {
-    sub.push(`↓${formatCompactTokens(s.todayInputTokens)} in  ↑${formatCompactTokens(s.todayOutputTokens)} out`);
-  }
-  if (s.todayToolCallCount > 0 || s.todayTouchedFileCount > 0) {
-    sub.push(`${s.todayToolCallCount} tool call${s.todayToolCallCount === 1 ? '' : 's'} · ${s.todayTouchedFileCount} file${s.todayTouchedFileCount === 1 ? '' : 's'}`);
-  }
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
         <span>Estimated token cost today</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
-      <div class="rich-tooltip-sub">API-equivalent estimate; not an invoice</div>
-      <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>
       {!!s.billableAccounting && (
         s.billableAccounting.todayUnknownInvocationCount > 0
         || s.billableAccounting.todayUnpricedInvocationCount > 0
@@ -470,8 +461,6 @@ export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
         <span>Estimated token cost (7d)</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.weekCost)}</span>
       </div>
-      <div class="rich-tooltip-sub">API-equivalent estimate; not an invoice</div>
-      <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
       {tokenSummary && <div class="rich-tooltip-sub">Token counts by provider · {tokenSummary}</div>}
       {!!s.billableAccounting && (s.billableAccounting.weekUnknownInvocationCount > 0
         || s.billableAccounting.weekUnpricedInvocationCount > 0

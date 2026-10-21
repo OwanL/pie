@@ -314,7 +314,7 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
   assert.match(html, /Focus for 14-day work trend/);
 });
 
-test('daily and weekly cost tooltips render canonical graphs and token counts', () => {
+test('daily and weekly cost tooltips omit routine scope rows and retain graphs and legends', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -347,12 +347,12 @@ test('daily and weekly cost tooltips render canonical graphs and token counts', 
   const weekHtml = renderToString(weekCostTooltipNode(stats));
 
   for (const html of [todayHtml, weekHtml]) {
-    assert.match(html, /API-equivalent estimate; not an invoice/);
+    assert.doesNotMatch(html, /API-equivalent estimate; not an invoice|Across all sessions|\b[25] runs\b/);
     assert.doesNotMatch(html, /All-time|subscriptions|invoices are not reconciled/);
+    assert.match(html, /rich-tooltip-legend-trigger/);
   }
-  assert.match(todayHtml, /Across all sessions · 2 runs/);
   assert.match(todayHtml, /<svg\b/);
-  assert.match(todayHtml, /↓1\.2k in {2}↑3\.4k out/);
+  assert.doesNotMatch(todayHtml, /↓1\.2k in {2}↑3\.4k out/);
   assert.match(todayHtml, /model-a/);
   assert.match(weekHtml, /<svg\b/);
   assert.match(weekHtml, /Token counts by provider · alpha ↓5\.6k in ↑7\.8k out/);
@@ -403,6 +403,10 @@ test('aggregate strip keeps cost and token segments clean while provenance detai
   assert.match(tokens, />Output<\/button>/);
   const weekTooltip = renderToString(weekCostTooltipNode(stats));
   assert.match(weekTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\)/);
+  for (const tooltip of [todayTooltip, weekTooltip]) {
+    assert.match(tooltip, /1 instrumentation gap\(s\)/);
+    assert.doesNotMatch(tooltip, /API-equivalent estimate; not an invoice|Across all sessions/);
+  }
 });
 
 test('provider legend entries are focusable and expose provider-qualified nested model tooltips', () => {
