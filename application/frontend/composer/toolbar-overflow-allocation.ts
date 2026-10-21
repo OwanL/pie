@@ -159,5 +159,5 @@ export function allocateComposerToolbar({
 export function allocateComposerOverflow(
   input: Omit<ComposerToolbarAllocationInput, 'modelNaturalWidth'>,
 ): string[] {
-  return allocateComposerToolbar({ ...input, modelNaturalWidth: 0 }).visibleItemKeys;
+  return [...allocateComposerToolbar({ ...input, modelNaturalWidth: 0 }).visibleItemKeys];
 }

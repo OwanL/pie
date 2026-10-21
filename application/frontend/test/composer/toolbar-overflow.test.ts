@@ -398,9 +398,9 @@ test('a bare unknown-cost chip yields before any control; a valued cost chip kee
     pinnedNaturalWidth: 10,
     actionsWidth: 10,
     items: [
-      DASH_ALLOCATION.items[0] as const,
+      DASH_ALLOCATION.items[0],
       { ...DASH_ALLOCATION.items[1], removalPriority: 0 as const },
-      DASH_ALLOCATION.items[2] as const,
+      DASH_ALLOCATION.items[2],
     ],
     sectionGap: 0,
     controlGap: 0,
