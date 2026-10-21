@@ -65,7 +65,7 @@ export interface BottomSectionProps {
   draftText: string;
   /** AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (AppBody-level) can re-send the live draft. */
-  sendRetryDraftRef?: { current: ((disablePruning?: boolean) => void) | null };
+  sendRetryDraftRef?: { current: ((disablePruning?: boolean) => boolean) | null };
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
