@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { memo } from 'preact/compat';
-import { useCallback, useMemo, useRef } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type {
   ActiveRunSummary,
@@ -41,6 +41,7 @@ import { ComposerAttachments } from '../composer/attachments';
 import { ComposerToolbar } from '../composer/toolbar';
 import { getComposerRunControls } from '../session-tabs/run-state';
 import { cx } from '../lib/components/cx';
+import { InlineConfirmDialog } from '../notifications/inline-confirm-dialog';
 import { ComposerActions } from '../composer/actions';
 import {
   useComposerIndicators,
@@ -367,11 +368,41 @@ function ComposerView({
     () => transcript.some((m) => m.role === 'user' && m.status === 'queued'),
     [transcript],
   );
+  // Misclick protection: the "Clear queued" icon does not dispatch directly.
+  // It opens a renderer-local InlineConfirmDialog whose intent is bound to the
+  // session path captured at click time; only an explicit "Clear" (no
+  // Cancel/Escape/disconnect/session switch) dispatches `clearQueue`, and
+  // only once, while that intent is still current.
+  const [pendingClearQueueSession, setPendingClearQueueSession] = useState<string | null>(null);
   const onClearQueue = useCallback(() => {
     if (sessionPath) {
-      postMessage({ type: 'clearQueue', sessionPath });
+      setPendingClearQueueSession(sessionPath);
     }
-  }, [sessionPath, postMessage]);
+  }, [sessionPath]);
+  // A session switch, disconnect, or drained queue invalidates the pending
+  // intent — it must not reappear if the same session reconnects or the queue
+  // is repopulated later.
+  useEffect(() => {
+    if (
+      pendingClearQueueSession !== null &&
+      (pendingClearQueueSession !== sessionPath || !commandsAvailable || !hasQueuedMessages)
+    ) {
+      setPendingClearQueueSession(null);
+    }
+  }, [pendingClearQueueSession, sessionPath, commandsAvailable, hasQueuedMessages]);
+  const onClearQueueDecision = useCallback(
+    (confirmed: boolean) => {
+      const capturedSessionPath = pendingClearQueueSession;
+      setPendingClearQueueSession(null);
+      // One confirm response dispatches `clearQueue` at most once, and only
+      // while the intent is still current: same session, queue still present,
+      // and commands available (a disconnected renderer cannot clear).
+      if (!confirmed || capturedSessionPath === null) return;
+      if (capturedSessionPath !== sessionPath || !hasQueuedMessages || !commandsAvailable) return;
+      postMessage({ type: 'clearQueue', sessionPath: capturedSessionPath });
+    },
+    [pendingClearQueueSession, sessionPath, hasQueuedMessages, commandsAvailable, postMessage],
+  );
   const onCompact = useCallback(() => {
     if (sessionPath && capabilities?.canCompact === true) {
       postMessage({ type: 'compact', sessionPath });
@@ -528,6 +559,18 @@ function ComposerView({
           />
         </div>
       </div>
+
+      {pendingClearQueueSession !== null &&
+        pendingClearQueueSession === sessionPath && commandsAvailable && hasQueuedMessages && (
+          <InlineConfirmDialog
+            confirm={{
+              confirmId: 'clear-queue-confirm',
+              message: 'Clear queued messages?',
+              confirmChoice: 'Clear',
+            }}
+            onRespond={onClearQueueDecision}
+          />
+        )}
 
       {visibleDictation && (visibleDictation.phase === 'preparing' || visibleDictation.error) && (
         <div class={`composer-hint${visibleDictation.error ? ' composer-hint-error' : ''}`} role="status" aria-live="polite">

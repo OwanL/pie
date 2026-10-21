@@ -7,12 +7,19 @@ import type { HostToWebviewMessage } from '../../lib/protocol/index.js';
 
 export type InlineConfirmState = Extract<HostToWebviewMessage, { type: 'inlineConfirm' }>;
 
+/** Renderable confirmation text. Host-delivered confirmations pass the full
+ *  {@link InlineConfirmState}; renderer-local misclick guards (e.g. the
+ *  clear-queued-messages confirm) pass only these fields and must not claim
+ *  the host-owned protocol `kind`. */
+export type InlineConfirmPrompt = Pick<InlineConfirmState, 'confirmId' | 'message' | 'confirmChoice'>;
+
 /**
  * Source-aware inline confirmation: the host
  * delivers model-switch / destructive-revert confirmations to the INITIATING
  * browser renderer as a typed imperative; this dialog renders it and replies
  * `inlineConfirmResponse`. The host proceeds only on explicit confirm;
- * disconnect cancels the pending confirmation.
+ * disconnect cancels the pending confirmation. Renderer-local confirmations
+ * (composer clear-queue misclick guard) reuse this modal without host routing.
  *
  * Modal a11y: the Cancel button takes initial focus (safety default), Tab is
  * trapped inside the dialog, Escape answers Cancel, and focus returns to the
@@ -22,7 +29,7 @@ export function InlineConfirmDialog({
   confirm,
   onRespond,
 }: {
-  confirm: InlineConfirmState;
+  confirm: InlineConfirmPrompt;
   onRespond: (confirmed: boolean) => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
