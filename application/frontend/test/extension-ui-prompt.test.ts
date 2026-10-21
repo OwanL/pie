@@ -211,7 +211,7 @@ test('same-method replacement resets state and focus and answers the new request
 
   const prompt = document.querySelector('.ext-prompt')!;
   key(prompt, { key: 'Escape' });
-  assert.deepEqual(responses, [{ id: 'req-b', cancelled: true }], 'only the replacement request answers');
+  assert.deepEqual([...responses], [{ id: 'req-b', cancelled: true }], 'only the replacement request answers');
 
   // Rapid replacement again: input prompt must also drop prior text.
   act(() => {

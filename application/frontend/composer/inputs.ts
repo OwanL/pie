@@ -1,3 +1,5 @@
+/// <reference lib="es2022.intl" />
+
 import type { ComposerInput } from '../../lib/protocol/index.js';
 import { formatPathWithParentDepth } from '../lib/formatting/path-utils';
 

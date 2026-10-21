@@ -355,7 +355,8 @@ test('keyboard activation focuses the first member when no member is active', ()
     });
     assert.ok(queryDropdown(), 'keyboard activation opens the dropdown');
     const focused = document.activeElement as HTMLElement | null;
-    assert.ok(focused?.classList.contains('pinned-tab-group-member'), 'focus is a member row');
+    assert.ok(focused, 'focus moved to the first member row');
+    assert.ok(focused.classList.contains('pinned-tab-group-member'), 'focus is a member row');
     assert.match(focused.textContent ?? '', /Alpha/, 'focus is the first member row');
   } finally {
     unmount();
