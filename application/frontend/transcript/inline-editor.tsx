@@ -150,8 +150,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
         />
         <div class="inline-editor-footer">
           {/* In-flow footer region below the scrolling textarea (same shell,
-              never an overlay): the one durable resend warning plus actions. */}
-          {!queued && <p class="inline-editor-note" title="Resending replaces later messages.">Resending replaces later messages.</p>}
+              never an overlay): actions remain anchored at the bottom-right. */}
           <div class="inline-editor-actions">
             <button class="action-btn secondary" type="button" onClick={onCancel}>Cancel</button>
             <button
@@ -159,7 +158,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
               type="button"
               disabled={!text.trim() && inputs.length === 0}
               onClick={() => submit(text, inputs)}
-            >{queued ? 'Save' : 'Save & resend'}</button>
+            >{queued ? 'Save' : 'Send'}</button>
           </div>
         </div>
       </div>

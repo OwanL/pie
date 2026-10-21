@@ -96,13 +96,13 @@ test('InlineEditor confirms at most once when Save and Enter both submit', () =>
 });
 
 for (const queued of [false, true]) {
-  test(`InlineEditor explains ${queued ? 'queued save' : 'durable resend'}`, () => {
+  test(`InlineEditor labels ${queued ? 'queued save' : 'durable edit'}`, () => {
     act(() => render(h(InlineEditor, {
       queued, initialText: 'question', initialInputs: [], capturedHeight: null,
       onConfirm: () => {}, onCancel: () => {},
     }), container));
-    assert.equal(container.querySelector('button.primary')?.textContent, queued ? 'Save' : 'Save & resend');
-    assert.equal(container.textContent?.includes('Resending replaces later messages.'), !queued);
+    assert.equal(container.querySelector('button.primary')?.textContent, queued ? 'Save' : 'Send');
+    assert.doesNotMatch(container.textContent ?? '', /Resending replaces later messages\./);
     // The rejected shortcut paragraph stays gone: keys are documented behavior
     // (Enter saves, Shift+Enter newlines, Esc cancels), tested below.
     assert.doesNotMatch(container.textContent ?? '', /Shift\+Enter|Esc cancel|Enter save/);
@@ -129,11 +129,8 @@ test('inline editor is one integrated surface with a separate in-flow footer', a
   // autoSize clamp, so long text scrolls but the editor stays compact.
   assert.match(css, /\.inline-editor-textarea\s*\{[^}]*max-height: 240px;/);
   assert.match(css, /\.inline-editor-textarea\s*\{[^}]*overflow-y: auto;/);
-  // Warning stays readable against the user bubble (warning hue tint, not
-  // muted gray); the shortcut paragraph stays gone.
-  assert.match(css, /\.inline-editor-note\s*\{[^}]*color: color-mix\(in srgb, var\(--panel-warning\) 30%, var\(--panel-user-foreground\)\)/);
-  assert.doesNotMatch(css, /\.inline-editor-note\s*\{[^}]*--panel-muted/);
-  assert.doesNotMatch(css, /inline-editor-hint/);
+  // Removed resend warning and shortcut paragraph stay absent.
+  assert.doesNotMatch(css, /inline-editor-note|inline-editor-hint/);
   // Shell floor keeps the bubble editor-suitable at short text.
   assert.match(css, /\.inline-editor\s*\{[^}]*min-width: 260px;/);
 });
