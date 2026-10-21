@@ -138,6 +138,19 @@ test('inline editor is one integrated surface with a separate in-flow footer', a
   assert.match(css, /\.inline-editor\s*\{[^}]*min-width: 260px;/);
 });
 
+test('InlineEditor keeps captured transcript height on the wrapper, not the compact shell', () => {
+  act(() => render(h(InlineEditor, {
+    queued: false, initialText: 'long message', initialInputs: [], capturedHeight: 900,
+    onConfirm: () => {}, onCancel: () => {},
+  }), container));
+  const wrapper = container.querySelector<HTMLElement>('.inline-editor-wrapper')!;
+  const shell = container.querySelector<HTMLElement>('.inline-editor')!;
+  assert.ok(wrapper && shell);
+  assert.match(wrapper.style.minHeight, /900px/);
+  assert.equal(shell.style.minHeight, '');
+  assert.equal(shell.getAttribute('style'), null);
+});
+
 test('InlineEditor renders textarea and footer as flow siblings of one shell', () => {
   act(() => render(h(InlineEditor, {
     queued: false, initialText: 'question', initialInputs: [], capturedHeight: null,

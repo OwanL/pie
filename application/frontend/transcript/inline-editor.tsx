@@ -111,17 +111,16 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
     setInputs((prev) => prev.filter((i) => i.id !== id));
   }, []);
 
-  // min-height locks the container to prevent scroll shift; the footer is a
-  // separate in-flow region of the shell (no absolutely positioned children).
-  const containerStyle = capturedHeight != null
+  // Keep the transcript footprint stable while the compact, bordered editor
+  // replaces a potentially much taller message body.
+  const wrapperStyle = capturedHeight != null
     ? `min-height:${capturedHeight}px`
     : undefined;
 
   return (
-    <div class="inline-editor-wrapper">
+    <div class="inline-editor-wrapper" style={wrapperStyle}>
       <div
         class={cx('inline-editor', isDragActive && 'border-accent/40 bg-accent/5 shadow-md')}
-        style={containerStyle}
         ref={composerShellRef}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
