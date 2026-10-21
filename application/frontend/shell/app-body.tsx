@@ -129,7 +129,9 @@ export function AppBody({ adapter }: AppBodyProps) {
   //  composer-level live draft. The composer registers its `sendAsRetry` here;
   //  `handleNoticeAction` invokes it on a Retry click. A ref (not state) so a
   //  Retry click doesn't re-render — it just calls the latest registered closure.
-  const sendRetryDraftRef = useRef<((disablePruning?: boolean) => void) | null>(null);
+  //  The callback reports whether the re-send dispatched: the notice is
+  //  dismissed only on `true` (a no-op retry preserves the error banner).
+  const sendRetryDraftRef = useRef<((disablePruning?: boolean) => boolean) | null>(null);
 
   const derived = useAppBodyDerivedState(
     viewState,

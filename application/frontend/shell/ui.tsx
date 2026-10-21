@@ -145,8 +145,11 @@ interface ComposerProps {
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
    *  re-render, just a stable callback bridge from the app-level notice to the
-   *  composer-level draft (which the NoticeBanner cannot otherwise reach). */
-  sendRetryDraftRef?: { current: ((disablePruning?: boolean) => void) | null };
+   *  composer-level draft (which the NoticeBanner cannot otherwise reach).
+   *  The registered callback reports whether the re-send actually dispatched:
+   *  `useNoticeAction` dismisses the error notice only on `true`, so a no-op
+   *  retry (empty draft, busy, send-blocked) preserves the banner. */
+  sendRetryDraftRef?: { current: ((disablePruning?: boolean) => boolean) | null };
 }
 
 function ComposerView({
@@ -315,8 +318,9 @@ function ComposerView({
   //  render behind a keystroke under some test harnesses, sending stale text.
   //  This is the standard "latest-callback" ref escape hatch (the `useEvent`
   //  pattern): a ref write is an idempotent side effect that cannot trigger a
-  //  re-render, so it is safe during render. The closure no-ops (empty-text
-  //  guard) once the composer unmounts, so a stale entry is harmless.
+  //  re-render, so it is safe during render. The closure reports `false`
+  //  (no dispatch; see hooks.ts) once the composer unmounts, so a stale entry
+  //  is harmless.
   if (sendRetryDraftRef) sendRetryDraftRef.current = sendAsRetry;
 
   useComposerPaste({ applyComposerTransfer, textareaRef });

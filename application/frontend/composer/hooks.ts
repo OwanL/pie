@@ -545,19 +545,26 @@ export function useComposerInput({
   // (AppBody) so the NoticeBanner's Retry / Retry-without-pruning buttons re-send
   // the LIVE draft (honoring an edit between rejection and retry — `draftRestore`
   // would be stale once the user types).
-  const sendAsRetry = useCallback((disablePruning?: boolean) => {
+  //
+  // Returns whether the re-send actually dispatched. Guards (submit latch,
+  // send block, dictation, pending start, empty composer, busy) and a
+  // rejected `onRetrySend` return `false`; only `true` lets the caller
+  // (`useNoticeAction`) dismiss the error notice — a no-op retry must not
+  // clear the banner reporting the error that motivated it.
+  const sendAsRetry = useCallback((disablePruning?: boolean): boolean => {
     const trimmed = text.trim();
-    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return;
-    if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return;
+    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return false;
+    if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return false;
     submitting.current = true;
     if (onRetrySend(trimmed, disablePruning) === false) {
       submitting.current = false;
-      return;
+      return false;
     }
     clearCheckpointTimer();
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
+    return true;
   }, [busy, sendBlocked, activeDictation, onRetrySend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   // Returns the text the gesture produced, or null when nothing was applied

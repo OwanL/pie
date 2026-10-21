@@ -51,8 +51,17 @@ export function NoticeBanner({ notice, kind, rawDetail, actions: projectedAction
     setDetailExpanded(false);
   }, [notice]);
 
+  // Announce appropriately and exactly once per inserted banner: operational
+  //  errors use role=alert (assertive); plain info/warning notices use
+  //  role=status (polite). One role per banner — role=status/alert already
+  //  provides the live-region announcement, so no extra aria-live is layered
+  //  on (that would repeat the message), and the persistent DOM is left in
+  //  place across re-renders, so an unchanged notice is not re-announced.
+  const noticeRole = isError ? 'alert' : 'status';
+
   return (
     <div
+      role={noticeRole}
       class={`notice${isError ? ' error' : ''}${dismissing ? ' dismissing' : ''}`}
       onAnimationEnd={(e) => {
         if (e.animationName === 'notice-exit') onDismiss();
