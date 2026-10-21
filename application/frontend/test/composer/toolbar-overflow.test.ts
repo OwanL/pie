@@ -862,11 +862,15 @@ test('the bare unknown-cost dash moves into More at a width where a valued cost 
   const costChip = popover.querySelector<HTMLElement>('[data-toolbar-item="session-cost"] [role="img"]')!;
   assert.equal(costChip!.textContent, '—', 'unavailable cost keeps its bare dash, never a fabricated zero');
   assert.equal(costChip!.getAttribute('aria-label'), 'Session cost unavailable; cumulative usage coverage is unknown.');
+  assert.equal(popover.querySelector('[data-toolbar-item="session-cost"] .composer-toolbar-item-label')?.textContent, 'Cost');
+  assert.equal(container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), null, 'Cost is shown only after the indicator overflows');
+  assert.equal(container.querySelectorAll('[data-toolbar-item="session-cost"]').length, 1, 'the tooltip-bearing indicator remains mounted once');
   assert.ok(costChip!.closest('.pie-tooltip-trigger'), 'the overflowed dash keeps its tooltip wrapper');
 
   rerender({ ...unknownProps, sessionCostIndicator: { ...unknownSessionCost(), label: '$3.42', ariaLabel: 'Estimated session cost $3.42.' } });
   const rowChip = container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] [role="img"]');
   assert.ok(rowChip, 'a valued cost chip keeps its built-in priority and stays in the row');
+  assert.equal(container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), null, 'the in-row cost indicator has no extra label');
   assert.match(rowChip!.textContent ?? '', /3\.42/);
   assert.equal(
     container.querySelector<HTMLElement>('.composer-pinned-controls')!.style.getPropertyValue('--composer-model-picker-max-width'),

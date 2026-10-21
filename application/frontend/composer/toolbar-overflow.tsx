@@ -10,9 +10,8 @@ import { allocateComposerToolbar } from './toolbar-overflow-allocation';
 export interface ComposerToolbarItem {
   key: string;
   kind: 'control' | 'indicator';
-  /** Short visible action name shown beside the icon in the overflow panel
-   *  only; the row keeps icon-only triggers and the accessible names are those
-   *  of the trigger itself. Indicators already render their own text labels. */
+  /** Short visible name shown in the overflow panel only. The row keeps its
+   *  existing presentation and accessible names remain those of the item. */
   shortLabel?: string;
   /** Explicit removal priority consumed by the allocator; lower values move the
    *  item behind the trigger earlier (see {@link ComposerOverflowItemWidth}). */
@@ -311,7 +310,14 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
         </fieldset>
       );
     }
-    return <div {...common}>{item.content}</div>;
+    return (
+      <div {...common}>
+        {item.content}
+        {inPopover && item.shortLabel ? (
+          <span class="composer-toolbar-item-label" aria-hidden="true">{item.shortLabel}</span>
+        ) : null}
+      </div>
+    );
   }
 
   const openMenu = (keyboard = false) => {

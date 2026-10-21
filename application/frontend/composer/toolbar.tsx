@@ -436,6 +436,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     ...(sessionCostIndicator && !prefs.hideSessionCost ? [{
       key: 'session-cost',
       kind: 'indicator' as const,
+      shortLabel: 'Cost',
       // A bare em-dash chip has nothing to show in-row: move it behind the
       // trigger ahead of every other item, keeping its tooltip in the panel.
       ...(isUnknownSessionCost(sessionCostIndicator) ? { removalPriority: 0 as const } : {}),
