@@ -413,7 +413,7 @@ test('native beforeinput historyUndo/historyRedo routes through the custom histo
   }
 });
 
-test(`beforeinput historyUndo immediately after a keyboard undo does not double-apply`, async () => {
+test(`beforeinput historyUndo immediately after a keyboard undo does not double-apply`, () => {
   installFakeTimers();
   try {
     act(() => {
@@ -435,18 +435,107 @@ test(`beforeinput historyUndo immediately after a keyboard undo does not double-
     typeValue(textarea, 'second');
 
     // Keyboard route applies the undo; a non-compliant engine echoes it through
-    // beforeinput right after — the duplicate window swallows the echo.
+    // beforeinput right after — the echo latch swallows the duplicate.
     ctrlZ(textarea);
     assert.equal(textarea.value, 'first');
     const echoed = beforeinput(textarea, 'historyUndo');
     assert.ok(echoed.defaultPrevented, 'echo is still prevented');
     assert.equal(textarea.value, 'first', 'echo does not undo a second time');
 
-    // A genuinely later native gesture (no keyboard event) still applies.
-    // UNDO_REDO_DUPLICATE_WINDOW_MS in hooks.ts is 250; clear it with real time.
-    await new Promise((resolve) => originalSetTimeout(resolve, 300));
+    // The echo consumed the latch: a genuinely later NATIVE gesture — even in
+    // the immediately following task, with no wallclock delay — still applies.
     beforeinput(textarea, 'historyUndo');
-    assert.equal(textarea.value, '', 'a later native undo is applied');
+    assert.equal(textarea.value, '', 'a later native undo is applied without any 250 ms gap');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('two genuine native gestures in successive tasks without 250 ms delay both apply', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(
+        h(TestHarness, {
+          sessionPath: '/s',
+          draftText: '',
+          postMessage: () => {},
+          onSend: () => {},
+        }),
+        container,
+      );
+    });
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    assert.ok(textarea);
+
+    typeValue(textarea, 'one');
+    typeValue(textarea, 'two');
+    typeValue(textarea, 'three');
+
+    // Two native same-direction gestures in immediate successive tasks (no
+    // keydown, no wallclock spacing). Neither is an echo: both must apply.
+    beforeinput(textarea, 'historyUndo');
+    assert.equal(textarea.value, 'two', 'first native undo applies');
+    beforeinput(textarea, 'historyUndo');
+    assert.equal(textarea.value, 'one', 'second native undo, sub-250 ms later, is not deduped away');
+
+    // And two native redos in the same shape.
+    beforeinput(textarea, 'historyRedo');
+    assert.equal(textarea.value, 'two', 'first native redo applies');
+    beforeinput(textarea, 'historyRedo');
+    assert.equal(textarea.value, 'three', 'second native redo, sub-250 ms later, is not deduped away');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('echo right after a redo that flush-discards the pending burst never overwrites the live text', () => {
+  installFakeTimers();
+  try {
+    act(() => {
+      render(
+        h(TestHarness, {
+          sessionPath: '/s',
+          draftText: '',
+          postMessage: () => {},
+          onSend: () => {},
+        }),
+        container,
+      );
+    });
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    assert.ok(textarea);
+
+    typeValue(textarea, 'A');
+    typeValue(textarea, 'B');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'A');
+
+    // Fresh typing leaves a pending checkpoint burst on top of the undone state;
+    // the redo stack still holds 'B' until the burst is flushed.
+    typeRapid(textarea, 'A2');
+
+    // The redo itself is consumed by the flush-discard: the burst becomes the
+    // present and the redo stack is cleared.
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'A2', 'flush-discard keeps the live burst');
+
+    // The engine echoes the just-consumed redo gesture through beforeinput.
+    // A stale canRedo/future closure would replay the DISCARDED 'B' entry over
+    // the live text — the echo latch must swallow it instead.
+    const echoed = beforeinput(textarea, 'historyRedo');
+    assert.ok(echoed.defaultPrevented, 'echo is still prevented');
+    assert.equal(textarea.value, 'A2', 'echo of a flush-discarded redo never overwrites the live text');
+
+    // The live value is still the real editor state: undo and redo converge on it.
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'A', 'undo steps back to the pre-burst checkpoint');
+    ctrlShiftZ(textarea);
+    assert.equal(textarea.value, 'A2', 'redo replays the burst exactly');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'A');
   } finally {
     restoreTimers();
   }

@@ -28,10 +28,6 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
 /** Idle window that groups a typing burst into a single undo checkpoint,
  * mirroring how word processors undo by word/action rather than per keystroke. */
 const CHECKPOINT_DEBOUNCE_MS = 500;
-/** Window in which a native beforeinput historyUndo/historyRedo is treated as the same edit
- * already applied through the keyboard route (non-compliant engines echo the gesture) rather
- * than a fresh undo/redo. Well under any human cadence between two separate gestures. */
-const UNDO_REDO_DUPLICATE_WINDOW_MS = 250;
 const DICTATION_START_ACK_TIMEOUT_MS = 15_000;
 
 function mobileVisibleHeight(): number | undefined {
@@ -136,10 +132,28 @@ export function useComposerInput({
   const [history, { set: setHistory, reset: resetHistory, undo, redo, canUndo, canRedo }] =
     useUndo<string>('');
   const checkpointTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Direction and timestamp of the last undo/redo this hook applied. beforeinput delivers a
-  // native historyUndo/historyRedo echo right after our keydown route on engines that ignore
-  // keydown prevention — the same-direction echo must not apply the edit a second time.
-  const lastUndoRedoGestureRef = useRef<{ kind: 'undo' | 'redo'; at: number } | null>(null);
+  // Keydown echo latch: set when the KEYDOWN route applies (or consumes via
+  // flush-discard) an undo/redo gesture. Non-compliant engines deliver a native
+  // beforeinput historyUndo/historyRedo echo right after the keydown task; the
+  // same-direction echo is swallowed instead of applying a second time. The
+  // latch is consumed by the echo itself or resets at the event-task boundary
+  // (setTimeout(0)); only keyboard gestures arm it, so back-to-back native
+  // (beforeinput) gestures — e.g. two mobile-IME undos in successive tasks —
+  // all apply regardless of how close they are.
+  const undoRedoEchoLatchRef = useRef<'undo' | 'redo' | null>(null);
+  const undoRedoEchoLatchResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armUndoRedoEchoLatch = useCallback((kind: 'undo' | 'redo') => {
+    undoRedoEchoLatchRef.current = kind;
+    if (undoRedoEchoLatchResetRef.current) clearTimeout(undoRedoEchoLatchResetRef.current);
+    // setTimeout(0), not queueMicrotask: the echo, when present, is delivered
+    // in a separate event task right after the keydown task, and the latch
+    // must stay armed across that task boundary. A 0 ms timer is the earliest
+    // boundary past it — no longer than the input task itself.
+    undoRedoEchoLatchResetRef.current = setTimeout(() => {
+      undoRedoEchoLatchResetRef.current = null;
+      undoRedoEchoLatchRef.current = null;
+    }, 0);
+  }, []);
   const pendingStartRef = useRef<{ recordingId: string; baselineText: string; editGeneration: number } | null>(null);
   const cancelledStartDraftRef = useRef<{ sessionPath: string; editGeneration: number } | null>(null);
   const pendingStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -506,7 +520,6 @@ export function useComposerInput({
       : history.past[history.past.length - 1] ?? '';
     undo();
     setText(target);
-    lastUndoRedoGestureRef.current = { kind: 'undo', at: performance.now() };
     // Height is re-fit by the [text] effect above — we intentionally do NOT
     // write textarea.value directly here. Setting it before Preact commits the
     // controlled value can desync the input in real browsers.
@@ -523,7 +536,6 @@ export function useComposerInput({
     const target = history.future[0] ?? '';
     redo();
     setText(target);
-    lastUndoRedoGestureRef.current = { kind: 'redo', at: performance.now() };
     // See undoComposer: height is handled by the [text] effect, not a direct
     // textarea.value write.
   }, [canRedo, flushPendingCheckpoint, history.future, redo, setText, cancelDictation]);
@@ -542,11 +554,16 @@ export function useComposerInput({
         const key = e.key.toLowerCase();
         if (key === 'z' && !e.shiftKey) {
           e.preventDefault();
+          // Arm the echo latch even when the composer call below is a no-op
+          // (including the flush-discard path): the engine's echoes must be
+          // swallowed whatever the keyboard gesture actually consumed.
+          armUndoRedoEchoLatch('undo');
           undoComposer();
           return;
         }
         if ((key === 'z' && e.shiftKey) || key === 'y') {
           e.preventDefault();
+          armUndoRedoEchoLatch('redo');
           redoComposer();
           return;
         }
@@ -557,7 +574,7 @@ export function useComposerInput({
         sendCurrentText();
       }
     },
-    [undoComposer, redoComposer, sendCurrentText],
+    [undoComposer, redoComposer, sendCurrentText, armUndoRedoEchoLatch],
   );
 
   const handleInput = useCallback((e: Event) => {
@@ -613,16 +630,26 @@ export function useComposerInput({
   // changes and cannot survive the programmatic clear on send), but route the
   // native gesture through the SAME undo/redo: engines that bypass the keydown
   // route (e.g. mobile keyboards) deliver historyUndo/historyRedo only here.
-  // When the keyboard route already applied the same gesture inside the
-  // duplicate window, swallow the echo without applying it a second time.
+  // When the keyboard route just applied (or consumed) the same gesture, the
+  // engine's echo is swallowed without applying it a second time. Native-only
+  // gestures (no keydown) never arm the echo latch, so genuine back-to-back
+  // native gestures all apply.
   const handleBeforeInput = useCallback((event: Event) => {
     const inputType = (event as InputEvent).inputType;
     if (inputType !== 'historyUndo' && inputType !== 'historyRedo') return;
     event.preventDefault();
-    const last = lastUndoRedoGestureRef.current;
-    if (last && performance.now() - last.at < UNDO_REDO_DUPLICATE_WINDOW_MS
-      && last.kind === (inputType === 'historyUndo' ? 'undo' : 'redo')) return;
-    if (inputType === 'historyUndo') undoComposer();
+    const kind = inputType === 'historyUndo' ? 'undo' : 'redo';
+    if (undoRedoEchoLatchRef.current === kind) {
+      // The echo of the just-applied keyboard gesture; consume the latch so a
+      // genuinely later native gesture (even in the very next task) applies.
+      undoRedoEchoLatchRef.current = null;
+      if (undoRedoEchoLatchResetRef.current) {
+        clearTimeout(undoRedoEchoLatchResetRef.current);
+        undoRedoEchoLatchResetRef.current = null;
+      }
+      return;
+    }
+    if (kind === 'undo') undoComposer();
     else redoComposer();
   }, [undoComposer, redoComposer]);
 
