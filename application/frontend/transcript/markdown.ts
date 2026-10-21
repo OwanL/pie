@@ -7,6 +7,8 @@ import {
   isLocalFilePath,
   localFilePathReference,
   ordinaryProseFilePathReference,
+  hasAbsolutePathRoot,
+  hasFileLikeLeaf,
   MARKDOWN_FILE_PATH_CLASS,
   MARKDOWN_FILE_PATH_ATTRIBUTE,
 } from './markdown-file-path';
@@ -122,6 +124,29 @@ const ORDINARY_PROSE_FILE_TOKEN = /(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])?[A-Za
 const PROTECTED_PROSE_TAGS = new Set(['a', 'code', 'pre', 'script', 'style', 'textarea', 'title']);
 const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
+/**
+ * True when the text before `start` ends with a truncated absolute path head
+ * such as ``C:/Program`` in ``C:/Program Files/src/main.ts``: an absolute
+ * root whose basename is not itself file-like. A candidate immediately after
+ * such a head is the whitespace-separated continuation of one ambiguous path,
+ * so linking it would produce a broken partial reference.
+ */
+function precededByTruncatedPathHead(text: string, start: number): boolean {
+  const head = text.slice(0, start).replace(/\s+$/, '');
+  const headWord = head.split(/\s+/).pop() ?? '';
+  return Boolean(headWord) && hasAbsolutePathRoot(headWord) && !hasFileLikeLeaf(headWord);
+}
+
+/**
+ * True when the first token after a whitespace run contains a path separator.
+ * Used to treat a truncated absolute head (``C:/Program``) as the unfinished
+ * start of a whitespace path rather than a complete reference.
+ */
+function separatorTokenFollowsWhitespace(text: string, from: number): boolean {
+  const token = /^\s*([^\s]+)/.exec(text.slice(from))?.[1] ?? '';
+  return Boolean(token) && /[/\\]/.test(token);
+}
+
 function linkifyOrdinaryProse(text: string): string {
   let output = '';
   let cursor = 0;
@@ -133,6 +158,18 @@ function linkifyOrdinaryProse(text: string): string {
 
     const referenceText = candidate.replace(/[.,:]+$/, '');
     const trailingPunctuation = candidate.slice(referenceText.length);
+
+    // Unquoted whitespace-bearing paths (`C:/Program Files/src/main.ts`) are
+    // tokenized into a truncated head and a continuation fragment; linking
+    // either piece yields a broken partial reference, and joining across the
+    // whitespace is ambiguous, so both are conservatively left as plain text.
+    if (precededByTruncatedPathHead(text, start)
+      || (hasAbsolutePathRoot(referenceText)
+        && !hasFileLikeLeaf(referenceText)
+        && separatorTokenFollowsWhitespace(text, start + candidate.length))) {
+      continue;
+    }
+
     const reference = ordinaryProseFilePathReference(referenceText);
     if (!reference) continue;
 

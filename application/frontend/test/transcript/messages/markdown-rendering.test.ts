@@ -43,6 +43,71 @@ async function loadRenderMarkdown() {
   return mod.renderMarkdown;
 }
 
+test('common ecosystem manifest, notebook, and extensionless tool files are recognized', () => {
+  // Go and .NET manifests plus Jupyter notebooks.
+  for (const value of [
+    'go.mod',
+    'go.sum',
+    'services/api/go.mod',
+    'analysis.ipynb',
+    'src/web/app.csproj',
+    'MyApp.sln',
+    'src/lib.fsproj',
+    'src/lib.vbproj',
+  ]) {
+    assert.equal(isLocalFilePath(value), true, value);
+  }
+
+  // Extensionless conventional tool basenames.
+  for (const value of ['Gemfile', 'Rakefile', 'Procfile', 'justfile', 'Vagrantfile', 'Brewfile']) {
+    assert.equal(isLocalFilePath(value), true, value);
+  }
+
+  // Unrelated bare words with similar shapes stay inert.
+  assert.equal(isLocalFilePath('notebook'), false);
+  assert.equal(isLocalFilePath('sum'), false);
+});
+
+// Unquoted paths containing whitespace (`C:/Program Files/src/main.ts`) can
+// never be joined safely by prose linkification; neither the truncated head
+// (`C:/Program`) nor the whitespace-separated continuation
+// (`Files/src/main.ts`) may become a partial link.
+test('unquoted whitespace paths are never partially linkified in prose', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const samples = [
+    'Edit C:/Program Files/src/main.ts now.',
+    'Edit C:\\Program Files\\src\\main.ts, then restart.',
+    'Edit /Program Files/src/main.ts now.',
+  ];
+  for (const source of samples) {
+    const html = renderMarkdown(source);
+    assert.doesNotMatch(html, /data-pie-file-path/, source);
+  }
+  // Complete whitespace-free references still linkify, alongside prose words.
+  assert.match(
+    renderMarkdown('Edit C:/workspace/src/main.ts now.'),
+    /data-pie-file-path="C:\/workspace\/src\/main\.ts"/,
+  );
+  assert.match(
+    renderMarkdown('Edit src/main.ts, then README.md.'),
+    /data-pie-file-path="src\/main\.ts"[\s\S]*data-pie-file-path="README\.md"/,
+  );
+});
+
+// Explicit references the user quoted themselves keep their full space-bearing
+// value; only ambiguous ordinary prose is suppressed.
+test('explicit codespans and markdown links keep full space-bearing local paths', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const codespanHtml = renderMarkdown('`C:/Program Files/src/main.ts`');
+  assert.match(codespanHtml, /data-pie-file-path="C:\/Program Files\/src\/main\.ts"/);
+
+  const linkedHtml = renderMarkdown('[main](<C:/Program Files/src/main.ts>)');
+  assert.match(linkedHtml, /data-pie-file-path="C:\/Program Files\/src\/main\.ts"/);
+
+  const externalHtml = renderMarkdown('`https://example.com/foo.md` [external](https://example.com/foo.md)');
+  assert.doesNotMatch(externalHtml, /data-pie-file-path="https/);
+});
+
 test('local raster markdown images use safe placeholders, never filesystem src', async () => {
   const renderMarkdown = await loadRenderMarkdown();
   const html = renderMarkdown('![Chart & details](C:/workspace/chart.png "A & title")');

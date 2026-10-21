@@ -8,6 +8,16 @@ export const MARKDOWN_FILE_PATH_CLASS = 'file-path-link';
 const EXTENSIONLESS_FILE_NAMES = new Set(['copying', 'dockerfile', 'license', 'makefile', 'notice']);
 
 /**
+ * Conventional tool basenames and manifests whose whole name (not their
+ * trailing extension) identifies them, including names that only differ by
+ * case (``Gemfile``) or that end in a dot-word (``go.mod``, ``go.sum``).
+ */
+const CONVENTIONAL_FILE_NAMES = new Set([
+  'brewfile', 'gemfile', 'justfile', 'procfile', 'rakefile', 'vagrantfile',
+  'go.mod', 'go.sum',
+]);
+
+/**
  * Conventional dotfile basenames (after the leading dot). Separator-free
  * tokens are treated as dotfiles only when they name one of these;
  * CSS-class-looking tokens such as `.message-body` stay ordinary inline code.
@@ -34,12 +44,12 @@ const CONVENTIONAL_DOTFILES = new Set([
  */
 const KNOWN_FILE_EXTENSIONS = new Set([
   // Programming languages and tooling
-  'asm', 'bash', 'bat', 'c', 'cc', 'cjs', 'clj', 'cljs', 'cmd', 'coffee', 'cpp', 'cr', 'cs',
-  'cts', 'cxx', 'd', 'dart', 'ejs', 'elm', 'erl', 'ex', 'exs', 'fish', 'fs', 'fsi', 'go',
-  'gradle', 'graphql', 'groovy', 'gql', 'h', 'hbs', 'hpp', 'hrl', 'hs', 'hxx', 'java', 'js',
+  'asm', 'bash', 'bat', 'c', 'cc', 'cjs', 'clj', 'cljs', 'cmd', 'coffee', 'cpp', 'cr', 'cs', 'csproj',
+  'cts', 'cxx', 'd', 'dart', 'ejs', 'elm', 'erl', 'ex', 'exs', 'fish', 'fs', 'fsi', 'fsproj', 'go',
+  'gradle', 'graphql', 'groovy', 'gql', 'h', 'hbs', 'hpp', 'hrl', 'hs', 'hxx', 'ipynb', 'java', 'js',
   'jsx', 'kt', 'kts', 'lua', 'make', 'mjs', 'mk', 'ml', 'mli', 'mts', 'nim', 'php', 'pl',
   'pm', 'prisma', 'proto', 'ps1', 'psd1', 'psm1', 'pug', 'py', 'pyi', 'pyw', 'r', 'rb', 'rs',
-  's', 'scala', 'sh', 'sol', 'sql', 'svelte', 'swift', 'thrift', 'ts', 'tsx', 'vue', 'zig',
+  's', 'scala', 'sln', 'sh', 'sol', 'sql', 'svelte', 'swift', 'thrift', 'ts', 'tsx', 'vbproj', 'vue', 'zig',
   'zsh',
   // Web and markup
   'astro', 'css', 'dtd', 'htm', 'html', 'jade', 'less', 'sass', 'scss', 'styl', 'svg',
@@ -66,6 +76,16 @@ function isAbsoluteFilePath(value: string): boolean {
     || value.startsWith('\\\\');
 }
 
+/** True when a token begins with an absolute path root (drive, UNC, or leading slash). */
+export function hasAbsolutePathRoot(value: string): boolean {
+  return isAbsoluteFilePath(value);
+}
+
+/** Whether a path's basename looks like an openable file (recognized extension or conventional name). */
+export function hasFileLikeLeaf(value: string): boolean {
+  return isFileLikeLeaf(filePathLeaf(value.replace(/[\\/]+$/, '')));
+}
+
 function filePathLeaf(value: string): string {
   const normalized = value.replace(/[\\/]+$/, '');
   const separator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
@@ -76,6 +96,7 @@ function isFileLikeLeaf(value: string): boolean {
   const leaf = filePathLeaf(value);
   if (!leaf || leaf === '.' || leaf === '..') return false;
   if (EXTENSIONLESS_FILE_NAMES.has(leaf.toLowerCase())) return true;
+  if (CONVENTIONAL_FILE_NAMES.has(leaf.toLowerCase())) return true;
 
   // Separator-free tokens are ambiguous with property access (`response.ok`)
   // and CSS selectors (`.message-body`), so bare names get a conservative
