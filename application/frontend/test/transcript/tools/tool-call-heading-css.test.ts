@@ -26,10 +26,12 @@ test('ordinary inspectors tighten spacing without shrinking control hitboxes or 
   assert.match(css, /\.tool-call-input-field dd\s*\{[^}]*font-size:\s*12px;/);
 });
 
-test('secondary actions appear on hover or keyboard focus without hiding touch controls', async () => {
+test('file actions stay visible at low rest opacity and reach full contrast on hover or keyboard focus', async () => {
   const css = await readToolCallCss();
-  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)\s*\{[^}]*\.tool-call-header \.tool-call-action\s*\{\s*opacity:\s*0;\s*pointer-events:\s*none;/);
-  assert.match(css, /\.tool-call-header:hover \.tool-call-action,\s*\.tool-call-header:focus-within \.tool-call-action\s*\{\s*opacity:\s*1;\s*pointer-events:\s*auto;/);
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)\s*\{[^}]*\.tool-call-header \.tool-call-action\s*\{\s*opacity:\s*0\.45;/);
+  assert.match(css, /\.tool-call-header:hover \.tool-call-action,\s*\.tool-call-header:focus-within \.tool-call-action\s*\{\s*opacity:\s*1;/);
+  // Visible at rest means operable at rest: no pointer-events suppression.
+  assert.doesNotMatch(css, /\.tool-call-header \.tool-call-action\s*\{[^}]*pointer-events:\s*none/);
   assert.match(css, /\.tool-call-heading-content \.transcript-header-path-target,\s*\.tool-call-heading-content \.transcript-header-summary-command\s*\{\s*font-weight:\s*400;/);
 });
 
@@ -49,16 +51,43 @@ test('coarse-pointer tools gain touch hitboxes and font floors without wrapping 
   assert.match(touch, /\.tool-call-card \.resizable-scroll-hint\s*\{[^}]*display:\s*block;[^}]*user-select:\s*none;/);
 });
 
-test('ordinary headers omit the disclosure arrow but keep the native toggle and collapse rail', async () => {
+test('ordinary headers disclose with a muted chevron beside the native toggle and collapse rail', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {}, onOpenFile: () => {} }));
-  assert.doesNotMatch(html, /tool-call-disclosure/);
+  assert.match(html, /tool-call-disclosure/);
+  assert.match(html, /collapsible-chevron/);
   assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
   assert.match(html, /Collapse details/);
   assert.match(html, /tool-call-kind-icon/);
   const css = await readToolCallCss();
+  assert.match(css, /Every ordinary tool row now carries this muted disclosure chevron/);
+  assert.match(css, /\.tool-call-disclosure\s*\{\s*flex:\s*0 0 auto;\s*color:\s*var\(--panel-muted\);\s*\}/);
   assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*16px;/);
   assert.match(css, /\.tool-call-inspector-body > \.tool-call-collapse-rail\s*\{\s*width:\s*16px;/);
+});
+
+test('failed ordinary results take a quiet danger edge through existing data-status without new labels', async () => {
+  const css = await readToolCallCss();
+  assert.match(css, /\.tool-call-card:not\(\.tool-call-subagent\)\[data-status="failed"\]\s*\{\s*box-shadow:\s*inset 2px 0 0 color-mix\(in srgb, var\(--panel-danger\) 32%, var\(--panel-border\)\);/);
+  assert.doesNotMatch(css, /\.tool-call-card\[data-status="failed"\][^}]*content:/);
+});
+
+test('desktop resizable result panes scroll with an explicit thin inner scrollbar', async () => {
+  const css = await readToolCallCss();
+  const block = css.slice(css.indexOf('/* Desktop result panes get an explicit thin inner scrollbar'));
+  const desktop = block.slice(0, block.indexOf('@media (pointer: coarse)'));
+  assert.match(desktop, /@media \(hover: hover\) and \(pointer: fine\)\s*\{\s*\.tool-call-pre\.tool-call-pre-resizable\s*\{\s*scrollbar-width:\s*thin;\s*scrollbar-color:\s*var\(--panel-border\) transparent;/);
+  assert.match(desktop, /::-webkit-scrollbar\s*\{\s*width:\s*6px;\s*height:\s*6px;/);
+  assert.match(desktop, /::-webkit-scrollbar-thumb\s*\{\s*background:\s*var\(--panel-border\);\s*border-radius:\s*4px;/);
+});
+
+test('diff lines soft-wrap inside .tool-call-diff only, preserving the +/- marker column', async () => {
+  const css = await readToolCallCss();
+  assert.match(css, /\.tool-call-diff \.tool-call-diff-added,\s*\.tool-call-diff \.tool-call-diff-removed,\s*\.tool-call-diff \.tool-call-diff-context\s*\{\s*display:\s*block;\s*min-width:\s*0;\s*white-space:\s*pre-wrap;/);
+  // The generic tool-call-pre stays nowrap; no unscoped line-span wrap rule.
+  assert.match(css, /\.tool-call-pre\s*\{\s*white-space:\s*pre;/);
+  // The old unscoped nowrap block rule (min-width: max-content) is gone.
+  assert.doesNotMatch(css, /min-width:\s*max-content/);
 });
 
 test('collapsed tool-call headers use the shared path hierarchy', async () => {

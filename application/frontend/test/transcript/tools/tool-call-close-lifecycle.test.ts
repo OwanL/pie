@@ -113,14 +113,14 @@ test('drafting and ready inputs stay visible without provisional disclaimers or 
   assert.equal(container.querySelector('.tool-call-preview-label')?.textContent, 'replacement 2');
 });
 
-test('arrow-free whole-row disclosure stays a focusable native button with accurate aria wiring', () => {
+test('whole-row disclosure stays a focusable native button with accurate aria wiring', () => {
   paint(call('read', 'completed'));
   const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
   assert.equal(header.tagName, 'BUTTON');
   assert.equal(header.type, 'button');
   assert.equal(header.disabled, false);
   assert.equal(header.tabIndex, 0, 'native button retains keyboard activation semantics');
-  assert.equal(header.querySelector('.tool-call-disclosure'), null);
+  assert.ok(header.querySelector('.tool-call-disclosure'), 'ordinary rows keep the muted disclosure chevron');
   assert.equal(header.getAttribute('aria-expanded'), 'false');
   header.focus();
   assert.equal(document.activeElement, header);

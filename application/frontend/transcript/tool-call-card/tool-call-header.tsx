@@ -71,7 +71,9 @@ export function ToolCallHeader({ open, name, nameTitle, status, summary, summary
           {preview && <span class="tool-call-read-preview" aria-hidden="true">{preview.end ? `${preview.start} … ${preview.end}` : preview.start}</span>}
           {detail && <span class="tool-call-secondary-detail" title={detail}>{detail}</span>}
         </span>
-        {isSubagent && <CollapsibleChevron open={open} class="tool-call-disclosure" />}
+        {/* Every tool row — not only subagents — discloses with the same
+            muted chevron; the collapse rail still owns open-body closing. */}
+        <CollapsibleChevron open={open} class="tool-call-disclosure" />
       </button>
       {canOpenFile && <div class="tool-call-actions">
         <button type="button" class="tool-call-action" aria-label={`Open file ${summaryPath}`} title="Open file" onClick={() => onOpenFile(summaryPath!)}><ToolIcon kind="open" /></button>

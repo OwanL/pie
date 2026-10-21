@@ -180,6 +180,10 @@
 }
 
 .tool-call-disclosure { flex: 0 0 auto; color: var(--panel-muted); }
+/* Every ordinary tool row now carries this muted disclosure chevron (a
+   deliberate revision of the earlier arrow-free design): the native toggle
+   and collapse rail keep their roles, and the chevron only marks the
+   disclosure affordance. */
 /* Natural metadata flow. Missing values do not reserve columns or gaps. */
 .tool-call-header-meta {
   display: flex;
@@ -214,12 +218,21 @@
   cursor: pointer;
 }
 
+/* A failed ordinary result takes a quiet danger edge via the existing
+   `data-status`; the Failed chip already names the state, so no new labels,
+   badges or shells here. Subagent cards keep their own failure styling. */
+.tool-call-card:not(.tool-call-subagent)[data-status="failed"] {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--panel-danger) 32%, var(--panel-border));
+}
+
 /* File opening is secondary; the left inspection icon always stays visible.
-   Existing file controls keep their hit area on hover; absent ones take no space. */
+   The action is visible at a low opacity at rest (and stays operable),
+   reaching full contrast only on hover/keyboard focus; absent file controls
+   still take no space and coarse-pointer rows keep full-opacity controls. */
 @media (hover: hover) and (pointer: fine) {
-  .tool-call-header .tool-call-action { opacity: 0; pointer-events: none; }
+  .tool-call-header .tool-call-action { opacity: 0.45; }
   .tool-call-header:hover .tool-call-action,
-  .tool-call-header:focus-within .tool-call-action { opacity: 1; pointer-events: auto; }
+  .tool-call-header:focus-within .tool-call-action { opacity: 1; }
 }
 
 .tool-call-status-draft {
@@ -376,9 +389,18 @@
 .tool-call-detail-status { padding: 4px 0; font-family: var(--panel-font-sans); font-size: 11px; color: var(--panel-muted); }
 .tool-call-detail-status { padding-inline: 10px; }
 .tool-call-detail-status button { margin-left: 8px; }
-.tool-call-diff-added,
-.tool-call-diff-removed,
-.tool-call-diff-context { display: block; min-width: max-content; }
+/* Diff lines are the one tool-call surface that soft-wraps. Each line stays a
+   single block span, so a wrapped continuation never reads as a new change and
+   the leading +/- marker is preserved at the row start. Wrapping is scoped to
+   .tool-call-diff; the base .tool-call-pre keeps white-space: pre (nowrap). */
+.tool-call-diff .tool-call-diff-added,
+.tool-call-diff .tool-call-diff-removed,
+.tool-call-diff .tool-call-diff-context {
+  display: block;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .tool-call-diff-added { color: var(--panel-success); background: var(--panel-success-surface); }
 .tool-call-diff-removed { color: var(--panel-danger); background: var(--panel-danger-surface); }
 .tool-call-diff { padding-inline: 0; }
@@ -429,6 +451,20 @@
   max-height: var(--expanded-section-max-height);
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+/* Desktop result panes get an explicit thin inner scrollbar: compact thumbs
+   (rather than the default full-width bar) while the pane itself stays
+   independently resizable and scrollable. Coarse pointers keep native
+   overlay scrollbars and their touch behaviour. */
+@media (hover: hover) and (pointer: fine) {
+  .tool-call-pre.tool-call-pre-resizable {
+    scrollbar-width: thin;
+    scrollbar-color: var(--panel-border) transparent;
+  }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar { width: 6px; height: 6px; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-track { background: transparent; }
+  .tool-call-pre.tool-call-pre-resizable::-webkit-scrollbar-thumb { background: var(--panel-border); border-radius: 4px; }
 }
 
 /* The opt-in cue lives outside selectable code and never adds desktop noise. */
@@ -1238,7 +1274,8 @@
 
 /* ── Tool-call status glyph (header) ─────────────────────────────────────── */
 /* The processing wheel shares the pending mark's compact footprint and quiet
-   neutral colour. Shape and motion, rather than accent tint, signal work. */
+   neutral colour. Shape and motion, rather than accent tint, signal work; the
+   track stays translucent, but visible enough for the brighter arc to read. */
 
 .tool-call-status-spinner {
   flex: 0 0 auto;
@@ -1246,7 +1283,7 @@
   height: 11px;
   box-sizing: border-box;
   border-radius: 999px;
-  border: 1.5px solid color-mix(in srgb, var(--panel-muted) 26%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--panel-muted) 45%, transparent);
   border-top-color: var(--panel-muted);
   animation: panel-loading-wheel-spin 0.72s linear infinite;
   will-change: transform;

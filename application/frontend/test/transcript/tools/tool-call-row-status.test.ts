@@ -39,7 +39,7 @@ test('failure retains the visible error-copy control instead of a quiet success 
   assert.match(html, /status-chip-failed/);
   assert.match(html, /Copy tool-call error detail/);
   assert.match(html, />Failed</);
-  assert.doesNotMatch(html, /tool-call-status-completed|tool-call-status-spinner|tool-call-disclosure/);
+  assert.doesNotMatch(html, /tool-call-status-completed|tool-call-status-spinner|role="img"/);
 });
 
 test('pending and processing marks share a stable footprint without accent emphasis', async () => {
@@ -52,4 +52,12 @@ test('pending and processing marks share a stable footprint without accent empha
     assert.match(rule, /var\(--panel-muted\)/);
     assert.doesNotMatch(rule, /panel-accent|panel-success/);
   }
+});
+
+test('the spinner track stays brighter for visible contrast without accent tint or size change', async () => {
+  const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
+  const rule = css.match(/\.tool-call-status-spinner\s*\{[^}]*\}/)?.[0];
+  assert.ok(rule, 'expected spinner rule');
+  assert.match(rule, /border:\s*1\.5px solid color-mix\(in srgb, var\(--panel-muted\) 45%, transparent\);/);
+  assert.match(rule, /border-top-color:\s*var\(--panel-muted\);/);
 });
