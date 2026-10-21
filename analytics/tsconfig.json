@@ -10,9 +10,10 @@
       "preact": ["../application/hosts/vscode/node_modules/preact"],
       "preact-render-to-string": ["../application/hosts/vscode/node_modules/preact-render-to-string"],
       "yaml": ["../application/hosts/vscode/node_modules/yaml"],
-      "@earendil-works/pi-ai": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
-      "@mariozechner/pi-ai": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
-      "@earendil-works/pi-coding-agent": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+      "@earendil-works/pi-ai": ["../harness/pi/packages/ai/dist/index.d.ts"],
+      "@mariozechner/pi-ai": ["../harness/pi/packages/ai/dist/index.d.ts"],
+      "@earendil-works/pi-coding-agent": ["../harness/pi/packages/coding-agent/dist/index.d.ts"],
+      "@earendil-works/pi-ai/compat": ["../harness/pi/packages/ai/dist/compat.d.ts"]
     }
   },
   "include": [

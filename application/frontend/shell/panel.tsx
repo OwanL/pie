@@ -1,6 +1,5 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
-/// <reference types="vite/client" />
 
 import { options, render } from 'preact';
 

@@ -23,10 +23,11 @@
       "immer": ["../hosts/vscode/node_modules/immer"],
       "preact": ["../hosts/vscode/node_modules/preact"],
       "preact-render-to-string": ["../hosts/vscode/node_modules/preact-render-to-string"],
-      "@earendil-works/pi-ai": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
-      "@mariozechner/pi-ai": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
-      "@earendil-works/pi-coding-agent": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent"],
-      "@mariozechner/pi-coding-agent": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+      "@earendil-works/pi-ai": ["../../harness/pi/packages/ai/dist/index.d.ts"],
+      "@mariozechner/pi-ai": ["../../harness/pi/packages/ai/dist/index.d.ts"],
+      "@earendil-works/pi-coding-agent": ["../../harness/pi/packages/coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-coding-agent": ["../../harness/pi/packages/coding-agent/dist/index.d.ts"],
+      "@earendil-works/pi-ai/compat": ["../../harness/pi/packages/ai/dist/compat.d.ts"]
     }
   },
   "include": [
