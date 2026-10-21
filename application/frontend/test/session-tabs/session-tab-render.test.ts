@@ -157,6 +157,20 @@ test('tab keeps its full title on hover even when the label truncates', () => {
   assert.match(html, new RegExp(`title="${label}"`));
 });
 
+test('aria-disabled tab close keeps muted hover styling and a visible focus ring', async () => {
+  const css = await readFile(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
+  const disabledHover = css.match(/\.session-tab-close\[aria-disabled='true'\]:hover\s*\{([^}]*)\}/)?.[1] ?? '';
+  const disabledFocus = css.match(/\.session-tab-close\[aria-disabled='true'\]:focus-visible\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  assert.match(disabledHover, /background:\s*transparent/);
+  assert.match(disabledHover, /color:\s*inherit/);
+  assert.doesNotMatch(disabledHover, /outline:\s*none/);
+  assert.match(disabledFocus, /background:\s*transparent/);
+  assert.match(disabledFocus, /outline:\s*2px solid var\(--panel-accent\)/);
+  assert.match(disabledFocus, /outline-offset:\s*1px/);
+  assert.doesNotMatch(disabledFocus, /outline:\s*none/);
+});
+
 test('agent icon stays muted without a surface or accent style', async () => {
   const tabsCss = await readFile(new URL('../../styles/tabs.css', import.meta.url), 'utf8');
 

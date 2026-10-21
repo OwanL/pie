@@ -712,13 +712,20 @@ body.session-tab-dragging {
   opacity: 0.4;
 }
 
-/* A blocked close button must not light up on hover/focus like an active one. */
-.session-tab-close[aria-disabled='true']:hover,
+/* A blocked close button stays muted on hover, but remains visibly focused for
+   keyboard users even though aria-disabled keeps it in the tab order. */
+.session-tab-close[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: var(--session-tab-outline);
+  color: inherit;
+}
+
 .session-tab-close[aria-disabled='true']:focus-visible {
   background: transparent;
   border-color: var(--session-tab-outline);
   color: inherit;
-  outline: none;
+  outline: 2px solid var(--panel-accent);
+  outline-offset: 1px;
 }
 
 /* ── Drop indicators ─────────────────────────────────────────────────────── */

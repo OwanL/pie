@@ -57,6 +57,7 @@ function mountHarness(options: { onMove: MoveSpy; onSelect: (path: string) => vo
         'data-tab-path': path,
         'data-unpinned-tab': 'true',
         onPointerDown: (event: PointerEvent) => rendered!.onPointerDown(event, index, path),
+        onClick: () => rendered!.onClick(path),
       })));
   }
   act(() => { render(h(Harness, {}), container); });
@@ -120,7 +121,7 @@ test('normal pointerup without a cancel commits the reorder', () => {
   assert.ok(!bodyDragging(), 'commit clears the dragging body class');
 });
 
-test('Escape during drag cancels tracking and ghost state; trailing pointerup commits nothing', () => {
+test('Escape during drag cancels tracking and suppresses the eventual click', async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   const moves: unknown[][] = [];
@@ -141,8 +142,19 @@ test('Escape during drag cancels tracking and ghost state; trailing pointerup co
   act(() => { window.dispatchEvent(pointerEvent('pointermove', { clientX: 120, clientY: 14 })); });
   act(() => { window.dispatchEvent(pointerEvent('pointerup', { clientX: 120, clientY: 14 })); });
   assert.deepEqual(moves, [], 'no reorder commit after an Escape-cancelled drag');
-  assert.deepEqual(selects, [], 'no selection commit after an Escape-cancelled drag');
+  act(() => {
+    const tabB = container.querySelector('[data-tab-path="b"]') as HTMLElement;
+    tabB.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  assert.deepEqual(selects, [], 'the click following the trailing pointerup does not select the dragged tab');
   assert.ok(!bodyDragging(), 'tracking stays torn down');
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  act(() => {
+    const tabB = container.querySelector('[data-tab-path="b"]') as HTMLElement;
+    tabB.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  assert.deepEqual(selects, ['b'], 'a subsequent ordinary click still selects its tab');
 });
 
 test('pointercancel cancels tracking; trailing pointerup commits nothing', () => {
