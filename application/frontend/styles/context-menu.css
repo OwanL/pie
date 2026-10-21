@@ -248,15 +248,18 @@
    per-trigger list items (session, condition, note, wait time, cancel ×). */
 
 .deferred-triggers-menu {
-  min-width: 240px;
-  max-width: 340px;
+  min-width: min(240px, calc(100vw - 8px));
+  max-width: min(340px, calc(100vw - 8px));
+  max-height: calc(100vh - 8px);
   padding: 4px 0;
 }
 
 .deferred-triggers-menu-list {
   display: flex;
   flex-direction: column;
-  max-height: 280px;
+  /* Leave room for the shell's 8px padding and 2px border, in addition to
+     the viewport clamp's 4px margin on each side. */
+  max-height: min(280px, calc(100vh - 18px));
   overflow-y: auto;
 }
 
