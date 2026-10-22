@@ -157,8 +157,10 @@ export function ImageViewer({
       // Reuse supported inline embeds without granting native raster actions.
       if (!source && !/^data:image\/svg\+xml[;,]/i.test(target.src)) return;
       event.preventDefault(); event.stopImmediatePropagation();
-      openingTrigger.current = target;
       target.focus();
+      const activation = { returnFocus: target as HTMLElement };
+      target.dispatchEvent(new window.CustomEvent('pie-image-viewer-open', { bubbles: true, detail: activation }));
+      openingTrigger.current = activation.returnFocus;
       openImageViewer({ src: target.src, alt: target.alt || 'Image', source });
     };
     document.addEventListener('click', open, true);

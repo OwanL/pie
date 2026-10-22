@@ -255,6 +255,19 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       if (event.key !== 'Escape' || !activeRef.current) return;
       event.preventDefault();
       event.stopPropagation();
+      const owner = activeRef.current;
+      const returnFocus = popoverRef.current?.contains(document.activeElement) && owner.anchor.isConnected
+        ? owner.anchor : null;
+      dismiss();
+      returnFocus?.focus();
+    };
+    const onViewerOpen = (event: Event) => {
+      const owner = activeRef.current;
+      if (!owner || !(event.target instanceof Node) || !popoverRef.current?.contains(event.target)) return;
+      // The ephemeral preview cannot be the viewer's return target.
+      if (owner.anchor.isConnected) {
+        (event as CustomEvent<{ returnFocus: HTMLElement }>).detail.returnFocus = owner.anchor;
+      }
       dismiss();
     };
     const onAnchorActivation = (event: Event) => {
@@ -270,6 +283,7 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       else setPreview((current) => current ? { ...current, top: 0, left: 0 } : current);
     };
 
+    root.addEventListener('pie-image-viewer-open', onViewerOpen);
     root.addEventListener('pointerover', onPointerOver);
     root.addEventListener('pointerout', onPointerOut);
     root.addEventListener('focusin', onFocusIn);
@@ -305,6 +319,7 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
 
     return () => {
       dismiss();
+      root.removeEventListener('pie-image-viewer-open', onViewerOpen);
       root.removeEventListener('pointerover', onPointerOver);
       root.removeEventListener('pointerout', onPointerOut);
       root.removeEventListener('focusin', onFocusIn);

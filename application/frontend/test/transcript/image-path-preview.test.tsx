@@ -11,6 +11,8 @@ import { createRef, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import type { WebviewToHostMessage } from '../../../lib/protocol/index.js';
+import { ImageViewer } from '../../transcript/image-viewer';
+import { clearImageViewer } from '../../transcript/image-viewer-store';
 import { ImagePathPreview } from '../../transcript/image-path-preview';
 import {
   clearImagePreviewRequests,
@@ -70,6 +72,7 @@ let anchor: HTMLAnchorElement;
 let renderTarget: HTMLDivElement;
 let posts: WebviewToHostMessage[];
 let timers: ReturnType<typeof installFakeTimers>;
+let rootRef: ReturnType<typeof createRef<HTMLDivElement>>;
 
 beforeEach(() => {
   clearImagePreviewRequests();
@@ -83,7 +86,7 @@ beforeEach(() => {
   renderTarget = document.createElement('div');
   host.appendChild(renderTarget);
   document.body.appendChild(host);
-  const rootRef = createRef<HTMLDivElement>();
+  rootRef = createRef<HTMLDivElement>();
   rootRef.current = host;
   act(() => render(
     <ImagePathPreview
@@ -99,6 +102,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => render(null, renderTarget));
   clearImagePreviewRequests();
+  clearImageViewer();
   host.remove();
   timers.restore();
 });
@@ -122,6 +126,76 @@ function setRect(element: Element, rect: { left: number; top: number; width: num
     }),
   });
 }
+
+function readyFocusedPreview(): HTMLImageElement {
+  act(() => anchor.focus());
+  act(() => timers.fireByDelay(350));
+  const request = posts.find(post => post.type === 'requestImagePreview');
+  assert.ok(request && request.type === 'requestImagePreview');
+  act(() => receiveImagePreviewResult({
+    type: 'imagePreviewResult', requestId: request.requestId,
+    sessionPath: request.sessionPath, viewGeneration: 1, status: 'ready',
+    data: { mimeType: 'image/png', dataUrl: 'data:image/png;base64,YQ==' },
+  }));
+  const image = host.querySelector<HTMLImageElement>('.image-path-preview img');
+  assert.ok(image);
+  act(() => image.focus());
+  assert.equal(document.activeElement, image);
+  return image;
+}
+
+test('Escape returns actual preview focus to its connected transcript anchor', () => {
+  const image = readyFocusedPreview();
+  act(() => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+  assert.equal(host.querySelector('.image-path-preview'), null);
+  assert.equal(document.activeElement, anchor);
+});
+
+test('pointer preview Escape does not take focus from another control', () => {
+  const other = document.createElement('button');
+  host.appendChild(other);
+  act(() => other.focus());
+  startPointerPreview();
+  act(() => other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+  assert.equal(host.querySelector('.image-path-preview'), null);
+  assert.equal(document.activeElement, other);
+});
+
+test('session dismissal does not take focus from another control', () => {
+  readyFocusedPreview();
+  const other = document.createElement('button');
+  host.appendChild(other);
+  act(() => other.focus());
+  act(() => render(<ImagePathPreview rootRef={rootRef} sessionPath="/sessions/b.jsonl"
+    workingDirectory="/workspace" postMessage={message => posts.push(message)} />, renderTarget));
+  assert.equal(host.querySelector('.image-path-preview'), null);
+  assert.equal(document.activeElement, other);
+});
+
+test('real preview Enter retires preview; first Escape closes real PhotoSwipe and returns transcript focus', async () => {
+  Object.defineProperty(globalThis, 'HTMLImageElement', { configurable: true, value: window.HTMLImageElement });
+  const adapter: any = {
+    postMessage: () => {},
+    transport: { subscribe: () => () => {}, onConnectionStateChange: () => () => {} },
+  };
+  const viewerMount = document.createElement('div');
+  host.appendChild(viewerMount);
+  await act(async () => render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} />, viewerMount));
+  try {
+    const image = readyFocusedPreview();
+    await act(async () => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    await act(async () => {});
+    assert.equal(host.querySelector('.image-path-preview'), null);
+    assert.ok(document.querySelector('.pswp'));
+    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    await act(async () => {});
+    assert.equal(document.querySelector('.pswp'), null);
+    assert.equal(document.activeElement, anchor);
+  } finally {
+    await act(async () => render(null, viewerMount));
+    viewerMount.remove();
+  }
+});
 
 function startPointerPreview(): Extract<WebviewToHostMessage, { type: 'requestImagePreview' }> {
   act(() => fire('pointerover'));
