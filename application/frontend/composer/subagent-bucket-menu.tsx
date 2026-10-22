@@ -67,7 +67,12 @@ function SessionBucketMenu({ sessionPath, prefs, onSetPrefs }: Props & { session
         <button ref={triggerRef} type="button" title="Buckets"
           class={cx('system-prompt-toggle-trigger', 'subagent-bucket-trigger', open && 'open', value.length < 3 && 'has-disabled')}
           aria-haspopup="dialog" aria-expanded={open} aria-label={`Subagent buckets: ${summary}`}
-          onClick={() => setOpen(previous => !previous)} onKeyDown={keydown}>Buckets</button>
+          onClick={() => setOpen(previous => !previous)} onKeyDown={keydown}>
+          <svg class="subagent-bucket-icon" width="16" height="16" viewBox="0 0 24 24"
+            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 6h6M4 12h11M4 18h16" />
+          </svg>
+        </button>
       </Tooltip>
       {open && <div ref={menuRef} class="system-prompt-toggle-dropdown subagent-bucket-dropdown" role="dialog" aria-label="Subagent bucket toggles">
         <div class="system-prompt-toggle-header"><span class="system-prompt-toggle-title">Subagent buckets</span></div>

@@ -1660,7 +1660,13 @@
 
 .subagent-bucket-trigger {
   flex: none;
-  white-space: nowrap;
+  justify-content: center;
+  width: 26px;
+  padding: 0;
+}
+
+.subagent-bucket-icon {
+  flex: none;
 }
 
 .subagent-bucket-trigger.has-disabled {

@@ -21,6 +21,9 @@ test('bucket menu renders all seven subsets and disables only the last checked t
       act(() => render(h(SubagentBucketMenu, { sessionPath: a,
         prefs: { ...DEFAULT_CHAT_PREFS, subagentBucketTogglesBySession: { [a]: choices } }, onSetPrefs: () => {} }), container));
       const trigger = container.querySelector('button')!;
+      assert.match(trigger.getAttribute('aria-label') ?? '', /Subagent buckets/);
+      assert.ok(trigger.querySelector('svg[aria-hidden="true"]'));
+      assert.equal(trigger.textContent?.trim(), '', 'icon trigger leaves the visible label to the overflow row');
       if (trigger.getAttribute('aria-expanded') !== 'true') click(trigger);
       const rows = [...container.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')];
       assert.deepEqual(rows.map(row => row.textContent?.trim()), ['Small', 'Medium', 'Frontier']);
