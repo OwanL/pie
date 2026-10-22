@@ -148,6 +148,10 @@ export function Tooltip({
     if (timersRef.current.hide) return;
     timersRef.current.hide = window.setTimeout(() => {
       timersRef.current.hide = undefined;
+      // Check at expiry, not pointer exit: keyboard focus may have entered
+      // either side of the trigger↔host boundary during the bridge delay.
+      const focused = document.activeElement;
+      if (focused && (triggerRef.current?.contains(focused) || hostRef.current?.contains(focused))) return;
       setIsVisible(false);
     }, effectiveDelayHide);
   }, [effectiveDelayHide]);

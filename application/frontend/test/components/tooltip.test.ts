@@ -500,13 +500,51 @@ test('default tall tooltips retain their positioning without an activation heigh
   } finally { restoreTimers(); }
 });
 
-test('inspectors return focus on Escape without reopening the rich surface', async () => {
+for (const focusedSide of ['trigger', 'host'] as const) {
+  test(`pointer exit preserves real focus in the inspector ${focusedSide} after the hide delay`, async () => {
+    act(() => render(h('div', null,
+      h(Tooltip, {
+        contentNode: h('button', null, 'Provider legend'), richRole: 'region', delayShow: 0,
+      }, h('span', { tabIndex: 0, 'aria-label': 'Aggregate usage' }, 'Usage')),
+      h('button', { class: 'outside' }, 'Outside'),
+    ), container));
+    const trigger = container.querySelector('[aria-label="Aggregate usage"]') as HTMLElement;
+    const wrapper = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+    const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
+    await act(async () => {
+      trigger.focus();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const legend = host.querySelector('button')!;
+    if (focusedSide === 'host') await act(async () => legend.focus());
+    const focused = focusedSide === 'host' ? legend : trigger;
+    await act(async () => {
+      wrapper.dispatchEvent(new MouseEvent('mouseleave'));
+      host.dispatchEvent(new MouseEvent('mouseleave'));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    assert.equal(host.style.display, 'block');
+    assert.equal(document.activeElement, focused, 'pointer exit must not move keyboard focus');
+    const outside = container.querySelector('.outside') as HTMLButtonElement;
+    await act(async () => {
+      // DOM harnesses do not implement native Tab traversal; emulate its
+      // resulting focus move without synthesizing a blur event.
+      focused.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      outside.focus();
+    });
+    assert.equal(document.activeElement, outside, 'leaving the inspector must not restore or trap focus');
+    assert.equal(host.style.display, 'none');
+  });
+}
+
+for (const triggerTag of ['button', 'span'] as const) {
+test(`inspectors return focus to ${triggerTag} on Escape without reopening the rich surface`, async () => {
   installFakeTimers();
   try {
     act(() => render(h(Tooltip, {
       contentNode: h('button', null, 'Copy JSON'), richRole: 'region', returnFocusOnEscape: true, delayShow: 0,
-    }, h('button', { 'aria-label': 'Inspect tool' }, 'Inspect')), container));
-    const trigger = container.querySelector('button')!;
+    }, h(triggerTag, { tabIndex: 0, 'aria-label': 'Inspect tool' }, 'Inspect')), container));
+    const trigger = container.querySelector('[aria-label="Inspect tool"]') as HTMLElement;
     await act(async () => { trigger.focus(); flushTimers(); });
     const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
     await act(async () => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true })); });
@@ -519,3 +557,4 @@ test('inspectors return focus on Escape without reopening the rich surface', asy
     assert.equal(host.style.display, 'none');
   } finally { restoreTimers(); }
 });
+}

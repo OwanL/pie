@@ -42,7 +42,7 @@ export function MeasuredRow({ items }: { items: StripItem[] }) {
   return <>
     <div ref={rowRef} class="aggregate-strip-metrics">
       {items.slice(0, count).map((item) => <div key={item.key} class="aggregate-strip-item" data-stat={item.key}>
-        <Tooltip contentNode={item.tooltip} placement="top" freezeWhileVisible richRole="region">
+        <Tooltip contentNode={item.tooltip} placement="top" freezeWhileVisible richRole="region" returnFocusOnEscape>
           {item.onClick
             ? <button type="button" class={cx('aggregate-strip-seg', item.className)} aria-label={item.label} onClick={item.onClick}>{item.body}</button>
             : <span class={cx('aggregate-strip-seg', item.className)} tabIndex={0} aria-label={item.label}>{item.body}</span>}
