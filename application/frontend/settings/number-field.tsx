@@ -10,6 +10,13 @@ function clamp(value: number, min?: number, max?: number): number {
   return next;
 }
 
+/** Ordered host snapshots may coalesce any prefix of locally emitted intents.
+ * Match the latest occurrence so repeated values also acknowledge that prefix. */
+function acknowledgeEcho(queue: number[], value: number): void {
+  const index = queue.lastIndexOf(value);
+  queue.splice(0, index < 0 ? queue.length : index + 1);
+}
+
 export interface NumberFieldProps {
   label: string;
   value: number;
@@ -76,15 +83,7 @@ export function NumberField({
     }
     const queue = pending.current;
     if (queue.length > 0) {
-      if (queue[queue.length - 1] === value) {
-        queue.length = 0;
-      } else if (queue[0] === value) {
-        queue.shift();
-      } else {
-        // Not an echo of any local commit: external or re-normalized
-        // authoritative value; project it and drop superseded echoes.
-        queue.length = 0;
-      }
+      acknowledgeEcho(queue, value);
       if (queue.length > 0) return;
     }
     if (editing.current) return;
@@ -195,10 +194,31 @@ export function Stepper({
   decreaseLabel = `Decrease ${label.toLowerCase()}`,
   increaseLabel = `Increase ${label.toLowerCase()}`,
 }: StepperProps) {
-  const decrease = () => onChange(clamp(value - step, min, max));
-  const increase = () => onChange(clamp(value + step, min, max));
-  const atMin = min !== undefined && value <= min;
-  const atMax = max !== undefined && value >= max;
+  const [intended, setIntended] = useState(value);
+  const intendedRef = useRef(value);
+  const pending = useRef<number[]>([]);
+
+  useEffect(() => {
+    if (disabled) pending.current = [];
+    else acknowledgeEcho(pending.current, value);
+    if (pending.current.length > 0) return;
+    intendedRef.current = value;
+    setIntended(value);
+  }, [value, disabled]);
+
+  const advance = (delta: number) => {
+    if (disabled) return;
+    const next = clamp(intendedRef.current + delta, min, max);
+    if (next === intendedRef.current) return;
+    intendedRef.current = next;
+    setIntended(next);
+    pending.current.push(next);
+    onChange(next);
+  };
+  const decrease = () => advance(-step);
+  const increase = () => advance(step);
+  const atMin = min !== undefined && intended <= min;
+  const atMax = max !== undefined && intended >= max;
 
   return (
     <div class="toolbar-settings-item toolbar-settings-stepper-row">
@@ -211,7 +231,7 @@ export function Stepper({
           disabled={disabled || atMin}
           onClick={decrease}
         >−</button>
-        <span class="toolbar-settings-stepper-value">{value}</span>
+        <span class="toolbar-settings-stepper-value">{intended}</span>
         <button
           type="button"
           class="toolbar-settings-stepper-btn"

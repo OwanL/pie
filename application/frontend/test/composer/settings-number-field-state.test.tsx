@@ -9,7 +9,7 @@ installDom();
 
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import { NumberField } from '../../settings/number-field';
+import { NumberField, Stepper } from '../../settings/number-field';
 
 let target: HTMLDivElement;
 let value = 30;
@@ -104,6 +104,63 @@ afterEach(() => {
   act(() => render(null, target));
   target.remove();
 });
+
+test('coalesced middle echoes preserve the latest numeric commit and active draft', () => {
+  changeTo('11');
+  changeTo('12');
+  changeTo('13');
+  value = 12;
+  renderField();
+  assert.equal(field().value, '13');
+  type('14');
+  value = 13;
+  renderField();
+  assert.equal(field().value, '14');
+  pressEnter();
+  act(() => { field().dispatchEvent(new Event('blur')); });
+  assert.deepEqual(patches, [11, 12, 13, 14]);
+});
+
+test('duplicate pending numeric values acknowledge a coalesced prefix', () => {
+  for (const next of ['11', '12', '11', '13']) changeTo(next);
+  value = 11;
+  renderField();
+  assert.equal(field().value, '13');
+  value = 13;
+  renderField();
+  assert.equal(field().value, '13');
+  type('100');
+  pressEnter();
+  act(() => { field().dispatchEvent(new Event('blur')); });
+  assert.deepEqual(patches, [11, 12, 11, 13, 60]);
+});
+
+for (const direction of [1, -1]) {
+  test(`stepper rapid ${direction > 0 ? 'increments' : 'decrements'} build on pending intent`, () => {
+    value = 10;
+    const paint = () => act(() => render(<Stepper label="Count" value={value} min={7} max={13}
+      disabled={disabled} onChange={(next) => patches.push(next)} />, target));
+    const button = () => target.querySelectorAll('button')[direction > 0 ? 1 : 0] as HTMLButtonElement;
+    paint();
+    // Both clicks occur before a render, as well as before any host echo.
+    act(() => { button().click(); button().click(); });
+    assert.deepEqual(patches, [10 + direction, 10 + 2 * direction]);
+    act(() => { button().click(); });
+    assert.equal(button().disabled, true);
+    act(() => { button().click(); });
+    assert.equal(patches.length, 3, 'bound emits no redundant intent');
+    value = 10 + 2 * direction;
+    paint();
+    assert.equal(target.querySelector('.toolbar-settings-stepper-value')?.textContent, String(10 + 3 * direction));
+    value = 9;
+    paint();
+    assert.equal(target.querySelector('.toolbar-settings-stepper-value')?.textContent, '9', 'external override wins');
+    disabled = true;
+    paint();
+    act(() => { button().click(); });
+    assert.equal(patches.length, 3);
+  });
+}
 
 test('blur restores a cleared input to the latest projected value without a patch', () => {
   changeTo('');
