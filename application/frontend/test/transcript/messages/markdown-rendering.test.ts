@@ -408,15 +408,40 @@ test('rendered file URI opens preserve raw references and decode filename charac
     ['file:///tmp/report.md%3Fbackup.md?raw=1#L12', '/tmp/report.md?backup.md'],
     ['file:///C:/My%20Docs/report.md%23backup.md#L12', 'C:/My Docs/report.md#backup.md'],
     ['file:///tmp/report.md#L12', '/tmp/report.md'],
-    ['src/report.md#L12', '/work/src/report.md'],
     ['/tmp/report.md:12:3', '/tmp/report.md:12:3'],
   ]) {
     const document = new JSDOM(`<body>${renderMarkdown(`[report](${reference})`, false)}</body>`).window.document;
     const opens: unknown[][] = [];
     assert.equal(handleDelegatedFilePathClick({ target: document.querySelector('a')!, preventDefault() {}, stopPropagation() {} }, '/work', (...args) => opens.push(args)), true);
-    // The host receives the original suffix for line/column interpretation,
-    // not a decoded pathname which could be parsed as a new fragment.
+    // File URIs retain provenance, not a decoded pathname which could be
+    // parsed as a new fragment.
     assert.deepEqual(opens, [[path, reference, '/work']]);
+  }
+});
+
+test('rendered non-URI links delegate canonical references for bare-name workspace fallback', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu } = await import('../../../transcript/file-path-interactions');
+  for (const [destination, reference] of [
+    ['report.md#L9', 'report.md'],
+    ['report.md?raw=1#L9', 'report.md'],
+    ['src/report.md#L12', 'src/report.md'],
+    ['report#backup.md', 'report#backup.md'],
+    ['report?backup.md', 'report?backup.md'],
+    ['report%23.md', 'report%23.md'],
+    ['report%2523.md', 'report%2523.md'],
+  ]) {
+    const document = new JSDOM(`<body>${renderMarkdown(`[report](${destination})`, false)}</body>`).window.document;
+    const target = document.querySelector('a')!;
+    assert.equal(target.getAttribute('data-pie-file-path'), reference);
+    const event = { target, preventDefault() {}, stopPropagation() {} };
+    const opens: unknown[][] = [];
+    const menus: unknown[][] = [];
+    assert.equal(handleDelegatedFilePathClick(event, '/work', (...args) => opens.push(args)), true);
+    assert.deepEqual(opens, [[`/work/${reference}`, reference, '/work']]);
+    assert.equal(handleDelegatedFilePathContextMenu(event, '/work', (...args) => menus.push(args)), true);
+    assert.equal(menus[0]![1], `/work/${reference}`);
+    assert.deepEqual(menus[0]![4], { reference, workingDirectory: '/work' });
   }
 });
 

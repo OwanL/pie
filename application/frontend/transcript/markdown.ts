@@ -51,8 +51,11 @@ marked.use({
       // Strip only path affordances: image labels retain their preview markup.
       const text = stripInteractiveFilePathMarkup(this.parser.parseInline(tokens));
       const titleAttribute = title ? ` title="${escapeMarkdownHtmlAttribute(title)}"` : '';
+      // Only file URIs need raw provenance to avoid reparsing decoded #/?.
+      // Other destinations keep canonical references for bare-name host fallback.
+      const delegatedReference = /^file:/i.test(href.trim()) ? href : pathReference;
       const pathAttributes = pathReference
-        ? ` class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(href)}" role="link" tabindex="0"`
+        ? ` class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(delegatedReference!)}" role="link" tabindex="0"`
         : '';
       return `<a href="${escapeMarkdownHtmlAttribute(href)}"${pathAttributes}${titleAttribute}>${text}</a>`;
     },
