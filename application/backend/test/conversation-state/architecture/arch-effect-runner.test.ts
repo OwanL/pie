@@ -751,7 +751,7 @@ test('session-control settings share prefsQueue and acknowledge only after the c
     sessionPath: request.sessionPath,
     action: 'capture' as const,
     outcome: 'succeeded' as const,
-    settings: { autonomousMode: false, subagentProviderChoices: {} },
+    settings: { autonomousMode: false, subagentProviderChoices: {}, subagentBucketChoices: { small: true, medium: true, frontier: true } },
   };
   const { deps, events } = makeEffectRunnerDeps({
     serviceOverrides: {

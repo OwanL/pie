@@ -37,10 +37,11 @@ test('session-control settings requests are reducer-owned and correlated through
       sessionPath: request.sessionPath,
       action: 'apply',
       outcome: 'succeeded',
-      settings: { autonomousMode: true, subagentProviderChoices: { anthropic: false } },
+      settings: { autonomousMode: true, subagentProviderChoices: { anthropic: false }, subagentBucketChoices: { small: true, medium: true, frontier: true } },
       application: 'applied',
     },
     persistedPrefs: {
+      subagentBucketTogglesBySession: {},
       autonomousModeBySession: { [request.sessionPath]: true },
       subagentProviderTogglesBySession: { [request.sessionPath]: { anthropic: false } },
     },
@@ -55,7 +56,7 @@ test('session-control settings requests are reducer-owned and correlated through
       sessionPath: request.sessionPath,
       action: 'apply',
       outcome: 'succeeded',
-      settings: { autonomousMode: true, subagentProviderChoices: { anthropic: false } },
+      settings: { autonomousMode: true, subagentProviderChoices: { anthropic: false }, subagentBucketChoices: { small: true, medium: true, frontier: true } },
       application: 'applied',
     },
   }]);

@@ -25,6 +25,7 @@ import { mergeChatPrefs, type ChatPrefs, type ModelInfo } from '../../../lib/pro
 import { validateBrowserToHostMessage } from '../../../lib/validation/browser-ingress';
 
 const prefs: ChatPrefs = {
+  subagentBucketTogglesBySession: {},
   autoExpandReasoning: false,
   autoExpandToolCalls: true,
   autoExpandSubagentCalls: false,
@@ -159,6 +160,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
   assert.deepEqual(toggleChatPrefForContext(prefs, 'toolCalls'), {});
   assert.deepEqual(toggleChatPrefForContext(prefs, 'subagentCalls'), { autoExpandSubagentCalls: true });
   assert.deepEqual(prefs, {
+    subagentBucketTogglesBySession: {},
     autoExpandReasoning: false,
     autoExpandToolCalls: true,
     autoExpandSubagentCalls: false,

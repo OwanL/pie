@@ -10,7 +10,7 @@ import { SUBAGENT_BUCKET_TIERS } from '../../../../lib/subagent-bucket-policy.js
 
 const a = '/sessions/a.jsonl';
 const b = '/sessions/b.jsonl';
-const click = (node: Element) => act(() => node.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+const click = (node: Element) => act(() => { node.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
 test('bucket menu renders all seven subsets and disables only the last checked tier', () => {
   const container = document.createElement('div');
@@ -43,7 +43,7 @@ test('rapid toggles preserve intent through delayed/coalesced echoes and session
   try {
     draw(a, DEFAULT_CHAT_PREFS);
     const trigger = container.querySelector('button')!;
-    act(() => trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
+    act(() => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
     act(() => { click(rows()[0]); click(rows()[1]); click(rows()[2]); });
     assert.equal(calls.length, 2, 'last enabled tier cannot be unchecked even within a burst');
     assert.deepEqual(calls[1].subagentBucketTogglesBySession, { [a]: { small: false, medium: false, frontier: true } });
@@ -54,7 +54,7 @@ test('rapid toggles preserve intent through delayed/coalesced echoes and session
     click(rows()[1]);
     draw(a, { ...DEFAULT_CHAT_PREFS, ...calls.at(-1) });
     assert.deepEqual(rows().map(row => row.getAttribute('aria-checked')), ['true', 'true', 'true']);
-    act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     assert.equal(container.querySelector('[role="dialog"]'), null);
     assert.equal(document.activeElement, trigger);
     draw(b, { ...DEFAULT_CHAT_PREFS, ...calls[1] });
@@ -63,7 +63,7 @@ test('rapid toggles preserve intent through delayed/coalesced echoes and session
     draw(b, { ...DEFAULT_CHAT_PREFS, ...calls[0] });
     click(rows()[0]);
     assert.deepEqual(Object.keys(calls.at(-1)!.subagentBucketTogglesBySession!), [b]);
-    act(() => document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+    act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
     assert.equal(container.querySelector('[role="dialog"]'), null);
     draw(null, DEFAULT_CHAT_PREFS);
     assert.equal(container.querySelector('button'), null);

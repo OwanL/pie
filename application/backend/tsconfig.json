@@ -25,6 +25,7 @@
       "preact-render-to-string": ["../hosts/vscode/node_modules/preact-render-to-string"],
       "@earendil-works/pi-ai": ["../../harness/pi/packages/ai/dist/index.d.ts"],
       "@mariozechner/pi-ai": ["../../harness/pi/packages/ai/dist/index.d.ts"],
+      "@mariozechner/pi-agent-core": ["../../harness/pi/packages/agent/dist/index.d.ts"],
       "@earendil-works/pi-coding-agent": ["../../harness/pi/packages/coding-agent/dist/index.d.ts"],
       "@mariozechner/pi-coding-agent": ["../../harness/pi/packages/coding-agent/dist/index.d.ts"],
       "@earendil-works/pi-ai/compat": ["../../harness/pi/packages/ai/dist/compat.d.ts"]
