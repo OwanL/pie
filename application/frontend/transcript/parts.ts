@@ -1,4 +1,5 @@
 import type { ChatMessage, ComposerInput, UserContentPart } from '../../lib/protocol/index.js';
+import { decodedBase64ByteLength } from '../../lib/composer/image-constraints.js';
 import { createUuidV4 } from '../../../lib/uuid';
 
 export {
@@ -53,7 +54,7 @@ export function userImagePartsToInputs(message: Pick<ChatMessage, 'userParts'>):
       kind: 'imageBlob' as const,
       mimeType: part.mimeType,
       name: part.name || 'image',
-      sizeBytes: Math.floor((part.dataBase64.length * 3) / 4),
+      sizeBytes: decodedBase64ByteLength(part.dataBase64),
       dataBase64: part.dataBase64,
       width: part.width,
       height: part.height,

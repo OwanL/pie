@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { getRenderableUserParts, messageHasUserImages, splitSummaryPath } from '../../../transcript';
 import { userImagePartsToInputs } from '../../../transcript/parts';
+import { decodedBase64ByteLength } from '../../../../lib/composer/image-constraints';
 import { validateBrowserToHostMessage } from '../../../../lib/validation/browser-ingress';
 import type { ChatMessage } from '../../../../lib/protocol/index.js';
 
@@ -84,6 +85,20 @@ test('userImagePartsToInputs converts image user parts into seedable ComposerInp
   assert.ok(inputs[0]?.id && inputs[1]?.id && inputs[0].id !== inputs[1].id);
   // Two calls produce fresh ids (so a remount re-seeds without id collisions).
   assert.notEqual(userImagePartsToInputs(message)[0]?.id, inputs[0]?.id);
+});
+
+test('decoded image length handles surrounding whitespace without changing strict ingress policy', () => {
+  for (const [encoded, expected] of [[' YQ==\n', 1], ['\tYWI= ', 2], [' YWJj ', 3]] as const) {
+    assert.equal(decodedBase64ByteLength(encoded), expected);
+    const inputs = userImagePartsToInputs(makeUserMessage({
+      userParts: [{ kind: 'image', mimeType: 'image/png', dataBase64: encoded }],
+    }));
+    assert.equal(inputs[0]?.kind === 'imageBlob' && inputs[0].dataBase64, encoded);
+    const edit = JSON.parse(JSON.stringify({ type: 'editMessage', sessionPath: '/sessions/seed',
+      messageId: 'user-1', text: 'edited', inputs,
+      clientCommandId: '11111111-1111-4111-8111-111111111111' }));
+    assert.equal(validateBrowserToHostMessage(edit, new TextEncoder().encode(JSON.stringify(edit)).length).ok, false);
+  }
 });
 
 for (const [dataBase64, sizeBytes] of [['YQ==', 1], ['YWI=', 2], ['YWJj', 3]] as const) {
