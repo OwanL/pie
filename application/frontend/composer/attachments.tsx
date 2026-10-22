@@ -46,6 +46,7 @@ export function ComposerAttachments({
 
   return (
     <div ref={groupRef} class="composer-attachments" role="group" aria-label={`Pending attachments: ${attachmentSummary}`}>
+      <div class="composer-attachments-summary">Included: {attachmentSummary}</div>
       <div class="composer-attachments-strip">
         {pendingComposerInputs.map((input) => {
           const displayName = composerInputDisplayName(input);

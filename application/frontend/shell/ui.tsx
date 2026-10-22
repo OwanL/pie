@@ -399,6 +399,15 @@ function ComposerView({
     () => describeComposerInputSummary(pendingComposerInputs),
     [pendingComposerInputs],
   );
+  // Transient blockers only: ordinary busy work still permits queuing.
+  // Edits already have a progress chip in the measured toolbar.
+  const sendProgress = transferPending
+    ? 'Reading attachments… Send will be available when ready.'
+    : interrupting || primaryOperation?.kind === 'message.interrupt'
+      ? 'Stopping… Wait before sending another message.'
+      : operationBlocksSend && !editOperationActive
+        ? 'Reconciling the previous operation… Please wait before sending.'
+        : null;
   const composerPlaceholder = 'Ask anything…';
   const recording = commandsAvailable && dictation?.available && dictation.phase === 'recording'
     && !!sessionPath && dictation.sessionPath === sessionPath;
@@ -426,7 +435,7 @@ function ComposerView({
           <div class="composer-retry-row flex items-center gap-2" role="status" aria-live="polite">
             <span class="composer-retry-label flex items-center gap-1.5">
               <span class="composer-retry-spinner" aria-hidden="true" />
-              Retrying {retryStatus.attempt} of {retryStatus.maxAttempts}
+              Automatic retry {retryStatus.attempt} of {retryStatus.maxAttempts}
             </span>
             {retryStatus.errorMessage && (
               <span class="composer-retry-error" title={retryStatus.errorMessage}>
@@ -445,6 +454,8 @@ function ComposerView({
             </button>
           </div>
         )}
+        {isDragActive && <div class="composer-transfer-feedback">Drop files or images to include them</div>}
+        {sendProgress && <div class="composer-send-progress" role="status" aria-live="polite">{sendProgress}</div>}
         <ComposerAttachments
           pendingComposerInputs={pendingComposerInputs}
           attachmentSummary={attachmentSummary}

@@ -22,6 +22,16 @@ import { Composer } from '../../shell/ui';
 import { formatWorkingTime } from '../../analytics/use-working-time';
 import { WorkingTimeTooltip } from '../../analytics/working-time-tooltip';
 
+test('attachment layout wraps with bounded vertical scrolling and labeled action width remains measurable', async () => {
+  const attachments = await readFile('application/frontend/styles/context-menu.css', 'utf8');
+  const composer = await readFile('application/frontend/styles/composer.css', 'utf8');
+  const overflow = await readFile('application/frontend/composer/toolbar-overflow.tsx', 'utf8');
+  assert.match(attachments, /\.composer-attachments-strip\s*\{[^}]*flex-wrap: wrap;[^}]*max-height: 132px;[^}]*overflow-y: auto;/);
+  assert.match(composer, /\.composer-actions \.composer-action-submit\s*\{[^}]*width: auto;/);
+  assert.match(overflow, /actionsWidth: readWidth\(actions\)/);
+  assert.match(overflow, /observer\?\.observe\(element\)/);
+});
+
 const model: ModelInfo = {
   id: 'test-model',
   name: 'Test Model',
