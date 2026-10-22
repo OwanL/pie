@@ -48,14 +48,14 @@ for (const [name, disclosure] of Object.entries(disclosures)) {
       focus(trigger);
       assert.ok(popup(), 'backward focus to own trigger retains popup');
       act(() => trigger.blur());
-      act(() => window.dispatchEvent(new Event('blur')));
+      act(() => { void window.dispatchEvent(new Event('blur')); });
       assert.ok(popup(), 'null focus and window blur are not concrete destinations');
       focus(container.querySelector<HTMLButtonElement>('#before')!);
       assert.equal(popup(), null);
       open();
       focus(popup()!.querySelector<HTMLButtonElement>('[role="checkbox"]')!);
       const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-      act(() => document.activeElement!.dispatchEvent(tab));
+      act(() => { void document.activeElement!.dispatchEvent(tab); });
       assert.equal(tab.defaultPrevented, false);
       focus(container.querySelector<HTMLButtonElement>('#after')!);
       assert.equal(popup(), null);
