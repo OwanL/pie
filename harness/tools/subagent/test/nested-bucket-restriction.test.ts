@@ -192,8 +192,8 @@ test("resolveModel: childDepth ≥ 1 + opus disallowed → downgraded to sonnet 
 	assert.equal(resolved.bucket, "medium");
 	assert.equal(resolved.modelOverride, "sonnet");
 	assert.equal(resolved.selection.fallback, false);
-	assert.match(resolved.bucketDowngradeReason!, /downgraded to "medium"/);
-	assert.match(resolved.bucketDowngradeReason!, /depth 1/);
+	assert.match(resolved.bucketDowngradeReason!, /Requested bucket "frontier"/);
+	assert.match(resolved.bucketDowngradeReason!, /resolved to "medium"/);
 });
 
 test("resolveModel: childDepth ≥ 1 + requested tier allowed → no downgrade", async () => {
