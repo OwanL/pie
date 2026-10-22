@@ -45,7 +45,7 @@ class TestResizeObserver {
 }
 
 let container: HTMLElement;
-let rowWidth = 480;
+let rowWidth = 506;
 let longModel = false;
 let overflowTriggerWidth = 26;
 let modelNaturalWidth = 0;
@@ -93,7 +93,7 @@ function cleanupLayout(): void {
 }
 
 beforeEach(() => {
-  rowWidth = 480;
+  rowWidth = 506; // Nine 24px controls plus their 2px gaps, including Buckets.
   longModel = false;
   overflowTriggerWidth = 26;
   modelNaturalWidth = 0;
@@ -608,7 +608,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   const hiddenKeys = Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]'))
     .map((element) => element.dataset.toolbarItem);
   assert.deepEqual(hiddenKeys, [
-    'subagent-providers', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
+    'subagent-providers', 'subagent-buckets', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
     'run-status',
   ]);
   assert.equal(container.querySelectorAll('[data-toolbar-item="autonomous-mode"]').length, 1, 'moved controls are mounted once');
@@ -616,14 +616,16 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
 
 test('ResizeObserver moves controls back when room returns and reallocates for dynamic indicator labels', () => {
   mount();
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'the initial labels fit at the starting row width');
+  // Compare presence, not the DOM node: a failed node-vs-null assertion can
+  // exhaust the heap formatting the cyclic DOM/Preact graph instead of reporting.
+  assert.ok(!container.querySelector('.composer-controls > .composer-overflow-trigger'), 'the initial labels fit at the starting row width');
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'the overflow trigger disappears when every item fits');
   assert.equal(container.querySelector('.composer-toolbar-overflow-popover'), null);
   assert.equal(container.querySelectorAll('.composer-indicators [data-toolbar-item]').length, 2);
 
-  rowWidth = 480;
+  rowWidth = 506;
   const longTime = 'A very long live duration label that changes its measured width';
   rerender(props({ workingTimeIndicator: { label: longTime, ariaLabel: 'Working time', tooltip: 'Working time' } }));
   assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'the longer dynamic indicator creates overflow at the same row width');
@@ -635,7 +637,7 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
 
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  rowWidth = 480;
+  rowWidth = 506;
   longModel = true;
   rerender(props({
     availableModels: [{ ...model, name: 'A model label long enough to consume the remaining composer width' }],
@@ -765,11 +767,12 @@ test('keyboard opening focuses the first control and Escape restores More', () =
 // Realistic narrow-row ladder measured from the pinned group (270 = the 180px
 // model cap plus 90px of Settings/Reasoning): the label compacting to its
 // reserved floor keeps useful metrics in the row far longer, and only a row
-// with nothing left squeezes the label below the floor.
+// with nothing left squeezes the label below the floor. Widths with retained
+// controls include the new Buckets control's 24px width plus its 2px gap.
 test('narrow rows compact the model label, then yield items, and only an empty row yields below the reserve', () => {
   modelNaturalWidth = 180;
   pinnedNaturalWidth = 270;
-  rowWidth = 540;
+  rowWidth = 566;
   mount();
   const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls')!;
   assert.equal(
@@ -779,7 +782,7 @@ test('narrow rows compact the model label, then yield items, and only an empty r
   );
   assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
 
-  rowWidth = 430;
+  rowWidth = 456;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   assert.equal(pinned.style.getPropertyValue('--composer-model-picker-max-width'), '100px', 'the label compacts past its natural width before any item hides');
   assert.deepEqual(
@@ -806,7 +809,7 @@ test('narrow rows compact the model label, then yield items, and only an empty r
 test('repeated measurement converges instead of oscillating between allocations', () => {
   modelNaturalWidth = 180;
   pinnedNaturalWidth = 270;
-  rowWidth = 430;
+  rowWidth = 456;
   mount();
   const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls')!;
   const snapshot = () => ({
@@ -830,11 +833,11 @@ test('repeated measurement converges instead of oscillating between allocations'
   const narrow = at340();
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  rowWidth = 430;
+  rowWidth = 456;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   assert.deepEqual(snapshot(), { ...stable, budget: '100px', rowKeys: stable.rowKeys, hiddenKeys: stable.hiddenKeys });
   assert.deepEqual(at340(), narrow);
-  rowWidth = 540;
+  rowWidth = 566;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="run-status"]'), 'growing the row returns every item');
   assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
@@ -846,7 +849,7 @@ test('repeated measurement converges instead of oscillating between allocations'
 test('the bare unknown-cost dash moves into More at a width where a valued cost chip stays in the row', () => {
   modelNaturalWidth = 180;
   pinnedNaturalWidth = 270;
-  rowWidth = 420;
+  rowWidth = 446;
   const unknownProps = props({ sessionCostIndicator: unknownSessionCost() });
   mount(unknownProps);
   const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls')!;
@@ -891,6 +894,7 @@ test('overflowed controls show short action names beside their icons while the r
   });
   assert.deepEqual(labelsByItem, {
     'subagent-providers': 'Subagents',
+    'subagent-buckets': 'Buckets',
     'system-prompts': 'Prompts',
     mcp: 'MCP',
     'compact-context': 'Compact',
