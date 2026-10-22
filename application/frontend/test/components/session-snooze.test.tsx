@@ -77,6 +77,44 @@ test('snooze cascading menu supports arrow navigation and one-layer Escape', () 
   assert.equal(closed, 1);
 }));
 
+test('submenu mouseleave respects focus and pointer presence before delayed dismissal', async () => {
+  const container = document.createElement('div');
+  document.body.append(container);
+  const waitForDismissal = () => new Promise((resolve) => setTimeout(resolve, 380));
+  try {
+    act(() => render(h(SessionTabContextMenu, {
+      tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
+      runSummary: null, isPinned: false, hasDeferredTriggers: false,
+      onContextAction: noop, onSnooze: noop, onClose: noop,
+    }), container));
+    const trigger = button(container, 'Snooze…');
+    const submenu = () => document.body.querySelector<HTMLDivElement>('[aria-label="Snooze A quiet session"]');
+
+    act(() => { trigger.focus(); trigger.dispatchEvent(new MouseEvent('mouseenter')); });
+    act(() => { trigger.dispatchEvent(new MouseEvent('mouseleave')); });
+    await act(async () => { await waitForDismissal(); });
+    assert.ok(submenu(), 'focused submenu stays open after its mouseleave timeout');
+
+    act(() => { document.body.tabIndex = -1; document.body.focus(); });
+    await act(async () => { await waitForDismissal(); });
+    assert.equal(submenu(), null, 'focus and pointer both outside eventually dismiss the submenu');
+
+    act(() => { trigger.dispatchEvent(new MouseEvent('mouseenter')); trigger.dispatchEvent(new MouseEvent('mouseleave')); });
+    const child = submenu();
+    assert.ok(child);
+    act(() => { child!.dispatchEvent(new MouseEvent('mouseenter')); });
+    act(() => document.body.focus());
+    await act(async () => { await waitForDismissal(); });
+    assert.ok(submenu(), 'pointer inside submenu keeps it open despite outside focus');
+    act(() => { child!.dispatchEvent(new MouseEvent('mouseleave')); });
+    await act(async () => { await waitForDismissal(); });
+    assert.equal(submenu(), null, 'submenu closes after both focus and pointer leave');
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
 test('hover-open submenu leaves parent keyboard navigation available', () => fixture((container) => {
   act(() => render(h(SessionTabContextMenu, {
     tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),

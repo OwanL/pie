@@ -73,15 +73,34 @@ export function SessionTabContextMenu({
   const childRef = useRef<HTMLDivElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelClose = () => { if (closeTimer.current) clearTimeout(closeTimer.current); };
+  const pointerInsideSnooze = useRef(false);
+  const cancelClose = () => { if (closeTimer.current) clearTimeout(closeTimer.current); closeTimer.current = null; };
+  const snoozeHasFocus = () => snoozeItemRef.current?.contains(document.activeElement)
+    || childRef.current?.contains(document.activeElement);
   const closeChild = () => { cancelClose(); setSnoozeView(false); snoozeItemRef.current?.focus(); };
   const openChild = (keyboard: boolean) => {
     cancelClose();
     if (snoozeReason) return;
     setKeyboardOpen(keyboard); setSnoozeView(true);
   };
-  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setSnoozeView(false), 350); };
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null;
+      if (pointerInsideSnooze.current || snoozeHasFocus()) return;
+      setSnoozeView(false);
+    }, 350);
+  };
   useEffect(() => () => cancelClose(), []);
+  useEffect(() => {
+    if (!snoozeView) return;
+    const onFocusIn = () => {
+      if (snoozeHasFocus()) cancelClose();
+      else if (!pointerInsideSnooze.current) scheduleClose();
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, [snoozeView]);
   useMenuTriggerAria(tabContextMenu.triggerEl);
   useMenuListeners(ref, () => {
     if (snoozeView) closeChild();
@@ -220,13 +239,16 @@ export function SessionTabContextMenu({
         disabled={!!snoozeReason} title={snoozeReason}
         aria-haspopup="menu" aria-expanded={snoozeView}
         aria-label={snoozeReason ? `Snooze…: ${snoozeReason}` : undefined}
-        onMouseEnter={() => openChild(false)} onMouseLeave={scheduleClose}
+        onMouseEnter={() => { pointerInsideSnooze.current = true; openChild(false); }}
+        onMouseLeave={() => { pointerInsideSnooze.current = false; scheduleClose(); }}
         onClick={() => openChild(true)}>
         Snooze…<span class="snooze-submenu-arrow" aria-hidden="true">›</span>
       </button>
       {snoozeView && snoozeItemRef.current && <SnoozeSubmenu trigger={snoozeItemRef.current}
         menuRef={childRef} label={ctxLabel} reason={snoozeReason} keyboard={keyboardOpen}
-        onClose={closeChild} onEnter={cancelClose} onLeave={scheduleClose}
+        onClose={closeChild}
+        onEnter={() => { pointerInsideSnooze.current = true; cancelClose(); }}
+        onLeave={() => { pointerInsideSnooze.current = false; scheduleClose(); }}
         onSelect={(duration) => { onSnooze?.(tabContextMenu.tabPath, duration); onClose?.(); }} />}
       <div class="context-menu-separator" role="separator" />
       <button
