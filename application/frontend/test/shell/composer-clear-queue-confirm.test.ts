@@ -98,7 +98,7 @@ test('primary intent is visible and dispatches busy, attachment-only, and author
     const props = makeProps('/sessions/current.jsonl');
     props.busy = intent === 'Queue';
     props.capabilities = { billableActivity: props.busy, canContinue: intent === 'Continue', canInterrupt: props.busy, canCompact: false };
-    props.pendingComposerInputs = intent === 'Continue' ? [] : [{ id: 'path', kind: 'filesystemPathRef', path: '/included.txt' }];
+    props.pendingComposerInputs = intent === 'Continue' ? [] : [{ id: 'path', kind: 'filesystemPathRef', path: '/included.txt', name: 'included.txt', source: 'picker' }];
     let sends = 0;
     props.onSend = () => { sends++; return true; };
     act(() => render(h(Composer, props), container));
