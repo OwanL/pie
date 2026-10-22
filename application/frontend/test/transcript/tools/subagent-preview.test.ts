@@ -34,6 +34,20 @@ test('settled excerpts exclude stale live activity and unqualified finalOutput',
   assert.equal(subagentSettledExcerpt({ ...child, messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Genuine answer' }] }] }, false), 'Genuine answer');
 });
 
+test('settled excerpts omit placeholders and use converted committed text parts', () => {
+  const child = result({ agent: 'worker', task: 'fix' });
+  assert.equal(subagentSettledExcerpt(child, false), undefined);
+  assert.equal(subagentSettledExcerpt({ ...child, transcriptCompacted: true }, false), undefined);
+  assert.equal(subagentSettledExcerpt({ ...child, messages: [
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'Private reasoning' }] },
+  ] }, false), undefined);
+  assert.equal(subagentSettledExcerpt({ ...child, streamingText: 'stale', messages: [
+    { role: 'assistant', content: [{ type: 'text', text: 'First' }, { type: 'text', text: 'Second' }] },
+    { role: 'user', content: 'Next task' },
+    { role: 'assistant', content: [{ type: 'text', text: 'Latest' }] },
+  ] }, false), 'Latest');
+});
+
 test('settled failure excerpts prefer real diagnostics and bound large text', () => {
   const child = result({ agent: 'worker', task: 'fix', exitCode: 1, errorMessage: 'Provider unavailable', messages: [{ role: 'assistant', content: 'Partial work' }] });
   assert.equal(subagentSettledExcerpt(child, true), 'Provider unavailable');

@@ -3,7 +3,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { subagentSingleResultToChatMessages } from './subagent';
+import { rawMessagesToChatMessages, subagentSingleResultToChatMessages } from './subagent';
 import { summarizeSubagentToolCallInput } from './tool-call-summary-model';
 import { formatToolResult } from './tool-result-format.js';
 import { cx } from '../lib/components/cx';
@@ -533,7 +533,9 @@ function latestToolActivity(result: SubagentSingleResult): LatestToolActivity | 
  * recovery text only for a compacted transcript, never a success fallback. */
 export function subagentSettledExcerpt(result: SubagentSingleResult, failed: boolean): string | undefined {
   const failure = failed ? [result.errorMessage, result.stderr].filter((text) => text?.trim()).join('\n') : '';
-  const messages = failed ? [] : subagentSingleResultToChatMessages(result, 'preview');
+  const messages = failed ? [] : result.transcriptCompacted && result.finalOutput?.trim() && result.exitCode !== -1
+    ? subagentSingleResultToChatMessages(result, 'preview')
+    : rawMessagesToChatMessages(Array.isArray(result.messages) ? result.messages : [], 'preview');
   const answer = messages.filter((message) => message.role === 'assistant').at(-1)?.markdown?.trim();
   const text = failure || answer;
   if (!text) return undefined;
