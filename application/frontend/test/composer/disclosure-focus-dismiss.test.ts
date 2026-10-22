@@ -17,7 +17,7 @@ const disclosures = {
     availableModels: [], onSetPrefs: () => {} }),
   prompts: () => h(SystemPromptToggleMenu, { sessionPath, onSetToggles: () => {},
     prompts: ['one', 'two'].map(id => ({ id, source: 'harness' as const, availability: 'available' as const,
-      title: id, text: id, disabled: false })) }),
+      title: id, summary: id, text: id, disabled: false })) }),
 };
 
 for (const [name, disclosure] of Object.entries(disclosures)) {
@@ -60,7 +60,7 @@ for (const [name, disclosure] of Object.entries(disclosures)) {
       focus(container.querySelector<HTMLButtonElement>('#after')!);
       assert.equal(popup(), null);
       open();
-      act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+      act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
       assert.equal(popup(), null);
       assert.equal(document.activeElement, trigger, 'existing Escape focus ownership is preserved');
     } finally {
