@@ -40,30 +40,30 @@ export function extractDroppedPaths(dataTransfer: DataTransferLike | null | unde
   return extractPathsFromFiles(extractTransferFiles(dataTransfer));
 }
 
-export function extractStructuredDroppedPaths(dataTransfer: DataTransferLike): string[] {
+export function extractStructuredDroppedPaths(dataTransfer: DataTransferLike, rejectedUris: string[] = []): string[] {
   const codeFilePaths = extractPathsFromCodeFiles(safeGetData(dataTransfer, CODE_FILES_TYPE));
   if (codeFilePaths.length > 0) {
     return codeFilePaths;
   }
 
-  const resourcePaths = extractPathsFromResourceUrls(safeGetData(dataTransfer, RESOURCE_URLS_TYPE));
+  const resourcePaths = extractPathsFromResourceUrls(safeGetData(dataTransfer, RESOURCE_URLS_TYPE), rejectedUris);
   if (resourcePaths.length > 0) {
     return resourcePaths;
   }
 
-  const editorPaths = extractPathsFromCodeEditors(safeGetData(dataTransfer, CODE_EDITORS_TYPE));
+  const editorPaths = extractPathsFromCodeEditors(safeGetData(dataTransfer, CODE_EDITORS_TYPE), rejectedUris);
   if (editorPaths.length > 0) {
     return editorPaths;
   }
 
   const uriListPaths = extractPathsFromUriPayload(
-    safeGetData(dataTransfer, INTERNAL_URI_LIST_TYPE) || safeGetData(dataTransfer, URI_LIST_TYPE),
+    safeGetData(dataTransfer, INTERNAL_URI_LIST_TYPE) || safeGetData(dataTransfer, URI_LIST_TYPE), rejectedUris,
   );
   if (uriListPaths.length > 0) {
     return uriListPaths;
   }
 
-  const plainTextPaths = extractPathsFromPlainText(safeGetData(dataTransfer, PLAIN_TEXT_TYPE));
+  const plainTextPaths = extractPathsFromPlainText(safeGetData(dataTransfer, PLAIN_TEXT_TYPE), rejectedUris);
   if (plainTextPaths.length > 0) {
     return plainTextPaths;
   }
@@ -115,11 +115,11 @@ function safeGetData(dataTransfer: DataTransferLike, format: string): string {
   }
 }
 
-function extractPathsFromUriPayload(value: string): string[] {
+function extractPathsFromUriPayload(value: string, rejectedUris: string[]): string[] {
   if (!value.trim()) return [];
 
   const jsonUris = parseJsonStringArray(value)
-    .map(fileUriToFsPath)
+    .map((value) => fileUriToFsPath(value, rejectedUris))
     .filter((path): path is string => !!path);
   if (jsonUris.length > 0) {
     return dedupe(jsonUris);
@@ -129,7 +129,7 @@ function extractPathsFromUriPayload(value: string): string[] {
   for (const rawLine of value.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
-    const path = fileUriToFsPath(line);
+    const path = fileUriToFsPath(line, rejectedUris);
     if (path) {
       paths.push(path);
     }
@@ -143,12 +143,12 @@ function extractPathsFromCodeFiles(value: string): string[] {
   return dedupe(parsed);
 }
 
-function extractPathsFromResourceUrls(value: string): string[] {
-  const parsed = parseJsonStringArray(value).map(fileUriToFsPath).filter((path): path is string => !!path);
+function extractPathsFromResourceUrls(value: string, rejectedUris: string[]): string[] {
+  const parsed = parseJsonStringArray(value).map((value) => fileUriToFsPath(value, rejectedUris)).filter((path): path is string => !!path);
   return dedupe(parsed);
 }
 
-function extractPathsFromCodeEditors(value: string): string[] {
+function extractPathsFromCodeEditors(value: string, rejectedUris: string[]): string[] {
   if (!value.trim()) return [];
 
   let parsed: unknown;
@@ -162,12 +162,12 @@ function extractPathsFromCodeEditors(value: string): string[] {
 
   if (!Array.isArray(parsed)) return [];
   const paths = parsed
-    .map((entry) => extractPathFromEditorEntry(entry))
+    .map((entry) => extractPathFromEditorEntry(entry, rejectedUris))
     .filter((path): path is string => !!path);
   return dedupe(paths);
 }
 
-function extractPathsFromPlainText(value: string): string[] {
+function extractPathsFromPlainText(value: string, rejectedUris: string[]): string[] {
   if (!value.trim()) return [];
 
   const lines = value
@@ -179,7 +179,7 @@ function extractPathsFromPlainText(value: string): string[] {
 
   const paths: string[] = [];
   for (const line of lines) {
-    const uriPath = fileUriToFsPath(line);
+    const uriPath = fileUriToFsPath(line, rejectedUris);
     if (uriPath) {
       paths.push(uriPath);
       continue;
@@ -210,14 +210,14 @@ function extractPathsFromFiles(files: ArrayLike<FileLike> | undefined): string[]
   return dedupe(paths);
 }
 
-function extractPathFromEditorEntry(entry: unknown): string | null {
+function extractPathFromEditorEntry(entry: unknown, rejectedUris: string[]): string | null {
   if (!entry || typeof entry !== 'object') {
     return null;
   }
 
   const resource = (entry as Record<string, unknown>)['resource'];
   if (typeof resource === 'string') {
-    return fileUriToFsPath(resource);
+    return fileUriToFsPath(resource, rejectedUris);
   }
 
   if (!resource || typeof resource !== 'object') {
@@ -261,7 +261,7 @@ function parseJsonStringArray(value: string): string[] {
   return parsed.filter((entry): entry is string => typeof entry === 'string');
 }
 
-function fileUriToFsPath(rawValue: string): string | null {
+function fileUriToFsPath(rawValue: string, rejectedUris: string[] = []): string | null {
   let url: URL;
   try {
     url = new URL(rawValue);
@@ -274,8 +274,16 @@ function fileUriToFsPath(rawValue: string): string | null {
     return null;
   }
 
-  const host = decodeURIComponent(url.hostname);
-  const pathname = decodeURIComponent(url.pathname);
+  let host: string;
+  let pathname: string;
+  try {
+    host = decodeURIComponent(url.hostname);
+    pathname = decodeURIComponent(url.pathname);
+  } catch (err) {
+    if (!rejectedUris.includes(rawValue)) rejectedUris.push(rawValue);
+    webviewLog('warn', 'file-drop', 'file URI drop payload decode failed', { error: toErrorMessage(err) });
+    return null;
+  }
   if (/^\/[A-Za-z]:/.test(pathname)) {
     return pathname.slice(1).replace(/\//g, '\\');
   }

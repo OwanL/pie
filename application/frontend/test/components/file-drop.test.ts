@@ -8,6 +8,7 @@ import {
   extractDroppedPaths,
   formatComposerTransferError,
   hasClipboardFilePayload,
+  shouldHandleComposerDrop,
 } from '../../composer/file-drop';
 
 function makeTransfer(options: {
@@ -65,6 +66,44 @@ test('extractDroppedPaths prefers file URIs from text/uri-list', () => {
     'C:\\workspaces\\pie\\README.md',
     'C:\\workspaces\\pie\\src\\index.ts',
   ]);
+});
+
+test('malformed file URI escapes are rejected without losing valid URI paths', async () => {
+  for (const malformed of ['file:///tmp/%ZZ', 'file:///tmp/%', 'file:///tmp/%E0%A4']) {
+    for (const format of ['text/uri-list', 'application/vnd.code.uri-list', 'ResourceURLs', 'CodeEditors', 'text/plain']) {
+      const transfer = makeTransfer({ types: [format] });
+      transfer.getData = (type: string) => type !== format ? '' :
+        format === 'ResourceURLs' ? JSON.stringify([malformed]) :
+          format === 'CodeEditors' ? JSON.stringify([{ resource: malformed }]) : malformed;
+      assert.deepEqual(extractDroppedPaths(transfer), [], format);
+      assert.equal(shouldHandleComposerDrop(transfer), true, format);
+      const result = await extractComposerInputs(transfer, 'drop');
+      assert.deepEqual(result.inputs, [], format);
+      assert.deepEqual(result.rejectedFiles, [malformed], format);
+      assert.match(formatComposerTransferError(result.rejectedFiles) ?? '', /Cannot attach.*invalid file URI/);
+    }
+  }
+  assert.deepEqual(extractDroppedPaths(makeTransfer({
+    uriList: 'file:///tmp/%ZZ\nfile:///tmp/valid%20name',
+  })), ['/tmp/valid name']);
+});
+
+test('ordinary text and URLs are hover candidates but produce no attachment inputs', async () => {
+  for (const textPlain of ['hello world', 'https://example.com/readme']) {
+    const transfer = makeTransfer({ types: ['text/plain'], textPlain });
+    assert.equal(canAcceptComposerTransfer(transfer), true);
+    assert.equal(shouldHandleComposerDrop(transfer), false);
+    assert.deepEqual(await extractComposerInputs(transfer, 'drop'), {
+      inputs: [], unsupportedInputs: [], rejectedFiles: [],
+    });
+  }
+});
+
+test('drop-time handling retains plain absolute paths, slash commands and files', () => {
+  for (const textPlain of ['/tmp/app.ts', '/review', 'C:/repo/a.ts']) {
+    assert.equal(shouldHandleComposerDrop(makeTransfer({ types: ['text/plain'], textPlain })), true);
+  }
+  assert.equal(shouldHandleComposerDrop(makeTransfer({ files: [{ name: 'report.pdf' }] })), true);
 });
 
 test('extractDroppedPaths converts UNC file URIs to Windows paths', () => {

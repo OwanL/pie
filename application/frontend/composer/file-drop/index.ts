@@ -47,6 +47,15 @@ export function canAcceptComposerTransfer(dataTransfer: DataTransferLike | null 
   return files.some((file) => isImageMimeType(file.type));
 }
 
+/** Drop-time decision: unlike hover, payload data is available before native insertion. */
+export function shouldHandleComposerDrop(dataTransfer: DataTransferLike | null | undefined): boolean {
+  if (!dataTransfer) return false;
+  if (extractTransferFiles(dataTransfer).length > 0) return true;
+  const rejectedUris: string[] = [];
+  const paths = extractStructuredDroppedPaths(dataTransfer, rejectedUris);
+  return paths.length > 0 || rejectedUris.length > 0;
+}
+
 export async function extractComposerInputs(
   dataTransfer: DataTransferLike | null | undefined,
   source: ComposerTransferSource,
@@ -61,7 +70,7 @@ export async function extractComposerInputs(
   const rejectedFiles: string[] = [];
   const seenFilesystemPaths = new Set<string>();
 
-  for (const path of extractStructuredDroppedPaths(dataTransfer)) {
+  for (const path of extractStructuredDroppedPaths(dataTransfer, rejectedFiles)) {
     if (seenFilesystemPaths.has(path)) {
       continue;
     }
@@ -117,6 +126,10 @@ export async function extractComposerInputs(
 export function formatComposerTransferError(rejectedFiles: string[]): string | null {
   if (rejectedFiles.length === 0) {
     return null;
+  }
+
+  if (rejectedFiles.some((value) => /^file:/i.test(value))) {
+    return 'Cannot attach transfer: invalid file URI encoding. Attach a valid filesystem path instead.';
   }
 
   if (rejectedFiles.length === 1) {
