@@ -108,10 +108,13 @@ export function useComposerInput({
 }) {
   // Async reads belong to the selection/admission lifetime that started them.
   // Track transitions during render so A→B→A cannot resurrect an old read.
-  const transferOwnerRef = useRef({ sessionPath, commandsAvailable, generation: 0, mounted: true });
+  const [pendingTransferReads, setPendingTransferReads] = useState(0);
+  const transferOwnerRef = useRef({ sessionPath, commandsAvailable, generation: 0, mounted: true, pending: 0, tail: Promise.resolve() });
   const owner = transferOwnerRef.current;
   if (owner.sessionPath !== sessionPath || owner.commandsAvailable !== commandsAvailable) {
     owner.generation++;
+    owner.pending = 0;
+    owner.tail = Promise.resolve();
     owner.sessionPath = sessionPath;
     owner.commandsAvailable = commandsAvailable;
   }
@@ -518,7 +521,7 @@ export function useComposerInput({
 
   const sendCurrentText = useCallback(() => {
     const trimmed = text.trim();
-    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return;
+    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current || transferOwnerRef.current.pending > 0) return;
     if (trimmed.length === 0 && pendingComposerInputsLength === 0 && !allowEmptySend) return;
     submitting.current = true;
     if (onSend(trimmed) === false) {
@@ -557,7 +560,7 @@ export function useComposerInput({
   // clear the banner reporting the error that motivated it.
   const sendAsRetry = useCallback((disablePruning?: boolean): boolean => {
     const trimmed = text.trim();
-    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current) return false;
+    if (submitting.current || sendBlocked || activeDictation || pendingStartRef.current || transferOwnerRef.current.pending > 0) return false;
     if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return false;
     submitting.current = true;
     if (onRetrySend(trimmed, disablePruning) === false) {
@@ -706,8 +709,25 @@ export function useComposerInput({
     const ownerPath = owner.sessionPath;
     const generation = owner.generation;
     if (!ownerPath || !owner.mounted || owner.commandsAvailable === false) return;
-    const { inputs, unsupportedInputs, rejectedFiles } = await extractComposerInputs(dataTransfer, source);
+    owner.pending++;
+    setPendingTransferReads(owner.pending);
+    const predecessor = owner.tail;
+    let release!: () => void;
+    owner.tail = new Promise<void>((resolve) => { release = resolve; });
+    // Start reads immediately, but commit separate gestures in admission order.
+    const extraction = extractComposerInputs(dataTransfer, source).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+    try {
+    await predecessor;
+    const outcome = await extraction;
     if (!owner.mounted || owner.generation !== generation) return;
+    if (!('result' in outcome)) {
+      setAttachmentError('Could not read the selected attachment. Try again.');
+      return;
+    }
+    const { inputs, unsupportedInputs, rejectedFiles } = outcome.result;
     const { supportsImageInputs, onAddInput } = transferStateRef.current;
     const acceptedInputs = supportsImageInputs
       ? inputs
@@ -728,6 +748,13 @@ export function useComposerInput({
       ? 'The selected model does not support image inputs. Switch to an image-capable model to paste or drop images.'
       : null;
     setAttachmentError([blockedImageMessage, unsupportedFileMessage].filter(Boolean).join(' ') || null);
+    } finally {
+      release();
+      if (owner.mounted && owner.generation === generation) {
+        owner.pending--;
+        setPendingTransferReads(owner.pending);
+      }
+    }
   }, []);
 
   const handlePaste = useCallback((event: ClipboardEvent) => {
@@ -825,6 +852,7 @@ export function useComposerInput({
   }, [commandsAvailable, sendBlocked, activeDictation, dictation, sessionPath, postMessage, text, clearCheckpointTimer, setHistory]);
 
   return {
+    transferPending: pendingTransferReads > 0 && transferOwnerRef.current.pending > 0,
     toggleDictation,
     text,
     setText,

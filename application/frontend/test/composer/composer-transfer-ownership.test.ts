@@ -63,6 +63,48 @@ for (const source of ['paste', 'drop'] as const) {
   }
 }
 
+for (const reject of [false, true]) {
+  test(`pending image guards send until settled: rejection=${reject}`, async () => {
+    const container = document.createElement('div');
+    let composer!: ReturnType<typeof useComposerInput>;
+    const sent: string[] = [];
+    const added: unknown[] = [];
+    function Harness() {
+      composer = useComposerInput({ busy: false, onSend: (text) => { sent.push(text); },
+        onRetrySend: (text) => { sent.push(text); }, pendingComposerInputsLength: 0,
+        initialRows: 1, sessionPath: '/A', draftText: 'prompt', postMessage: () => {},
+        onAddInput: (input) => { added.push(input); }, supportsImageInputs: true });
+      return null;
+    }
+    const controls: Array<{ resolve: (value: ArrayBuffer) => void; reject: (error: Error) => void }> = [];
+    const transfer = () => ({ files: [{ name: 'image.gif', type: 'image/gif', size: 1,
+      arrayBuffer: () => new Promise<ArrayBuffer>((resolve, reject) => { controls.push({ resolve, reject }); }),
+    }] }) as unknown as DataTransfer;
+    try {
+      act(() => render(h(Harness, {}), container));
+      let first!: Promise<void>;
+      let second!: Promise<void>;
+      act(() => { first = composer.applyComposerTransfer(transfer(), 'paste'); second = composer.applyComposerTransfer(transfer(), 'drop'); });
+      act(() => composer.sendCurrentText());
+      assert.equal(composer.sendAsRetry(), false);
+      assert.equal(composer.text, 'prompt');
+      assert.deepEqual(sent, []);
+      await act(async () => { controls[1].resolve(new ArrayBuffer(1)); await Promise.resolve(); });
+      assert.deepEqual(added, []);
+      await act(async () => {
+        if (reject) controls[0].reject(new Error('failed read'));
+        else controls[0].resolve(new ArrayBuffer(1));
+        await Promise.all([first, second]);
+      });
+      assert.equal(added.length, reject ? 1 : 2);
+      assert.equal(composer.transferPending, false);
+      assert.deepEqual(sent, []);
+      act(() => composer.sendCurrentText());
+      assert.deepEqual(sent, ['prompt']);
+    } finally { act(() => render(null, container)); container.remove(); }
+  });
+}
+
 for (const transition of ['same', 'session', 'alias'] as const) {
   test(`attachment error ownership: ${transition}`, async () => {
     const container = document.createElement('div');
