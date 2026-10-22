@@ -2,19 +2,13 @@
 /** @jsxImportSource preact */
 
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { reconcileOptimisticEcho } from './optimistic-echo';
 
 function clamp(value: number, min?: number, max?: number): number {
   let next = value;
   if (min !== undefined) next = Math.max(min, next);
   if (max !== undefined) next = Math.min(max, next);
   return next;
-}
-
-/** Ordered host snapshots may coalesce any prefix of locally emitted intents.
- * Match the latest occurrence so repeated values also acknowledge that prefix. */
-function acknowledgeEcho(queue: number[], value: number): void {
-  const index = queue.lastIndexOf(value);
-  queue.splice(0, index < 0 ? queue.length : index + 1);
 }
 
 export interface NumberFieldProps {
@@ -81,11 +75,8 @@ export function NumberField({
       setDraft(applied);
       return;
     }
-    const queue = pending.current;
-    if (queue.length > 0) {
-      acknowledgeEcho(queue, value);
-      if (queue.length > 0) return;
-    }
+    pending.current = reconcileOptimisticEcho(pending.current, value, Object.is);
+    if (pending.current.length > 0) return;
     if (editing.current) return;
     setDraft(applied);
   }, [value, disabled]);
@@ -200,7 +191,7 @@ export function Stepper({
 
   useEffect(() => {
     if (disabled) pending.current = [];
-    else acknowledgeEcho(pending.current, value);
+    else pending.current = reconcileOptimisticEcho(pending.current, value, Object.is);
     if (pending.current.length > 0) return;
     intendedRef.current = value;
     setIntended(value);

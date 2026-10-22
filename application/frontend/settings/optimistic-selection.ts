@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { reconcileOptimisticEcho } from './optimistic-echo';
 
 /**
  * Optimistic intended-selection reconciliation for chip editors whose
@@ -25,21 +26,16 @@ export function sameSelection(a: readonly string[], b: readonly string[]): boole
  * order; out-of-order delivery is not imagined here (the revision guard
  * upstream discards stale snapshots).
  *
- * An echo equal to the newest emitted selection confirms the whole queue
- * (monotonic order subsumes the intermediate commits). An echo equal to the
- * oldest confirms commits one at a time while newer local intents stay
- * pending. An echo matching neither is authoritative host truth — an external
- * change, a rejected or re-normalized commit — and drops the superseded local
- * commits.
+ * Consume the earliest matching prefix, including coalesced middle echoes.
+ * Duplicate values cannot identify a request revision, so later matching
+ * intents remain pending until an unambiguous echo or unrelated host truth
+ * resolves them (see reconcileOptimisticEcho).
  */
 export function reconcileSelectionEcho(
   queue: string[][],
   echo: readonly string[],
 ): string[][] {
-  if (queue.length === 0) return queue;
-  if (sameSelection(echo, queue[queue.length - 1])) return [];
-  if (sameSelection(echo, queue[0])) return queue.slice(1);
-  return [];
+  return reconcileOptimisticEcho(queue, [...echo], sameSelection);
 }
 
 export interface IntendedSelection {

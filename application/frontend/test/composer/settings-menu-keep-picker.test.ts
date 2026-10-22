@@ -155,6 +155,24 @@ describe('AlwaysKeepPicker optimistic intended selection (in-order echoes)', () 
     };
   }
 
+  for (const indexes of [[0, 1, 2, 3], [0, 3], [1, 2, 3]]) {
+    it(`preserves repeated selections through ordered/coalesced echoes ${indexes}`, () => {
+      const ui = mount([]);
+      try {
+        ui.add('bash');
+        ui.add('edit');
+        ui.remove('edit');
+        ui.add('read');
+        for (const index of indexes) {
+          ui.echo([...ui.calls[index]]);
+          assert.deepEqual(ui.chips(), ['bash', 'read']);
+        }
+        ui.echo(['subagent']);
+        assert.deepEqual(ui.chips(), ['subagent']);
+      } finally { ui.unmount(); }
+    });
+  }
+
   it('preserves a rapid add burst across delayed echoes', () => {
     const ui = mount([]);
     try {
@@ -245,6 +263,13 @@ describe('AlwaysKeepPicker optimistic intended selection (in-order echoes)', () 
 });
 
 describe('reconcileSelectionEcho', () => {
+  it('does not mistake an older duplicate for the newest request', () => {
+    assert.deepEqual(reconcileSelectionEcho([['a'], ['b'], ['a']], ['a']), [['b'], ['a']]);
+  });
+
+  it('consumes a coalesced middle prefix while retaining newer intent', () => {
+    assert.deepEqual(reconcileSelectionEcho([['a'], ['b'], ['c']], ['b']), [['c']]);
+  });
   it('confirms the whole queue when the echo equals the newest emitted selection', () => {
     assert.deepEqual(reconcileSelectionEcho([['a'], ['a', 'b']], ['a', 'b']), []);
   });

@@ -121,6 +121,53 @@ test('coalesced middle echoes preserve the latest numeric commit and active draf
   assert.deepEqual(patches, [11, 12, 13, 14]);
 });
 
+for (const echoes of [[11, 12, 11, 13], [11, 13], [12, 11, 13]]) {
+  test(`duplicate numeric intents retain newest display through echoes ${echoes}`, () => {
+    for (const next of ['11', '12', '11', '13']) changeTo(next);
+    for (const echo of echoes) {
+      value = echo;
+      renderField();
+      assert.equal(field().value, '13');
+    }
+    value = 25;
+    renderField();
+    assert.equal(field().value, '25', 'unrelated external truth resolves intent');
+  });
+
+  test(`duplicate numeric echoes preserve active editing ${echoes}`, () => {
+    for (const next of ['11', '12', '11', '13']) changeTo(next);
+    type('24');
+    for (const echo of echoes) {
+      value = echo;
+      renderField();
+      assert.equal(field().value, '24');
+    }
+    pressEnter();
+    assert.deepEqual(patches, [11, 12, 11, 13, 24]);
+  });
+
+  test(`stepper duplicate intents retain newest display through echoes ${echoes}`, () => {
+    value = 10;
+    let step = 1;
+    const paint = () => act(() => render(<Stepper label="Count" value={value} step={step}
+      onChange={(next) => patches.push(next)} />, target));
+    paint();
+    for (const direction of [1, 1, 0, 1]) {
+      if (patches.length === 3) { step = 2; paint(); }
+      act(() => { (target.querySelectorAll('button')[direction] as HTMLButtonElement).click(); });
+    }
+    assert.deepEqual(patches, [11, 12, 11, 13]);
+    for (const echo of echoes) {
+      value = echo;
+      paint();
+      assert.equal(target.querySelector('.toolbar-settings-stepper-value')?.textContent, '13');
+    }
+    value = 25;
+    paint();
+    assert.equal(target.querySelector('.toolbar-settings-stepper-value')?.textContent, '25');
+  });
+}
+
 test('duplicate pending numeric values acknowledge a coalesced prefix', () => {
   for (const next of ['11', '12', '11', '13']) changeTo(next);
   value = 11;
