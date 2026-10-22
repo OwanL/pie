@@ -219,7 +219,9 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       }
       scheduleDismiss(owner);
     };
+    let returningFocus = false;
     const onFocusIn = (event: FocusEvent) => {
+      if (returningFocus) return;
       const anchor = pathElement(event.target, root);
       if (anchor) {
         beginPreview(anchor, 'focus');
@@ -259,7 +261,14 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       const returnFocus = popoverRef.current?.contains(document.activeElement) && owner.anchor.isConnected
         ? owner.anchor : null;
       dismiss();
-      returnFocus?.focus();
+      // Ignore only focusin dispatched synchronously by this focus return.
+      // A later genuine focus or pointer entry must still activate previews.
+      returningFocus = true;
+      try {
+        returnFocus?.focus();
+      } finally {
+        returningFocus = false;
+      }
     };
     const onViewerOpen = (event: Event) => {
       const owner = activeRef.current;

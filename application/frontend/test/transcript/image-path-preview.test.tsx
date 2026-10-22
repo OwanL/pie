@@ -149,6 +149,16 @@ test('Escape returns actual preview focus to its connected transcript anchor', (
   act(() => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
   assert.equal(host.querySelector('.image-path-preview'), null);
   assert.equal(document.activeElement, anchor);
+  act(() => { timers.fireOptionalByDelay(350); });
+  assert.equal(host.querySelector('.image-path-preview'), null);
+  assert.equal(posts.filter(post => post.type === 'requestImagePreview').length, 1);
+
+  const other = document.createElement('button');
+  host.appendChild(other);
+  act(() => other.focus());
+  act(() => anchor.focus());
+  act(() => timers.fireByDelay(350));
+  assert.ok(host.querySelector('.image-path-preview'));
 });
 
 test('pointer preview Escape does not take focus from another control', () => {
