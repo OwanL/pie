@@ -379,6 +379,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         canonicalActivityBySession={viewState.canonicalActivityBySession}
         canonicalActivityBySessionTruncated={viewState.canonicalActivityBySessionTruncated}
         draftRestore={draftRestore}
+        resolvedPendingPath={viewState.activeSession?.resolvedPendingPath}
         draftText={viewState.draftText}
         dictation={viewState.dictation}
         sendRetryDraftRef={sendRetryDraftRef}

@@ -67,6 +67,7 @@ interface ComposerProps {
    *  via `abortRetry()`, emitting `auto_retry_end` "Retry cancelled"). */
   retryStatus: RetryStatus | null;
   sessionPath: string | null;
+  resolvedPendingPath?: string;
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
   activeModelId?: string;
@@ -160,6 +161,7 @@ function ComposerView({
   commandsAvailable = true,
   retryStatus,
   sessionPath,
+  resolvedPendingPath,
   draftText,
   draftRestore,
   activeModelId,
@@ -295,6 +297,7 @@ function ComposerView({
     pendingComposerInputsLength: pendingComposerInputs.length,
     initialRows: prefs.composerInitialRows,
     sessionPath,
+    resolvedPendingPath,
     draftText,
     postMessage,
     draftRestore,

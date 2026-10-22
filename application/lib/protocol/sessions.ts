@@ -4,6 +4,8 @@ import type { BackendSessionSummary } from '../../../harness/agent-processes/lib
 export interface SessionSummary extends BackendSessionSummary {
   creationState?: 'pending' | 'delayed';
   createOperationId?: string;
+  /** Host-incarnation-local exact origin, assigned only by PendingPathReplaced. */
+  resolvedPendingPath?: string;
 }
 
 /** Worker/RPC session event DTOs. The host-only capability projection remains

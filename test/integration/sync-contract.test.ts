@@ -70,6 +70,33 @@ test('pending new-session preview uses creation authority without borrowing sess
   assert.equal(old.state, kept.state);
 });
 
+test('pending resolution identity survives both publication orders and summary refreshes', async () => {
+  const contract = await readFile('docs/contracts/STATE_CONTRACT.md', 'utf8');
+  assert.match(contract, /Path disappearance or a pending-to-real shape alone is never identity evidence/u);
+  const { createInitialArchState, reducer } = await import('../../application/backend/conversation-state/reducer.js');
+  const { selectViewState } = await import('../../application/backend/conversation-state/projections/projection.js');
+  const pending = 'pending:identity-a';
+  const durable = '/identity-a.jsonl';
+  const unrelated = '/identity-b.jsonl';
+  const summary = (path: string) => ({ path, name: path, cwd: '/', modifiedAt: '2024-01-01', messageCount: 0 });
+  for (const eventFirst of [true, false]) {
+    const initial = createInitialArchState();
+    let state = { ...initial, sessions: { ...initial.sessions, activeSessionPath: pending,
+      openTabPaths: [pending, unrelated], sessions: [summary(pending), summary(unrelated), ...(eventFirst ? [summary(durable)] : [])] } };
+    state = reducer(state, { kind: 'PendingPathReplaced', oldPendingPath: pending, newSessionPath: durable }).state;
+    assert.equal(selectViewState(state).activeSession?.resolvedPendingPath, pending);
+    // The trailing opened/upsert and list refresh must not erase identity before
+    // a renderer receives its next (possibly coalesced) full snapshot.
+    state = reducer(state, { kind: 'SessionSummaryUpserted', summary: summary(durable) }).state;
+    state = reducer(state, { kind: 'SessionListChanged', sessionSummaries: [summary(durable), summary(unrelated)] }).state;
+    assert.equal(selectViewState(state).activeSession?.resolvedPendingPath, pending);
+    assert.equal(selectViewState(state).sessions.find(s => s.path === unrelated)?.resolvedPendingPath, undefined);
+    state = reducer(state, { kind: 'SessionClosed', sessionPath: durable }).state;
+    state = reducer(state, { kind: 'SessionSummaryUpserted', summary: summary(durable) }).state;
+    assert.equal(state.sessions.sessions.find(s => s.path === durable)?.resolvedPendingPath, undefined);
+  }
+});
+
 test('local dictation owns only its captured draft span and never sends', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /dictation never auto-sends/iu);

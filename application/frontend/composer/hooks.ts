@@ -8,7 +8,6 @@ import type {
   WebviewToHostMessage,
 } from '../../lib/protocol/index.js';
 import { dictationActive, type DictationView } from '../../lib/protocol/dictation.js';
-import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { useUndo } from './use-undo';
 import { shouldHandleGlobalComposerPaste } from './affordances';
 import {
@@ -74,6 +73,7 @@ export function useComposerInput({
   pendingComposerInputsLength,
   initialRows,
   sessionPath,
+  resolvedPendingPath,
   draftText,
   postMessage,
   draftRestore,
@@ -100,6 +100,7 @@ export function useComposerInput({
   /** Empty-composer row count; changing it re-fits any existing inline height. */
   initialRows: number;
   sessionPath: string | null;
+  resolvedPendingPath?: string;
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   draftRestore?: { text: string; nonce: number } | null;
@@ -113,9 +114,14 @@ export function useComposerInput({
   const transferOwnerRef = useRef({ sessionPath, commandsAvailable, generation: 0, mounted: true, pending: 0, tail: Promise.resolve() });
   const owner = transferOwnerRef.current;
   if (owner.sessionPath !== sessionPath || owner.commandsAvailable !== commandsAvailable) {
-    owner.generation++;
-    owner.pending = 0;
-    owner.tail = Promise.resolve();
+    const sameSessionResolution = owner.sessionPath !== null
+      && owner.sessionPath === resolvedPendingPath && sessionPath !== null
+      && owner.commandsAvailable === commandsAvailable;
+    if (!sameSessionResolution) {
+      owner.generation++;
+      owner.pending = 0;
+      owner.tail = Promise.resolve();
+    }
     owner.sessionPath = sessionPath;
     owner.commandsAvailable = commandsAvailable;
   }
@@ -342,9 +348,9 @@ export function useComposerInput({
 
     const isPendingResolution = (
       prevSessionPath !== null &&
-      isPendingTabPath(prevSessionPath) &&
+      prevSessionPath === resolvedPendingPath &&
       sessionPath !== null &&
-      !isPendingTabPath(sessionPath)
+      sessionPath !== prevSessionPath
     );
 
     if (dictationResolution && resolvedSessionPath !== null) {
@@ -738,10 +744,10 @@ export function useComposerInput({
       : inputs.filter((input) => input.kind === 'imageBlob').length;
 
     for (const input of acceptedInputs) {
-      onAddInput(input, ownerPath);
+      onAddInput(input, owner.sessionPath ?? undefined);
     }
     for (const unsupportedInput of unsupportedInputs) {
-      onAddInput(unsupportedInput, ownerPath);
+      onAddInput(unsupportedInput, owner.sessionPath ?? undefined);
     }
 
     const unsupportedFileMessage = formatComposerTransferError(rejectedFiles);

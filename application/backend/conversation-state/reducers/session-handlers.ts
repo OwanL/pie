@@ -108,7 +108,8 @@ function mergeSessionSummaryPreservingLocalName(
   incoming: SessionSummary,
 ): SessionSummary {
   if (!existing) {
-    return incoming;
+    const { resolvedPendingPath: _hostOnlyOrigin, ...summary } = incoming;
+    return summary;
   }
 
   const keepExistingName = incoming.isPlaceholder === true
@@ -116,6 +117,8 @@ function mergeSessionSummaryPreservingLocalName(
       || (existing.name !== NEW_SESSION_NAME && incoming.name === NEW_SESSION_NAME));
   return {
     ...incoming,
+    // Backend refreshes cannot manufacture or retire host-owned rekey identity.
+    resolvedPendingPath: existing.resolvedPendingPath,
     name: keepExistingName ? existing.name : incoming.name,
     isPlaceholder: keepExistingName ? existing.isPlaceholder : incoming.isPlaceholder,
     modelId: incoming.modelId ?? existing.modelId,
@@ -2137,10 +2140,11 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     // summary-less. Lifecycle-only fields never leak onto the durable summary.
     const hasDurableSummary = draft.sessions.sessions.some((summary) => summary.path === newSessionPath);
     draft.sessions.sessions = draft.sessions.sessions.flatMap((summary) => {
+      if (summary.path === newSessionPath) return [{ ...summary, resolvedPendingPath: oldPendingPath }];
       if (summary.path !== oldPendingPath) return [summary];
       if (hasDurableSummary) return [];
       const { creationState: _creationState, createOperationId: _createOperationId, ...rest } = summary;
-      return [{ ...rest, path: newSessionPath }];
+      return [{ ...rest, path: newSessionPath, resolvedPendingPath: oldPendingPath }];
     });
 
     // Retarget the deferred choice without replaying it yet. The ordered drain
