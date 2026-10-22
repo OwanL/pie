@@ -7,6 +7,11 @@ import test, { afterEach, beforeEach } from 'node:test';
 import { installDom } from '../helpers/dom';
 installDom();
 
+// Static imports can evaluate markdown before installDom(), leaving DOMPurify
+// as its unbound factory. Bind the real sanitizer to this test's DOM before rendering.
+import DOMPurify from 'dompurify';
+if (!DOMPurify.sanitize) Object.assign(DOMPurify, DOMPurify(window));
+
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
@@ -124,6 +129,8 @@ test('parallel subagent transcript controls expand independently and preserve se
   await act(async () => toggles[0].click());
   assert.deepEqual(toggles.map((toggle) => toggle.getAttribute('aria-expanded')), ['true', 'false']);
   assert.match(cards[0].querySelector('.subagent-task')?.textContent ?? '', /Gather evidence/);
+  assert.match(cards[0].querySelector('.subagent-messages')?.textContent ?? '', /Evidence collected\./,
+    'opening the transcript must successfully render its Markdown, not leave a partial failed render');
   assert.equal(cards[0].querySelector('.subagent-settled-preview'), null);
   assert.ok(cards[1].querySelector('.subagent-settled-preview'));
   const secondToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-transcript-toggle')[1];
