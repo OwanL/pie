@@ -172,7 +172,7 @@ test('completed stock acknowledgements disappear from the body but remain in raw
   assert.match(writeHtml.replace(/<[^>]*>/g, ''), /const value/);
 });
 
-test('failed, unfamiliar and warning-bearing outputs remain visible without generic headings', () => {
+test('failed, unfamiliar and warning-bearing outputs retain a quiet Result heading', () => {
   const calls: ToolCall[] = [
     { ...writeConfirmation, status: 'failed' },
     { ...writeConfirmation, result: 'Saved with an unfamiliar response' },
@@ -183,7 +183,7 @@ test('failed, unfamiliar and warning-bearing outputs remain visible without gene
   for (const call of calls) {
     const html = renderToString(h(ToolCallBody, { toolCall: call, onOpenFile: noop }));
     assert.match(html, /Successfully|unfamiliar response|meaningful output/);
-    assert.doesNotMatch(html, /class="tool-call-section-label">(?:Input|Result)</);
+    assert.equal((html.match(/class="tool-call-section-label">Result</g) ?? []).length, 1);
   }
 });
 

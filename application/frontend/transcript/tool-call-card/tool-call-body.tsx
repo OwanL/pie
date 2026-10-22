@@ -48,6 +48,8 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
   const pathsMatch = inputPath === headerPath || (resolvedInputPath !== null && resolvedHeaderPath !== null
     && resolvedInputPath.replace(/\\/g, '/') === resolvedHeaderPath.replace(/\\/g, '/'));
   const omitHeaderPath = !isProvisional && typeof headerPath === 'string' && pathsMatch ? ['path'] : [];
+  const inputLabel = normalizedName !== 'edit' && normalizedName !== 'write'
+    ? <div class="tool-call-section-label">Input</div> : null;
   const renderInput = () => normalizedName === 'edit'
     ? <EditInputDetails input={visualInput} identity={`${toolCall.id}:input`} resultDiff={resultDiff} omit={omitHeaderPath} />
     : normalizedName === 'write'
@@ -58,6 +60,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
     return (
       <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
         <div class="tool-call-section">
+          {inputLabel}
           {renderInput()}
         </div>
       </div>
@@ -98,6 +101,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
 
     return (
       <div class="tool-call-body tool-call-body-terminal" onClick={(e) => e.stopPropagation()}>
+        <div class="tool-call-section-label">Input</div>
         {command && (
           <div class="tool-call-terminal-command hljs-scope" title={command}>
             <span class="tool-call-terminal-prompt" aria-hidden="true">$</span>
@@ -105,6 +109,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
           </div>
         )}
         <ToolInputFields input={toolCall.input} identity={`${toolCall.id}:options`} omit={['command']} />
+        {(text || isRunning) && <div class="tool-call-section-label">Result</div>}
         {!text && isRunning && <div class="tool-call-empty">Waiting for output…</div>}
         {text && (
           <div class="tool-call-terminal" data-running={isRunning ? 'true' : undefined}>
@@ -163,14 +168,17 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
   return (
     <div class="tool-call-body" onClick={(e) => e.stopPropagation()}>
       {!isEmptyToolCallInput(toolCall.input) && <div class="tool-call-section">
+        {inputLabel}
         {renderInput()}
       </div>}
       {toolCall.result !== undefined && !isRedundantToolConfirmation(toolCall) && (
         <div class="tool-call-section">
+          <div class="tool-call-section-label">Result</div>
           {hasImage ? (
             <ToolResultContentParts result={toolCall.result} languageHint={resultLanguageHint} />
           ) : resultIsTextOnly && resultText !== undefined ? (
             <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}
+              scrollLabel={isFileContentTool ? 'File result' : 'Tool result'}
               scrollHint={normalizedName === 'read' ? 'Swipe to scroll output' : undefined}>
               <SegmentedText
                 text={resultText}
@@ -181,7 +189,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
               />
             </ResizablePre>
           ) : yamlText !== undefined && yamlText.length > segmentThreshold ? (
-            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
+            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80} scrollLabel="Structured tool result">
               <SegmentedText
                 text={yamlText}
                 identity={`${toolCall.id}:result`}
@@ -191,7 +199,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
               />
             </ResizablePre>
           ) : (
-            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
+            <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80} scrollLabel="Structured tool result">
               <code class="hljs language-yaml" dangerouslySetInnerHTML={{ __html: formatValueAsHighlightedYaml(toolCall.result) }} />
             </ResizablePre>
           )}

@@ -7,8 +7,8 @@ import { highlightToolResultText, languageForToolInput, stringifyValueAsYamlText
 import { SegmentedText } from './segmented-text';
 import { requestedReplacements } from './display-model';
 
-export function ToolText({ text, identity, language }: { text: string; identity: string; language?: string }) {
-  return <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
+export function ToolText({ text, identity, language, scrollLabel = 'Tool input' }: { text: string; identity: string; language?: string; scrollLabel?: string }) {
+  return <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80} scrollLabel={scrollLabel}>
     <SegmentedText text={text} identity={identity} renderSegment={(segment) => <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(segment, language) }} />} />
   </ResizablePre>;
 }
@@ -22,14 +22,14 @@ export function ToolInputFields({ input, identity, omit = [] }: { input: unknown
       ? <code>{value || '(empty)'}</code>
       : value === null || typeof value !== 'object' && typeof value !== 'string'
         ? <code>{String(value)}</code>
-        : <ToolText text={typeof value === 'string' ? value : stringifyValueAsYamlText(value)} identity={`${identity}:${name}`} />}</dd>
+        : <ToolText text={typeof value === 'string' ? value : stringifyValueAsYamlText(value)} identity={`${identity}:${name}`} scrollLabel={`Input ${name}`} />}</dd>
   </div>)}</dl>;
 }
 
 export function ToolDiff({ diff, label, identity }: { diff: string; label: string; identity: string }) {
   return <div class="tool-call-section">
     <div class="tool-call-section-label">{label}</div>
-    <ResizablePre class="tool-call-pre tool-call-pre-resizable tool-call-diff" minHeight={80}>
+    <ResizablePre class="tool-call-pre tool-call-pre-resizable tool-call-diff" minHeight={80} scrollLabel={label}>
       <SegmentedText text={diff} identity={identity} renderSegment={(segment) => <code>{segment.split('\n').map((line, index, lines) => <span class={line.startsWith('+') ? 'tool-call-diff-added' : line.startsWith('-') ? 'tool-call-diff-removed' : 'tool-call-diff-context'} key={index}>{line}{index < lines.length - 1 ? '\n' : ''}</span>)}</code>} />
     </ResizablePre>
   </div>;
@@ -51,7 +51,7 @@ export function WriteInputDetails({ input, identity, omit = [] }: { input: unkno
   return <>
     <ToolInputFields input={input} identity={identity} omit={[...omit, 'content']} />
     <div class="tool-call-section"><div class="tool-call-section-label">File content</div>
-      <ToolText text={input.content} identity={`${identity}:content`} language={languageForToolInput('write', input)} />
+      <ToolText text={input.content} identity={`${identity}:content`} language={languageForToolInput('write', input)} scrollLabel="File content" />
     </div>
   </>;
 }

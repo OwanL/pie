@@ -265,7 +265,16 @@
 /* Let the root scroll instead of shrinking headings or clipping sections
  * whose intrinsic JSON height exceeds the inspector's viewport budget. */
 .tool-call-raw-inspector > * { flex-shrink: 0; min-width: 0; }
-.tool-call-raw-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tool-call-raw-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-code-surface);
+}
 .tool-call-raw-heading > strong { margin-right: auto; }
 .tool-call-raw-note { color: var(--panel-muted); font-size: 11px; }
 .tool-call-raw-refresh,
@@ -282,11 +291,12 @@
 .tool-call-raw-refresh[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 .tool-call-raw-inspector pre {
   min-height: 0;
-  max-height: min(40vh, 260px);
+  max-height: none;
   margin: 0;
   padding: 8px;
-  overflow: auto;
-  overscroll-behavior: contain;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
   background: var(--panel-code-surface);
   font-family: var(--panel-font-mono);
   font-size: 11px;
@@ -350,21 +360,20 @@
   padding: 0 8px 6px;
 }
 
-/* A reserved collapse rail replaces ordinary full-width footers. It never
-   overlays selectable content or changes shared reasoning/subagent controls. */
-.tool-call-inspector-body { padding-left: 16px; }
-.tool-call-inspector-body > .tool-call-collapse-rail { width: 16px; }
-.tool-call-collapse-rail::before {
-  content: '';
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  right: 3px;
-  width: 1px;
-  background: var(--panel-border);
+/* Ordinary details close through the shared focus-restoring footer. */
+.tool-call-inspector-body { padding-left: 0; }
+.tool-call-inspection-actions { display: flex; justify-content: flex-end; padding: 2px 8px 6px; }
+.tool-call-exchange-action {
+  border: 0;
+  border-radius: var(--panel-radius-sm);
+  padding: 3px 6px;
+  background: transparent;
+  color: var(--panel-muted);
+  font: inherit;
+  cursor: pointer;
 }
-.tool-call-collapse-rail:hover::before,
-.tool-call-collapse-rail:focus-visible::before { background: var(--panel-accent); }
+.tool-call-exchange-action:hover { background: var(--panel-control-hover); color: var(--panel-foreground); }
+.tool-call-exchange-action:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 1px; }
 .tool-call-body .tool-call-pre {
   margin-block: 4px;
   padding-block: 6px;

@@ -38,10 +38,10 @@ for (const name of ['bash', 'read', 'custom_tool']) {
     assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /first[\s\S]*third/);
     paint(call(name, 'completed'));
     assert.ok(container.querySelector('.tool-call-body-wrap'));
-    assert.equal(container.querySelector('.collapsible-close-footer'), null, 'ordinary tool details have no close footer');
-    const gutter = container.querySelector('.collapsible-gutter') as HTMLButtonElement | null;
-    assert.ok(gutter, 'ordinary tool details keep the collapsible gutter');
-    act(() => gutter!.click());
+    const footer = container.querySelector('.collapsible-close-footer') as HTMLButtonElement;
+    assert.equal(footer.textContent?.trim(), 'Collapse details');
+    assert.equal(container.querySelector('.collapsible-gutter'), null, 'no duplicate collapse rail');
+    act(() => footer.click());
     assert.equal(container.querySelector('.tool-call-body-wrap'), null);
     paint(call(name, 'running'));
     assert.equal(container.querySelector('.tool-call-body-wrap'), null, 'progress never undoes a manual close');
@@ -146,22 +146,44 @@ test('file opening and raw inspection are distinct sibling actions, not children
   assert.equal(expand.getAttribute('aria-expanded'), 'false');
 });
 
-test('ordinary tool gutter collapses, returns focus to its header, and exposes an accessible label', () => {
+test('ordinary tool footer collapses, returns focus to its header, and exposes an accessible label', () => {
   paint(call('read', 'completed'));
   toggle();
   const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
-  const gutter = container.querySelector('.collapsible-gutter') as HTMLButtonElement;
-  assert.equal(gutter.getAttribute('aria-label'), 'Collapse read details');
+  const gutter = container.querySelector('.collapsible-close-footer') as HTMLButtonElement;
+  assert.equal(gutter.getAttribute('aria-label'), 'Collapse details');
   header.focus();
   act(() => gutter.click());
   assert.equal(container.querySelector('.tool-call-body-wrap'), null);
   assert.equal(document.activeElement, header, 'focus returns to the owning disclosure button');
 });
 
+test('expanded Model exchange reuses inspection without closing details and Escape restores its trigger', () => {
+  const original = window.setTimeout;
+  const pending: Array<() => void> = [];
+  window.setTimeout = ((fn: () => void) => { pending.push(fn); return pending.length; }) as typeof window.setTimeout;
+  try {
+    paint(call('read', 'completed'));
+    assert.equal(container.querySelector('.tool-call-exchange-action'), null);
+    toggle();
+    const trigger = container.querySelector('.tool-call-exchange-action') as HTMLButtonElement;
+    assert.equal(trigger.textContent, 'Model exchange');
+    assert.ok(container.querySelector('[aria-label="Inspect read model exchange"]'), 'header shortcut remains');
+    act(() => trigger.focus());
+    act(() => pending.splice(0).forEach((fn) => fn()));
+    const inspector = document.querySelector('.tool-call-raw-inspector');
+    assert.match(inspector?.textContent ?? '', /Model exchange/);
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+    act(() => trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    assert.equal(document.activeElement, trigger);
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+  } finally { window.setTimeout = original; }
+});
+
 test('expanded shell details retain options and the header can close them while output streams', () => {
   paint(call('bash', 'running')); toggle();
   assert.match(container.querySelector('.tool-call-body')?.textContent ?? '', /pnpm test[\s\S]*timeout[\s\S]*60/);
-  assert.equal(container.querySelector('.collapsible-close-footer'), null);
+  assert.ok(container.querySelector('.collapsible-close-footer'));
   toggle();
   assert.equal(container.querySelector('.tool-call-body-wrap'), null);
   assert.ok(container.querySelector('.tool-call-live-preview'));

@@ -234,6 +234,17 @@ test('only overflowing output becomes a named keyboard scroll region', () => {
   assert.equal(pre.hasAttribute('tabindex'), false);
 });
 
+test('overflow region accepts its content-specific purpose without resetting scroll', () => {
+  act(() => render(h(ResizablePre, { scrollLabel: 'Input command' }, 'long command'), container));
+  const pre = scrollEl()!;
+  mockOverflow(pre, 600, 240);
+  pre.scrollTop = 72;
+  act(() => render(h(ResizablePre, { scrollLabel: 'File content' }, 'updated content'), container));
+  assert.equal(scrollEl(), pre);
+  assert.equal(pre.getAttribute('aria-label'), 'File content');
+  assert.equal(pre.scrollTop, 72);
+});
+
 // ── Horizontal-scroll edge-fade affordance ─────────────────────────────────
 
 function mockScrollBox(el: HTMLElement, scrollWidth: number, clientWidth: number, scrollLeft: number): void {

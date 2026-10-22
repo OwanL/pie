@@ -18,6 +18,7 @@ import { formatToolCallResultForDisplay } from './format';
 import { buildToolCallHeaderSummaryModel } from './summary-model';
 import { ToolCallBody } from './tool-call-body';
 import { ToolCallHeader } from './tool-call-header';
+import { RawToolInspector } from './raw-tool-inspector';
 import { provisionalToolSummary } from './provisional';
 import { liveToolPreview } from './display-model';
 import type { ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
@@ -80,8 +81,13 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
         {toolCall.detailRef && detail.state.status !== 'loaded' && <div class="tool-call-detail-status" role="status">
           {detail.state.status === 'loading' || detail.state.status === 'idle' ? 'Loading details…' : <><span>{detail.state.message}</span><button type="button" onClick={detail.retry}>Retry</button></>}
         </div>}
-        {isSubagent && <CollapsibleCloseFooter onCollapse={collapse} />}
-        <CollapsibleGutter onCollapse={collapse} label={isSubagent ? 'Collapse' : `Collapse ${presentation.name} details`} class={!isSubagent ? 'tool-call-collapse-rail' : undefined} />
+        {!isSubagent && <div class="tool-call-inspection-actions">
+          <RawToolInspector toolCall={toolCall} triggerClassName="tool-call-exchange-trigger">
+            <button type="button" class="tool-call-exchange-action" onClick={(e) => e.stopPropagation()}>Model exchange</button>
+          </RawToolInspector>
+        </div>}
+        <CollapsibleCloseFooter onCollapse={collapse} label={isSubagent ? 'Collapse' : 'Collapse details'} />
+        {isSubagent && <CollapsibleGutter onCollapse={collapse} label="Collapse" />}
       </div></div>}
     </div>
   );

@@ -17,6 +17,7 @@ interface ResizablePreProps {
   onResizeStart?: () => void;
   /** Quiet touch-only cue, shown only while this pre actually overflows. */
   scrollHint?: string;
+  scrollLabel?: string;
   children: ComponentChildren;
 }
 
@@ -29,7 +30,7 @@ interface ResizablePreProps {
  * Streaming panes (shell terminal, subagent thread) call `useResizableHeight`
  * directly so they can keep their own stick-to-bottom logic + ref.
  */
-export function ResizablePre({ class: className, minHeight, maxHeight, onScroll, onResizeStart, scrollHint, children }: ResizablePreProps) {
+export function ResizablePre({ class: className, minHeight, maxHeight, onScroll, onResizeStart, scrollHint, scrollLabel = 'Tool output', children }: ResizablePreProps) {
   const {
     scrollRef,
     height,
@@ -91,7 +92,7 @@ export function ResizablePre({ class: className, minHeight, maxHeight, onScroll,
         ref={scrollRef}
         tabIndex={overflows ? 0 : undefined}
         role={overflows ? 'region' : undefined}
-        aria-label={overflows ? 'Tool output' : undefined}
+        aria-label={overflows ? scrollLabel : undefined}
         class={cx('resizable-scroll-area-scroll', fades.left && 'fade-left', fades.right && 'fade-right', className)}
         onScroll={onScroll}
         style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}

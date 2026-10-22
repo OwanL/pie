@@ -51,7 +51,7 @@ test('coarse-pointer tools gain touch hitboxes and font floors without wrapping 
   assert.match(touch, /\.tool-call-card \.resizable-scroll-hint\s*\{[^}]*display:\s*block;[^}]*user-select:\s*none;/);
 });
 
-test('ordinary headers disclose with a muted chevron beside the native toggle and collapse rail', async () => {
+test('ordinary headers disclose with a muted chevron beside the native toggle', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {}, onOpenFile: () => {} }));
   assert.match(html, /tool-call-disclosure/);
@@ -62,8 +62,22 @@ test('ordinary headers disclose with a muted chevron beside the native toggle an
   const css = await readToolCallCss();
   assert.match(css, /Every ordinary tool row now carries this muted disclosure chevron/);
   assert.match(css, /\.tool-call-disclosure\s*\{\s*flex:\s*0 0 auto;\s*color:\s*var\(--panel-muted\);\s*\}/);
-  assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*16px;/);
-  assert.match(css, /\.tool-call-inspector-body > \.tool-call-collapse-rail\s*\{\s*width:\s*16px;/);
+  assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*0;/);
+  assert.doesNotMatch(css, /\.tool-call-collapse-rail/);
+});
+
+test('raw inspection has one vertical owner and sticky controls with horizontal JSON panes', async () => {
+  const css = await readToolCallCss();
+  const root = css.match(/\.tool-call-raw-inspector\s*\{([^}]+)\}/)?.[1] ?? '';
+  const pre = css.match(/\.tool-call-raw-inspector pre\s*\{([^}]+)\}/)?.[1] ?? '';
+  const heading = css.match(/\.tool-call-raw-heading\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(root, /max-height:/);
+  assert.match(root, /overflow: auto/);
+  assert.match(pre, /max-height: none/);
+  assert.match(pre, /overflow-x: auto/);
+  assert.match(pre, /overflow-y: hidden/);
+  assert.match(heading, /position: sticky/);
+  assert.match(heading, /top: 0/);
 });
 
 test('failed ordinary results take a quiet danger edge through existing data-status without new labels', async () => {
