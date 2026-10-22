@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { ChatPrefs } from '../../lib/protocol/index.js';
 import { SUBAGENT_BUCKET_TIERS } from '../../../lib/subagent-bucket-policy.js';
+import { useDisclosureFocusDismiss } from '../lib/hooks/use-disclosure-focus-dismiss';
 import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { Tooltip } from '../lib/components/tooltip';
 import { cx } from '../lib/components/cx';
@@ -26,6 +27,7 @@ function SessionBucketMenu({ sessionPath, prefs, onSetPrefs }: Props & { session
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  useDisclosureFocusDismiss(open, triggerRef, menuRef, () => setOpen(false));
   const choices = getSubagentBucketChoices(prefs, sessionPath);
   // Unrelated preference/session echoes must not consume this session's queue.
   const selected = useMemo(() => SUBAGENT_BUCKET_TIERS.filter(tier => choices[tier]),

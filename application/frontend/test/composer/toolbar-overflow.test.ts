@@ -645,6 +645,37 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'a long selected-model label reduces the measured space available to secondary items');
 });
 
+test('overflow child focus dismisses only the child until focus leaves More', () => {
+  rowWidth = 265;
+  mount(props());
+  const popover = openOverflow();
+  const trigger = popover.querySelector<HTMLButtonElement>('.subagent-bucket-trigger');
+  assert.ok(trigger);
+  act(() => trigger.focus());
+  click(trigger);
+  const row = popover.querySelector<HTMLButtonElement>('.subagent-bucket-dropdown [role="checkbox"]');
+  assert.ok(row);
+  act(() => row.focus());
+  assert.ok(popover.querySelector('.subagent-bucket-dropdown'));
+  act(() => trigger.focus());
+  assert.ok(popover.querySelector('.subagent-bucket-dropdown'));
+  const sibling = popover.querySelector<HTMLButtonElement>('[aria-label="Browser network access"]');
+  assert.ok(sibling);
+  act(() => sibling.focus());
+  assert.equal(document.activeElement, sibling);
+  assert.equal(popover.querySelector('.subagent-bucket-dropdown'), null);
+  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  click(trigger);
+  const outside = document.createElement('button');
+  document.body.appendChild(outside);
+  try {
+    act(() => outside.focus());
+    assert.equal(document.activeElement, outside);
+    assert.equal(popover.getAttribute('aria-hidden'), 'true');
+    assert.equal(popover.querySelector('.subagent-bucket-dropdown'), null);
+  } finally { outside.remove(); }
+});
+
 test('overflowed callbacks are reused and nested browser popovers stay open until their own Escape', () => {
   rowWidth = 265;
   const preferenceWrites: unknown[] = [];

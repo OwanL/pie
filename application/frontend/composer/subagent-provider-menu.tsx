@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { ChatPrefs, ModelInfo } from '../../lib/protocol/index.js';
+import { useDisclosureFocusDismiss } from '../lib/hooks/use-disclosure-focus-dismiss';
 import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { getSubagentBucketProviders, isSubagentProviderEnabled, setSubagentProviderEnabled } from '../shell/chat-prefs';
 import { Tooltip } from '../lib/components/tooltip';
@@ -22,6 +23,7 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, remo
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  useDisclosureFocusDismiss(open, triggerRef, menuRef, () => setOpen(false));
 
   useAnchoredOverlay({
     open,

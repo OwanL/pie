@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 import type { SystemPromptEntry } from '../../lib/protocol/index.js';
+import { useDisclosureFocusDismiss } from '../lib/hooks/use-disclosure-focus-dismiss';
 import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { Tooltip } from '../lib/components/tooltip';
 import { useNoticeContext } from '../lib/hooks/notice-context';
@@ -96,6 +97,7 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
   const pendingOperationRef = useRef(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  useDisclosureFocusDismiss(open, triggerRef, menuRef, () => setOpen(false));
   const { notice, sessionPath: noticeSessionPath } = useNoticeContext();
 
   // Scope the overlay synchronously as soon as the identity changes. The
