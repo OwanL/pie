@@ -1,3 +1,4 @@
+import { SUBAGENT_BUCKET_TOGGLES_ENV } from '../../tools/subagent/bucket-toggles.js';
 import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type SettingsPersistenceScope } from '../lib/rpc/settings.js';
 import { HISTORY_COMPACTION_ENV } from '../../session-storage/settings/history-compaction.js';
 import { PROTOCOL_VERSION, type RequestEnvelope } from '../lib/rpc/wire.js';
@@ -145,6 +146,9 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentProviderTogglesBySession !== undefined) {
     process.env[SUBAGENT_PROVIDER_TOGGLES_ENV] = JSON.stringify(params.subagentProviderTogglesBySession);
+  }
+  if (params.subagentBucketTogglesBySession !== undefined) {
+    process.env[SUBAGENT_BUCKET_TOGGLES_ENV] = JSON.stringify(params.subagentBucketTogglesBySession);
   }
   process.env[EXTENSION_TOGGLES_ENV] = JSON.stringify(params.extensionToggles);
   if (params.autonomousMode !== undefined) {

@@ -1,3 +1,4 @@
+import type { SubagentBucketChoices } from '../../../../lib/subagent-bucket-policy.js';
 import type { HistoryCompactionSettings } from '../../../session-storage/settings/history-compaction.js';
 import type { ProviderConcurrencyMap } from '../../../model-providers/concurrency/provider-concurrency.js';
 import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-level.js';
@@ -74,6 +75,7 @@ export interface RuntimePrefsSetParams {
   autonomousModeBySession?: Record<string, boolean>;
   mcpEnabled?: boolean;
   subagentProviderDefaults?: Record<string, boolean>;
+  subagentBucketTogglesBySession?: Record<string, SubagentBucketChoices>;
   subagentProviderTogglesBySession?: Record<string, Record<string, boolean>>;
   extensionToggles: Record<string, boolean>;
   subagentAlwaysParentModel?: boolean;

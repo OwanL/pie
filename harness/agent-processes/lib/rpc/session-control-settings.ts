@@ -1,3 +1,5 @@
+import { DEFAULT_SUBAGENT_BUCKET_CHOICES, isSubagentBucketChoices, type SubagentBucketChoices } from '../../../../lib/subagent-bucket-policy.js';
+
 /** Typed coordinator→host settings bridge used by session_control inheritance
  * (stage 3 of session-control refinement). This deliberately carries only the
  * two host-owned execution preferences, not a general preferences RPC. */
@@ -13,6 +15,7 @@ const ERROR_MAX_BYTES = 4 * 1024;
 export interface SessionControlExecutionSettings {
   /** Effective autonomous setting for the addressed root session. */
   autonomousMode: boolean;
+  subagentBucketChoices: SubagentBucketChoices;
   /** Effective choices for the configured subagent-provider toggle surface. */
   subagentProviderChoices: Record<string, boolean>;
 }
@@ -46,6 +49,11 @@ function fail(method: string, detail: string): never {
 function isBoundedString(value: unknown, maxBytes: number): value is string {
   return typeof value === 'string' && Buffer.byteLength(value, 'utf8') > 0
     && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function validateBucketChoices(value: unknown): SubagentBucketChoices {
+  if (!isSubagentBucketChoices(value)) fail(SESSION_CONTROL_SETTINGS_REQUEST_EVENT, 'subagentBucketChoices requires complete choices with at least one enabled');
+  return { ...value };
 }
 
 function validateChoices(value: unknown, label: string): Record<string, boolean> {
@@ -84,11 +92,13 @@ export function validateSessionControlSettingsRequest(value: unknown): SessionCo
     }
     const rawSettings = raw['settings'] as Record<string, unknown>;
     for (const key of Object.keys(rawSettings)) {
-      if (key !== 'autonomousMode' && key !== 'subagentProviderChoices') {
+      if (key !== 'autonomousMode' && key !== 'subagentProviderChoices' && key !== 'subagentBucketChoices') {
         fail(method, `settings.${key} is not supported`);
       }
     }
     settings = {
+      ...(rawSettings['subagentBucketChoices'] !== undefined
+        ? { subagentBucketChoices: validateBucketChoices(rawSettings['subagentBucketChoices']) } : {}),
       ...(rawSettings['autonomousMode'] !== undefined
         ? typeof rawSettings['autonomousMode'] === 'boolean'
           ? { autonomousMode: rawSettings['autonomousMode'] }
@@ -145,6 +155,9 @@ export function validateSessionControlSettingsAcknowledgement(
     if (typeof candidate['autonomousMode'] !== 'boolean') fail(method, 'settings.autonomousMode must be a boolean');
     settings = {
       autonomousMode: candidate['autonomousMode'],
+      subagentBucketChoices: candidate['subagentBucketChoices'] === undefined
+        ? { ...DEFAULT_SUBAGENT_BUCKET_CHOICES }
+        : validateBucketChoices(candidate['subagentBucketChoices']),
       subagentProviderChoices: validateChoices(candidate['subagentProviderChoices'], 'settings.subagentProviderChoices'),
     };
   }

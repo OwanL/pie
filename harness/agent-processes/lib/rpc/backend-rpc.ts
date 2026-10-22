@@ -1,3 +1,4 @@
+import { isSubagentBucketChoices, type SubagentBucketChoices } from '../../../../lib/subagent-bucket-policy.js';
 import type { ComposerInput, FilesystemPathComposerInput, ImageBlobComposerInput } from './composer-input.js';
 import type { ExtensionUIResponsePayload } from './extension-ui.js';
 import type { ModelSettings } from '../../../model-providers/catalog/model-contract.js';
@@ -1033,6 +1034,16 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParamsW
   const subagentProviderTogglesBySession = rawSubagentProviderToggles === undefined
     ? undefined
     : validateNestedBooleanMap('runtimePrefs.set', 'subagentProviderTogglesBySession', rawSubagentProviderToggles);
+  const rawBucketToggles = params['subagentBucketTogglesBySession'];
+  let subagentBucketTogglesBySession: Record<string, SubagentBucketChoices> | undefined;
+  if (rawBucketToggles !== undefined) {
+    if (!isObj(rawBucketToggles) || Array.isArray(rawBucketToggles)) fail('runtimePrefs.set', 'subagentBucketTogglesBySession must be an object');
+    subagentBucketTogglesBySession = {};
+    for (const [path, choices] of Object.entries(rawBucketToggles)) {
+      if (!isSubagentBucketChoices(choices)) fail('runtimePrefs.set', 'subagentBucketTogglesBySession requires complete bucket choices with at least one enabled');
+      subagentBucketTogglesBySession[path] = { ...choices };
+    }
+  }
   const rawAutonomousMode = (params as Record<string, unknown>)['autonomousMode'];
   const autonomousMode = rawAutonomousMode === undefined
     ? undefined
@@ -1100,7 +1111,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParamsW
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
   const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, ...(subagentMaxInflightSource !== undefined ? { subagentMaxInflightSource } : {}), bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
+  return { providerToggles, ...(subagentBucketTogglesBySession !== undefined ? { subagentBucketTogglesBySession } : {}), ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, ...(subagentMaxInflightSource !== undefined ? { subagentMaxInflightSource } : {}), bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface McpSetServerEnabledParams {

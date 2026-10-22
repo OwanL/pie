@@ -1,3 +1,5 @@
+import { isSubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
+import { SUBAGENT_BUCKET_TOGGLES_ENV } from '../../tools/subagent/bucket-toggles.js';
 import * as fsSync from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
@@ -1937,10 +1939,18 @@ export class WorkerRuntimeHost {
   }
 
   private applyRuntimePrefs(values: WorkerJsonObject): void {
+    const bucketToggles = values.subagentBucketTogglesBySession;
+    if (bucketToggles !== undefined) {
+      if (!bucketToggles || typeof bucketToggles !== 'object' || Array.isArray(bucketToggles)
+        || Object.values(bucketToggles).some(choices => !isSubagentBucketChoices(choices))) {
+        throw new TypeError('Invalid subagentBucketTogglesBySession');
+      }
+    }
     const jsonEnv: Array<[string, string]> = [
       ['providerToggles', PROVIDER_TOGGLES_ENV],
       ['subagentProviderDefaults', SUBAGENT_PROVIDER_DEFAULTS_ENV],
       ['subagentProviderTogglesBySession', SUBAGENT_PROVIDER_TOGGLES_ENV],
+      ['subagentBucketTogglesBySession', SUBAGENT_BUCKET_TOGGLES_ENV],
       ['extensionToggles', EXTENSION_TOGGLES_ENV],
       ['historyCompaction', HISTORY_COMPACTION_ENV],
       ['subagentBuckets', SUBAGENT_BUCKETS_ENV],

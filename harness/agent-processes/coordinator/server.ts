@@ -262,6 +262,7 @@ interface AgentSessionSettingsPatch {
   reasoning?: ThinkingLevel;
   autonomousMode?: boolean;
   subagentProviderChoices?: Record<string, boolean>;
+  subagentBucketChoices?: SessionControlExecutionSettings['subagentBucketChoices'];
   disabledSystemPromptEntries?: string[];
 }
 
@@ -4263,6 +4264,7 @@ export class BackendServer {
       callerModel: inheritedSettings.model,
       callerThinkingLevel: inheritedSettings.reasoning,
       subagentProviderChoices: inheritedSettings.subagentProviderChoices,
+      subagentBucketChoices: inheritedSettings.subagentBucketChoices,
       providerToggles: parseProviderToggles(JSON.stringify(this.runtimePrefs.providerToggles)),
       availableModels: catalog.models,
       isEligible: model => catalog.models.find(candidate =>
@@ -4306,6 +4308,7 @@ export class BackendServer {
         reasoning,
         autonomousMode: hostAcknowledgement.settings.autonomousMode,
         subagentProviderChoices: { ...hostAcknowledgement.settings.subagentProviderChoices },
+        subagentBucketChoices: { ...hostAcknowledgement.settings.subagentBucketChoices },
         disabledSystemPromptEntries: [...new Set(disabledSystemPromptEntries)],
       },
       cwd: durable.cwd,
@@ -4394,6 +4397,7 @@ export class BackendServer {
     }
 
     const hostSettings: SessionControlExecutionSettingsPatch = {
+      ...(patch.subagentBucketChoices !== undefined ? { subagentBucketChoices: patch.subagentBucketChoices } : {}),
       ...(patch.autonomousMode !== undefined ? { autonomousMode: patch.autonomousMode } : {}),
       ...(patch.subagentProviderChoices !== undefined
         ? { subagentProviderChoices: patch.subagentProviderChoices }
@@ -4783,14 +4787,18 @@ export class BackendServer {
         } satisfies WorkerJsonObject) };
       }
       const inheritedSettings = captured.settings;
-      const settings = this.validateAgentSessionSettingsPatch({
-        ...inheritedSettings,
+      const { subagentBucketChoices, ...publicInheritedSettings } = inheritedSettings;
+      const settings: AgentSessionSettingsPatch = {
+        ...this.validateAgentSessionSettingsPatch({
+        ...publicInheritedSettings,
         ...explicitSettings,
         model: modelSelection.model,
         reasoning: explicitSettings.reasoning ?? modelSelection.reasoning ?? inheritedSettings.reasoning,
         disabledSystemPromptEntries: explicitSettings.disabledSystemPromptEntries
           ?? inheritedSettings.disabledSystemPromptEntries,
-      });
+        }),
+        subagentBucketChoices,
+      };
       if (!settings.model) {
         throw new BackendError('SESSION_SETTINGS_UNAVAILABLE', 'The complete inherited model settings are unavailable.');
       }
