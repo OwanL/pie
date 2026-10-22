@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { ComposerInput } from '../../lib/protocol/index.js';
 import {
   composerInputDetail,
@@ -24,12 +25,27 @@ export function ComposerAttachments({
   attachmentSummary,
   onRemoveInput,
 }: ComposerAttachmentsProps) {
+  const groupRef = useRef<HTMLDivElement>(null);
+  const removalFocus = useRef<{ id: string; index: number; card: Element; owner: HTMLElement } | null>(null);
+
+  useLayoutEffect(() => {
+    const pending = removalFocus.current;
+    if (!pending || pendingComposerInputs.some(input => input.id === pending.id)) return;
+    removalFocus.current = null;
+    const active = pending.owner.ownerDocument.activeElement;
+    // Do not override focus moved elsewhere while a host-backed removal was pending.
+    if (active !== pending.owner.ownerDocument.body && !pending.card.contains(active)) return;
+    const buttons = groupRef.current?.querySelectorAll<HTMLButtonElement>('.attachment-card-remove');
+    const next = buttons?.[Math.min(pending.index, buttons.length - 1)];
+    (next ?? pending.owner.querySelector<HTMLTextAreaElement>('textarea'))?.focus();
+  }, [pendingComposerInputs]);
+
   if (pendingComposerInputs.length === 0) {
     return null;
   }
 
   return (
-    <div class="composer-attachments" role="group" aria-label={`Pending attachments: ${attachmentSummary}`}>
+    <div ref={groupRef} class="composer-attachments" role="group" aria-label={`Pending attachments: ${attachmentSummary}`}>
       <div class="composer-attachments-strip">
         {pendingComposerInputs.map((input) => {
           const displayName = composerInputDisplayName(input);
@@ -62,7 +78,14 @@ export function ComposerAttachments({
               <button
                 class="attachment-card-remove"
                 type="button"
-                onClick={() => onRemoveInput(input.id)}
+                onClick={(event) => {
+                  const card = event.currentTarget.closest('.attachment-card');
+                  const owner = groupRef.current?.parentElement;
+                  if (card && owner && card.contains(owner.ownerDocument.activeElement)) {
+                    removalFocus.current = { id: input.id, index: pendingComposerInputs.indexOf(input), card, owner };
+                  }
+                  onRemoveInput(input.id);
+                }}
                 aria-label={`Remove ${displayName}`}
               >
                 ×
