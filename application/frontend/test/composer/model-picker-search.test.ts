@@ -244,7 +244,7 @@ test('clearing the query restores the full list', () => {
   assert.equal(rowLabels(dropdown).length, 4);
 });
 
-function renderPicker(value: string, onChange: (spec: string) => void): void {
+function renderPicker(value: string, onChange: (spec: string) => void, catalog = entries()): void {
   act(() => {
     render(
       h(ModelPicker, {
@@ -252,7 +252,7 @@ function renderPicker(value: string, onChange: (spec: string) => void): void {
         label: value,
         ariaLabel: 'Model',
         title: 'Select model',
-        entries: entries(),
+        entries: catalog,
         onChange,
       }),
       container,
@@ -306,3 +306,39 @@ test('when the current model is missing from the list, Enter does not commit the
   keydown(searchInput(dropdown), 'Enter');
   assert.equal(selected, 'openai/gpt-5');
 });
+
+for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty'] as const) {
+  test(`catalog refresh before Enter: ${scenario}`, () => {
+    const commits: string[] = [];
+    const catalog = entries();
+    const onChange = (spec: string) => { commits.push(spec); };
+    renderPicker('gpt-5', onChange, catalog);
+    const dropdown = openDropdown();
+    const input = searchInput(dropdown);
+    keydown(input, 'ArrowDown');
+    const next = scenario === 'remove preceding' ? catalog.slice(1)
+      : scenario === 'reorder' ? [catalog[1], catalog[0], catalog[2], catalog[3]]
+      : scenario === 'remove active' ? [catalog[0], catalog[2], catalog[3]] : [];
+    renderPicker('gpt-5', onChange, next);
+    const activeId = input.getAttribute('aria-activedescendant');
+    if (scenario === 'remove active' || scenario === 'empty') {
+      assert.equal(activeId, null);
+      assert.equal(dropdown.querySelector('.model-picker-row-active'), null);
+      keydown(input, 'Enter');
+      assert.deepEqual(commits, []);
+      assert.equal(dropdown.isConnected, true);
+      if (next.length) {
+        keydown(input, 'ArrowDown');
+        keydown(input, 'Enter');
+        assert.deepEqual(commits, ['openai/gpt-5']);
+      }
+    } else {
+      assert.ok(activeId);
+      const active = document.getElementById(activeId);
+      assert.equal(active, dropdown.querySelector('.model-picker-row-active'));
+      assert.match(active?.getAttribute('aria-label') ?? '', /anthropic\/claude-opus/);
+      keydown(input, 'Enter');
+      assert.deepEqual(commits, ['anthropic/claude-opus']);
+    }
+  });
+}

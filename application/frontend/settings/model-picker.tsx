@@ -260,7 +260,7 @@ function useListKeyDown(
         }
       }
     },
-    [entries, activeIndex, handleSelect, explicitHighlightRef, query],
+    [entries, activeIndex, handleSelect, setActiveIndex, explicitHighlightRef, query],
   );
 }
 
@@ -278,7 +278,7 @@ function useModelPicker({
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(-1);
+  const [activeSpec, setActiveSpec] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   // An explicit user action that moves the highlight (arrow keys, Home/End,
   // pointer hover). Enter commits only after one of these, or after the user
@@ -308,36 +308,49 @@ function useModelPicker({
     );
   }, [entries, query]);
 
-  useFocusOnOpen(open, selectedIndex, setActiveIndex, inputRef, setQuery, resetNavigation);
+  // Resolve the highlight during render, before Enter or ARIA can observe a
+  // catalog refresh. A removed candidate leaves no implicit replacement.
+  const activeIndex = filteredEntries.findIndex((entry) => formatModelSpec(entry.model) === activeSpec);
+  const setActiveIndex = useCallback((next: number | ((previous: number) => number)) => {
+    setActiveSpec((previous) => {
+      const previousIndex = filteredEntries.findIndex((entry) => formatModelSpec(entry.model) === previous);
+      const index = typeof next === 'function' ? next(previousIndex) : next;
+      const entry = filteredEntries[index];
+      return entry ? formatModelSpec(entry.model) : null;
+    });
+  }, [filteredEntries]);
+  useLayoutEffect(() => {
+    if (activeIndex < 0) setActiveSpec(null);
+  }, [activeIndex, activeSpec]);
+
+  useFocusOnOpen(open, selectedIndex, (index) => {
+    setActiveSpec(entries[index] ? formatModelSpec(entries[index].model) : null);
+  }, inputRef, setQuery, resetNavigation);
   useClickOutside(open, setOpen, triggerRef, listRef);
   useDropdownPosition(open, dropdownDirection, listRef, triggerRef, compact);
   useScrollActiveItem(open, activeIndex, itemRefs);
-
-  // Keep activeIndex within the filtered list if the underlying entries change
-  // while the dropdown is open (e.g. a provider toggle). Never reduces a valid
-  // index, so it can't clobber the selectedIndex set on open.
-  useEffect(() => {
-    if (activeIndex >= 0 && activeIndex >= filteredEntries.length) {
-      setActiveIndex(Math.max(0, filteredEntries.length - 1));
-    }
-  }, [filteredEntries.length]);
 
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
   const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex, triggerRef, explicitHighlightRef, query);
   const onSearchInput = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
-    setQuery(e.currentTarget.value);
+    const nextQuery = e.currentTarget.value;
+    setQuery(nextQuery);
     // Typeahead: the first filtered match becomes the commit candidate. This
     // is itself an explicit user action (a typed query), so Enter may commit
     // it even without arrow-key navigation.
-    setActiveIndex(0);
-  }, []);
+    const q = nextQuery.trim().toLowerCase();
+    const first = entries.find((entry) =>
+      `${entry.label} ${entry.model.name} ${entry.model.id} ${entry.model.provider}`.toLowerCase().includes(q),
+    );
+    setActiveSpec(first ? formatModelSpec(first.model) : null);
+  }, [entries]);
   // Pointer hover is an explicit pointing action; hovering a row then pressing
   // Enter commits the hovered row, mirroring focus-follows-mouse.
   const onRowPointerEnter = useCallback((index: number) => {
     explicitHighlightRef.current = true;
     setActiveIndex(index);
-  }, []);
+  }, [setActiveIndex]);
 
   const activeDescendant =
     activeIndex >= 0 ? `${idBase}-option-${filteredEntries[activeIndex]?.model.provider}-${filteredEntries[activeIndex]?.model.id}` : undefined;
