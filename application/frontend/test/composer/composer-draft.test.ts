@@ -68,9 +68,10 @@ interface TestHarnessProps {
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   focusTrigger?: string;
+  resolvedPendingPath?: string;
 }
 
-function TestHarness({ sessionPath, draftText, postMessage, focusTrigger }: TestHarnessProps) {
+function TestHarness({ sessionPath, draftText, postMessage, focusTrigger, resolvedPendingPath }: TestHarnessProps) {
   const { text, textareaRef, handleInput } = useComposerInput({
     busy: false,
     focusTrigger,
@@ -79,6 +80,7 @@ function TestHarness({ sessionPath, draftText, postMessage, focusTrigger }: Test
     pendingComposerInputsLength: 0,
     initialRows: 1,
     sessionPath,
+    resolvedPendingPath,
     draftText,
     postMessage,
     onAddInput: (_input: ComposerInputDraft) => {},
@@ -305,7 +307,7 @@ test('useComposerInput preserves in-progress text across pending→resolved path
     // Session finishes loading: host swaps the active path pending→resolved and
     // posts draftText='' for the resolved path (draft was never persisted).
     act(() => {
-      render(h(TestHarness, { sessionPath: RESOLVED, draftText: '', postMessage: post }), container);
+      render(h(TestHarness, { sessionPath: RESOLVED, resolvedPendingPath: PENDING, draftText: '', postMessage: post }), container);
     });
 
     // The in-progress text must survive the path resolution.

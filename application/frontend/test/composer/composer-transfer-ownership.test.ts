@@ -67,31 +67,32 @@ for (const source of ['paste', 'drop'] as const) {
 }
 
 for (const reject of [false, true]) {
-  test(`pending image guards send until settled: rejection=${reject}`, async () => {
+  for (const attachedOnly of [false, true]) {
+  test(`pending image guards send until settled: rejection=${reject}, attachedOnly=${attachedOnly}`, async () => {
     const container = document.createElement('div');
     let composer!: ReturnType<typeof useComposerInput>;
     const sent: string[] = [];
     const added: unknown[] = [];
     function Harness() {
       composer = useComposerInput({ busy: false, onSend: (text) => { sent.push(text); },
-        onRetrySend: (text) => { sent.push(text); }, pendingComposerInputsLength: 0,
-        initialRows: 1, sessionPath: '/A', draftText: 'prompt', postMessage: () => {},
+        onRetrySend: (text) => { sent.push(text); }, pendingComposerInputsLength: attachedOnly ? 1 : 0,
+        initialRows: 1, sessionPath: '/A', draftText: attachedOnly ? '' : 'prompt', postMessage: () => {},
         onAddInput: (input) => { added.push(input); }, supportsImageInputs: true });
       return null;
     }
     const controls: Array<{ resolve: (value: ArrayBuffer) => void; reject: (error: Error) => void }> = [];
-    const transfer = () => ({ files: [{ name: 'image.gif', type: 'image/gif', size: 1,
+    const transfer = (name: string) => ({ files: [{ name, type: 'image/gif', size: 1,
       arrayBuffer: () => new Promise<ArrayBuffer>((resolve, reject) => { controls.push({ resolve, reject }); }),
     }] }) as unknown as DataTransfer;
     try {
       act(() => render(h(Harness, {}), container));
       let first!: Promise<void>;
       let second!: Promise<void>;
-      act(() => { first = composer.applyComposerTransfer(transfer(), 'paste'); second = composer.applyComposerTransfer(transfer(), 'drop'); });
+      act(() => { first = composer.applyComposerTransfer(transfer('first.gif'), 'paste'); second = composer.applyComposerTransfer(transfer('second.gif'), 'drop'); });
       assert.equal(composer.transferPending, true);
       act(() => composer.sendCurrentText());
       assert.equal(composer.sendAsRetry(), false);
-      assert.equal(composer.text, 'prompt');
+      assert.equal(composer.text, attachedOnly ? '' : 'prompt');
       assert.deepEqual(sent, []);
       await act(async () => { controls[1].resolve(new ArrayBuffer(1)); await Promise.resolve(); });
       assert.deepEqual(added, []);
@@ -100,13 +101,21 @@ for (const reject of [false, true]) {
         else controls[0].resolve(new ArrayBuffer(1));
         await Promise.all([first, second]);
       });
-      assert.equal(added.length, reject ? 1 : 2);
+      // An unreadable image remains visible as an unsupported file chip.
+      assert.deepEqual(added, [
+        { kind: reject ? 'fileBlob' : 'imageBlob', mimeType: 'image/gif', name: 'first.gif',
+          sizeBytes: 1, dataBase64: reject ? '' : 'AA==', source: 'paste' },
+        { kind: 'imageBlob', mimeType: 'image/gif', name: 'second.gif',
+          sizeBytes: 1, dataBase64: 'AA==', source: 'drop' },
+      ]);
       assert.equal(composer.transferPending, false);
       assert.deepEqual(sent, []);
       act(() => composer.sendCurrentText());
-      assert.deepEqual(sent, ['prompt']);
+      assert.deepEqual(sent, [attachedOnly ? '' : 'prompt']);
+      assert.equal(added.length, 2);
     } finally { act(() => render(null, container)); container.remove(); }
   });
+  }
 }
 
 for (const transition of ['same', 'session', 'alias'] as const) {
@@ -114,9 +123,9 @@ for (const transition of ['same', 'session', 'alias'] as const) {
     const container = document.createElement('div');
     document.body.appendChild(container);
     let composer!: ReturnType<typeof useComposerInput>;
-    function Harness({ path }: { path: string }) {
+    function Harness({ path, resolvedPendingPath }: { path: string; resolvedPendingPath?: string }) {
       composer = useComposerInput({ busy: false, onSend: () => {}, onRetrySend: () => {},
-        pendingComposerInputsLength: 0, initialRows: 1, sessionPath: path, draftText: '',
+        pendingComposerInputsLength: 0, initialRows: 1, sessionPath: path, resolvedPendingPath, draftText: '',
         postMessage: () => {}, onAddInput: () => {}, supportsImageInputs: false,
         commandsAvailable: true });
       return null;
@@ -133,7 +142,7 @@ for (const transition of ['same', 'session', 'alias'] as const) {
       assert.match(error ?? '', /does not support image/);
       const completion = composer.applyComposerTransfer(image(() => new Promise((done) => { resolve = done; })), 'drop');
       const path = transition === 'session' ? '/B' : transition === 'alias' ? '/A' : initialPath;
-      act(() => render(h(Harness, { path }), container));
+      act(() => render(h(Harness, { path, resolvedPendingPath: transition === 'alias' ? initialPath : undefined }), container));
       assert.equal(composer.attachmentError, transition === 'session' ? null : error);
       await act(async () => { resolve(new ArrayBuffer(1)); await completion; });
       assert.equal(composer.attachmentError, transition === 'session' ? null : error);
