@@ -13,6 +13,18 @@ import {
 } from '../../../lib/protocol/index.js';
 import { ComposerToolbar } from '../../composer/toolbar';
 
+test('bucket selector follows providers before existing toolbar controls', () => {
+  const html = renderToolbar({ prefs: {
+    ...DEFAULT_CHAT_PREFS,
+    subagentProviderDefaults: { anthropic: true },
+  } });
+  const provider = html.indexOf('data-toolbar-item="subagent-providers"');
+  const buckets = html.indexOf('data-toolbar-item="subagent-buckets"');
+  const prompts = html.indexOf('data-toolbar-item="system-prompts"');
+  assert.ok(provider >= 0 && buckets > provider && prompts > buckets);
+  assert.match(html, /subagent-bucket-trigger/);
+});
+
 function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]> = {}): string {
   return renderToString(h(ComposerToolbar, {
     sessionPath: '/session/test.jsonl',

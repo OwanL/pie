@@ -1,6 +1,24 @@
 import { resolveAutonomousModeForSession } from '../../lib/protocol/settings.js';
 import type { ChatPrefs, ModelInfo, SubagentBucketAssignment } from '../../lib/protocol/index.js';
 
+import { normalizeSubagentBucketChoices, type SubagentBucketChoices, type SubagentBucketTier } from '../../../lib/subagent-bucket-policy.js';
+
+export function getSubagentBucketChoices(prefs: ChatPrefs, sessionPath: string): SubagentBucketChoices {
+  return normalizeSubagentBucketChoices(prefs.subagentBucketTogglesBySession?.[sessionPath]);
+}
+
+/** Emit only the addressed session, with a complete, nonempty selection. */
+export function setSubagentBucketEnabled(
+  sessionPath: string,
+  choices: SubagentBucketChoices,
+  bucket: SubagentBucketTier,
+  enabled: boolean,
+): Partial<ChatPrefs> {
+  const next = { ...choices, [bucket]: enabled };
+  if (!Object.values(next).some(Boolean)) return {};
+  return { subagentBucketTogglesBySession: { [sessionPath]: next } };
+}
+
 export type BooleanPrefKey =
   | 'autoExpandReasoning'
   | 'autoExpandSubagentCalls'

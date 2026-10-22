@@ -26,6 +26,7 @@ import type {
 import { SessionCostTooltip } from '../analytics/session-cost-tooltip';
 import { ComposerSettingsMenu } from '../settings/settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
+import { SubagentBucketMenu } from './subagent-bucket-menu';
 import { getAutonomousModeForSession, setAutonomousModeForSession } from '../shell/chat-prefs';
 import { CompactionButton } from './compaction-button';
 import { formatCompactTokens } from '../lib/formatting/format-tokens';
@@ -328,6 +329,12 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           onSetPrefs={onSetPrefs}
         />
       ),
+    },
+    {
+      key: 'subagent-buckets',
+      kind: 'control',
+      shortLabel: 'Buckets',
+      content: <SubagentBucketMenu sessionPath={sessionPath} prefs={prefs} onSetPrefs={onSetPrefs} />,
     },
     {
       key: 'system-prompts',
