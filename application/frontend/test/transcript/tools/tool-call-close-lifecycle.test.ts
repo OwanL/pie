@@ -40,9 +40,15 @@ for (const name of ['bash', 'read', 'custom_tool']) {
     assert.ok(container.querySelector('.tool-call-body-wrap'));
     const footer = container.querySelector('.collapsible-close-footer') as HTMLButtonElement;
     assert.equal(footer.textContent?.trim(), 'Collapse details');
-    assert.equal(container.querySelector('.collapsible-gutter'), null, 'no duplicate collapse rail');
+    assert.equal(container.querySelector('.collapsible-gutter')?.getAttribute('aria-label'), `Collapse ${name} details`);
     act(() => footer.click());
     assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+    paint(call(name, 'completed'));
+    toggle();
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+    const rail = container.querySelector('.collapsible-gutter') as HTMLButtonElement;
+    act(() => rail.click());
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null, 'the rail remains an independent collapse target');
     paint(call(name, 'running'));
     assert.equal(container.querySelector('.tool-call-body-wrap'), null, 'progress never undoes a manual close');
   });
@@ -150,10 +156,22 @@ test('ordinary tool footer collapses, returns focus to its header, and exposes a
   paint(call('read', 'completed'));
   toggle();
   const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
-  const gutter = container.querySelector('.collapsible-close-footer') as HTMLButtonElement;
-  assert.equal(gutter.getAttribute('aria-label'), 'Collapse details');
+  const footer = container.querySelector('.collapsible-close-footer') as HTMLButtonElement;
+  assert.equal(footer.getAttribute('aria-label'), 'Collapse details');
   header.focus();
-  act(() => gutter.click());
+  act(() => footer.click());
+  assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+  assert.equal(document.activeElement, header, 'focus returns to the owning disclosure button');
+});
+
+test('ordinary tool rail collapses, returns focus to its header, and exposes an accessible label', () => {
+  paint(call('read', 'completed'));
+  toggle();
+  const header = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
+  const rail = container.querySelector('.collapsible-gutter') as HTMLButtonElement;
+  assert.equal(rail.getAttribute('aria-label'), 'Collapse read details');
+  header.focus();
+  act(() => rail.click());
   assert.equal(container.querySelector('.tool-call-body-wrap'), null);
   assert.equal(document.activeElement, header, 'focus returns to the owning disclosure button');
 });

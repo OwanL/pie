@@ -360,8 +360,16 @@
   padding: 0 8px 6px;
 }
 
-/* Ordinary details close through the shared focus-restoring footer. */
-.tool-call-inspector-body { padding-left: 0; }
+/* Ordinary details retain the side collapse rail as well as the footer.
+   Reserve its left hitbox so it never covers selectable inspector content,
+   and inset the footer so its full-width hit target does not sit underneath
+   the rail. */
+.tool-call-inspector-body { padding-left: 10px; }
+.tool-call-collapse-rail { left: 0; }
+.tool-call-inspector-body > .collapsible-close-footer {
+  width: calc(100% - 10px);
+  margin-left: 10px;
+}
 .tool-call-inspection-actions { display: flex; justify-content: flex-end; padding: 2px 8px 6px; }
 .tool-call-exchange-action {
   border: 0;

@@ -87,7 +87,7 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
           </RawToolInspector>
         </div>}
         <CollapsibleCloseFooter onCollapse={collapse} label={isSubagent ? 'Collapse' : 'Collapse details'} />
-        {isSubagent && <CollapsibleGutter onCollapse={collapse} label="Collapse" />}
+        <CollapsibleGutter onCollapse={collapse} label={isSubagent ? 'Collapse' : `Collapse ${presentation.name} details`} class={!isSubagent ? 'tool-call-collapse-rail' : undefined} />
       </div></div>}
     </div>
   );
