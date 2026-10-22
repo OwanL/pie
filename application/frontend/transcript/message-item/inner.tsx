@@ -187,7 +187,7 @@ export function MessageItemInner({
   onCancelPrepass,
 }: MessageItemInnerProps) {
   if (message.customType === 'compaction-summary') {
-    return <CompactionSummary summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
+    return <CompactionSummary collapsibleKey={`compaction:${message.id}`} summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
   }
 
   const showHeaderActions = pruningHeaderState || statusLabel;

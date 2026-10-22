@@ -9,19 +9,42 @@ DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
-import { CompactionSummary } from '../../transcript/compaction-summary';
+import { CompactionSummary as CompactionSummaryCard } from '../../transcript/compaction-summary';
+import { clearCollapsibleCache } from '../../transcript/use-collapsible-open';
+
+const CompactionSummary = (props: { summary: string; details?: CompactionSummaryDetails; collapsibleKey?: string }) =>
+  h(CompactionSummaryCard, { ...props, collapsibleKey: props.collapsibleKey ?? 'compaction:test-entry' });
 import { mapTranscript } from '../../../../harness/session-storage/transcripts/transcript';
 import type { CompactionSummaryDetails } from '../../../lib/protocol/index.js';
 
 let container: HTMLElement;
 
 beforeEach(() => {
+  clearCollapsibleCache();
   container = document.createElement('div');
   document.body.appendChild(container);
   return () => {
     render(null, container);
     container.remove();
   };
+});
+
+test('compaction disclosure survives remount without leaking to another entry or session', () => {
+  const mount = (id: string) => act(() => render(h(CompactionSummary, {
+    summary: 'kept context', collapsibleKey: `compaction:${id}`,
+  }), container));
+  const expanded = () => container.querySelector('button')?.getAttribute('aria-expanded');
+  mount('session-a-entry-1');
+  act(() => (container.querySelector('button') as HTMLButtonElement).click());
+  act(() => render(null, container));
+  mount('session-a-entry-1');
+  assert.equal(expanded(), 'true');
+  act(() => render(null, container));
+  mount('session-a-entry-2');
+  assert.equal(expanded(), 'false');
+  act(() => render(null, container));
+  mount('session-b-entry-1');
+  assert.equal(expanded(), 'false');
 });
 
 test('compaction entries map to a distinct collapsed transcript row', () => {

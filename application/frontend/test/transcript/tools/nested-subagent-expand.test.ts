@@ -207,6 +207,33 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
   return { ...DEFAULT_CHAT_PREFS, ...overrides };
 }
 
+test('parallel children retain mixed disclosure across remount and attribute pending questions independently', () => {
+  const toolCall: ToolCall = {
+    id: 'parallel-disclosure', name: 'subagent', status: 'completed', input: {},
+    result: { details: { results: ['first', 'second', 'third'].map((agent) => ({
+      agent, task: agent, exitCode: 0, messages: [],
+    })) } },
+  };
+  const prefs = prefsWith({ autoExpandSubagentCalls: false });
+  const mountGroup = () => act(() => render(h(AskUserContext.Provider, {
+    value: {
+      sessionPath: '/session-a', postMessage: noop,
+      pendingRequests: { question: { id: 'question', method: 'input', subagentCallId: 'parallel-disclosure:1' } } as any,
+      registerInlineRequest: noop, unregisterInlineRequest: noop,
+    },
+  }, h(SubagentToolRenderer, {
+    toolCall, prefs, workingDirectory: '/repo', onOpenFile: noop,
+    onContextMenu: noopContextMenu, renderToolCall: makeRenderToolCall(prefs),
+  })), container));
+  const headers = () => Array.from(container.querySelectorAll<HTMLElement>('.subagent-header'));
+  mountGroup();
+  act(() => headers()[0].click());
+  act(() => render(null, container));
+  mountGroup();
+  assert.deepEqual(headers().map((header) => header.getAttribute('aria-expanded')), ['true', 'false', 'false']);
+  assert.deepEqual(Array.from(container.querySelectorAll('.tool-call-subagent')).map((card) => card.classList.contains('pending-ask-user')), [false, true, false]);
+});
+
 test('subagent model tooltip shows the exact inherited context packet', async () => {
   const toolCall = nestedSubagentToolCall();
   const details = (toolCall.result as any).details;

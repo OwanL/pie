@@ -1,7 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useMemo, useState } from 'preact/hooks';
+import { useMemo } from 'preact/hooks';
+import { useCollapsibleOpen } from './use-collapsible-open';
 
 import type { CompactionSummaryDetails } from '../../lib/protocol/index.js';
 import { Collapsible } from '../lib/components/collapsible';
@@ -12,6 +13,7 @@ import { normalizeThinkingLevel } from '../../../harness/model-providers/catalog
 
 interface CompactionSummaryProps {
   summary: string;
+  collapsibleKey: string;
   /** Durable metrics scanned from the `pie.compaction-metrics` sidecar.
    *  Absent for legacy/malformed sidecars (and for sessions compacted before
    *  the sidecar existed) — the card then renders the summary markdown only. */
@@ -90,8 +92,8 @@ function modelLine(details: CompactionSummaryDetails): string | null {
  * Model/thinking provenance and duration stay in expanded metadata. The full replacement-context
  * markdown stays lazy — `renderMarkdown` only runs when the card is expanded.
  */
-export function CompactionSummary({ summary, details }: CompactionSummaryProps) {
-  const [open, setOpen] = useState(false);
+export function CompactionSummary({ summary, details, collapsibleKey }: CompactionSummaryProps) {
+  const [open, setOpen] = useCollapsibleOpen(collapsibleKey, false);
   const html = useMemo(() => (open ? renderMarkdown(summary, true, false) : ''), [open, summary]);
 
   const reason = details ? reasonLabel(details.reason) : null;

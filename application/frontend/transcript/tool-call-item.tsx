@@ -747,9 +747,10 @@ function SubagentSingleBlock({
   multipleResults,
   displayCost,
 }: SubagentSingleBlockProps) {
-  // The generic draft card and this specialized renderer share one cache key,
-  // so renderer/content promotion cannot reset a user's disclosure choice.
-  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(toolCall.id), prefs.autoExpandSubagentCalls);
+  // Single-child renderer promotion retains the generic draft card's key;
+  // parallel children need independent disclosure identities.
+  const subagentCallId = multipleResults ? `${toolCall.id}:${index}` : toolCall.id;
+  const [open, setOpen] = useCollapsibleOpen(toolDisclosureKey(subagentCallId), prefs.autoExpandSubagentCalls);
 
   // Source attribution for nested ask_user prompts: carry this subagent's
   // call id (matching the SDK's subagentCallId stamping), agent name, and
@@ -757,7 +758,6 @@ function SubagentSingleBlock({
   // nested transcript so ask_user prompts can label who is asking.
   const parentSubagentCtx = useContext(SubagentCallContext);
   const subagentDepth = (parentSubagentCtx?.depth ?? 0) + 1;
-  const subagentCallId = multipleResults ? `${toolCall.id}:${index}` : toolCall.id;
   // Nested (depth ≥ 2) subagents live inside a parent subagent's bounded
   // scroll region. A nested header/body establishing its own scroll container
   // creates nested-scroll confusion, so nested blocks use a free-flowing body
@@ -855,7 +855,8 @@ function SubagentSingleBlock({
   const askUserCtx = useContext(AskUserContext);
   const hasPendingAskUser = !open && Object.values(askUserCtx.pendingRequests).some(
     (req) => (req.method === 'select' || req.method === 'confirm' || req.method === 'input') && req.subagentCallId != null
-      && (req.subagentCallId === toolCall.id || req.subagentCallId.startsWith(`${toolCall.id}:`)),
+      && (req.subagentCallId === toolCall.id
+        || (multipleResults ? req.subagentCallId === subagentCallId : req.subagentCallId.startsWith(`${toolCall.id}:`))),
   );
 
   const costFit = useSubagentCostFit(`${activityNow}:${singleResult.agent}:${singleResult.selectedModel ?? singleResult.model}:${singleResult.thinkingLevel}:${activity?.diagnostic}:${status}:${displayCost?.cost}:${singleResult.retryCount}`);
