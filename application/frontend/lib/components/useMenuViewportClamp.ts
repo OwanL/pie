@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { wasMenuDismissedByTab } from './useMenuListeners';
 
 export interface UseMenuViewportClampOptions {
   x: number;
@@ -14,6 +15,7 @@ export interface UseMenuViewportClampOptions {
 export interface UseMenuViewportClampResult {
   ref: { current: HTMLDivElement | null };
   pos: { top: number; left: number };
+  prepareTabExit: () => void;
 }
 
 /**
@@ -73,10 +75,11 @@ export function useMenuViewportClamp({
       previousFocusRef.current = document.activeElement as HTMLElement | null;
       triggerRef.current = triggerEl ?? previousFocusRef.current;
     }
+    const menuNode = ref.current;
     const firstItem = ref.current?.querySelector<HTMLButtonElement>('button.context-menu-item:not(:disabled)');
     firstItem?.focus();
     return () => {
-      if (!restoreFocusOnClose) return;
+      if (!restoreFocusOnClose || wasMenuDismissedByTab(menuNode)) return;
       triggerRef.current?.focus?.({ preventScroll: true });
       // Some context-menu targets are layout wrappers rather than focusable
       // controls. Do not leave focus on a removed menu in that case.
@@ -94,5 +97,28 @@ export function useMenuViewportClamp({
     ref.current?.querySelector<HTMLButtonElement>('button.context-menu-item:not(:disabled)')?.focus();
   }, [refocusKey]);
 
-  return { ref, pos };
+  const prepareTabExit = () => {
+    // Use the same logical anchor and fallback as ordinary focus restoration.
+    // This must happen during keydown, before native sequential navigation.
+    triggerRef.current?.focus?.({ preventScroll: true });
+    if (document.activeElement !== triggerRef.current) {
+      previousFocusRef.current?.focus?.({ preventScroll: true });
+    }
+    // A pointer-opened menu can have a nonfocusable wrapper as its trigger
+    // and no previously focused control. Give native Tab a starting point in
+    // that wrapper's document position without permanently changing tab order.
+    const trigger = triggerRef.current;
+    if (ref.current?.contains(document.activeElement) && trigger) {
+      const tabIndex = trigger.getAttribute('tabindex');
+      trigger.setAttribute('tabindex', '-1');
+      trigger.focus({ preventScroll: true });
+      if (tabIndex === null) trigger.removeAttribute('tabindex');
+      else trigger.setAttribute('tabindex', tabIndex);
+    }
+    // Portalled menu items must not become the next native Tab destination.
+    // Inert also covers any nested menus without enumerating focusable DOM.
+    ref.current?.setAttribute('inert', '');
+  };
+
+  return { ref, pos, prepareTabExit };
 }

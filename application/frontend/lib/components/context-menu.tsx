@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useMenuListeners } from './useMenuListeners';
-import { useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import type { ChatPrefs } from '../../../lib/protocol/index.js';
 import {
@@ -45,7 +45,19 @@ export interface ContextMenuState {
   triggerEl: HTMLElement | null;
 }
 
-export function ContextMenu({
+const openingKeys = new WeakMap<ContextMenuState, number>();
+let nextOpeningKey = 0;
+
+export function ContextMenu(props: Parameters<typeof ContextMenuOpening>[0]) {
+  let key = openingKeys.get(props.menu);
+  if (key === undefined) {
+    key = ++nextOpeningKey;
+    openingKeys.set(props.menu, key);
+  }
+  return <ContextMenuOpening key={key} {...props} />;
+}
+
+function ContextMenuOpening({
   menu,
   prefs,
   onSetPrefs,
@@ -64,7 +76,7 @@ export function ContextMenu({
   onTruncateAfter: (sessionPath: string, messageId: string) => void;
   onClose: () => void;
 }) {
-  const { ref, pos } = useMenuViewportClamp({
+  const { ref, pos, prepareTabExit } = useMenuViewportClamp({
     x: menu.x,
     y: menu.y,
     triggerEl: menu.triggerEl,
@@ -79,13 +91,22 @@ export function ContextMenu({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [copyFailure, setCopyFailure] = useState(false);
   const meta = menu.message ?? null;
-  const copyAndClose = (text: string) => {
+  const copyRequest = useRef(0);
+  const mounted = useRef(true);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const copy = (text: string, closeOnSuccess: boolean) => {
+    const request = ++copyRequest.current;
     setCopyFailure(false);
     void writeTextToClipboard(text).then((copied) => {
-      if (copied) onClose();
-      else setCopyFailure(true);
+      if (!mounted.current || request !== copyRequest.current) return;
+      if (copied && closeOnSuccess) onClose();
+      else if (!copied) setCopyFailure(true);
     });
   };
+  const copyAndClose = (text: string) => copy(text, true);
   const copyFailureNotice = copyFailure ? (
     <div role="status" aria-live="polite" style="padding:4px 10px;color:var(--panel-muted);font-size:11px">
       Couldn’t copy to clipboard.
@@ -100,15 +121,12 @@ export function ContextMenu({
     if (event.key.toLowerCase() !== 'c') return;
 
     event.preventDefault();
-    setCopyFailure(false);
-    void writeTextToClipboard(menu.selectionText).then((copied) => {
-      if (!copied) setCopyFailure(true);
-    });
+    copy(menu.selectionText, false);
   };
 
   // Transcript menus intentionally remain open during scrolling: the menu is
   // fixed and transcript auto-scroll is part of normal streaming behavior.
-  useMenuListeners(ref, onClose, { onKey: onMenuKey });
+  useMenuListeners(ref, onClose, { onKey: onMenuKey, onTabExit: prepareTabExit });
 
   const style = `position:fixed;top:${pos.top}px;left:${pos.left}px`;
 

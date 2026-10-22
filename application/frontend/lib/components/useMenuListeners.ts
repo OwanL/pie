@@ -9,6 +9,8 @@ export interface UseMenuListenersOptions {
   onOutsideClick?: (e: MouseEvent) => void;
   /** Optional key customization. Prevent the event to override navigation. */
   onKey?: (e: KeyboardEvent) => void;
+  /** Re-anchor native Tab navigation before deferred dismissal. */
+  onTabExit?: () => void;
   /** Called on window resize. Default: close. */
   onResize?: () => void;
   /** Close on a capture-phase scroll event. Defaults to false. */
@@ -31,6 +33,12 @@ interface MenuListenerEntry {
 // lets a document-level Escape listener close only that overlay, even though
 // every menu owns its own dismissal lifecycle.
 const menuStack: MenuListenerEntry[] = [];
+const tabDismissedMenus = new WeakSet<HTMLElement>();
+
+/** Tab owns the next focus destination; unmount must not restore the trigger. */
+export function wasMenuDismissedByTab(node: HTMLElement | null): boolean {
+  return node !== null && tabDismissedMenus.has(node);
+}
 
 function enabledItems(ref: MenuRef): HTMLButtonElement[] {
   const root = ref.current;
@@ -79,6 +87,7 @@ export function useMenuListeners(
     const entry: MenuListenerEntry = { ref, latest };
     menuStack.push(entry);
 
+    let tabTimer: ReturnType<typeof setTimeout> | undefined;
     const onOutside = (event: MouseEvent) => {
       const current = entry.latest.current;
       if (current.options?.onOutsideClick) {
@@ -102,6 +111,17 @@ export function useMenuListeners(
         current.onClose();
         return;
       }
+      if (event.key === 'Tab') {
+        if (ref.current) tabDismissedMenus.add(ref.current);
+        current.options?.onTabExit?.();
+        // Let native Tab run from the logical trigger before unmounting.
+        // The context-menu hook makes its overlay inert synchronously.
+        if (tabTimer === undefined) tabTimer = setTimeout(() => {
+          tabTimer = undefined;
+          entry.latest.current.onClose();
+        }, 0);
+        return;
+      }
       current.options?.onKey?.(event);
       if (!event.defaultPrevented) moveFocus(event, ref);
     };
@@ -123,6 +143,7 @@ export function useMenuListeners(
     // a given menu opts into scroll dismissal.
     window.addEventListener('scroll', onScroll, true);
     return () => {
+      if (tabTimer !== undefined) clearTimeout(tabTimer);
       const index = menuStack.indexOf(entry);
       if (index >= 0) menuStack.splice(index, 1);
       document.removeEventListener('mousedown', onOutside);
