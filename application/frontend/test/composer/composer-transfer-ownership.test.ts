@@ -50,6 +50,9 @@ for (const source of ['paste', 'drop'] as const) {
         } else if (transition === 'selection-gap') {
           activeRef.current = '/B';
         }
+        if (transition === 'session' || transition === 'round-trip' || transition === 'disconnect') {
+          assert.equal(composer.transferPending, false);
+        }
         await act(async () => { resolve(new Uint8Array([1]).buffer); await completion; });
         const additions = messages.filter((message) => message.type === 'addComposerInput');
         assert.equal(additions.length, transition === 'same' ? 1 : 0);
@@ -85,6 +88,7 @@ for (const reject of [false, true]) {
       let first!: Promise<void>;
       let second!: Promise<void>;
       act(() => { first = composer.applyComposerTransfer(transfer(), 'paste'); second = composer.applyComposerTransfer(transfer(), 'drop'); });
+      assert.equal(composer.transferPending, true);
       act(() => composer.sendCurrentText());
       assert.equal(composer.sendAsRetry(), false);
       assert.equal(composer.text, 'prompt');

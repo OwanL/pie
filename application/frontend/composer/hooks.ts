@@ -16,6 +16,7 @@ import {
   extractComposerInputs,
   formatComposerTransferError,
   hasClipboardFilePayload,
+  shouldHandleComposerDrop,
 } from './file-drop';
 
 export { useComposerIndicators } from './use-composer-indicators';
@@ -899,12 +900,12 @@ export function useComposerDragDrop({
   }, []);
 
   const handleDrop = useCallback((event: DragEvent) => {
-    if (!canAcceptComposerTransfer(event.dataTransfer)) {
+    setIsDragActive(false);
+    if (!shouldHandleComposerDrop(event.dataTransfer)) {
       return;
     }
 
     event.preventDefault();
-    setIsDragActive(false);
     void applyComposerTransfer(event.dataTransfer, 'drop');
   }, [applyComposerTransfer]);
 

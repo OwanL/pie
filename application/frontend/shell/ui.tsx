@@ -282,6 +282,7 @@ function ComposerView({
     handlePaste,
     handleBeforeInput,
     applyComposerTransfer,
+    transferPending,
     submitting,
   } = useComposerInput({
     dictation,
@@ -385,6 +386,7 @@ function ComposerView({
   const canSend = commandsAvailable
     && !dictationActive(visibleDictation)
     && !operationBlocksSend
+    && !transferPending
     && (text.trim().length > 0 || pendingComposerInputs.length > 0 || continueMode)
     && !submitting.current;
   const attachmentSummary = useMemo(
