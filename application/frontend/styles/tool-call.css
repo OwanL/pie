@@ -782,13 +782,22 @@
 }
 
 .subagent-agent-trigger {
+  display: inline-flex;
   min-width: 0;
-  flex: 0 0 auto;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
+.subagent-agent-trigger > .pie-tooltip-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .subagent-agent-name {
+  display: block;
   min-width: 0;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1058,6 +1067,11 @@
   flex-direction: column;
   /* Match the main transcript's inter-message gap for visual parity */
   gap: 6px;
+}
+
+.subagent-messages-scroll[tabindex="0"]:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: -1px;
 }
 
 /* A nested (depth ≥ 2) subagent's body flows naturally inside the parent's

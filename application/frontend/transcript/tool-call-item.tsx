@@ -669,6 +669,9 @@ function SubagentMessages({
       <div
         class={cx('subagent-messages-scroll', isNested && 'subagent-messages-scroll-nested')}
         ref={scrollRef}
+        role={isNested ? undefined : 'region'}
+        tabIndex={isNested ? undefined : 0}
+        aria-label={isNested ? undefined : `${singleResult.agent} subagent transcript`}
         onScroll={handleScroll}
         style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}
       >
@@ -930,15 +933,24 @@ function SubagentSingleBlock({
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
         <div class="subagent-header-content" ref={costFit.contentRef}>
-          <RawToolInspector toolCall={toolCall} triggerClassName="subagent-agent-trigger">
-            <span
-              class="subagent-agent-name transcript-header-title-mono"
-              tabIndex={0}
-              aria-label={`Inspect ${singleResult.agent} model exchange`}
-            >
-              {singleResult.agent}
-            </span>
-          </RawToolInspector>
+          <span
+            class="subagent-agent-trigger"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Enter' || event.key === ' ') event.preventDefault();
+            }}
+          >
+            <RawToolInspector toolCall={toolCall}>
+              <span
+                class="subagent-agent-name transcript-header-title-mono"
+                tabIndex={0}
+                aria-label={`Inspect ${singleResult.agent} model exchange`}
+              >
+                {singleResult.agent}
+              </span>
+            </RawToolInspector>
+          </span>
           {activity && (
             <span class={cx('subagent-activity', status === 'idle' && 'subagent-activity-idle')} title={activity.diagnostic} aria-label={activity.diagnostic}>
               <span class="subagent-activity-dot" aria-hidden="true" />

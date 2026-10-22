@@ -525,7 +525,21 @@ test('nested agent-name inspection is safely unavailable when the exact child se
   assert.doesNotMatch(host.textContent ?? '', /Recon complete|recon the codebase/);
 });
 
-test('agent-name raw inspection retains focus, click and keyboard header expansion and dismissal', async () => {
+test('long agent names retain their full accessible inspection label and bounded ellipsis styling', async () => {
+  const toolCall = requestedAgentToolCall('worker');
+  const agent = 'worker'.repeat(100);
+  (toolCall.result as any).details.results[0].agent = agent;
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  assert.equal(agentName().textContent, agent);
+  assert.equal(agentName().getAttribute('aria-label'), `Inspect ${agent} model exchange`);
+  const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
+  assert.match(css, /\.subagent-agent-trigger\s*\{[^}]*max-width:\s*100%[^}]*flex:\s*0 1 auto/);
+  assert.match(css, /\.subagent-agent-trigger > \.pie-tooltip-trigger\s*\{[^}]*min-width:\s*0[^}]*max-width:\s*100%/);
+  assert.match(css, /\.subagent-agent-name\s*\{[^}]*flex:\s*0 1 auto[^}]*text-overflow:\s*ellipsis/);
+  assert.match(css, /\.subagent-messages-scroll\[tabindex="0"\]:focus-visible\s*\{[^}]*outline:/);
+});
+
+test('agent-name raw inspection retains focus and dismissal without toggling the header', async () => {
   const messages = captureRequests();
   const toolCall = requestedAgentToolCall('reviewer');
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
@@ -537,16 +551,18 @@ test('agent-name raw inspection retains focus, click and keyboard header expansi
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
   assert.equal(header.getAttribute('aria-expanded'), 'false', 'focus alone does not expand');
-  for (const [key, expanded] of [['Enter', 'true'], [' ', 'false']] as const) {
+  for (const key of ['Enter', ' ', 'Escape']) {
     if (host.style.display === 'none') await openDetailsTooltip(name);
     const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
     act(() => { name.dispatchEvent(event); });
-    assert.equal(header.getAttribute('aria-expanded'), expanded);
+    assert.equal(header.getAttribute('aria-expanded'), 'false');
     assert.equal(host.style.display, 'none', 'activation dismisses inspection');
     assert.equal(document.activeElement, name);
     assert.equal(event.defaultPrevented, true);
   }
   for (const expanded of ['true', 'false']) {
+    act(() => header.click());
+    assert.equal(header.getAttribute('aria-expanded'), expanded);
     const clickHost = await openDetailsTooltip(name);
     act(() => { name.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     assert.equal(header.getAttribute('aria-expanded'), expanded);
@@ -851,6 +867,14 @@ test('nested subagent: depth-1 body is a bounded scroll region, nested body flow
   assert.equal(scrolls.length, 2, 'outer + inner scroll element');
   assert.ok(!scrolls[0].classList.contains('subagent-messages-scroll-nested'), 'depth-1 body is a bounded scroll region');
   assert.ok(scrolls[1].classList.contains('subagent-messages-scroll-nested'), 'nested body flows (subagent-messages-scroll-nested)');
+  assert.equal(scrolls[0].getAttribute('role'), 'region');
+  assert.equal(scrolls[0].getAttribute('aria-label'), 'worker subagent transcript');
+  assert.equal(scrolls[0].getAttribute('tabindex'), '0');
+  act(() => (scrolls[0] as HTMLElement).focus());
+  assert.equal(document.activeElement, scrolls[0]);
+  for (const attribute of ['role', 'aria-label', 'tabindex']) {
+    assert.equal(scrolls[1].getAttribute(attribute), null);
+  }
 });
 
 test('nested subagent: no resize handles on the nested (free-flowing) body', () => {
