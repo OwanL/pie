@@ -359,7 +359,7 @@ test('composer uses the configured initial textarea rows and defaults to one', (
   assert.doesNotMatch(emptySessionHtml, /panel-chip-indicator-time/);
 });
 
-test('composer actions use compact icons in clear, stop, dictation, and queue order', () => {
+test('composer actions keep secondary controls icon-only and the primary queue intent visible', () => {
   const html = renderToString(h(ComposerActions, {
     busy: true,
     hasQueuedMessages: true,
@@ -380,7 +380,12 @@ test('composer actions use compact icons in clear, stop, dictation, and queue or
   ]);
   assert.match(html, /aria-label="Start dictation"[^>]*disabled[^>]*data-action="dictation"/);
   assert.equal((html.match(/<svg/g) ?? []).length, 4);
-  assert.doesNotMatch(html, />\s*(?:Clear queued|Stop|Queue|Send)\s*</);
+  const secondaryButtons = [...html.matchAll(/<button\b[^>]*data-action="(?:clear-queue|stop|dictation)"[^>]*>([\s\S]*?)<\/button>/g)];
+  assert.equal(secondaryButtons.length, 3);
+  for (const [, content] of secondaryButtons) {
+    assert.equal(content.replace(/<[^>]*>/g, '').trim(), '', 'secondary controls remain icon-only');
+  }
+  assert.match(html, /data-action="queue"[^>]*>[\s\S]*<span aria-hidden="true">Queue<\/span><\/button>/);
   assert.doesNotMatch(html, /Attach file|paperclip/i);
 });
 

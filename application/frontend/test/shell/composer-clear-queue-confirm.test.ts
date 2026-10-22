@@ -121,18 +121,34 @@ test('reading a dropped image explains the temporary send block and clears when 
   props.activeModelId = 'images';
   props.activeProvider = 'test';
   props.availableModels = [{ id: 'images', name: 'Images', provider: 'test', reasoning: false, inputKinds: ['text', 'image'] }];
+  let sends = 0;
+  const added: unknown[] = [];
+  props.onSend = () => { sends++; return true; };
+  props.onAddInput = (input) => { added.push(input); };
   let resolve!: (buffer: ArrayBuffer) => void;
-  const transfer = { files: [{ name: 'image.gif', type: 'image/gif', size: 1,
+  const transfer = { types: ['Files'], getData: () => '', files: [{ name: 'image.gif', type: 'image/gif', size: 1,
     arrayBuffer: () => new Promise<ArrayBuffer>(done => { resolve = done; }) }] } as unknown as DataTransfer;
   act(() => render(h(Composer, props), container));
-  const drop = new Event('drop', { bubbles: true, cancelable: true });
+  // happy-dom lacks the native ondrop property, so Preact registers onDrop
+  // case-sensitively as "Drop" rather than the browser's lowercase "drop".
+  const drop = new Event('Drop', { bubbles: true, cancelable: true });
   Object.defineProperty(drop, 'dataTransfer', { value: transfer });
   await act(async () => { container.querySelector('.composer-shell')!.dispatchEvent(drop); });
+  assert.equal(typeof resolve, 'function', 'the drop starts the delayed image read');
   assert.match(container.querySelector('.composer-send-progress')!.textContent!, /Reading attachments/);
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-action-submit')!.disabled, true);
+  act(() => {
+    container.querySelector<HTMLButtonElement>('.composer-action-submit')!.click();
+    container.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  assert.equal(sends, 0, 'neither click nor Enter dispatches while the image is being read');
+  assert.equal(added.length, 0);
   await act(async () => { resolve(new Uint8Array([1]).buffer); await new Promise(done => setTimeout(done, 0)); });
   assert.equal(container.querySelector('.composer-send-progress'), null);
+  assert.equal(added.length, 1, 'the completed image is accepted');
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-action-submit')!.disabled, false);
+  act(() => container.querySelector<HTMLButtonElement>('.composer-action-submit')!.click());
+  assert.equal(sends, 1);
 });
 
 test('stop and reconciliation show transient progress without allowing dispatch', () => {
