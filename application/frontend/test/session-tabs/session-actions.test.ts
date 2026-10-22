@@ -60,6 +60,18 @@ test('session tab actions omit session history and retain new session', () => {
     assert.equal(container.querySelector('[aria-label="Open session history"]'), null);
     assert.equal(container.querySelector('[role="dialog"][aria-label="Session history"]'), null);
     assert.ok(container.querySelector('[aria-label="New session"]'));
+
+    const actionsButton = container.querySelector<HTMLButtonElement>('[aria-label="Open session session actions"]');
+    assert.ok(actionsButton);
+    actionsButton.getBoundingClientRect = () => ({
+      x: 70, y: 80, left: 70, top: 80, right: 90, bottom: 90, width: 20, height: 10,
+      toJSON: () => ({}),
+    });
+    act(() => actionsButton.click());
+    const menu = container.querySelector<HTMLElement>('.session-tab-context-menu');
+    assert.ok(menu, 'activating session actions opens the existing context menu');
+    assert.match(menu.getAttribute('style') ?? '', /top:85px;left:80px/,
+      'menu activation is grounded at the actions button instead of click coordinates 0,0');
   } finally {
     act(() => render(null, container));
     container.remove();
