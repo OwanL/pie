@@ -265,6 +265,40 @@ for (const finish of ['send', 'cancel', 'unmount', 'reject'] as const) {
   });
 }
 
+test('InlineEditor retains batch read errors after a later success and clears on a fresh batch', async () => {
+  act(() => render(h(InlineEditor, {
+    queued: false, initialText: 'draft', initialInputs: [], capturedHeight: null,
+    onConfirm: () => {}, onCancel: () => {},
+  }), container));
+  const textarea = container.querySelector('textarea')!;
+  const paste = (promise: Promise<ArrayBuffer>) => {
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: {
+      files: [{ name: 'image.gif', type: 'image/gif', arrayBuffer: () => promise }],
+    } });
+    textarea.dispatchEvent(event);
+  };
+  let rejectFirst!: () => void;
+  let resolveSecond!: (value: ArrayBuffer) => void;
+  const first = new Promise<ArrayBuffer>((_resolve, reject) => { rejectFirst = reject; });
+  const second = new Promise<ArrayBuffer>((resolve) => { resolveSecond = resolve; });
+  act(() => { paste(first); paste(second); });
+  await act(async () => {
+    rejectFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(container.querySelector('[role="status"]')?.textContent ?? '', /Cannot attach image\.gif/);
+  await act(async () => {
+    resolveSecond(new ArrayBuffer(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(container.querySelector('[role="status"]')?.textContent ?? '', /Cannot attach image\.gif/);
+  act(() => { paste(Promise.resolve(new ArrayBuffer(1))); });
+  assert.equal(container.querySelector('[role="status"]'), null);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.equal(container.querySelector('[role="status"]'), null);
+});
+
 for (const moved of [false, true]) {
   test('editor removal restores shell only while focus is owned: ' + moved, async () => {
     const shell = document.createElement('div');

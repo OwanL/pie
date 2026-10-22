@@ -36,9 +36,13 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [pendingTransfers, setPendingTransfers] = useState(0);
-  const transferOwner = useRef({ active: true, pending: 0, tail: Promise.resolve() });
+  const createTransferOwner = () => ({
+    active: true, pending: 0, tail: Promise.resolve(),
+    feedback: { files: 0, fileMessage: '', uri: '', read: '' },
+  });
+  const transferOwner = useRef(createTransferOwner());
   useLayoutEffect(() => {
-    const owner = { active: true, pending: 0, tail: Promise.resolve() };
+    const owner = createTransferOwner();
     transferOwner.current = owner;
     setPendingTransfers(0);
     setAttachmentError(null);
@@ -115,9 +119,16 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
   const applyTransfer = useCallback(async (dataTransfer: DataTransfer | null, source: 'drop' | 'paste') => {
     const owner = transferOwner.current;
     if (!owner.active || submittedRef.current) return;
+    if (owner.pending === 0) {
+      owner.feedback = { files: 0, fileMessage: '', uri: '', read: '' };
+      setAttachmentError(null);
+    }
+    const feedback = owner.feedback;
+    const publishFeedback = () => setAttachmentError(
+      [feedback.read, feedback.uri, feedback.fileMessage].filter(Boolean).join(' ') || null,
+    );
     owner.pending += 1;
     setPendingTransfers(owner.pending);
-    setAttachmentError(null);
     // Start extraction immediately (DataTransfer is event-scoped), but commit
     // results in gesture order even when later reads finish first.
     const result = extractComposerInputs(dataTransfer, source).then(
@@ -128,13 +139,22 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, queue
       const outcome = await result;
       if (!owner.active) return;
       if (outcome.error) {
-        setAttachmentError('Could not attach files. Please try again.');
+        feedback.read = 'Could not read the selected attachment. Try again.';
       } else {
         const { inputs: drafts, rejectedFiles } = outcome.value;
         const materialized = drafts.map((draft) => ({ ...draft, id: createUuidV4() }) as ComposerInput);
         setInputs((prev) => [...prev, ...materialized]);
-        setAttachmentError(formatComposerTransferError(rejectedFiles));
+        const invalidUris = rejectedFiles.filter((value) => /^file:/i.test(value));
+        if (invalidUris.length > 0) feedback.uri = formatComposerTransferError(invalidUris) ?? '';
+        const rejectedBlobs = rejectedFiles.filter((value) => !/^file:/i.test(value));
+        feedback.files += rejectedBlobs.length;
+        if (rejectedBlobs.length > 0) {
+          feedback.fileMessage = feedback.files === 1
+            ? formatComposerTransferError(rejectedBlobs) ?? ''
+            : `Cannot attach ${feedback.files} files: arbitrary file blobs are not supported yet. Attach filesystem paths instead.`;
+        }
       }
+      publishFeedback();
     }).finally(() => {
       owner.pending -= 1;
       if (owner.active) setPendingTransfers(owner.pending);
