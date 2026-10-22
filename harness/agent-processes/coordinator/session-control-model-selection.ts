@@ -7,6 +7,8 @@ import {
   type ThinkingLevel,
 } from "../../tools/subagent/bucket-selector.js";
 
+import type { SubagentBucketChoices } from "../../../lib/subagent-bucket-policy.js";
+
 export { parseBucketConfig };
 
 /** Runtime declarations deliberately require no Pi SDK types. */
@@ -25,6 +27,7 @@ export interface SessionControlModelSelectionInput {
   callerModel: { provider: string; id: string };
   callerThinkingLevel?: ThinkingLevel;
   subagentProviderChoices: Readonly<Record<string, boolean>>;
+  subagentBucketChoices?: Readonly<SubagentBucketChoices>;
   providerToggles: Readonly<Record<string, boolean>>;
   availableModels: readonly SessionControlModel[];
   isEligible?: (model: SessionControlModel) => boolean;
@@ -69,7 +72,7 @@ export function selectSessionControlModel(input: SessionControlModelSelectionInp
   const selection = selectModel(
     input.bucket, assignments, [], new Set(byKey.keys()), undefined,
     callerAllowed ? callerKey : "", input.callerThinkingLevel,
-    undefined, undefined, support,
+    undefined, undefined, support, input.subagentBucketChoices,
   );
   const model = byKey.get(selection.modelId);
   if (!model) {

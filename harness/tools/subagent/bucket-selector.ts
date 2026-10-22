@@ -8,6 +8,8 @@
 
 export * from "./bucket-config.js";
 export * from "./provider-toggles.js";
+export * from "./bucket-toggles.js";
+import { DEFAULT_SUBAGENT_BUCKET_CHOICES, resolveEnabledSubagentBucket, type SubagentBucketChoices, type SubagentBucketTier } from "../../../lib/subagent-bucket-policy.js";
 
 import type {
   ThinkingLevel,
@@ -113,6 +115,8 @@ export function selectModel(
   capacityAvailableModelIds?: Set<string>,
   requirementQualifiedModelIds?: Set<string>,
   runtimeThinkingSupport?: RuntimeThinkingSupport,
+  choices: Readonly<SubagentBucketChoices> = DEFAULT_SUBAGENT_BUCKET_CHOICES,
+  permittedBuckets?: ReadonlySet<SubagentBucketTier>,
 ): BucketSelection {
   const filterBucket = (bucketPool: BucketAssignment[]): BucketAssignment[] => {
     let pool = bucketPool.filter((assignment) => isAssignmentSupported(assignment, modelConfig, runtimeThinkingSupport));
@@ -127,8 +131,12 @@ export function selectModel(
   };
 
   const tiersDescending = ["frontier", "medium", "small"] as const;
-  const requestedTierIndex = tiersDescending.indexOf(bucket as (typeof tiersDescending)[number]);
-  const candidateBuckets = requestedTierIndex >= 0 ? tiersDescending.slice(requestedTierIndex) : [bucket];
+  const isTier = tiersDescending.includes(bucket as SubagentBucketTier);
+  const effective = isTier ? resolveEnabledSubagentBucket(bucket as SubagentBucketTier, choices, permittedBuckets) : bucket;
+  const requestedTierIndex = tiersDescending.indexOf(effective as SubagentBucketTier);
+  const candidateBuckets = effective === undefined ? [] : requestedTierIndex >= 0
+    ? tiersDescending.slice(requestedTierIndex).filter((tier) => choices[tier] && (!permittedBuckets || permittedBuckets.has(tier)))
+    : [effective];
 
   for (const candidateBucket of candidateBuckets) {
     const filtered = filterBucket(assignments[candidateBucket as keyof BucketAssignments] ?? []);
@@ -148,7 +156,7 @@ export function selectModel(
   return {
     modelId: fallbackId,
     thinkingLevel: callerThinkingLevel,
-    bucket,
+    bucket: effective ?? bucket,
     pool: [],
     fallback: true,
   };

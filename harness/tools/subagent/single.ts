@@ -529,6 +529,7 @@ export async function executeSingleTask(args: {
 			rootSessionPath: runtimeCtx.rootSessionPath ?? ctx.sessionManager?.getSessionFile?.() ?? undefined,
 			rootSessionId: runtimeCtx.rootSessionId ?? args.parentSessionId,
 			subagentProviderToggles: runtimeCtx.subagentProviderToggles,
+			subagentBucketChoices: runtimeCtx.subagentBucketChoices,
 			processPermitScope: runtimeCtx.processPermitScope,
 			lineage: extendSubagentLineage(runtimeCtx.lineage, identity.childId, identity.spawningToolCallId, identity.attemptId),
 			analyticsCapture: runtimeCtx.analyticsCapture,

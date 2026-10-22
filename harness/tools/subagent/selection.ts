@@ -9,9 +9,9 @@ import {
 	type SimpleModelConfig,
 	type NestedAllowedBuckets,
 	ALL_NESTED_BUCKETS_ALLOWED,
-	downgradeBucketForNested,
 } from "./bucket-config.js";
 import { selectModel } from "./bucket-selector.js";
+import { DEFAULT_SUBAGENT_BUCKET_CHOICES, SUBAGENT_BUCKET_TIERS, resolveEnabledSubagentBucket, type SubagentBucketChoices, type SubagentBucketTier } from "../../../lib/subagent-bucket-policy.js";
 import { getCapacityAvailableModelIds } from "./provider-capacity.js";
 import type { RuntimeModelRef } from "./runtime-provenance.js";
 
@@ -104,6 +104,7 @@ export interface SelectionContext {
 	 *  may use. Read once from the env mirror (PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON).
 	 *  All-true (the default) leaves behaviour unchanged. */
 	nestedAllowedBuckets: NestedAllowedBuckets;
+	subagentBucketChoices?: Readonly<SubagentBucketChoices>;
 	/** Per-call hard model requirements (e.g. image input). Undefined/empty
 	 *  preserves current selection behaviour. */
 	modelRequirements?: ModelRequirements;
@@ -271,9 +272,13 @@ export async function resolveModel(
 	// every subagent in the tree.
 	let bucket = requestedBucket;
 	let bucketDowngradeReason: string | undefined;
-	if (childDepth !== undefined && childDepth >= 1) {
-		const allowed = selectionCtx.nestedAllowedBuckets ?? ALL_NESTED_BUCKETS_ALLOWED;
-		const downgraded = downgradeBucketForNested(bucket, allowed);
+	const choices = selectionCtx.subagentBucketChoices ?? DEFAULT_SUBAGENT_BUCKET_CHOICES;
+	const nested = childDepth !== undefined && childDepth >= 1;
+	const allowed = nested ? selectionCtx.nestedAllowedBuckets ?? ALL_NESTED_BUCKETS_ALLOWED : ALL_NESTED_BUCKETS_ALLOWED;
+	const permittedBuckets = new Set(SUBAGENT_BUCKET_TIERS.filter((tier) => allowed[tier]));
+	if (SUBAGENT_BUCKET_TIERS.includes(bucket as SubagentBucketTier)) {
+		const effective = resolveEnabledSubagentBucket(bucket as SubagentBucketTier, choices, permittedBuckets);
+		const downgraded = { bucket: effective ?? "", downgraded: effective !== bucket };
 		if (downgraded.downgraded) {
 			if (downgraded.bucket === "") {
 				if (!callerEligible) return eligibilityError(bucket);
@@ -302,7 +307,7 @@ export async function resolveModel(
 					...requirementProvenance,
 				};
 			}
-			bucketDowngradeReason = `Nested subagent (depth ${childDepth}) requested bucket "${requestedBucket}" but it is not allowed for nested subagents; downgraded to "${downgraded.bucket}".`;
+			bucketDowngradeReason = `Requested bucket "${requestedBucket}" is disabled or not permitted for this subagent; resolved to "${downgraded.bucket}".`;
 			bucket = downgraded.bucket;
 		}
 	}
@@ -330,6 +335,8 @@ export async function resolveModel(
 		capacityAvailableModelIds,
 		requirementQualifiedModelIds,
 		selectionCtx.runtimeThinkingSupport,
+		choices,
+		permittedBuckets,
 	);
 	const selection = selected;
 
@@ -346,7 +353,7 @@ export async function resolveModel(
 		modelOverride: selection.modelId,
 		thinkingLevel: selection.thinkingLevel,
 		selection,
-		bucket,
+		bucket: selection.bucket,
 		bucketDowngradeReason,
 		...requirementProvenance,
 	};

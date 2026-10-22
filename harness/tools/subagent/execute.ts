@@ -242,6 +242,8 @@ export function resolveTreeSubagentProviderToggles(
 	return resolved;
 }
 
+import { resolveTreeSubagentBucketChoices } from "./bucket-toggles.js";
+
 /** Loads simple model config, reads user-configured buckets, and builds provider/model allowlists. */
 function setupModelSelection(
 	ctx: ToolContext,
@@ -339,6 +341,7 @@ function setupModelSelection(
 		registryModels: availableModels,
 		modelFamilies: loadModelFamilies(path.join(CONFIG_ROOT, "models.json")),
 		nestedAllowedBuckets: readNestedAllowedBuckets(),
+		subagentBucketChoices: resolveTreeSubagentBucketChoices(runtimeCtx, sessionPath),
 		modelRequirements,
 		callerModelInput: ctx.model?.input as ReadonlyArray<ModelInputKind> | undefined,
 		requirementQualifiedModelIds,

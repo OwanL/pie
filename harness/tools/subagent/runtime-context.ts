@@ -34,6 +34,7 @@ export interface SubagentRuntimeContext {
 	 * sessions have in-memory session managers, so they must inherit this policy
 	 * rather than trying to resolve a per-chat override from their own path. */
 	subagentProviderToggles?: Record<string, boolean>;
+	subagentBucketChoices?: Readonly<import("../../../lib/subagent-bucket-policy.js").SubagentBucketChoices>;
 	/** One process-wide permit held for the complete root-tree lifetime. */
 	processPermitScope?: ProcessPermitScope;
 	/** Immutable producer lineage of the currently executing ancestor attempt. */
