@@ -18,7 +18,7 @@ test('Tab can anchor at a nonfocusable context target without changing its tab o
       onEditMessage: () => {}, onTruncateAfter: () => {}, onClose: () => {},
     }), container));
     const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    act(() => document.activeElement!.dispatchEvent(event));
+    act(() => { document.activeElement!.dispatchEvent(event); });
     assert.equal(event.defaultPrevented, false);
     assert.equal(document.activeElement, trigger);
     assert.equal(trigger.hasAttribute('tabindex'), false);

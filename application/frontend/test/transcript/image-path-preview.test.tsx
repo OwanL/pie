@@ -93,7 +93,7 @@ beforeEach(() => {
       rootRef={rootRef}
       sessionPath="/sessions/a.jsonl"
       workingDirectory="/workspace"
-      postMessage={(message) => posts.push(message)}
+      postMessage={(message) => { posts.push(message); }}
     />,
     renderTarget,
   ));
@@ -146,7 +146,7 @@ function readyFocusedPreview(): HTMLImageElement {
 
 test('Escape returns actual preview focus to its connected transcript anchor', () => {
   const image = readyFocusedPreview();
-  act(() => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+  act(() => { image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.equal(host.querySelector('.image-path-preview'), null);
   assert.equal(document.activeElement, anchor);
   act(() => { timers.fireOptionalByDelay(350); });
@@ -166,7 +166,7 @@ test('pointer preview Escape does not take focus from another control', () => {
   host.appendChild(other);
   act(() => other.focus());
   startPointerPreview();
-  act(() => other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+  act(() => { other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.equal(host.querySelector('.image-path-preview'), null);
   assert.equal(document.activeElement, other);
 });
@@ -177,7 +177,7 @@ test('session dismissal does not take focus from another control', () => {
   host.appendChild(other);
   act(() => other.focus());
   act(() => render(<ImagePathPreview rootRef={rootRef} sessionPath="/sessions/b.jsonl"
-    workingDirectory="/workspace" postMessage={message => posts.push(message)} />, renderTarget));
+    workingDirectory="/workspace" postMessage={message => { posts.push(message); }} />, renderTarget));
   assert.equal(host.querySelector('.image-path-preview'), null);
   assert.equal(document.activeElement, other);
 });
@@ -193,11 +193,11 @@ test('real preview Enter retires preview; first Escape closes real PhotoSwipe an
   await act(async () => render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} />, viewerMount));
   try {
     const image = readyFocusedPreview();
-    await act(async () => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    await act(async () => { image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
     await act(async () => {});
     assert.ok(!host.querySelector('.image-path-preview'), 'opening viewer retires preview');
     assert.ok(document.querySelector('.pswp'));
-    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     // PhotoSwipe defers its close teardown even with animations disabled.
     await act(async () => { timers.fireOptionalByDelay(0); });
     assert.ok(!document.querySelector('.pswp'), 'Escape closes viewer');

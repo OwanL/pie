@@ -68,7 +68,7 @@ test(`${shiftKey ? 'Shift+Tab' : 'Tab'} exits a multi-item menu from its logical
     assert.ok(container.querySelectorAll('button').length > 1);
     assert.equal(document.activeElement?.textContent, 'Copy');
     const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
-    act(() => document.activeElement!.dispatchEvent(event));
+    act(() => { document.activeElement!.dispatchEvent(event); });
     assert.equal(event.defaultPrevented, false);
     assert.equal(document.activeElement, trigger, 'keydown must re-anchor before native Tab');
     assert.ok(container.querySelector('[role="menu"]')!.hasAttribute('inert'));

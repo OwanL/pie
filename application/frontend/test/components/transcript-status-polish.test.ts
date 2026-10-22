@@ -42,6 +42,7 @@ test('history compaction keeps provenance expanded, summary lazy, and header com
   document.body.appendChild(container);
   try {
     act(() => render(h(CompactionSummary, {
+      collapsibleKey: 'transcript-status-polish:provenance',
       summary: '**Preserved** context',
       details: { reason: 'overflow', tokensBefore: 100, estimatedTokensAfter: 50,
         modelId: 'model-long', provider: 'provider', thinkingLevel: 'medium', durationMs: 4200 },
@@ -74,7 +75,8 @@ test('history compaction missing metrics stay truthful, never invented', () => {
     [{ reason: 'manual', estimatedTokensAfter: 50 }, '— → 50'],
     [{ reason: 'manual', durationMs: 0 }, 'Compaction summary'],
   ] as const) {
-    const html = renderToString(h(CompactionSummary, { summary: 'hidden body', details }));
+    const key = `transcript-status-polish:missing-metrics:${expected}`;
+    const html = renderToString(h(CompactionSummary, { collapsibleKey: key, summary: 'hidden body', details }));
     const container = document.createElement('div');
     container.innerHTML = html;
     assert.ok(container.querySelector('.compaction-summary-header')?.textContent?.includes(expected));
