@@ -12,8 +12,10 @@
  * `.subagent-messages`).
  */
 
+import { writeTextToClipboard } from '../lib/components/clipboard';
+
 /** A scoped, nonvisual live region; never append feedback to copied code. */
-export function announceCopyResult(control: Element, ok: boolean): void {
+export function announceCopyResult(control: Element, ok: boolean, isCurrent = () => true): void {
   const scope = control.parentElement;
   if (!scope) return;
   let status = scope.querySelector<HTMLElement>('[data-copy-status]');
@@ -25,13 +27,19 @@ export function announceCopyResult(control: Element, ok: boolean): void {
     scope.appendChild(status);
   }
   status.textContent = '';
-  window.setTimeout(() => { if (status?.isConnected) status.textContent = ok ? 'Copied to clipboard' : 'Copy failed'; }, 0);
+  window.setTimeout(() => {
+    if (control.isConnected && status?.isConnected && isCurrent()) {
+      status.textContent = ok ? 'Copied to clipboard' : 'Copy failed';
+    }
+  }, 0);
 }
 
 interface CodeBlockClickHandler {
   selector: string;
   handle: (target: HTMLElement, btn: Element) => void;
 }
+
+const copyAttempts = new WeakMap<Element, object>();
 
 const CODE_BLOCK_CLICK_HANDLERS: CodeBlockClickHandler[] = [
   {
@@ -40,17 +48,20 @@ const CODE_BLOCK_CLICK_HANDLERS: CodeBlockClickHandler[] = [
       const code = btn.closest('.code-block')?.querySelector('code');
       const text = code?.textContent ?? '';
       if (text) {
+        const attempt = {};
+        copyAttempts.set(btn, attempt);
+        const isCurrent = () => btn.isConnected && copyAttempts.get(btn) === attempt;
         void (async () => {
-          try {
-            if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-            await navigator.clipboard.writeText(text);
-            btn.classList.add('copied');
-            announceCopyResult(btn, true);
-            window.setTimeout(() => btn.classList.remove('copied'), 1200);
-          } catch {
+          const ok = await writeTextToClipboard(text);
+          if (!isCurrent()) return;
+          btn.classList.toggle('copied', ok);
+          btn.textContent = ok ? 'Copied' : 'Copy failed';
+          announceCopyResult(btn, ok, isCurrent);
+          window.setTimeout(() => {
+            if (!isCurrent()) return;
             btn.classList.remove('copied');
-            announceCopyResult(btn, false);
-          }
+            btn.textContent = 'Copy';
+          }, 1200);
         })();
       }
     },
