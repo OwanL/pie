@@ -192,7 +192,7 @@ test('expanded Model exchange reuses inspection without closing details and Esca
     const inspector = document.querySelector('.tool-call-raw-inspector');
     assert.match(inspector?.textContent ?? '', /Model exchange/);
     assert.ok(container.querySelector('.tool-call-body-wrap'));
-    act(() => trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    act(() => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     assert.equal(document.activeElement, trigger);
     assert.ok(container.querySelector('.tool-call-body-wrap'));
   } finally { window.setTimeout = original; }
