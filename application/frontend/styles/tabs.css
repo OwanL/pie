@@ -422,7 +422,8 @@ body.session-tab-dragging {
 /* z-index 1 keeps both interactive children above the shell backdrop */
 
 .session-tab-main,
-.session-tab-close {
+.session-tab-close,
+.session-tab-actions {
   position: relative;
   z-index: 1;
 }
@@ -527,6 +528,14 @@ body.session-tab-dragging {
   min-width: 40px;
   max-width: 40px;
   flex: 0 0 40px;
+}
+
+/* The active pinned chip shares its fixed-width row between its avatar and the
+   compact actions trigger; inactive pinned chips retain their 40px footprint. */
+.session-tab.pinned.active {
+  min-width: 64px;
+  max-width: 64px;
+  flex-basis: 64px;
 }
 
 .session-tab.pinned .session-tab-main {
@@ -638,10 +647,11 @@ body.session-tab-dragging {
   text-align: center;
 }
 
-/* ── Close / delayed-create retry buttons ───────────────────────────────── */
+/* ── Compact per-tab controls ───────────────────────────────────────────── */
 
 .session-tab-retry,
-.session-tab-close {
+.session-tab-close,
+.session-tab-actions {
   width: 20px;
   height: 20px;
   border: 1px solid transparent;
@@ -657,7 +667,7 @@ body.session-tab-dragging {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Hidden by default; revealed when the tab is active or focused */
+  /* Close/retry controls stay quiet until needed; active-tab actions are visible. */
   opacity: 0.38;
   transition:
     background var(--panel-transition-fast),
@@ -665,6 +675,11 @@ body.session-tab-dragging {
     color var(--panel-transition-fast),
     opacity var(--panel-transition-fast),
     transform var(--panel-duration-fast) var(--panel-ease-spring);
+}
+
+.session-tab-actions {
+  font-size: 15px;
+  opacity: 0.88;
 }
 
 .session-tab-retry {
@@ -688,7 +703,9 @@ body.session-tab-dragging {
 .session-tab-retry:hover,
 .session-tab-retry:focus-visible,
 .session-tab-close:hover,
-.session-tab-close:focus-visible {
+.session-tab-close:focus-visible,
+.session-tab-actions:hover,
+.session-tab-actions:focus-visible {
   background: var(--panel-control-hover);
   border-color: var(--session-tab-outline);
   color: var(--panel-foreground);

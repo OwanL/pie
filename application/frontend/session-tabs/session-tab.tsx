@@ -8,6 +8,7 @@ import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { handleContextMenuKeyRequest } from '../lib/components/context-menu-key';
 import { AgentIcon } from './icons';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
+import type { SessionTabContextTarget } from './types';
 
 export function getSessionTabTooltip(agentCreated?: boolean, existingTooltip?: string): string | undefined {
   if (agentCreated !== true) return existingTooltip;
@@ -36,7 +37,7 @@ export interface SessionTabProps {
   hasDeferredTriggers: boolean;
   /** True when a pending deferred trigger includes a timer. */
   hasDeferredTimer: boolean;
-  onContextMenu: (event: MouseEvent, tabPath: string) => void;
+  onContextMenu: (event: MouseEvent, tabPath: string, target?: SessionTabContextTarget, triggerEl?: HTMLElement | null) => void;
   onPointerDown: (event: PointerEvent, sourceIndex: number, sourcePath: string) => void;
   onClick: (tabPath: string) => void;
   onClose: (tabPath: string) => void;
@@ -165,6 +166,22 @@ export const SessionTabPresentation = memo(function SessionTabPresentation({
           </>
         )}
       </button>
+      {isActive && (
+        <button
+          class="session-tab-actions"
+          type="button"
+          aria-label={`${label} session actions`}
+          title="Session actions"
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onContextMenu(event as MouseEvent, tabPath, { kind: 'tab' }, event.currentTarget as HTMLElement);
+          }}
+        >
+          ⋯
+        </button>
+      )}
       {isCreationDelayed && createOperationId && onRetryCreate && (
         <button
           class="session-tab-retry"

@@ -152,6 +152,37 @@ function contextMenu(container: HTMLElement) {
   act(() => { tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); });
 }
 
+test('active tab actions target the clicked session and reflect host pin updates', () => fixture((container) => {
+  const secondPath = '/sessions/two.jsonl';
+  const secondSession = { path: secondPath, name: 'The right-hand session' } as SessionSummary;
+  const sessions = [session, secondSession];
+  const selected: string[] = [];
+  const toggled: string[] = [];
+  const props = { ...tabsProps, sessions, openTabPaths: [path, secondPath], activeSession: secondSession,
+    onSelect: (selectedPath: string) => { selected.push(selectedPath); },
+    onTogglePin: (toggledPath: string) => { toggled.push(toggledPath); } };
+  const publish = (pinnedTabPaths: string[] = []) => act(() => render(h(SessionTabs, { ...props, pinnedTabPaths }), container));
+
+  publish();
+  const activeActions = container.querySelector<HTMLButtonElement>('[aria-label="The right-hand session session actions"]');
+  assert.ok(activeActions);
+  assert.equal(container.querySelector('[aria-label="A quiet session session actions"]'), null,
+    'inactive tabs have no permanent action button');
+  act(() => { activeActions.focus(); activeActions.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); });
+  assert.equal(document.activeElement, activeActions, 'keyboard activation stays outside tab-list navigation');
+  assert.deepEqual(selected, []);
+  act(() => activeActions.click());
+  assert.equal(container.querySelector('[role="menu"]')?.getAttribute('aria-label'), 'The right-hand session tab actions');
+  assert.equal(container.querySelector('.session-tab-context-title')?.textContent, 'The right-hand session');
+  assert.deepEqual(selected, [], 'opening tab actions does not select a tab');
+
+  act(() => button(container, 'Pin tab').click());
+  assert.deepEqual(toggled, [secondPath], 'menu action addresses the tab that opened it');
+  publish([secondPath]);
+  assert.equal(container.querySelector(`[data-tab-path="${secondPath}"]`)?.getAttribute('data-pinned-item'), 'true');
+  assert.deepEqual(selected, [], 'host pin update does not change the active session');
+}));
+
 test('idle-only guard covers pending, running, billable, primary operations and deferred targets', () => fixture((container) => {
   assert.equal(getSnoozeBlockedReason(path, idle, false, false, false, false), undefined);
   assert.match(getSnoozeBlockedReason('__pending__:one', idle, false, false, false, false) ?? '', /pending/i);

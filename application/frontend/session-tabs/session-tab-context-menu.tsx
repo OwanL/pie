@@ -143,6 +143,7 @@ export function SessionTabContextMenu({
       style={`position:fixed;top:${pos.top}px;left:${pos.left}px`}
       onMouseDown={(e) => e.stopPropagation()}
     >
+      <div class="session-tab-context-title" title={ctxLabel}>{ctxLabel}</div>
       <button
         class="context-menu-item"
         role="menuitem"
