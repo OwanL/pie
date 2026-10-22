@@ -66,8 +66,14 @@ test('real tool disclosure pins only while focused; editor pin and saved expansi
     onEditRequest() {}, onEditConfirm() {}, onEditCancel() {}, onOpenFile() {}, onContextMenu() {},
   };
   const paint = async () => {
-    act(() => render(h(TranscriptVirtualList, props as never), root));
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Flush mount effects (including disclosure-cache synchronization) before
+    // interacting. A wall-clock delay can leave those effects pending until
+    // the click's act(), where they overwrite the newly toggled state.
+    await act(() => render(h(TranscriptVirtualList, props as never), root));
+    // The virtualizer publishes its measured range on the next animation frame.
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
   };
   try {
     await paint();
