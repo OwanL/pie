@@ -121,6 +121,55 @@ test('mapTranscript strips the matched envelope in SDK text-array content and pr
   assert.deepEqual(entry, before);
 });
 
+test('mapTranscript strips a complete metadata prompt envelope only when its exact suffix matches', () => {
+  const sender = {
+    ...createSessionControlSender({ sessionId: 'source-session', identityFallback: false }),
+    message: { sentAt: 100, deliveredAt: 200, expectReply: true },
+  };
+  const body = 'message with delivery metadata';
+  const envelope = formatSessionControlPrompt(body, sender);
+  const transcript = mapTranscript([{
+    ...userEntry,
+    message: sdkAgentMessage(envelope, sender),
+  }]);
+  const mismatchedEnvelope = `${envelope.slice(0, -1)}!`;
+  const mismatched = mapTranscript([{
+    ...userEntry,
+    message: sdkAgentMessage(mismatchedEnvelope, sender),
+  }]);
+
+  assert.equal(transcript[0]?.markdown, body);
+  assert.equal(mismatched[0]?.markdown, mismatchedEnvelope);
+});
+
+test('mapTranscript matches metadata envelope suffix across split text parts atomically', () => {
+  const sender = {
+    ...createSessionControlSender({ sessionId: 'source-session', identityFallback: false }),
+    message: { sentAt: 100, deliveredAt: 200, expectReply: true },
+  };
+  const body = 'split metadata envelope';
+  const envelope = formatSessionControlPrompt(body, sender);
+  const splitAt = envelope.length - 8;
+  const exact = mapTranscript([{
+    ...userEntry,
+    message: sdkAgentMessage([
+      { type: 'text', text: envelope.slice(0, splitAt) },
+      { type: 'text', text: envelope.slice(splitAt) },
+    ], sender),
+  }]);
+  const mismatchedEnvelope = `${envelope.slice(0, -1)}!`;
+  const mismatched = mapTranscript([{
+    ...userEntry,
+    message: sdkAgentMessage([
+      { type: 'text', text: mismatchedEnvelope.slice(0, splitAt) },
+      { type: 'text', text: mismatchedEnvelope.slice(splitAt) },
+    ], sender),
+  }]);
+
+  assert.equal(exact[0]?.markdown, body);
+  assert.equal(mismatched[0]?.markdown, mismatchedEnvelope);
+});
+
 test('mapTranscript strips a matched envelope from legacy sidecar attribution only', () => {
   const sender = createSessionControlSender({ sessionId: 'legacy-source', identityFallback: false }, 'Legacy source');
   const body = 'legacy message';

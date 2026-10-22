@@ -8,6 +8,7 @@ import {
 import {
   isSessionControlSender,
   sessionControlPromptPrefix,
+  sessionControlPromptSuffix,
   type SessionControlSender,
 } from '../../agent-processes/lib/rpc/session-control-attribution.js';
 import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY } from '../../agent-processes/workers/agent-message-provenance.js';
@@ -233,25 +234,49 @@ function stripSessionControlPromptEnvelope(
 ): MessageLike['content'] {
   const prefix = sender ? sessionControlPromptPrefix(sender) : undefined;
   if (!prefix || content === undefined) return content;
+  const suffix = sender ? sessionControlPromptSuffix(sender) : undefined;
   if (typeof content === 'string') {
-    return content.startsWith(prefix) ? content.slice(prefix.length) : content;
+    return content.startsWith(prefix)
+        && (suffix === undefined || content.endsWith(suffix))
+      ? content.slice(prefix.length, suffix === undefined ? undefined : -suffix.length)
+      : content;
   }
   if (!Array.isArray(content)) return content;
 
-  let matched = 0;
   const replacements = new Map<number, string | undefined>();
-  for (let index = 0; index < content.length && matched < prefix.length; index += 1) {
+  let matchedPrefix = 0;
+  for (let index = 0; index < content.length && matchedPrefix < prefix.length; index += 1) {
     const part = content[index];
     if (part?.type !== 'text' || typeof part.text !== 'string') return content;
     if (part.text.length === 0) continue;
 
-    const remaining = prefix.length - matched;
+    const remaining = prefix.length - matchedPrefix;
     const comparedLength = Math.min(part.text.length, remaining);
-    if (part.text.slice(0, comparedLength) !== prefix.slice(matched, matched + comparedLength)) return content;
-    matched += comparedLength;
+    if (part.text.slice(0, comparedLength) !== prefix.slice(matchedPrefix, matchedPrefix + comparedLength)) return content;
+    matchedPrefix += comparedLength;
     replacements.set(index, part.text.length > comparedLength ? part.text.slice(comparedLength) : undefined);
   }
-  if (matched !== prefix.length) return content;
+  if (matchedPrefix !== prefix.length) return content;
+
+  if (suffix !== undefined) {
+    let matchedSuffix = 0;
+    for (let index = content.length - 1; index >= 0 && matchedSuffix < suffix.length; index -= 1) {
+      const part = content[index];
+      if (part?.type !== 'text' || typeof part.text !== 'string') return content;
+      const currentText = replacements.has(index) ? replacements.get(index) ?? '' : part.text;
+      if (currentText.length === 0) continue;
+
+      const remaining = suffix.length - matchedSuffix;
+      const comparedLength = Math.min(currentText.length, remaining);
+      const suffixStart = currentText.length - comparedLength;
+      if (currentText.slice(suffixStart) !== suffix.slice(suffix.length - matchedSuffix - comparedLength, suffix.length - matchedSuffix)) return content;
+      matchedSuffix += comparedLength;
+      replacements.set(index, currentText.length > comparedLength
+        ? currentText.slice(0, suffixStart)
+        : undefined);
+    }
+    if (matchedSuffix !== suffix.length) return content;
+  }
 
   return content.flatMap((part, index) => {
     if (!replacements.has(index)) return [part];

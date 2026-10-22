@@ -38,11 +38,11 @@ const run = async (tool: ReturnType<typeof createSessionControlTool>, params: un
 
 test('title requests map onto the bridge and mutations get distinct generated keys', async () => {
   const { calls, tool } = harness();
-  await run(tool, { action: 'message', title: 'Refactor auth', prompt: 'wake the other session' });
+  await run(tool, { action: 'message', title: 'Refactor auth', prompt: 'wake the other session', expectReply: false });
   await run(tool, { action: 'read', title: 'Refactor auth', direction: 'older', cursor: 'opaque', maxCharacters: 8000 });
   await run(tool, { action: 'close', title: 'Refactor auth (2)', delete: true });
   assert.deepEqual(calls.map(withoutKey), [
-    { kind: 'session.control', action: 'message', payload: { title: 'Refactor auth', prompt: 'wake the other session' } },
+    { kind: 'session.control', action: 'message', payload: { title: 'Refactor auth', prompt: 'wake the other session', expectReply: false } },
     { kind: 'session.control', action: 'read', payload: { title: 'Refactor auth', direction: 'older', cursor: 'opaque', maxCharacters: 8000, includeToolCalls: false, includeReasoning: false } },
     { kind: 'session.control', action: 'close', payload: { title: 'Refactor auth (2)', delete: true } },
   ]);
@@ -54,13 +54,13 @@ test('settings, replies, and create patches preserve payloads', async () => {
   const settings = { model: { provider: 'openai', id: 'gpt-test' }, reasoning: 'high', autonomousMode: true, subagentProviderChoices: { anthropic: false }, disabledSystemPromptEntries: ['prompt-a'] };
   await run(tool, { action: 'settings.get', title: 'Research' });
   await run(tool, { action: 'settings.set', title: 'Research', settings });
-  await run(tool, { action: 'message', replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer' });
+  await run(tool, { action: 'message', replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer', expectReply: false });
   const { model: _model, ...createSettings } = settings;
   await run(tool, { action: 'create', title: 'New worker', bucket: 'medium', prompt: 'start this task', settings: createSettings });
   assert.deepEqual(calls.map(withoutKey), [
     { kind: 'session.control', action: 'settings.get', payload: { title: 'Research' } },
     { kind: 'session.control', action: 'settings.set', payload: { title: 'Research', settings } },
-    { kind: 'session.control', action: 'message', payload: { replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer' } },
+    { kind: 'session.control', action: 'message', payload: { replyTo: 'pie-reply:v1:eyJpZGVudGl0eSJ9', prompt: 'answer', expectReply: false } },
     { kind: 'session.control', action: 'create', payload: { title: 'New worker', bucket: 'medium', prompt: 'start this task', settings: createSettings } },
   ]);
 });
@@ -83,6 +83,8 @@ test('invalid create, targeting, inapplicable fields and attempted key replay do
     { action: 'message', title: 'A', prompt: 'hi', settings: {} },
     { action: 'close', title: 'A', prompt: 'ignored' },
     { action: 'message', title: 'A', prompt: 'hi', requestKey: 'caller-replay' },
+    { action: 'message', title: 'A', prompt: 'hi', expectReply: 'yes' },
+    { action: 'create', title: 'A', bucket: 'small', expectReply: false },
     { action: 'read', title: 'A', limit: 4 },
     { action: 'read', self: false },
     { action: 'message', self: true, replyTo: 'ref', prompt: 'hi' },
@@ -106,7 +108,7 @@ test('invalid create, targeting, inapplicable fields and attempted key replay do
 test('unnamed self targets remain usable, including subagent read of its owning primary', async () => {
   const { calls, tool } = harness();
   for (const params of [
-    { action: 'read', self: true }, { action: 'message', self: true, prompt: 'body' },
+    { action: 'read', self: true }, { action: 'message', self: true, prompt: 'body', expectReply: false },
     { action: 'settings.get', self: true }, { action: 'settings.set', self: true, settings: { reasoning: 'low' } },
     { action: 'close', self: true },
   ]) assert.equal((await run(tool, params)).isError, false);
@@ -144,7 +146,7 @@ test('read renders the same compact serialization counted by its character budge
 test('prompt bound is UTF-8 bytes for both create and message', async () => {
   const { calls, tool } = harness();
   for (const action of ['create', 'message']) {
-    const base = action === 'create' ? { action, title: 'A', bucket: 'small' } : { action, title: 'A' };
+    const base = action === 'create' ? { action, title: 'A', bucket: 'small' } : { action, title: 'A', expectReply: true };
     assert.equal((await run(tool, { ...base, prompt: 'é'.repeat(32 * 1024) })).isError, false);
     assert.equal((await run(tool, { ...base, prompt: 'é'.repeat(32 * 1024 + 1) })).isError, true);
     assert.equal((await run(tool, { ...base, prompt: 'x'.repeat(64 * 1024 + 1) })).isError, true);
@@ -169,7 +171,7 @@ test('lost mutation acknowledgements return key and exact lookup without suggest
   const tool = createSessionControlTool(async body => { sent.push(body as Request); throw new Error('request cancelled'); });
   for (const params of [
     { action: 'create', bucket: 'frontier', title: 'Disposable' },
-    { action: 'message', title: 'A', prompt: 'body' },
+    { action: 'message', title: 'A', prompt: 'body', expectReply: false },
     { action: 'settings.set', title: 'A', settings: { reasoning: 'low' } },
     { action: 'close', title: 'A' }, { action: 'cleanup' },
   ]) {
@@ -186,7 +188,7 @@ test('lost mutation acknowledgements return key and exact lookup without suggest
 
 test('known rejection and partial/unknown phase outcomes are errors, not unconditional success', async () => {
   const rejected = createSessionControlTool(async () => ({ kind: 'session.control.result', requestId: 'rejected', ok: false, error: { code: 'SESSION_CONTROL_FAILED', message: 'Known preflight rejection', retryable: false } }));
-  const failure = await run(rejected, { action: 'message', title: 'A', prompt: 'body' });
+  const failure = await run(rejected, { action: 'message', title: 'A', prompt: 'body', expectReply: false });
   assert.equal(failure.isError, true);
   assert.equal(failure.details.outcome, undefined);
   for (const value of [
@@ -249,6 +251,7 @@ test('public schema and guidance reflect approved access and actions', () => {
   assert.equal('limit' in SessionControlParameters.properties, false);
   assert.equal('path' in SessionControlParameters.properties, false);
   assert.match(SessionControlParameters.properties.replyTo.description!, /mutually exclusive with title/);
+  assert.equal(SessionControlParameters.properties.expectReply.type, 'boolean');
   assert.ok(tool.promptGuidelines?.includes('Prefer cheaper subagents for large-output inspection; use bounded reads for small checks.'));
   assert.ok(tool.promptGuidelines?.includes('Before cleanup, check for owned sessions the user is still using; close sessions individually if any should remain open'));
   assert.ok(tool.promptGuidelines?.includes('Message decisions, blockers, interface changes, and final findings; omit routine progress and acknowledgements'));

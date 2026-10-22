@@ -6,6 +6,8 @@ import {
   createSessionReplyReference,
   formatSessionControlPrompt,
   isSessionControlSender,
+  sessionControlPromptSuffix,
+  stampSessionControlDelivery,
   parseSessionReplyReference,
   sessionControlPromptPrefix,
   SESSION_REPLY_REFERENCE_MAX_BYTES,
@@ -49,6 +51,33 @@ test('canonical transcript-removal prefix is available only for a validated send
   assert.equal(sessionControlPromptPrefix(sender), formatSessionControlPrompt('', sender));
   assert.equal(sessionControlPromptPrefix({ ...sender, replyReference: 'pie-reply:v1:YWJj' }), undefined);
   assert.equal(sessionControlPromptPrefix(undefined), undefined);
+});
+
+test('sender metadata rejects malformed timestamps and completion reply loops', () => {
+  const sender = createSessionControlSender({ sessionId: 'session-123', identityFallback: false }, 'Sender', {
+    sentAt: 100, deliveredAt: 200, expectReply: true,
+  });
+  for (const timestamp of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '100']) {
+    assert.equal(isSessionControlSender({ ...sender, message: { ...sender.message, sentAt: timestamp } }), false, `sentAt=${timestamp}`);
+    assert.equal(isSessionControlSender({ ...sender, message: { ...sender.message, deliveredAt: timestamp } }), false, `deliveredAt=${timestamp}`);
+  }
+  assert.equal(isSessionControlSender({ ...sender, message: { ...sender.message, kind: 'completion', expectReply: true } }), false);
+  assert.equal(isSessionControlSender({ ...sender, message: { ...sender.message, kind: 'completion', expectReply: false } }), true);
+  assert.equal(stampSessionControlDelivery(sender, 999), sender, 'a valid existing timestamp is preserved');
+  assert.throws(() => stampSessionControlDelivery(sender, -1));
+});
+
+test('reply guidance distinguishes no-reply from the explicit session_control recipe', () => {
+  const noReply = createSessionControlSender({ sessionId: 'no-reply', identityFallback: false }, undefined, {
+    sentAt: 1, expectReply: false,
+  });
+  assert.equal(sessionControlPromptSuffix(noReply), '\n\n[Pie cross-session reply guidance: No acknowledgement requested for this message; it does not cancel an outstanding task or completion handoff.]');
+
+  const expectsReply = createSessionControlSender({ sessionId: 'expects-reply', identityFallback: false }, undefined, {
+    sentAt: 1, expectReply: true,
+  });
+  assert.equal(sessionControlPromptSuffix(expectsReply), `\n\n[Pie cross-session reply guidance: If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(expectsReply.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.]`);
+  assert.ok(formatSessionControlPrompt('body', expectsReply).includes('session_control with'));
 });
 
 test('reply references and sender DTOs reject malformed, unbounded, or changed identities', () => {

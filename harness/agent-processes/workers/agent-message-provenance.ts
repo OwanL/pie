@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 
 import { isAgentSessionMessageLocalId } from '../lib/rpc/message-contract.js';
-import { isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
+import { sessionControlPromptPrefix, formatSessionControlPrompt, stripSessionControlPrompt, stampSessionControlDelivery, isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import type { SessionContext } from '../coordinator/server-types.js';
 import { FENCED_ENTRY_ID, type MutableSdkSessionManager } from '../../session-storage/ownership/session-manager-fence.js';
 
@@ -28,8 +28,40 @@ export function attachAgentMessageProvenance(
         if (role !== 'user' || !active || !isAgentSessionMessageLocalId(active.agentMessageLocalId)) {
           return target.appendMessage(message);
         }
-        const sender = isSessionControlSender(active.coordinatorAttribution)
+        let sender = isSessionControlSender(active.coordinatorAttribution)
           ? active.coordinatorAttribution : undefined;
+        if (sender?.message && sender.message.deliveredAt === undefined) {
+          const stamped = stampSessionControlDelivery(sender, Date.now());
+          const content = record!.content;
+          if (typeof content === 'string') {
+            const body = stripSessionControlPrompt(content, sender);
+            if (body !== undefined) record!.content = formatSessionControlPrompt(body, stamped);
+          } else if (Array.isArray(content)) {
+            // The prefix may span adjacent text blocks. Replace only that
+            // authenticated prefix, preserving body/image ordering and objects.
+            const prefix = sessionControlPromptPrefix(sender)!;
+            const leading: { text: string }[] = [];
+            let joined = '';
+            for (const part of content) {
+              if (part?.type !== 'text' || typeof part.text !== 'string') break;
+              leading.push(part);
+              joined += part.text;
+              if (joined.length >= prefix.length) break;
+            }
+            const allText = content.filter((part) => part?.type === 'text' && typeof part.text === 'string')
+              .map((part) => part.text).join('');
+            if (joined.startsWith(prefix) && stripSessionControlPrompt(allText, sender) !== undefined) {
+              let remaining = prefix.length;
+              for (const [index, part] of leading.entries()) {
+                const consumed = Math.min(remaining, part.text.length);
+                remaining -= consumed;
+                part.text = `${index === 0 ? sessionControlPromptPrefix(stamped)! : ''}${part.text.slice(consumed)}`;
+              }
+            }
+          }
+          sender = stamped;
+          active.coordinatorAttribution = sender;
+        }
         // Never copy caller-controlled provenance from a user message. The
         // coordinator-authenticated request is the only source of this field.
         const persisted = {

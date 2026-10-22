@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { attachAgentMessageProvenance } from '../agent-message-provenance';
-import { createSessionControlSender } from '../../lib/rpc/session-control-attribution';
+import { createSessionControlSender, formatSessionControlPrompt } from '../../lib/rpc/session-control-attribution';
 import { mapTranscript, type SessionEntryLike } from '../../../session-storage/transcripts/transcript';
 import { FENCED_ENTRY_ID, type MutableSdkSessionManager } from '../../../session-storage/ownership/session-manager-fence';
 import type { SessionContext } from '../../coordinator/server-types';
@@ -88,6 +88,47 @@ test('authenticated sender is attached atomically at SDK append and restored on 
   assert.equal(reloaded[0]?.customType, 'agent-message');
   assert.deepEqual(reloaded[0]?.sender, sender);
   assert.equal(reloaded[0]?.markdown, 'request');
+});
+
+test('model-facing text-array content is stamped in place and deliveredAt persists through reload', (t) => {
+  const { manager, context, entries, disk } = fixture('stored', t);
+  const sender = createSessionControlSender(
+    { sessionId: 'authenticated-source', identityFallback: false }, 'Source',
+    { sentAt: 123, expectReply: true },
+  );
+  context.activeRequest!.coordinatorAttribution = sender;
+  const original = { role: 'user', content: [{ type: 'text', text: formatSessionControlPrompt('request body', sender) }] };
+
+  assert.equal(manager.appendMessage(original), 'entry-1');
+  assert.ok(original.content[0]!.text.includes('request body'));
+  assert.ok(original.content[0]!.text.includes('delivered at:'));
+  assert.ok(!original.content[0]!.text.includes('delivered at: pending'));
+  const reloaded = mapTranscript(disk().trim().split('\n').map((line) => JSON.parse(line) as SessionEntryLike));
+  assert.deepEqual(reloaded[0]?.sender, context.activeRequest!.coordinatorAttribution);
+  assert.equal(reloaded[0]?.sender?.message?.deliveredAt, entries[0]?.message &&
+    (entries[0].message as { pieAgentMessageProvenance?: { sender?: { message?: { deliveredAt?: number } } } }).pieAgentMessageProvenance?.sender?.message?.deliveredAt);
+  assert.equal(typeof reloaded[0]?.sender?.message?.deliveredAt, 'number');
+});
+
+test('existing delivery time and legacy sender metadata are never restamped', (t) => {
+  const { manager, context } = fixture('stored', t);
+  const delivered = createSessionControlSender(
+    { sessionId: 'authenticated-source', identityFallback: false }, 'Source',
+    { sentAt: 123, deliveredAt: 456, expectReply: true },
+  );
+  context.activeRequest!.coordinatorAttribution = delivered;
+  const alreadyDelivered = { role: 'user', content: [{ type: 'text', text: 'already delivered' }] };
+  manager.appendMessage(alreadyDelivered);
+  assert.equal(alreadyDelivered.content[0]!.text, 'already delivered');
+  assert.equal(context.activeRequest!.coordinatorAttribution, delivered);
+  assert.equal(delivered.message?.deliveredAt, 456);
+
+  const legacy = createSessionControlSender({ sessionId: 'authenticated-source', identityFallback: false }, 'Source');
+  context.activeRequest!.coordinatorAttribution = legacy;
+  const legacyInput = { role: 'user', content: [{ type: 'text', text: 'legacy input' }] };
+  manager.appendMessage(legacyInput);
+  assert.equal(legacyInput.content[0]!.text, 'legacy input');
+  assert.equal(context.activeRequest!.coordinatorAttribution, legacy);
 });
 
 test('queued sender is selected only at delivery and persists through reload', (t) => {

@@ -9,12 +9,20 @@ export interface SessionControlSenderIdentity {
 }
 
 /** Coordinator-authenticated sender carried with an agent-to-agent message. */
+export interface SessionControlMessage {
+  sentAt: number;
+  deliveredAt?: number;
+  expectReply: boolean;
+  kind?: 'completion';
+}
+
 export interface SessionControlSender {
   identity: SessionControlSenderIdentity;
   /** Assigned title from the coordinator title authority; absent while unnamed. */
   title?: string;
   /** Bounded identity-only reply address. It is not a secret or an operation token. */
   replyReference: string;
+  message?: SessionControlMessage;
 }
 
 function boundedUtf8(value: string, maxBytes: number): boolean {
@@ -49,6 +57,7 @@ export function createSessionReplyReference(identity: SessionControlSenderIdenti
 export function createSessionControlSender(
   identity: SessionControlSenderIdentity,
   assignedTitle?: string,
+  message?: SessionControlMessage,
 ): SessionControlSender {
   const title = assignedTitle?.trim();
   if (assignedTitle !== undefined && (!title || !boundedUtf8(title, TITLE_MAX_BYTES))) {
@@ -58,6 +67,7 @@ export function createSessionControlSender(
     identity: { sessionId: identity.sessionId, identityFallback: identity.identityFallback },
     ...(title ? { title } : {}),
     replyReference: createSessionReplyReference(identity),
+    ...(message ? { message } : {}),
   };
 }
 
@@ -85,12 +95,31 @@ export function parseSessionReplyReference(value: unknown): SessionControlSender
 export function isSessionControlSender(value: unknown): value is SessionControlSender {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const sender = value as Record<string, unknown>;
-  if (Object.keys(sender).some((key) => key !== 'identity' && key !== 'title' && key !== 'replyReference')) return false;
+  if (Object.keys(sender).some((key) => key !== 'identity' && key !== 'title' && key !== 'replyReference' && key !== 'message')) return false;
   if (!isIdentity(sender.identity) || typeof sender.replyReference !== 'string'
       || sender.replyReference !== createSessionReplyReference(sender.identity)) return false;
   if (sender.title !== undefined
       && (typeof sender.title !== 'string' || !boundedUtf8(sender.title, TITLE_MAX_BYTES))) return false;
+  if (sender.message !== undefined) {
+    const m = sender.message as Record<string, unknown>;
+    if (!m || typeof m !== 'object' || Array.isArray(m)
+        || Object.keys(m).some((key) => !['sentAt', 'deliveredAt', 'expectReply', 'kind'].includes(key))
+        || !validTimestamp(m.sentAt) || (m.deliveredAt !== undefined && !validTimestamp(m.deliveredAt))
+        || typeof m.expectReply !== 'boolean'
+        || (m.kind !== undefined && m.kind !== 'completion')
+        || (m.kind === 'completion' && m.expectReply)) return false;
+  }
   return true;
+}
+
+function validTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function stampSessionControlDelivery(sender: SessionControlSender, deliveredAt: number): SessionControlSender {
+  if (!isSessionControlSender(sender) || !validTimestamp(deliveredAt)) throw new Error('Invalid delivery attribution.');
+  if (!sender.message || sender.message.deliveredAt !== undefined) return sender;
+  return { ...sender, message: { ...sender.message, deliveredAt } };
 }
 
 /** Return the exact display-removable prefix for validated coordinator sender metadata.
@@ -102,6 +131,10 @@ export function sessionControlPromptPrefix(sender: unknown): string | undefined 
   const sourceTitle = sender.title
     ? `; assigned title: ${JSON.stringify(sender.title)}`
     : '; unnamed session';
+  if (sender.message) {
+    const m = sender.message;
+    return `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply reference: ${sender.replyReference}. Sent at: ${m.sentAt}; delivered at: ${m.deliveredAt ?? 'pending'}; expectReply: ${m.expectReply}${m.kind ? `; kind: ${m.kind}` : ''}.]\n\n`;
+  }
   return `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply reference: ${sender.replyReference}. Use this exact reference as message.replyTo if replying.]\n\n`;
 }
 
@@ -110,5 +143,24 @@ export function sessionControlPromptPrefix(sender: unknown): string | undefined 
 export function formatSessionControlPrompt(text: string, sender: SessionControlSender): string {
   const prefix = sessionControlPromptPrefix(sender);
   if (!prefix) throw new Error('Cannot format a message with invalid sender attribution.');
-  return `${prefix}${text}`;
+  return `${prefix}${text}${sessionControlPromptSuffix(sender) ?? ''}`;
+}
+
+export function sessionControlPromptSuffix(sender: unknown): string | undefined {
+  if (!isSessionControlSender(sender) || !sender.message) return undefined;
+  const guidance = sender.message.kind === 'completion'
+    ? 'Informational completion; no acknowledgement requested.'
+    : sender.message.expectReply
+      ? `If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(sender.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.`
+      : 'No acknowledgement requested for this message; it does not cancel an outstanding task or completion handoff.';
+  return `\n\n[Pie cross-session reply guidance: ${guidance}]`;
+}
+
+/** Exact authenticated envelope removal, never inferred from body text. */
+export function stripSessionControlPrompt(text: string, sender: unknown): string | undefined {
+  const prefix = sessionControlPromptPrefix(sender);
+  const suffix = sessionControlPromptSuffix(sender) ?? '';
+  if (!prefix || !text.startsWith(prefix) || (suffix && !text.endsWith(suffix))
+      || text.length < prefix.length + suffix.length) return undefined;
+  return text.slice(prefix.length, suffix ? -suffix.length : undefined);
 }
