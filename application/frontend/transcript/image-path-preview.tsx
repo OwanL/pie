@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { WebviewToHostMessage } from '../../lib/protocol/index.js';
 import { filePathPreviewRequestFromTarget } from './file-path-interactions';
 import { MARKDOWN_FILE_PATH_SELECTOR } from './markdown-file-path';
+import { isImageFocusRestoration, restoreImageFocus } from './image-focus-restoration';
 import {
   registerImagePreviewRequest,
   type ImagePreviewResult,
@@ -219,9 +220,8 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       }
       scheduleDismiss(owner);
     };
-    let returningFocus = false;
     const onFocusIn = (event: FocusEvent) => {
-      if (returningFocus) return;
+      if (isImageFocusRestoration(event.target)) return;
       const anchor = pathElement(event.target, root);
       if (anchor) {
         beginPreview(anchor, 'focus');
@@ -263,12 +263,7 @@ export function ImagePathPreview({ rootRef, sessionPath, workingDirectory, postM
       dismiss();
       // Ignore only focusin dispatched synchronously by this focus return.
       // A later genuine focus or pointer entry must still activate previews.
-      returningFocus = true;
-      try {
-        returnFocus?.focus();
-      } finally {
-        returningFocus = false;
-      }
+      restoreImageFocus(returnFocus);
     };
     const onViewerOpen = (event: Event) => {
       const owner = activeRef.current;

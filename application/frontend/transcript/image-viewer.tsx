@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import PhotoSwipe, { type PhotoSwipeOptions, type UIElementData } from 'photoswipe';
 import type { AppAdapter } from '../shell/app';
+import { restoreImageFocus } from './image-focus-restoration';
 import { clearImageViewer, inlineViewerSource, openImageViewer, subscribeImageViewer, type ViewerImage } from './image-viewer-store';
 
 /** PhotoSwipe requires intrinsic dimensions before a slide can load or zoom. */
@@ -58,7 +59,7 @@ export function ImageViewer({
     const previous = focusRestore.current;
     if (!previous?.isConnected) return;
     const active = document.activeElement as HTMLElement | null;
-    if (!active || active === document.body) previous.focus();
+    if (!active || active === document.body) restoreImageFocus(previous);
   };
 
   const registerViewerActions = (instance: PhotoSwipe) => {
@@ -129,7 +130,7 @@ export function ImageViewer({
         pswp.current = null; setViewerOpen(false);
         // Wait until PhotoSwipe has removed its focused dialog from the DOM.
         queueMicrotask(() => {
-          if (!pswp.current && trigger?.isConnected) trigger.focus();
+          if (!pswp.current) restoreImageFocus(trigger);
         });
       }
     });

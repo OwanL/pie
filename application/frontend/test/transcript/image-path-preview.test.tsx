@@ -195,12 +195,23 @@ test('real preview Enter retires preview; first Escape closes real PhotoSwipe an
     const image = readyFocusedPreview();
     await act(async () => image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
     await act(async () => {});
-    assert.equal(host.querySelector('.image-path-preview'), null);
+    assert.ok(!host.querySelector('.image-path-preview'), 'opening viewer retires preview');
     assert.ok(document.querySelector('.pswp'));
     await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
-    await act(async () => {});
-    assert.equal(document.querySelector('.pswp'), null);
-    assert.equal(document.activeElement, anchor);
+    // PhotoSwipe defers its close teardown even with animations disabled.
+    await act(async () => { timers.fireOptionalByDelay(0); });
+    assert.ok(!document.querySelector('.pswp'), 'Escape closes viewer');
+    assert.ok(document.activeElement === anchor, 'viewer restores anchor focus');
+    act(() => { timers.fireOptionalByDelay(350); });
+    assert.ok(!host.querySelector('.image-path-preview'), 'viewer focus restoration must not reopen preview');
+    assert.equal(posts.filter(post => post.type === 'requestImagePreview').length, 1);
+
+    const other = document.createElement('button');
+    host.appendChild(other);
+    act(() => other.focus());
+    act(() => anchor.focus());
+    act(() => timers.fireByDelay(350));
+    assert.ok(host.querySelector('.image-path-preview'), 'a genuine new focus still opens preview');
   } finally {
     await act(async () => render(null, viewerMount));
     viewerMount.remove();
