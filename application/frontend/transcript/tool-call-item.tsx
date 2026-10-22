@@ -43,7 +43,7 @@ import type { LiveSubagentDetailAddress } from '../../../harness/agent-processes
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
-import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-tail-preview';
+import { TurnActivityTailBody, isIdle, subagentPreviewTail, subagentSettledExcerpt } from './activity-tail-preview';
 import { CommittedToolLeaf } from './commit-registry';
 import { subagentDisplayCosts, type SubagentDisplayCost } from './subagent-cost';
 import type { TokenPricingResolver } from '../session-tabs/token-usage';
@@ -532,6 +532,14 @@ export function singleResultStatus(
   return 'completed';
 }
 
+export function subagentParallelProgress(results: SubagentSingleResult[], toolCallStatus: ToolCall['status']): string {
+  const counts = { idle: 0, running: 0, interrupted: 0, failed: 0, completed: 0 };
+  for (const result of results) counts[singleResultStatus(result, toolCallStatus, true)] += 1;
+  return [`${results.length} tasks`, ...(['completed', 'running', 'idle', 'failed', 'interrupted'] as const)
+    .filter((status) => counts[status] > 0)
+    .map((status) => `${counts[status]} ${status === 'idle' ? 'queued' : status}`)].join(' · ');
+}
+
 interface SubagentSingleBlockProps {
   singleResult: SubagentSingleResult;
   toolCall: ToolCall;
@@ -846,7 +854,9 @@ function SubagentSingleBlock({
   // Collapsed cards keep a compact task/live-output preview. Expanded cards
   // already show the full child transcript, so repeating the preview there is
   // redundant.
-  const previewTail = open
+  const live = status === 'running' || status === 'idle';
+  const settledExcerpt = !live ? subagentSettledExcerpt(singleResult, status === 'failed' || status === 'interrupted') : undefined;
+  const previewTail = open || !live
     ? undefined
     : subagentPreviewTail(
         singleResult,
@@ -984,13 +994,26 @@ function SubagentSingleBlock({
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
       </div>
+      <div class="subagent-task" title={singleResult.task}><span class="subagent-preview-label">Task</span>{singleResult.task}</div>
+      <div class="subagent-transcript-actions">
+        <button type="button" class="subagent-transcript-toggle" aria-expanded={open} aria-controls={renderBody ? bodyId : undefined} onClick={toggle}>
+          {open ? 'Hide transcript' : 'View transcript'}
+        </button>
+      </div>
       {previewTail && !renderBody && (
         <div
           class="subagent-live-preview"
           role="status"
           aria-label={`${singleResult.agent} ${status === 'running' || status === 'idle' ? 'live' : status} output`}
         >
-          <TurnActivityTailBody tail={previewTail} continuous />
+          <span class="subagent-preview-label">Live activity</span>
+          <TurnActivityTailBody tail={{ ...previewTail, label: previewTail.kind === 'tool' ? previewTail.label : undefined, inputLine: previewTail.kind === 'tool' ? previewTail.inputLine : undefined }} continuous />
+        </div>
+      )}
+      {!live && !renderBody && (
+        <div class="subagent-settled-preview">
+          <span class="subagent-preview-label">{status === 'completed' ? 'Answer excerpt' : 'Failure excerpt'}</span>
+          <div class="subagent-outcome">{settledExcerpt ?? (status === 'completed' ? 'No answer text available.' : errorDetail ?? 'No failure detail available.')}</div>
         </div>
       )}
       {renderBody && (
@@ -1095,6 +1118,7 @@ function SubagentBlock({
   if (multipleResults) {
     return (
       <div class="subagent-parallel-group">
+        <div class="subagent-parallel-progress" role="status">{subagentParallelProgress(result.results, toolCall.status)}</div>
         {result.results.map((singleResult, index) => (
           // Keep a stable wrapper per child while the group owns the single
           // shallow vertical batch marker outside each card's clipping boundary.

@@ -11,6 +11,7 @@ import {
   isIdle,
   mergeContinuousPreviewSource,
   subagentPreviewTail,
+  subagentSettledExcerpt,
   TurnActivityTailBody,
 } from '../../../transcript/activity-tail-preview';
 import type { SubagentSingleResult } from '../../../../../harness/agent-processes/workers/subagent-result';
@@ -25,6 +26,19 @@ function result(overrides: Partial<SubagentSingleResult> & { agent: string; task
     ...rest,
   } as SubagentSingleResult;
 }
+
+test('settled excerpts exclude stale live activity and unqualified finalOutput', () => {
+  const child = result({ agent: 'worker', task: 'fix', streamingText: 'old live text', finalOutput: 'recovery' });
+  assert.equal(subagentSettledExcerpt(child, false), undefined);
+  assert.equal(subagentSettledExcerpt({ ...child, transcriptCompacted: true }, false), 'recovery');
+  assert.equal(subagentSettledExcerpt({ ...child, messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Genuine answer' }] }] }, false), 'Genuine answer');
+});
+
+test('settled failure excerpts prefer real diagnostics and bound large text', () => {
+  const child = result({ agent: 'worker', task: 'fix', exitCode: 1, errorMessage: 'Provider unavailable', messages: [{ role: 'assistant', content: 'Partial work' }] });
+  assert.equal(subagentSettledExcerpt(child, true), 'Provider unavailable');
+  assert.equal(subagentSettledExcerpt({ ...child, errorMessage: 'x'.repeat(1000) }, true)?.length, 601);
+});
 
 test('continuous subagent preview appends source changes without clearing prior rows', () => {
   let stream = mergeContinuousPreviewSource({ accumulated: '', segment: '' }, 'Inspecting the event path');

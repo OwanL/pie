@@ -3,6 +3,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
+import { subagentSingleResultToChatMessages } from './subagent';
 import { summarizeSubagentToolCallInput } from './tool-call-summary-model';
 import { formatToolResult } from './tool-result-format.js';
 import { cx } from '../lib/components/cx';
@@ -526,6 +527,17 @@ function latestToolActivity(result: SubagentSingleResult): LatestToolActivity | 
     }
   }
   return undefined;
+}
+
+/** Settled excerpts use the same conversion as the transcript: finalOutput is
+ * recovery text only for a compacted transcript, never a success fallback. */
+export function subagentSettledExcerpt(result: SubagentSingleResult, failed: boolean): string | undefined {
+  const failure = failed ? [result.errorMessage, result.stderr].filter((text) => text?.trim()).join('\n') : '';
+  const messages = failed ? [] : subagentSingleResultToChatMessages(result, 'preview');
+  const answer = messages.filter((message) => message.role === 'assistant').at(-1)?.markdown?.trim();
+  const text = failure || answer;
+  if (!text) return undefined;
+  return text.length > 600 ? `${text.slice(0, 600).trimEnd()}…` : text;
 }
 
 /** Build the collapsed subagent-card live preview.

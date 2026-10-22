@@ -185,6 +185,40 @@ function makeRenderToolCall(prefs: ChatPrefs): RenderToolCall {
   return renderToolCall;
 }
 
+test('card task stays stable as live activity settles; transcript control activates once', () => {
+  const prefs = prefsWith({ autoExpandSubagentCalls: false });
+  const makeCall = (status: ToolCall['status'], child: object): ToolCall => ({
+    id: 'outcome-transition', name: 'subagent', status, input: {},
+    result: { details: { results: [{ agent: 'worker', task: 'Stable delegated task', messages: [], exitCode: status === 'running' ? -1 : 0, ...child }] } },
+  });
+  mount(makeCall('running', { streamingText: 'Live inspection' }), prefs);
+  assert.match(container.textContent ?? '', /Live activity/);
+  mount(makeCall('completed', { streamingText: 'Stale activity', messages: [{ role: 'assistant', content: 'Real completed answer' }] }), prefs);
+  assert.match(container.querySelector('.subagent-task')?.textContent ?? '', /Stable delegated task/);
+  assert.match(container.querySelector('.subagent-outcome')?.textContent ?? '', /Real completed answer/);
+  assert.doesNotMatch(container.textContent ?? '', /Stale activity|Live activity/);
+  const control = container.querySelector<HTMLButtonElement>('.subagent-transcript-toggle')!;
+  act(() => control.click());
+  assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'true');
+  assert.equal(control.textContent, 'Hide transcript');
+  act(() => control.click());
+  assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
+});
+
+test('parallel progress uses child lifecycle without changing independent disclosure', () => {
+  const call: ToolCall = { id: 'mixed-progress', name: 'subagent', status: 'running', input: {}, result: { details: { results: [
+    { agent: 'done', task: 'done', exitCode: 0, messages: [] },
+    { agent: 'failed', task: 'failed', exitCode: 1, errorMessage: 'No access', messages: [] },
+    { agent: 'queued', task: 'queued', exitCode: -1, activityPhase: 'queued', messages: [] },
+    { agent: 'active', task: 'active', exitCode: -1, streamingText: 'Working', messages: [] },
+  ] } } };
+  mount(call, prefsWith({ autoExpandSubagentCalls: false }));
+  assert.equal(container.querySelector('.subagent-parallel-progress')?.textContent, '4 tasks · 1 completed · 1 running · 1 queued · 1 failed');
+  assert.match(container.textContent ?? '', /No access|No answer text available/);
+  act(() => container.querySelector<HTMLButtonElement>('.subagent-transcript-toggle')!.click());
+  assert.deepEqual(Array.from(container.querySelectorAll('.subagent-header')).map((header) => header.getAttribute('aria-expanded')), ['true', 'false', 'false', 'false']);
+});
+
 function mount(toolCall: ToolCall, prefs: ChatPrefs, pricingForModel?: TokenPricingResolver, sessionPath?: string) {
   const renderToolCall = makeRenderToolCall(prefs);
   act(() => {
