@@ -11,6 +11,8 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 import { CompactionSummary as CompactionSummaryCard } from '../../transcript/compaction-summary';
 import { clearCollapsibleCache } from '../../transcript/use-collapsible-open';
+import { MessageItem } from '../../transcript/message-item';
+import { DEFAULT_CHAT_PREFS } from '../../../lib/protocol/index.js';
 
 const CompactionSummary = (props: { summary: string; details?: CompactionSummaryDetails; collapsibleKey?: string }) =>
   h(CompactionSummaryCard, { ...props, collapsibleKey: props.collapsibleKey ?? 'compaction:test-entry' });
@@ -30,20 +32,34 @@ beforeEach(() => {
 });
 
 test('compaction disclosure survives remount without leaking to another entry or session', () => {
-  const mount = (id: string) => act(() => render(h(CompactionSummary, {
-    summary: 'kept context', collapsibleKey: `compaction:${id}`,
-  }), container));
+  const noop = () => {};
+  const mount = (sessionKey: string, id = 'shared-entry') => {
+    const [message] = mapTranscript([{
+      id, type: 'compaction', timestamp: '2026-07-15T00:00:00.000Z', summary: 'kept context',
+    }]);
+    act(() => render(h(MessageItem, {
+      message, sessionKey, isStreaming: false, prefs: DEFAULT_CHAT_PREFS,
+      workingDirectory: null, editingId: null,
+      onEditRequest: noop, onEditConfirm: noop, onEditCancel: noop,
+      onOpenFile: noop, onContextMenu: noop, renderToolCall: () => null,
+    }), container));
+  };
   const expanded = () => container.querySelector('button')?.getAttribute('aria-expanded');
-  mount('session-a-entry-1');
+  mount('session-a');
   act(() => (container.querySelector('button') as HTMLButtonElement).click());
   act(() => render(null, container));
-  mount('session-a-entry-1');
+  mount('session-a');
   assert.equal(expanded(), 'true');
   act(() => render(null, container));
-  mount('session-a-entry-2');
+  mount('session-a', 'other-entry');
   assert.equal(expanded(), 'false');
   act(() => render(null, container));
-  mount('session-b-entry-1');
+  mount('session-b');
+  assert.equal(expanded(), 'false');
+  // Also switch sessions without unmounting the row.
+  mount('session-a');
+  assert.equal(expanded(), 'true');
+  mount('session-b');
   assert.equal(expanded(), 'false');
 });
 

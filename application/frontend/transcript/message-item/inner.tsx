@@ -118,6 +118,7 @@ export function MessageItemShell({
 }
 
 interface MessageItemInnerProps {
+  sessionKey?: string | null;
   message: ChatMessage;
   isEditing: boolean;
   isCurrentlyStreaming: boolean;
@@ -153,6 +154,7 @@ interface MessageItemInnerProps {
 }
 
 export function MessageItemInner({
+  sessionKey,
   message,
   isEditing,
   isCurrentlyStreaming,
@@ -187,7 +189,8 @@ export function MessageItemInner({
   onCancelPrepass,
 }: MessageItemInnerProps) {
   if (message.customType === 'compaction-summary') {
-    return <CompactionSummary collapsibleKey={`compaction:${message.id}`} summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
+    const collapsibleKey = `compaction:${JSON.stringify([sessionKey ?? null, message.id])}`;
+    return <CompactionSummary key={collapsibleKey} collapsibleKey={collapsibleKey} summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
   }
 
   const showHeaderActions = pruningHeaderState || statusLabel;

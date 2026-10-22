@@ -179,6 +179,7 @@ export function MessageItemView({
       <MessageCommitContext.Provider value={commitOwner}>
       <MessageToolRevisionContext.Provider value={message.toolStateRevision ?? 0}>
       <MessageItemInner
+        sessionKey={sessionKey}
         message={message}
         isEditing={derived.isEditing}
         isCurrentlyStreaming={derived.isCurrentlyStreaming}
