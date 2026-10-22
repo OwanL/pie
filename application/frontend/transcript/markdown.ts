@@ -47,11 +47,14 @@ marked.use({
     },
     link({ href, title, tokens }) {
       const pathReference = localFilePathReference(href);
-      if (!pathReference) return false;
-
-      const text = this.parser.parseInline(tokens);
+      // An explicit destination owns its whole label, including code spans.
+      // Strip only path affordances: image labels retain their preview markup.
+      const text = stripInteractiveFilePathMarkup(this.parser.parseInline(tokens));
       const titleAttribute = title ? ` title="${escapeMarkdownHtmlAttribute(title)}"` : '';
-      return `<a href="${escapeMarkdownHtmlAttribute(href)}" class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(pathReference)}" role="link" tabindex="0"${titleAttribute}>${text}</a>`;
+      const pathAttributes = pathReference
+        ? ` class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(href)}" role="link" tabindex="0"`
+        : '';
+      return `<a href="${escapeMarkdownHtmlAttribute(href)}"${pathAttributes}${titleAttribute}>${text}</a>`;
     },
     code({ text, lang }: { text: string; lang?: string }) {
       const { html, language } = highlightCodeBlock(text, lang);

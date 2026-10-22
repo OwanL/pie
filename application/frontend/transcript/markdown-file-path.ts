@@ -178,11 +178,12 @@ export function localFilePathReference(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
 
+  // URL owns URI query/fragment parsing; decode its pathname only once, after
+  // that parsing, so encoded #, ? and % remain literal filename characters.
+  if (/^file:/i.test(trimmed)) return decodeFileUri(trimmed);
+
   const withoutSuffix = stripReferenceSuffix(trimmed);
   if (!withoutSuffix) return null;
-
-  const fileUriPath = decodeFileUri(withoutSuffix);
-  if (fileUriPath) return fileUriPath;
   if (withoutSuffix.startsWith('#') || withoutSuffix.startsWith('//')) return null;
 
   // Check rooted filesystem paths before generic URI schemes so Windows drive
@@ -233,7 +234,7 @@ export function resolveLocalFilePath(reference: string, workingDirectory: string
   const localReference = localFilePathReference(reference);
   if (!localReference) return null;
 
-  const fileUriPath = decodeFileUri(stripReferenceSuffix(reference.trim()));
+  const fileUriPath = decodeFileUri(reference.trim());
   if (fileUriPath) return normalizePath(fileUriPath, fileUriPath.includes('\\') ? '\\' : '/');
   if (isAbsoluteFilePath(localReference)) {
     return normalizePath(localReference, localReference.includes('\\') ? '\\' : '/');

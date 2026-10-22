@@ -367,6 +367,59 @@ test('sanitized Windows and file-URI anchors retain an announced keyboard target
   assert.equal(links[1]!.getAttribute('href'), null);
 });
 
+test('rendered explicit destinations own code labels for delegated click and context menu', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu } = await import('../../../transcript/file-path-interactions');
+  for (const [source, expected] of [
+    ['[`label.ts`](actual.ts)', 'actual.ts'],
+    ['[`label.ts`](https://example.com/actual.ts)', null],
+    ['`label.ts`', 'label.ts'],
+  ] as const) {
+    const document = new JSDOM(`<body>${renderMarkdown(source, false)}</body>`).window.document;
+    const target = document.querySelector('code')!;
+    if (target.closest('a')) assert.equal(target.hasAttribute('tabindex'), false);
+    const event = { target, preventDefault() {}, stopPropagation() {} };
+    const opens: unknown[][] = [];
+    const menus: unknown[][] = [];
+    assert.equal(handleDelegatedFilePathClick(event, '/work', (...args) => opens.push(args)), expected !== null);
+    assert.equal(handleDelegatedFilePathContextMenu(event, '/work', (...args) => menus.push(args)), expected !== null);
+    assert.deepEqual(opens, expected ? [[`/work/${expected}`, expected, '/work']] : []);
+    if (expected) {
+      assert.equal(menus[0]![1], `/work/${expected}`);
+      assert.deepEqual(menus[0]![4], { reference: expected, workingDirectory: '/work' });
+    } else assert.deepEqual(menus, []);
+  }
+});
+
+test('explicit image link labels retain image preview markup', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const document = new JSDOM(`<body>${renderMarkdown('[![preview](./preview.png)](actual.ts)', false)}</body>`).window.document;
+  assert.equal(document.querySelector('a')?.getAttribute('data-pie-file-path'), 'actual.ts');
+  assert.equal(document.querySelector('a [data-pie-inline-image]')?.getAttribute('data-pie-inline-image'), './preview.png');
+});
+
+test('rendered file URI opens preserve raw references and decode filename characters only once', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const { handleDelegatedFilePathClick } = await import('../../../transcript/file-path-interactions');
+  for (const [reference, path] of [
+    ['file:///tmp/report.md%23backup.md', '/tmp/report.md#backup.md'],
+    ['file:///tmp/report.md%23backup.md#L12', '/tmp/report.md#backup.md'],
+    ['file:///tmp/report%2523.md', '/tmp/report%23.md'],
+    ['file:///tmp/report.md%3Fbackup.md?raw=1#L12', '/tmp/report.md?backup.md'],
+    ['file:///C:/My%20Docs/report.md%23backup.md#L12', 'C:/My Docs/report.md#backup.md'],
+    ['file:///tmp/report.md#L12', '/tmp/report.md'],
+    ['src/report.md#L12', '/work/src/report.md'],
+    ['/tmp/report.md:12:3', '/tmp/report.md:12:3'],
+  ]) {
+    const document = new JSDOM(`<body>${renderMarkdown(`[report](${reference})`, false)}</body>`).window.document;
+    const opens: unknown[][] = [];
+    assert.equal(handleDelegatedFilePathClick({ target: document.querySelector('a')!, preventDefault() {}, stopPropagation() {} }, '/work', (...args) => opens.push(args)), true);
+    // The host receives the original suffix for line/column interpretation,
+    // not a decoded pathname which could be parsed as a new fragment.
+    assert.deepEqual(opens, [[path, reference, '/work']]);
+  }
+});
+
 test('renderMarkdown sanitizes unsafe HTML in enhanced output', async () => {
   const renderMarkdown = await loadRenderMarkdown();
   const html = renderMarkdown('Hello <script>alert(1)</script> normal text');
