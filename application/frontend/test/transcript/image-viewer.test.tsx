@@ -273,6 +273,57 @@ test('session switch tears the PhotoSwipe instance down instantly and restores f
   await act(async () => { dom.window.close(); });
 });
 
+test('explicit anchors own loaded image clicks and Enter while standalone images still open', async () => {
+  const { dom, mount } = viewerHarness();
+  FakePswp.reset();
+  const { adapter } = adapterHarness();
+  await act(async () => { render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} pswpFactory={pswpFactory} />, mount); });
+  const surface = document.createElement('div');
+  document.body.appendChild(surface);
+  const delegated: Event[] = [];
+  const delegate = (event: Event) => {
+    assert.equal(event.defaultPrevented, false, 'viewer leaves delegated link activation untouched');
+    delegated.push(event);
+    event.preventDefault(); // Avoid jsdom navigation; the real link owner handles this.
+  };
+  surface.addEventListener('click', delegate);
+  surface.addEventListener('keydown', delegate);
+  try {
+    for (const href of ['actual.ts', 'https://example.com/actual']) {
+      surface.innerHTML = `<a href="${href}"><span data-pie-inline-image="./preview.png"><img src="data:image/png;base64,YQ==" tabindex="0"></span></a>`;
+      const image = surface.querySelector('img')!;
+      for (const event of [
+        new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }),
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      ]) {
+        const before = delegated.length;
+        await act(async () => { image.dispatchEvent(event); });
+        await flush();
+        assert.equal(delegated.length, before + 1);
+        assert.equal(FakePswp.instances.length, 0);
+      }
+    }
+    surface.innerHTML = '<span data-pie-inline-image="./preview.png"><img src="data:image/png;base64,YQ==" tabindex="0"></span>';
+    const image = surface.querySelector('img')!;
+    for (const event of [
+      new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }),
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    ]) {
+      const before = delegated.length;
+      const opened = FakePswp.instances.length;
+      await act(async () => { image.dispatchEvent(event); });
+      await flush();
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(delegated.length, before, 'standalone image activation belongs to viewer');
+      assert.equal(FakePswp.instances.length, opened + 1);
+      await act(async () => { FakePswp.instances.at(-1)!.close(); });
+    }
+  } finally {
+    await unmount(mount);
+    dom.window.close();
+  }
+});
+
 test('inline clicks open the viewer, SVG stays view-only, and probe failures use PhotoSwipe', async () => {
   const { dom, mount } = viewerHarness();
   FakePswp.reset();

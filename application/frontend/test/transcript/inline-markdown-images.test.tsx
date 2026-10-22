@@ -76,6 +76,26 @@ test('Windows markdown hydrates the actual placeholder with bounded targeted dat
   assert.equal(requests.length, 1);
 });
 
+test('linked hydrated images remain native anchor labels rather than separate button tab stops', async () => {
+  root.innerHTML = await markdown('[![preview](./preview.png)](actual.ts) ![standalone](./other.png)');
+  mount();
+  assert.equal(requests.length, 2);
+  reply(requests[0]);
+  reply(requests[1]);
+  const anchor = root.querySelector('a[href]')!;
+  const linked = anchor.querySelector('img')!;
+  assert.ok(linked);
+  assert.equal(anchor.getAttribute('href'), 'actual.ts');
+  assert.equal(linked.hasAttribute('tabindex'), false, 'Enter targets the native anchor, not a dead image tab stop');
+  assert.equal(linked.hasAttribute('role'), false);
+  assert.equal(linked.hasAttribute('aria-label'), false);
+  assert.equal(linked.alt, 'preview');
+  const standalone = root.querySelectorAll('img')[1];
+  assert.equal(standalone.tabIndex, 0);
+  assert.equal(standalone.getAttribute('role'), 'button');
+  assert.equal(standalone.getAttribute('aria-label'), 'View standalone');
+});
+
 test('the transcript-style parent ref is ready when the child hydrator mounts', async () => {
   const html = await markdown('![chart](chart.png)');
   const parentRef = createRef<HTMLDivElement>();

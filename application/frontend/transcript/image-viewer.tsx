@@ -150,7 +150,8 @@ export function ImageViewer({
     const open = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent && event.key !== 'Enter' && event.key !== ' ') return;
       const target = event.target;
-      if (!(target instanceof HTMLImageElement) || target.closest('.image-viewer')) return;
+      // Explicit links own their entire label, including loaded image previews.
+      if (!(target instanceof HTMLImageElement) || target.closest('.image-viewer, a[href]')) return;
       if (!target.matches('.message-user-image-element, .tool-call-result-image, .attachment-card-image, .image-path-preview img, [data-pie-inline-image] img')) return;
       const source = target.dataset.pieImagePath
         ? { kind: 'file' as const, path: target.dataset.pieImagePath, reference: target.dataset.pieImageReference, workingDirectory: target.dataset.pieImageCwd }
