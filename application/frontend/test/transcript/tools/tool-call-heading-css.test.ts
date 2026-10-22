@@ -62,8 +62,8 @@ test('ordinary headers disclose with a muted chevron beside the native toggle', 
   const css = await readToolCallCss();
   assert.match(css, /Every ordinary tool row now carries this muted disclosure chevron/);
   assert.match(css, /\.tool-call-disclosure\s*\{\s*flex:\s*0 0 auto;\s*color:\s*var\(--panel-muted\);\s*\}/);
-  assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*0;/);
-  assert.doesNotMatch(css, /\.tool-call-collapse-rail/);
+  assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*10px;/);
+  assert.match(css, /\.tool-call-collapse-rail\s*\{\s*left:\s*0;/);
 });
 
 test('raw inspection has one vertical owner and sticky controls with horizontal JSON panes', async () => {
