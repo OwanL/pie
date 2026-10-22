@@ -528,8 +528,10 @@ export function useComposerInput({
     }
 
     clearCheckpointTimer();
-    // Checkpoint the restore so a single Ctrl+Z steps back to the prior state
-    // (e.g. the post-send empty composer) rather than a duplicate of the text.
+    // Preserve the exact live editor before authoritative recovery replaces it,
+    // even when its typing burst has not reached the checkpoint debounce.
+    setHistory(textareaRef.current?.value ?? text, true);
+    // Checkpoint the restore so a single Ctrl+Z recovers that prior live value.
     setHistory(draftRestore.text, true);
     setTextState(draftRestore.text);
     const textarea = textareaRef.current;

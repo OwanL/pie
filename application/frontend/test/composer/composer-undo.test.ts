@@ -31,9 +31,10 @@ interface TestHarnessProps {
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   onSend: (text: string) => void;
+  draftRestore?: { text: string; nonce: number };
 }
 
-function TestHarness({ sessionPath, draftText, postMessage, onSend }: TestHarnessProps) {
+function TestHarness({ sessionPath, draftText, postMessage, onSend, draftRestore }: TestHarnessProps) {
   const { text, textareaRef, handleInput, handleKeyDown, handleBeforeInput } = useComposerInput({
     busy: false,
     onSend,
@@ -42,6 +43,7 @@ function TestHarness({ sessionPath, draftText, postMessage, onSend }: TestHarnes
     initialRows: 1,
     sessionPath,
     draftText,
+    draftRestore,
     postMessage,
     onAddInput: (_input: ComposerInputDraft) => {},
     supportsImageInputs: false,
@@ -162,6 +164,89 @@ function ctrlY(textarea: HTMLTextAreaElement) {
 
 function enter(textarea: HTMLTextAreaElement) {
   keydown(textarea, { key: 'Enter' });
+}
+
+test('authoritative restore preserves rapid typing for undo and redo without a stale checkpoint', () => {
+  installFakeTimers();
+  const props: TestHarnessProps = {
+    sessionPath: '/s', draftText: '', postMessage: () => {}, onSend: () => {},
+  };
+  try {
+    act(() => render(h(TestHarness, props), container));
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, 'sent prompt');
+    enter(textarea);
+    typeRapid(textarea, '  next draft\nexact whitespace  ');
+    assert.ok(pending.some((timer) => timer.ms === 500));
+    act(() => render(h(TestHarness, {
+      ...props, draftRestore: { text: 'authoritative recovery', nonce: 1 },
+    }), container));
+    assert.equal(textarea.value, 'authoritative recovery');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, '  next draft\nexact whitespace  ');
+    act(() => flushTimers());
+    ctrlY(textarea);
+    assert.equal(textarea.value, 'authoritative recovery');
+    act(() => flushTimers());
+    ctrlZ(textarea);
+    assert.equal(textarea.value, '  next draft\nexact whitespace  ');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, '');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('restore preserves settled empty live text without a typing timer', () => {
+  installFakeTimers();
+  try {
+    const props: TestHarnessProps = {
+      sessionPath: '/s', draftText: 'local state', postMessage: () => {}, onSend: () => {},
+    };
+    act(() => render(h(TestHarness, props), container));
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    typeValue(textarea, '');
+    assert.equal(pending.some((timer) => timer.ms === 500), false);
+    act(() => render(h(TestHarness, {
+      ...props, draftRestore: { text: 'recovery', nonce: 1 },
+    }), container));
+    ctrlZ(textarea);
+    assert.equal(textarea.value, '');
+    ctrlZ(textarea);
+    assert.equal(textarea.value, 'local state');
+    ctrlY(textarea);
+    assert.equal(textarea.value, '');
+    ctrlY(textarea);
+    assert.equal(textarea.value, 'recovery');
+  } finally {
+    restoreTimers();
+  }
+});
+
+for (const live of ['same recovery', '']) {
+  test(`restore deduplicates identical live value ${JSON.stringify(live)}`, () => {
+    installFakeTimers();
+    const props: TestHarnessProps = {
+      sessionPath: '/s', draftText: 'prior checkpoint', postMessage: () => {}, onSend: () => {},
+    };
+    try {
+      act(() => render(h(TestHarness, props), container));
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      typeRapid(textarea, live);
+      for (const nonce of [1, 2]) {
+        act(() => render(h(TestHarness, { ...props, draftRestore: { text: live, nonce } }), container));
+      }
+      ctrlZ(textarea);
+      assert.equal(textarea.value, 'prior checkpoint');
+      ctrlY(textarea);
+      assert.equal(textarea.value, live);
+      act(() => flushTimers());
+      ctrlZ(textarea);
+      assert.equal(textarea.value, 'prior checkpoint');
+    } finally {
+      restoreTimers();
+    }
+  });
 }
 
 test('Ctrl+Z recovers a deleted and already-sent prompt (word-processor undo)', () => {
