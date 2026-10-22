@@ -67,6 +67,7 @@ export const SessionControlParameters = Type.Object(
      *  provided in its sender attribution. Cannot be combined with title/self. */
     replyTo: Type.Optional(Type.String({ minLength: 1, maxLength: 768, description: 'message only: identity-bound original sender reference, mutually exclusive with title or self. Resolves only while the sender remains live.' })),
     expectReply: Type.Optional(Type.Boolean({ description: 'message only, required: whether the recipient should reply to this message.' })),
+    fulfills: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 64, uniqueItems: true, description: 'message only: consumed creator input entry IDs fulfilled by a manual final handoff. Requires creator replyTo and expectReply:false. Suppresses automatic handoff for these IDs even if the send outcome is unknown.' })),
     settings: Type.Optional(Type.Object(SessionControlSettings.properties, {
       additionalProperties: false,
       description: 'Persistent session overrides for create, message, or settings.set. Not temporary per-message settings.',
@@ -149,6 +150,7 @@ export function createSessionControlTool(request: SessionControlToolRequest, opt
       'Include the task, ownership boundaries, and expected handoff in the initial prompt.',
       'Message decisions, blockers, interface changes, and final findings; omit routine progress and acknowledgements',
       'For message, expectReply is required: false requests no acknowledgement and does not cancel outstanding tasks or completion handoffs. A delegated creator task hands its final outcome back automatically; do not also send that final via session_control. For other requests expecting a reply, use session_control message with replyTo set to the exact sender reference and expectReply:false; ordinary assistant output is not delivered for those requests.',
+      'If manually sending a delegated final outcome, use fulfills with the consumed creator input entry IDs from read self; otherwise messages are intermediate and do not fulfill the automatic handoff.',
       'list exposes live sessions with their assigned titles (field `title`) and provisional `name` labels; only assigned titles address existing sessions.',
       "read, settings, and close require an explicit target: set `self` for the caller's own primary session or `title` for another live session; message may instead use replyTo. Target selectors are mutually exclusive.",
       "create requires a 1-25-character title (trimmed) and an explicit bucket: small for simple tasks, medium for well-defined substantial tasks, frontier for hard reasoning. Bucket selection uses the caller's provider policy and bucket reasoning unless settings.reasoning overrides it; settings.model is not accepted. System-prompt toggles and execution settings are inherited and configured before any optional prompt is sent. Without a prompt the new session remains cold. creation.status=not_created confirms no session exists; unknown never authorizes automatic recreation.",
@@ -172,7 +174,7 @@ export function createSessionControlTool(request: SessionControlToolRequest, opt
         list: ['action'],
         create: ['action', 'title', 'bucket', 'cwd', 'prompt', 'settings'],
         read: ['action', 'title', 'self', 'direction', 'cursor', 'maxCharacters', 'includeToolCalls', 'includeReasoning'],
-        message: ['action', 'title', 'self', 'replyTo', 'expectReply', 'prompt', 'settings'],
+        message: ['action', 'title', 'self', 'replyTo', 'expectReply', 'fulfills', 'prompt', 'settings'],
         'settings.get': ['action', 'title', 'self'],
         'settings.set': ['action', 'title', 'self', 'settings'],
         close: ['action', 'title', 'self', 'delete'],
@@ -290,6 +292,12 @@ export function createSessionControlTool(request: SessionControlToolRequest, opt
         payload = { ...target, settings: typedParams.settings as unknown as WorkerJsonObject };
       } else if (action === 'message') {
         if (typeof typedParams.expectReply !== 'boolean') return failure('message requires boolean expectReply.');
+        const fulfills = typedParams.fulfills;
+        if (fulfills !== undefined && (!Array.isArray(fulfills) || fulfills.length < 1 || fulfills.length > 64
+          || fulfills.some(id => typeof id !== 'string' || !id.trim() || id.length > 256)
+          || new Set(fulfills).size !== fulfills.length || !hasReplyReference || typedParams.expectReply !== false)) {
+          return failure('message.fulfills requires unique input IDs, creator replyTo, and expectReply:false.');
+        }
         if (typeof typedParams.prompt !== 'string' || !typedParams.prompt.trim()) {
           return failure('message requires non-empty prompt.');
         }
@@ -300,6 +308,7 @@ export function createSessionControlTool(request: SessionControlToolRequest, opt
           ...target,
           prompt: typedParams.prompt,
           expectReply: typedParams.expectReply,
+          ...(fulfills ? { fulfills } : {}),
           ...(typedParams.settings ? { settings: typedParams.settings as unknown as WorkerJsonObject } : {}),
         };
       } else {

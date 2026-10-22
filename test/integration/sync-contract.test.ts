@@ -451,6 +451,11 @@ test('agent session-control messages retain user-role provenance through queue d
   assert.match(stateContract, /explicitly flushing a fresh session at user append rather than waiting for an assistant response/u);
   assert.match(stateContract, /Duplicate observations cannot downgrade a delivered row/u);
   assert.match(agentContract, /publishes an Agent-attributed user-role transcript row/u);
+  assert.match(stateContract, /`deliveredAt` stamped once at durable append, never at enqueue/u);
+  assert.match(agentContract, /`expectReply:false` requests no acknowledgement.*does not cancel outstanding work/u);
+  assert.match(agentContract, /At correlated `agent_settled`, not `agent_end`/u);
+  assert.match(agentContract, /human steering and readable local summaries remain supported/iu);
+  assert.match(agentContract, /Claimed inputs are suppressed.*even when the send fails or its outcome is unknown/u);
 });
 
 test('user append bindings reconcile optimistic rows without changing delivery ownership', async () => {

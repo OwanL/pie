@@ -49,6 +49,19 @@ test('title requests map onto the bridge and mutations get distinct generated ke
   assert.notEqual(calls[0].payload.requestKey, calls[2].payload.requestKey);
 });
 
+test('manual final fulfillment requires explicit creator reply intent and bounded unique input IDs', async () => {
+  const { calls, tool } = harness();
+  const base = { action: 'message', replyTo: 'creator-reference', prompt: 'final result', expectReply: false };
+  for (const fulfills of [[], [''], ['a', 'a'], ['a'.repeat(257)], Array.from({ length: 65 }, (_, i) => String(i)), 'input']) {
+    assert.equal((await run(tool, { ...base, fulfills })).isError, true);
+  }
+  assert.equal((await run(tool, { ...base, fulfills: ['input'], expectReply: true })).isError, true);
+  assert.equal((await run(tool, { ...base, replyTo: undefined, title: 'Creator', fulfills: ['input'] })).isError, true);
+  assert.equal(calls.length, 0);
+  assert.equal((await run(tool, { ...base, fulfills: ['input-a', 'input-b'] })).isError, false);
+  assert.deepEqual(calls[0].payload.fulfills, ['input-a', 'input-b']);
+});
+
 test('settings, replies, and create patches preserve payloads', async () => {
   const { calls, tool } = harness();
   const settings = { model: { provider: 'openai', id: 'gpt-test' }, reasoning: 'high', autonomousMode: true, subagentProviderChoices: { anthropic: false }, disabledSystemPromptEntries: ['prompt-a'] };

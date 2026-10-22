@@ -37,6 +37,7 @@ import { readProviderRuntimeReference, type NativeRuntimeModel, type ProviderRun
 import { isThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {
   AgentMessagePayload,
+  DelegatedHandoff,
   SessionCloseRequestedPayload,
   SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
@@ -61,11 +62,13 @@ import {
 } from '../lib/rpc/session-control-settings.js';
 import {
   createSessionControlSender,
+  createSessionReplyReference,
   isSessionControlSender,
   parseSessionReplyReference,
   type SessionControlSender,
   type SessionControlSenderIdentity,
 } from '../lib/rpc/session-control-attribution.js';
+import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
 import { createCoordinatorProviderManagement, hasCoordinatorProviderConfiguration } from './provider-management';
 import { PIE_BUILD_ID } from '../../../lib/build-identity.js';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from '../../model-providers/authentication/auth.js';
@@ -699,6 +702,7 @@ export class BackendServer {
    *  while a worker owns a session's lease. */
   private readonly liveSessionTitles = new LiveSessionTitles();
   private readonly sessionControlOperations = new SessionControlOperations();
+  private readonly delegatedHandoffAttempts = new Set<string>();
   private readonly sessionControlCreators = new Map<string, { sessionId: string; creator?: SessionControlSenderIdentity }>();
   /** Initial namespace hydration from the first complete restored host
    *  membership. The namespace stays unavailable (fail closed) until this
@@ -1096,6 +1100,7 @@ export class BackendServer {
         emit: (event, payload) => this.emit(event, payload),
         emitDetail: (message) => this.emit('detail.stream', message as unknown as WorkerJsonObject),
         onSessionControl: (frame, source) => this.handleWorkerSessionControl(frame, source.sessionPath),
+        onDelegatedHandoff: (handoff, sourceSessionPath) => this.routeDelegatedHandoff(handoff, sourceSessionPath),
         assertExecutionAdmissionOpen: (sessionPath) => this.assertSessionNotClosing(sessionPath),
         assertSessionControlSendAdmissionOpen: (sessionPath) => this.assertSessionControlSendAdmissionOpen(sessionPath),
         onSessionReplaced: (sourcePath, destinationPath) => {
@@ -4446,12 +4451,14 @@ export class BackendServer {
   }
 
   private async sendSessionControlPrompt(
-    frame: WorkerSessionControlFrame,
+    frame: Pick<WorkerSessionControlFrame, 'requestId'>,
     sourceSessionPath: string,
     targetSessionPath: string,
     prompt: string,
     operationId: string,
+    expectReply: boolean,
     expectedCancellationGeneration?: number,
+    kind?: 'completion',
   ): Promise<WorkerJsonObject> {
     try {
       if (expectedCancellationGeneration !== undefined
@@ -4472,9 +4479,11 @@ export class BackendServer {
       };
     }
     const sourceIdentity: SessionControlSenderIdentity = resolveSessionIdentity(sourceSessionPath);
+    const sentAt = Date.now();
     const sender: SessionControlSender = createSessionControlSender(
       sourceIdentity,
       this.liveSessionTitles.assigned(sourceSessionPath),
+      { sentAt, expectReply, ...(kind ? { kind } : {}) },
     );
     if (!isSessionControlSender(sender)) throw new BackendError('INVALID_PARAMS', 'Unable to authenticate the source session.');
     const localId = `${AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX}${frame.requestId}`;
@@ -4483,7 +4492,7 @@ export class BackendServer {
       localId,
       text: prompt,
       sender,
-      timestamp: Date.now(),
+      timestamp: sentAt,
       status: 'queued',
     };
     this.emit('message.agent', agentMessage);
@@ -4518,6 +4527,47 @@ export class BackendServer {
         status: unknown ? 'unknown' : 'rejected',
         error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
       };
+    }
+  }
+
+  /** A worker claims its consumed obligations durably before this one-shot send.
+   * Never reopen a creator or replay an unknown attempt. Ordinary message.send
+   * retains queue admission, delivery provenance, and recipient wake semantics. */
+  private async routeDelegatedHandoff(handoff: DelegatedHandoff, sourceSessionPath: string): Promise<void> {
+    if (this.disposed) return;
+    const operationId = `delegated-handoff:${handoff.childSessionId}:${handoff.id}`;
+    if (this.delegatedHandoffAttempts.has(operationId)) return;
+    this.delegatedHandoffAttempts.add(operationId);
+    let unknown = false;
+    try {
+      if (resolveSessionIdentity(sourceSessionPath).sessionId !== handoff.childSessionId) {
+        throw new Error('Delegated handoff source identity changed.');
+      }
+      const target = this.resolveSessionControlReplyTarget({
+        replyTo: createSessionReplyReference(handoff.recipient),
+      }, sourceSessionPath);
+      if (this.sessionControlOwnership(sourceSessionPath, target.sessionPath).ownedByCaller !== true) {
+        throw new Error('Delegated handoff recipient is not the durable creator.');
+      }
+      const result = await this.sendSessionControlPrompt(
+        { requestId: operationId },
+        sourceSessionPath, target.sessionPath,
+        `Delegated run ${handoff.outcome}.\n\n${handoff.text}`,
+        operationId, false, undefined, 'completion',
+      );
+      if (result.status === 'accepted') return;
+      unknown = result.status === 'unknown';
+      throw new Error(typeof result.error === 'string' ? result.error : `Handoff ${result.status}.`);
+    } catch (error) {
+      this.emit('operational-error', createOperationalIncident({
+        sessionPath: sourceSessionPath, operationId,
+        code: 'DELEGATED_HANDOFF_UNAVAILABLE', severity: 'warning',
+        certainty: unknown ? 'ambiguous' : 'definitive', phase: 'settlement',
+        message: unknown
+          ? 'The creator handoff outcome is unknown. It will not be sent again automatically.'
+          : 'The creator handoff was not sent. The result remains in this session.',
+        detail: toErrorMessage(error),
+      }));
     }
   }
 
@@ -4710,7 +4760,7 @@ export class BackendServer {
       list: [],
       create: ['cwd', 'title', 'bucket', 'prompt', 'settings'],
       read: ['title', 'self', 'direction', 'cursor', 'maxCharacters', 'includeReasoning', 'includeToolCalls'],
-      message: ['title', 'self', 'replyTo', 'prompt', 'settings'],
+      message: ['title', 'self', 'replyTo', 'prompt', 'expectReply', 'fulfills', 'settings'],
       'settings.get': ['title', 'self'],
       'settings.set': ['title', 'self', 'settings'],
       close: ['title', 'self', 'delete'],
@@ -4890,6 +4940,7 @@ export class BackendServer {
               sessionPath,
               payload.prompt as string,
               `${operationId}:send`,
+              true,
               sendCancellationGeneration,
             );
         return { result: workerJson({ creation, configuration, message, modelSelection: workerJson(modelSelection) } satisfies WorkerJsonObject) };
@@ -4932,6 +4983,16 @@ export class BackendServer {
     }
 
     if (frame.action === 'message') {
+      if (typeof payload.expectReply !== 'boolean') {
+        throw new BackendError('INVALID_PARAMS', 'message.expectReply must explicitly be true or false.');
+      }
+      if (payload.fulfills !== undefined && (!Array.isArray(payload.fulfills)
+        || payload.fulfills.length < 1 || payload.fulfills.length > 64
+        || payload.fulfills.some(id => typeof id !== 'string' || !id.trim() || id.length > 256)
+        || new Set(payload.fulfills).size !== payload.fulfills.length
+        || payload.expectReply !== false || typeof payload.replyTo !== 'string')) {
+        throw new BackendError('INVALID_PARAMS', 'message.fulfills requires unique input IDs, replyTo, and expectReply:false.');
+      }
       if (!boundedAgentString(payload.prompt, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.prompt.trim()) {
         throw new BackendError('INVALID_PARAMS', 'message.prompt must be non-empty and bounded.');
       }
@@ -4964,6 +5025,7 @@ export class BackendServer {
             resolved.sessionPath,
             payload.prompt,
             operationId,
+            payload.expectReply,
             sendCancellationGeneration,
           )
           : { status: 'not_sent', reason: configuration.status };

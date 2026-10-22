@@ -10,6 +10,7 @@ import { BackendServer } from '../server.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { BackendError } from '../server-io.js';
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../request-handler.js';
+import type { DelegatedHandoff } from '../../lib/rpc/session-events.js';
 import type { SessionEntryLike } from '../../../session-storage/transcripts/transcript.js';
 import {
   SESSION_CONTROL_SETTINGS_REQUEST_EVENT,
@@ -77,7 +78,7 @@ function serverForTests(): FakeServer {
 }
 
 function frame(action: string, payload: Record<string, unknown> = {}): unknown {
-  return { requestId: `control-${action}`, action, payload };
+  return { requestId: `control-${action}`, action, payload: { ...(action === 'message' ? { expectReply: true } : {}), ...payload } };
 }
 
 function mockSettingsReply(request: { method: string; params?: unknown }): Record<string, unknown> {
@@ -166,6 +167,15 @@ const currentSender = createSessionControlSender(
   { sessionId: 'sid-current.jsonl', identityFallback: false },
   'Current plan',
 );
+
+function assertStampedSender(value: unknown, expectReply = true) {
+  const sender = value as typeof currentSender;
+  assert.deepEqual({ ...sender, message: undefined }, { ...currentSender, message: undefined });
+  assert.equal(sender.message?.expectReply, expectReply);
+  assert.ok(Number.isSafeInteger(sender.message?.sentAt));
+  assert.equal(sender.message?.deliveredAt, undefined);
+  return sender;
+}
 
 const summaries = [
   {
@@ -1547,6 +1557,42 @@ test('unrelated membership removal does not cancel a gated session-control send'
   assert.equal(sends, 1);
 });
 
+test('message requires explicit reply intent before configuration or send', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-reply-intent-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  let requests = 0;
+  server.handleRequest = async () => { requests += 1; return { accepted: true }; };
+  for (const expectReply of [undefined, null, 'false', 0]) {
+    await assert.rejects(server.handleWorkerSessionControl(frame('message', {
+      self: true, prompt: 'notification', expectReply,
+    }), currentPath), /expectReply/);
+  }
+  assert.equal(requests, 0);
+});
+
+test('agent send records reply intent and send time, leaving delivery time to the recipient', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-send-stamp-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  const requests: Array<{ method: string; params?: unknown }> = [];
+  const events: Array<{ event: string; payload?: unknown }> = [];
+  server.handleRequest = async (request) => { requests.push(request); return { queued: true }; };
+  server.emit = (event, payload) => events.push({ event, payload });
+  const before = Date.now();
+  await server.handleWorkerSessionControl(frame('message', {
+    title: 'Idle plan', prompt: 'window released', expectReply: false,
+  }), currentPath);
+  const sender = (requests[0]!.params as { coordinatorAttribution: typeof currentSender & {
+    message: { sentAt: number; expectReply: boolean; deliveredAt?: number };
+  } }).coordinatorAttribution;
+  assert.deepEqual(sender.identity, currentSender.identity);
+  assert.equal(sender.message.expectReply, false);
+  assert.ok(sender.message.sentAt >= before && sender.message.sentAt <= Date.now());
+  assert.equal(sender.message.deliveredAt, undefined);
+  const event = events.find(({ event }) => event === 'message.agent')!.payload as { timestamp: number; sender: unknown };
+  assert.equal(event.timestamp, sender.message.sentAt);
+  assert.deepEqual(event.sender, sender);
+});
+
 test('combined create captures settings once, honors explicit overrides, then sends with attribution', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-combined-'));
   const { server, currentPath } = await readyServerWithMembers(dir);
@@ -1599,7 +1645,7 @@ test('combined create captures settings once, honors explicit overrides, then se
   assert.deepEqual(requests[2]?.params, {
     sessionPath: '/workspace/combined.jsonl', disabledEntries: ['override-entry'],
   });
-  assert.deepEqual((requests[3]?.params as Record<string, unknown>).coordinatorAttribution, currentSender);
+  const sender = assertStampedSender((requests[3]?.params as Record<string, unknown>).coordinatorAttribution);
   const settingsRequests = events
     .filter((entry) => entry.event === SESSION_CONTROL_SETTINGS_REQUEST_EVENT)
     .map((entry) => entry.payload as SessionControlSettingsRequest);
@@ -1607,10 +1653,11 @@ test('combined create captures settings once, honors explicit overrides, then se
   assert.deepEqual(settingsRequests[1]?.settings, {
     autonomousMode: false,
     subagentProviderChoices: { openai: true },
+    subagentBucketChoices: { small: true, medium: true, frontier: true },
   });
   assert.deepEqual(events.filter((entry) => entry.event === 'message.agent').map((entry) => (
     (entry.payload as Record<string, unknown>).sender
-  )), [currentSender, currentSender]);
+  )), [sender, sender]);
 });
 
 test('message settings require confirmed effective reasoning before sending', async () => {
@@ -1801,6 +1848,7 @@ test('settings inspection and update use target-session settings authorities', a
     reasoning: 'high',
     autonomousMode: true,
     subagentProviderChoices: { openai: true },
+    subagentBucketChoices: { small: true, medium: true, frontier: true },
     disabledSystemPromptEntries: [],
   });
 
@@ -1875,7 +1923,7 @@ test('replyTo resolves the live original identity and rejects stale references',
   }), currentPath);
   assert.equal((sent.result.message as Record<string, unknown>).status, 'accepted');
   assert.equal((requests[0]?.params as Record<string, unknown>).sessionPath, idlePath);
-  assert.deepEqual((requests[0]?.params as Record<string, unknown>).coordinatorAttribution, currentSender);
+  assertStampedSender((requests[0]?.params as Record<string, unknown>).coordinatorAttribution);
 
   applyMembership(server, membership([membershipEntry(currentPath)]));
   await assert.rejects(server.handleWorkerSessionControl(frame('message', {
@@ -2116,11 +2164,12 @@ test('session-control server adapts transcript cursors and ordinary message send
     currentPath,
   );
   assert.equal(requests[0]?.method, 'message.send');
+  const sender = assertStampedSender((requests[0]?.params as Record<string, unknown>).coordinatorAttribution);
   assert.deepEqual(requests[0]?.params, {
     sessionPath: idlePath, text: 'please continue', inputs: [],
     operationId: 'agent-session:control-message', operationAttempt: 1,
     localId: 'local:agent-session:control-message',
-    coordinatorAttribution: currentSender,
+    coordinatorAttribution: sender,
   });
   assert.equal(events[0]?.event, 'message.agent');
   const pendingMessage = events[0]?.payload as {
@@ -2131,7 +2180,7 @@ test('session-control server adapts transcript cursors and ordinary message send
     sessionPath: idlePath,
     localId: 'local:agent-session:control-message',
     text: 'please continue',
-    sender: currentSender,
+    sender,
     status: 'queued',
     timestamp: undefined,
   });
@@ -2190,7 +2239,7 @@ test('session-control message rows reflect queued delivery and roll back rejecte
 
   server.handleRequest = async () => { throw new Error('send rejected'); };
   const rejected = await server.handleWorkerSessionControl(
-    { requestId: 'control-message-rejected', action: 'message', payload: { title: 'Idle plan', prompt: 'rejected message' } },
+    { requestId: 'control-message-rejected', action: 'message', payload: { title: 'Idle plan', prompt: 'rejected message', expectReply: false } },
     currentPath,
   );
   assert.equal((rejected.result.message as Record<string, unknown>).status, 'rejected');
@@ -2243,7 +2292,7 @@ test('session-control message rows reflect queued delivery and roll back rejecte
     throw new BackendError(workerResponse.frame.error.code, workerResponse.frame.error.message);
   };
   const unknown = await server.handleWorkerSessionControl(
-    { requestId: 'control-message-unknown', action: 'message', payload: { title: 'Idle plan', prompt: 'possibly admitted' } },
+    { requestId: 'control-message-unknown', action: 'message', payload: { title: 'Idle plan', prompt: 'possibly admitted', expectReply: false } },
     currentPath,
   );
   assert.equal((unknown.result.message as Record<string, unknown>).status, 'unknown');
@@ -2415,6 +2464,67 @@ test('durable creator ownership survives human prompts and cleanup closes only c
   branches.set(idlePath, []);
   assert.equal((await list()).find(row => row.path === idlePath)?.ownedByCaller, false);
   assert.equal(reads.get(idlePath), 2, 'a replacement identity invalidates the creator cache');
+});
+
+test('settled handoffs target the durable live creator once and never request another reply', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-handoff-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const creator = resolveSessionIdentity(currentPath);
+  const childSessionId = resolveSessionIdentity(idlePath).sessionId;
+  const internal = server as unknown as {
+    initializeColdSessionStore(): unknown;
+    routeDelegatedHandoff(handoff: DelegatedHandoff, source: string): Promise<void>;
+  };
+  internal.initializeColdSessionStore = () => ({ readSessionControlSource: () => ({ sessionId: childSessionId, creator }) });
+  const requests: Array<{ method: string; params?: unknown }> = [];
+  const events: Array<{ event: string; payload?: unknown }> = [];
+  server.handleRequest = async request => { requests.push(request); return { queued: true }; };
+  server.emit = (event, payload) => events.push({ event, payload });
+  const handoff: DelegatedHandoff = { id: 'claim-1', childSessionId, recipient: creator,
+    inputIds: ['delivered-input'], outcome: 'completed', text: 'Changed the parser; focused tests pass.' };
+  await Promise.all([internal.routeDelegatedHandoff(handoff, idlePath), internal.routeDelegatedHandoff(handoff, idlePath)]);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'message.send');
+  const params = requests[0].params as { sessionPath: string; text: string; coordinatorAttribution: typeof currentSender };
+  assert.equal(params.sessionPath, currentPath);
+  assert.match(params.text, /Changed the parser/);
+  assert.equal(params.coordinatorAttribution.message?.kind, 'completion');
+  assert.equal(params.coordinatorAttribution.message?.expectReply, false);
+  assert.equal(params.coordinatorAttribution.message?.deliveredAt, undefined, 'queued is not delivered');
+  assert.equal(events.some(event => event.event === 'operational-error'), false);
+  // The title can disappear/reappear, but the original identity is never reopened.
+  applyMembership(server, membership([membershipEntry(idlePath)]));
+  await internal.routeDelegatedHandoff({ ...handoff, id: 'claim-closed' }, idlePath);
+  assert.equal(requests.length, 1);
+  assert.equal(events.at(-1)?.event, 'operational-error');
+});
+
+test('unknown handoff sends are not retried and wrong creator identities are rejected', async (t) => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-handoff-unknown-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const creator = resolveSessionIdentity(currentPath);
+  const childSessionId = resolveSessionIdentity(idlePath).sessionId;
+  const internal = server as unknown as {
+    initializeColdSessionStore(): unknown;
+    routeDelegatedHandoff(handoff: DelegatedHandoff, source: string): Promise<void>;
+  };
+  internal.initializeColdSessionStore = () => ({ readSessionControlSource: () => ({ sessionId: childSessionId, creator }) });
+  let sends = 0;
+  const incidents: Array<{ certainty: string }> = [];
+  server.handleRequest = async () => { sends++; throw new BackendError('UNKNOWN', 'lost acknowledgement'); };
+  server.emit = (event, payload) => { if (event === 'operational-error') incidents.push(payload as { certainty: string }); };
+  const handoff: DelegatedHandoff = { id: 'unknown', childSessionId, recipient: creator,
+    inputIds: ['delivered-input'], outcome: 'cancelled', text: 'Stopped before verification.' };
+  await internal.routeDelegatedHandoff(handoff, idlePath);
+  await internal.routeDelegatedHandoff(handoff, idlePath);
+  assert.equal(sends, 1);
+  assert.equal(incidents[0].certainty, 'ambiguous');
+  await internal.routeDelegatedHandoff({ ...handoff, id: 'wrong-creator', recipient: resolveSessionIdentity(idlePath) }, idlePath);
+  await internal.routeDelegatedHandoff({ ...handoff, id: 'wrong-child', childSessionId: 'old-header' }, idlePath);
+  assert.equal(sends, 1);
+  assert.equal(incidents.length, 3);
 });
 
 test('operation status reports pending and known evidence without replay and read-only access rejects mutations', async (t) => {

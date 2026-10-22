@@ -9,6 +9,7 @@ import {
   validateWorkerIpcFrameDraft,
 } from '../../lib/rpc/worker-protocol.js';
 import { BackendError } from '../server-io.js';
+import { SETTLED_SESSION_CAPABILITIES } from '../../workers/session-activity.js';
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 import { sessionOpenedUnavailableForWorkerIpc } from '../../lib/rpc/session-opened-transport.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
@@ -796,6 +797,39 @@ test('worker router drops stale and cross-session events', async () => {
   assert.deepEqual(emitted, []);
 });
 
+
+test('only current validated settlements route internal handoffs and never expose their payload to host state', async () => {
+  const emitted: Array<[string, any]> = [];
+  const handoffs: unknown[] = [];
+  const router = new WorkerRuntimeRouter({
+    supervisor: {} as any, coldStore: {} as any, ownership: {} as any,
+    emit: (event, payload) => emitted.push([event, payload]),
+    onDelegatedHandoff: async (handoff, source) => { handoffs.push({ handoff, source }); },
+    buildPromotionSnapshot: async () => { throw new Error('unused'); },
+  });
+  const route = {
+    state: 'hot', rootSessionPath: '/child', workerRootSessionPath: '/child', currentLeasePath: '/child',
+    previousLeasePath: '/previous', currentLeaseRevision: 1,
+    owner: { workerId: 'child-worker', workerGeneration: 1, coordinatorGeneration: 1 },
+    checkpoint: { busySeq: 0, tools: [] },
+  };
+  (router as any).workersById.set('child-worker', route);
+  const handoff = { id: 'claim', childSessionId: 'child-id', recipient: { sessionId: 'creator-id', identityFallback: false },
+    inputIds: ['input'], outcome: 'completed', text: 'Final result' };
+  const frame = {
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: 'child-worker', workerGeneration: 1, workerPid: 1,
+    rootSessionPath: '/child', leasePath: '/child', leaseRevision: 1, sessionPath: '/child', seq: 1,
+    kind: 'runtime.event', event: 'agent.settled', payload: { sessionPath: '/child', capabilities: SETTLED_SESSION_CAPABILITIES, handoff },
+  };
+  await router.handleWorkerFrame('/child', frame as any);
+  assert.deepEqual(handoffs, [{ handoff, source: '/child' }]);
+  assert.equal(emitted[0][1].handoff, undefined);
+  await router.handleWorkerFrame('/child', { ...frame, workerGeneration: 0 } as any);
+  await router.handleWorkerFrame('/child', { ...frame, payload: { ...frame.payload, sessionPath: '/previous' } } as any);
+  await router.handleWorkerFrame('/child', { ...frame, payload: { ...frame.payload, handoff: { ...handoff, text: 12 } } } as any);
+  assert.equal(handoffs.length, 1);
+  assert.equal(emitted.every(([, payload]) => payload.handoff === undefined), true);
+});
 
 test('session-control send admission is rechecked after async promotion without fencing ordinary sends', async () => {
   const sessionPath = `${process.cwd()}/admission-fence.jsonl`;

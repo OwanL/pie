@@ -10,7 +10,8 @@ import {
 } from '../../../lib/concurrency-config.js';
 import { getMaxInflightResolution } from '../../tools/subagent/concurrency-limit.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
-import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
+import type { DelegatedHandoff, SessionOpenedPayload } from '../lib/rpc/session-events.js';
+import { isAgentSettledPayload } from '../lib/rpc/event-payload-validation.js';
 import { isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import { sessionOpenedMetadataForWorkerIpc } from '../lib/rpc/session-opened-transport.js';
 import type { ModelSettingsUnsetKey } from './request-handler-shared';
@@ -242,6 +243,8 @@ export interface WorkerRuntimeRouterOptions {
    *  this cross-session admission check. */
   assertSessionControlSendAdmissionOpen?(sessionPath: string): void;
   emit(event: string, payload?: unknown): void;
+  /** Route a claimed final handoff from the current worker, never host state. */
+  onDelegatedHandoff?: (handoff: DelegatedHandoff, sourceSessionPath: string) => Promise<void>;
   /** Handle the narrowly scoped worker-originated agent session-control
    * request after the route identity fence has accepted its frame. */
   onSessionControl?: (
@@ -1626,12 +1629,27 @@ export class WorkerRuntimeRouter {
         // host, and a later response for it must never invoke the worker.
         if (!this.recordExtensionUiOwner(route, frame.payload)) return;
       }
-      const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, frame.payload);
+      const handoff = !isSupersededTerminal && frame.event === 'agent.settled'
+        && isAgentSettledPayload(frame.payload) ? frame.payload.handoff : undefined;
+      // Handoff content is an internal coordinator action, not host state.
+      let eventPayload = frame.payload;
+      if (frame.event === 'agent.settled') {
+        const { handoff: _handoff, ...settledPayload } = frame.payload;
+        eventPayload = settledPayload;
+      }
+      const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, eventPayload);
       if (frame.event === 'session.opened' && this.options.analyticsContext) {
         route.analyticsCaptureSubject = this.analyticsCaptureSubject(publicPayload);
       }
       if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, publicPayload);
       this.options.emit(frame.event, publicPayload);
+      if (handoff && this.options.onDelegatedHandoff) {
+        void this.options.onDelegatedHandoff(handoff, route.currentLeasePath).catch((error) => {
+          backendWarn('backend-session-control', 'delegated handoff failed', {
+            sessionPath: route.currentLeasePath, error: toErrorMessage(error),
+          });
+        });
+      }
       return;
     }
     if (frame.kind === 'analytics.capture') {

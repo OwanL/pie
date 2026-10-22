@@ -16,7 +16,7 @@ import type { SdkSession, SdkSessionEvent, SdkSessionManager } from '../../lib/s
 import type { SessionContext } from '../../coordinator/server-types.js';
 import { FENCED_ENTRY_ID } from '../../../session-storage/ownership/session-manager-fence';
 import { BackendLiveTurnAccumulator } from '../live-turn-accumulator';
-import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { createSessionControlSender, formatSessionControlPrompt } from '../../lib/rpc/session-control-attribution.js';
 import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY, attachAgentMessageProvenance } from '../agent-message-provenance.js';
 import { OrderedJsonlWriter } from '../../coordinator/server-io.js';
 import { SendOperationLedger, canonicalSendIntentFingerprint } from '../../coordinator/send-operation-ledger.js';
@@ -2026,6 +2026,114 @@ test('initial user message_start preserves the direct agent attribution before h
 
     manager.appendMessage({ role: 'user', content: 'queued request' });
     assert.deepEqual(entries[1]?.message[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY], { sender: queuedSender }, mode);
+  }
+});
+
+function createDelegatedDeliveryFixture(t: { after: (fn: () => void) => void }) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-delegated-delivery-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const sessionFile = path.join(directory, 'session.jsonl');
+  fs.writeFileSync(sessionFile, '');
+  const creator = { sessionId: 'creator-session', identityFallback: false };
+  const entries: any[] = [{
+    id: 'creator-marker', type: 'custom', customType: 'pie.agent-created-session',
+    data: { version: 1, sessionId: 'child-session', creator },
+  }];
+  const baseManager = {
+    flushed: true,
+    isPersisted: () => true,
+    getSessionFile: () => sessionFile,
+    getSessionId: () => 'child-session',
+    getEntries: () => entries,
+    getBranch: () => entries,
+    appendMessage(message: unknown) {
+      const id = `input-${entries.length}`;
+      entries.push({ id, type: 'message', message });
+      fs.appendFileSync(sessionFile, `${JSON.stringify(entries.at(-1))}\n`);
+      return id;
+    },
+    appendCustomEntry(customType: string, data: unknown) {
+      const id = `claim-${entries.length}`;
+      entries.push({ id, type: 'custom', customType, data });
+      fs.appendFileSync(sessionFile, `${JSON.stringify(entries.at(-1))}\n`);
+      return id;
+    },
+  };
+  const context = createContext({
+    activeRequest: { id: 'delegated-request', messageIndex: 0, aborted: false },
+  });
+  const manager = attachAgentMessageProvenance(baseManager as any, () => context,
+    () => assert.fail('delivery must persist authenticated provenance'));
+  context.session = { sessionManager: manager } as unknown as SessionContext['session'];
+  const captured = createDeps();
+  function deliver(sender?: ReturnType<typeof createSessionControlSender>) {
+    Object.assign(context.activeRequest!, {
+      agentMessageLocalId: sender ? 'local:agent-session:delivery' : undefined,
+      coordinatorAttribution: sender,
+      agentMessageProvenanceEntryId: undefined,
+      agentMessageDurabilityConfirmed: false,
+    });
+    const message = { role: 'user' as const, content: sender ? formatSessionControlPrompt('instruction', sender) : 'human steering' };
+    const id = manager.appendMessage(message);
+    handleSdkSessionEventImpl(captured.deps, context, { type: 'message_end', sessionEntryId: id, message });
+    return { id, message };
+  }
+  function settle() {
+    entries.push({ id: 'final-assistant', type: 'message', message: {
+      role: 'assistant', content: [{ type: 'text', text: 'Verified final result.' }], stopReason: 'end_turn',
+    } });
+    context.activeRequest!.lastAssistantMessageId = 'final-assistant';
+    handleSdkSessionEventImpl(captured.deps, context, { type: 'agent_settled' });
+  }
+  return { ...captured, context, creator, entries, deliver, settle,
+    inputIds: () => context.delegation?.inputIds };
+}
+
+test('durable creator delivery produces one correlated handoff only at full settlement', (t) => {
+  const fixture = createDelegatedDeliveryFixture(t);
+  const { context, deps, emitted, entries, creator } = fixture;
+  const sender = createSessionControlSender(creator, 'Creator', { sentAt: 1, expectReply: true });
+  context.queuedLocalIds = ['local:agent-session:not-consumed'];
+  context.queuedCoordinatorAttributions = [sender];
+  handleSdkSessionEventImpl(deps, context, { type: 'message_end', message: { role: 'user', content: 'not durable' } });
+  assert.equal(context.delegation, undefined);
+  const { id, message } = fixture.deliver(sender);
+  const delivered = context.activeRequest!.coordinatorAttribution!;
+  assert.equal(typeof delivered.message?.deliveredAt, 'number');
+  assert.equal(sender.message?.deliveredAt, undefined);
+  assert.equal(message.content, formatSessionControlPrompt('instruction', delivered), 'actual append input is stamped');
+  assert.deepEqual(entries.find(entry => entry.id === id).message[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY], { sender: delivered });
+  assert.deepEqual(fixture.inputIds(), [id]);
+  handleSdkSessionEventImpl(deps, context, { type: 'message_end', sessionEntryId: id, message });
+  assert.deepEqual(fixture.inputIds(), [id], 'duplicate delivery is idempotent');
+  fixture.deliver();
+  fixture.deliver(createSessionControlSender(creator, undefined, { sentAt: 2, expectReply: false }));
+  assert.deepEqual(fixture.inputIds(), [id], 'human and no-reply steering preserve the obligation');
+  handleSdkSessionEventImpl(deps, context, { type: 'agent_end' });
+  handleSdkSessionEventImpl(deps, context, { type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 1 });
+  assert.equal(emitted.some(entry => entry.event === 'agent.settled'), false);
+  assert.equal(entries.some(entry => entry.customType === 'pie.delegated-handoff-claim'), false);
+  fixture.settle();
+  const settled = emitted.find(entry => entry.event === 'agent.settled')!.payload as any;
+  assert.equal(settled.requestId, 'delegated-request');
+  assert.deepEqual(settled.handoff.inputIds, [id]);
+  assert.deepEqual(settled.handoff.recipient, creator);
+  assert.equal(settled.handoff.text, 'Verified final result.');
+  handleSdkSessionEventImpl(deps, context, { type: 'agent_settled' });
+  assert.equal(emitted.filter(entry => entry.event === 'agent.settled' && (entry.payload as any).handoff).length, 1);
+  assert.equal(entries.filter(entry => entry.customType === 'pie.delegated-handoff-claim').length, 1);
+});
+
+test('human-only, no-reply and completion deliveries never start automatic handoff loops', (t) => {
+  for (const kind of ['human', 'no-reply', 'completion'] as const) {
+    const fixture = createDelegatedDeliveryFixture(t);
+    fixture.deliver(kind === 'human' ? undefined : createSessionControlSender(fixture.creator, undefined, {
+      sentAt: 1, expectReply: false, ...(kind === 'completion' ? { kind: 'completion' as const } : {}),
+    }));
+    assert.equal(fixture.context.delegation, undefined, kind);
+    fixture.settle();
+    assert.equal((fixture.emitted.find(entry => entry.event === 'agent.settled')!.payload as any).handoff, undefined, kind);
+    assert.equal(fixture.entries.some(entry => entry.customType === 'pie.delegated-handoff-claim'), false, kind);
   }
 });
 
