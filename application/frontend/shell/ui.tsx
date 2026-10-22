@@ -68,6 +68,7 @@ interface ComposerProps {
   retryStatus: RetryStatus | null;
   sessionPath: string | null;
   resolvedPendingPath?: string;
+  hostInstanceId?: string;
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
   activeModelId?: string;
@@ -162,6 +163,7 @@ function ComposerView({
   retryStatus,
   sessionPath,
   resolvedPendingPath,
+  hostInstanceId,
   draftText,
   draftRestore,
   activeModelId,
@@ -298,6 +300,7 @@ function ComposerView({
     initialRows: prefs.composerInitialRows,
     sessionPath,
     resolvedPendingPath,
+    hostInstanceId,
     draftText,
     postMessage,
     draftRestore,

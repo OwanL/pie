@@ -74,6 +74,7 @@ export function useComposerInput({
   initialRows,
   sessionPath,
   resolvedPendingPath,
+  hostInstanceId,
   draftText,
   postMessage,
   draftRestore,
@@ -101,6 +102,9 @@ export function useComposerInput({
   initialRows: number;
   sessionPath: string | null;
   resolvedPendingPath?: string;
+  /** Accepted host incarnation. Initial discovery adopts boot edits; replacement
+   * retires local buffers, history, timers and reads even at the same path. */
+  hostInstanceId?: string;
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
   draftRestore?: { text: string; nonce: number } | null;
@@ -108,13 +112,23 @@ export function useComposerInput({
   onAddInput: (input: ComposerInputDraft, sessionPath?: string) => void;
   supportsImageInputs: boolean;
 }) {
+  // First identity discovery adopts boot-local edits; only known→known replaces ownership.
+  const hostOwnerRef = useRef({ id: hostInstanceId, generation: 0 });
+  const hostOwner = hostOwnerRef.current;
+  if (hostInstanceId && hostOwner.id !== hostInstanceId) {
+    if (hostOwner.id) hostOwner.generation++;
+    hostOwner.id = hostInstanceId;
+  }
+  const hostGeneration = hostOwner.generation;
+  const seededHostGenerationRef = useRef(hostGeneration);
+  const replacingHost = seededHostGenerationRef.current !== hostGeneration;
   // Async reads belong to the selection/admission lifetime that started them.
   // Track transitions during render so A→B→A cannot resurrect an old read.
   const [pendingTransferReads, setPendingTransferReads] = useState(0);
-  const transferOwnerRef = useRef({ sessionPath, commandsAvailable, generation: 0, mounted: true, pending: 0, tail: Promise.resolve() });
+  const transferOwnerRef = useRef({ sessionPath, commandsAvailable, hostGeneration, generation: 0, mounted: true, pending: 0, tail: Promise.resolve() });
   const owner = transferOwnerRef.current;
-  if (owner.sessionPath !== sessionPath || owner.commandsAvailable !== commandsAvailable) {
-    const sameSessionResolution = owner.sessionPath !== null
+  if (owner.hostGeneration !== hostGeneration || owner.sessionPath !== sessionPath || owner.commandsAvailable !== commandsAvailable) {
+    const sameSessionResolution = owner.hostGeneration === hostGeneration && owner.sessionPath !== null
       && owner.sessionPath === resolvedPendingPath && sessionPath !== null
       && owner.commandsAvailable === commandsAvailable;
     if (!sameSessionResolution) {
@@ -122,6 +136,7 @@ export function useComposerInput({
       owner.pending = 0;
       owner.tail = Promise.resolve();
     }
+    owner.hostGeneration = hostGeneration;
     owner.sessionPath = sessionPath;
     owner.commandsAvailable = commandsAvailable;
   }
@@ -192,7 +207,9 @@ export function useComposerInput({
     // gesture is never mistaken for the stray echo of the applied one.
     // Deferred markers stay armed: their matched input is spec-guaranteed.
     if (pendingNativeUndoRedoResetRef.current) clearTimeout(pendingNativeUndoRedoResetRef.current);
+    const generation = hostOwnerRef.current.generation;
     pendingNativeUndoRedoResetRef.current = setTimeout(() => {
+      if (generation !== hostOwnerRef.current.generation) return;
       pendingNativeUndoRedoResetRef.current = null;
       if (pendingNativeUndoRedoRef.current?.applied) pendingNativeUndoRedoRef.current = null;
     }, 0);
@@ -207,7 +224,9 @@ export function useComposerInput({
     // in a separate event task right after the keydown task, and the latch
     // must stay armed across that task boundary. A 0 ms timer is the earliest
     // boundary past it — no longer than the input task itself.
+    const generation = hostOwnerRef.current.generation;
     undoRedoEchoLatchResetRef.current = setTimeout(() => {
+      if (generation !== hostOwnerRef.current.generation) return;
       undoRedoEchoLatchResetRef.current = null;
       undoRedoEchoLatchRef.current = null;
     }, 0);
@@ -249,7 +268,9 @@ export function useComposerInput({
 
   const scheduleCheckpoint = useCallback((value: string) => {
     clearCheckpointTimer();
+    const generation = hostOwnerRef.current.generation;
     checkpointTimerRef.current = setTimeout(() => {
+      if (generation !== hostOwnerRef.current.generation) return;
       checkpointTimerRef.current = null;
       setHistory(value, true);
     }, CHECKPOINT_DEBOUNCE_MS);
@@ -336,7 +357,18 @@ export function useComposerInput({
   // 300 ms post debounce (and was keyed under the pending path until the host
   // migrates it on PendingPathReplaced).
   useEffect(() => {
-    const prevSessionPath = prevSessionPathRef.current;
+    const hostChanged = seededHostGenerationRef.current !== hostGeneration;
+    seededHostGenerationRef.current = hostGeneration;
+    if (hostChanged) {
+      clearPendingStart();
+      cancelledStartDraftRef.current = null;
+      cancelledDictationRef.current = null;
+      setDictationStartError(null);
+      setAttachmentError(null);
+      undoRedoEchoLatchRef.current = null;
+      if (undoRedoEchoLatchResetRef.current) clearTimeout(undoRedoEchoLatchResetRef.current);
+    }
+    const prevSessionPath = hostChanged ? null : prevSessionPathRef.current;
     const pendingStart = pendingStartRef.current;
     const resolvedSessionPath = sessionPath;
     const dictationResolution = resolvedSessionPath !== null && prevSessionPath === null && pendingStart !== null
@@ -410,7 +442,7 @@ export function useComposerInput({
       textarea.value = draftText;
       resizeComposerTextarea(textarea);
     }
-  }, [sessionPath, clearPendingStart]);
+  }, [sessionPath, hostGeneration, clearPendingStart]);
 
   useEffect(() => {
     const pendingStart = pendingStartRef.current;
@@ -466,12 +498,16 @@ export function useComposerInput({
   // session switches. A 300 ms window coalesces rapid keystrokes.
   useEffect(() => {
     if (sessionPath === null) return;
+    // The replacement render still holds the retired text until the seed commits.
+    if (replacingHost) return;
     if (text === draftText) return;
 
     if (draftPostTimeoutRef.current) {
       clearTimeout(draftPostTimeoutRef.current);
     }
+    const generation = hostGeneration;
     draftPostTimeoutRef.current = setTimeout(() => {
+      if (generation !== hostOwnerRef.current.generation) return;
       draftPostTimeoutRef.current = null;
       postMessage({ type: 'setComposerDraft', sessionPath, text });
     }, 300);
@@ -482,7 +518,7 @@ export function useComposerInput({
         draftPostTimeoutRef.current = null;
       }
     };
-  }, [text, sessionPath, draftText, postMessage]);
+  }, [text, sessionPath, draftText, postMessage, hostGeneration]);
 
   useEffect(() => {
     if (!draftRestore) {
@@ -845,7 +881,9 @@ export function useComposerInput({
     const recordingId = crypto.randomUUID();
     pendingStartRef.current = { recordingId, baselineText: text, editGeneration: editGenerationRef.current };
     setDictationStartError(null);
+    const generation = hostOwnerRef.current.generation;
     pendingStartTimerRef.current = setTimeout(() => {
+      if (generation !== hostOwnerRef.current.generation) return;
       pendingStartTimerRef.current = null;
       if (pendingStartRef.current?.recordingId !== recordingId) return;
       pendingStartRef.current = null;

@@ -152,3 +152,45 @@ for (const transition of ['same', 'session', 'alias'] as const) {
     }
   });
 }
+
+for (const replace of [false, true]) {
+  test('host incarnation owns draft, undo and concurrent reads: replace=' + replace, async () => {
+    const container = document.createElement('div');
+    const messages: WebviewToHostMessage[] = [];
+    const added: unknown[] = [];
+    let composer!: ReturnType<typeof useComposerInput>;
+    const postMessage = (message: WebviewToHostMessage) => { messages.push(message); };
+    function Harness({ host, draft }: { host?: string; draft: string }) {
+      composer = useComposerInput({ busy: false, onSend() {}, onRetrySend() {},
+        pendingComposerInputsLength: 0, initialRows: 1, sessionPath: '/A', draftText: draft,
+        hostInstanceId: host, postMessage, onAddInput: input => added.push(input),
+        supportsImageInputs: true, commandsAvailable: true });
+      return h('textarea', { ref: composer.textareaRef, value: composer.text, onInput: composer.handleInput, onKeyDown: composer.handleKeyDown });
+    }
+    const controls: Array<(buffer: ArrayBuffer) => void> = [];
+    const transfer = () => ({ files: [{ name: 'image.gif', type: 'image/gif', size: 1,
+      arrayBuffer: () => new Promise<ArrayBuffer>(resolve => controls.push(resolve)),
+    }] }) as unknown as DataTransfer;
+    try {
+      act(() => render(h(Harness, { host: replace ? 'old' : undefined, draft: 'seed' }), container));
+      const textarea = container.querySelector('textarea')!;
+      act(() => { textarea.value = 'local'; textarea.dispatchEvent(new Event('input', { bubbles: true })); });
+      let first!: Promise<void>, second!: Promise<void>;
+      act(() => { first = composer.applyComposerTransfer(transfer(), 'paste'); second = composer.applyComposerTransfer(transfer(), 'drop'); });
+      act(() => render(h(Harness, { host: 'new', draft: replace ? 'new seed' : 'seed' }), container));
+      assert.equal(composer.text, replace ? 'new seed' : 'local');
+      assert.equal(composer.transferPending, !replace);
+      await act(async () => { controls[1](new ArrayBuffer(1)); controls[0](new ArrayBuffer(1)); await Promise.all([first, second]); });
+      assert.equal(added.length, replace ? 0 : 2);
+      assert.equal(composer.transferPending, false);
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 550)); });
+      if (replace) {
+        assert.equal(messages.some(message => message.type === 'setComposerDraft' && message.text === 'local'), false);
+        act(() => { textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true })); });
+        assert.equal(composer.text, 'new seed', 'undo cannot restore the retired host draft');
+      }
+      act(() => render(h(Harness, { host: 'new', draft: replace ? 'new seed' : 'seed' }), container));
+      assert.equal(composer.text, replace ? 'new seed' : 'local');
+    } finally { act(() => render(null, container)); container.remove(); }
+  });
+}

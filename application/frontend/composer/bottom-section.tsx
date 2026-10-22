@@ -63,6 +63,7 @@ export interface BottomSectionProps {
   canonicalActivityBySessionTruncated?: ViewState['canonicalActivityBySessionTruncated'];
   draftRestore: { text: string; nonce: number } | null;
   resolvedPendingPath?: string;
+  hostInstanceId?: string;
   draftText: string;
   /** AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (AppBody-level) can re-send the live draft. */
@@ -121,6 +122,7 @@ export const BottomSection = memo(function BottomSection({
   canonicalActivityBySessionTruncated,
   draftRestore,
   resolvedPendingPath,
+  hostInstanceId,
   draftText,
   sendRetryDraftRef,
   pendingComposerInputs,
@@ -146,6 +148,7 @@ export const BottomSection = memo(function BottomSection({
       <Composer
         sessionPath={activeSessionPath}
         resolvedPendingPath={resolvedPendingPath}
+        hostInstanceId={hostInstanceId}
         draftText={draftText}
         postMessage={postMessage}
         busy={busy}

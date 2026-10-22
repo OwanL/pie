@@ -126,6 +126,7 @@ export interface OptimisticUserMessage {
 }
 
 export interface HostSyncState {
+  hostInstanceId?: string;
   viewState: ViewState;
   /** Transcript with optimistic user messages merged in. */
   mergedTranscript: ChatMessage[];
@@ -840,6 +841,7 @@ export function useHostSync(
     viewState: effectiveViewState,
     mergedTranscript,
     commitTarget,
+    hostInstanceId: hostInstanceIdRef.current || undefined,
     draftRestore,
     activeSessionPathRef,
     setDraftRestore,

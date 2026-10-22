@@ -42,6 +42,7 @@ export function AppBody({ adapter }: AppBodyProps) {
   const { postMessage, transport } = adapter;
   const {
     viewState,
+    hostInstanceId,
     mergedTranscript,
     commitTarget,
     draftRestore,
@@ -334,6 +335,7 @@ export function AppBody({ adapter }: AppBodyProps) {
       />
 
       <BottomSection
+        hostInstanceId={hostInstanceId}
         hasActiveTabs={derived.hasActiveTabs}
         needsSessionRecovery={derived.needsSessionRecovery}
         pendingExtensionUIRequest={fixedPendingExtensionUIRequest}
