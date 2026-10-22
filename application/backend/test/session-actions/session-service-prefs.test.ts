@@ -326,6 +326,7 @@ test('session-control capture reads durable execution prefs and apply persists t
     subagentBuckets: { small: [{ model: 'openai/gpt-test', thinkingLevel: 'off' }], medium: [], frontier: [] },
     subagentProviderDefaults: { anthropic: false },
     subagentProviderTogglesBySession: { [source]: { openai: false } },
+    subagentBucketTogglesBySession: { [source]: { small: false, medium: true, frontier: false } },
   });
   archState.settings.prefs.autonomousMode = true;
   archState.settings.prefs.autonomousModeBySession = { [source]: false };
@@ -343,22 +344,26 @@ test('session-control capture reads durable execution prefs and apply persists t
   assert.deepEqual(captured.acknowledgement.settings, {
     autonomousMode: true,
     subagentProviderChoices: { anthropic: false, openai: false },
+    subagentBucketChoices: { small: false, medium: true, frontier: false },
   }, 'capture uses durable values, not conflicting optimistic reducer prefs');
 
   const applied = await service.sessionControlSettings({
     requestId: 'apply-1',
     sessionPath: target,
     action: 'apply',
-    settings: { autonomousMode: false, subagentProviderChoices: { openai: true } },
+    settings: { autonomousMode: false, subagentProviderChoices: { openai: true }, subagentBucketChoices: captured.acknowledgement.settings!.subagentBucketChoices },
   });
   assert.equal(applied.acknowledgement.outcome, 'succeeded');
   assert.equal(applied.acknowledgement.application, 'applied');
   const persisted = context.globalState.get('chatPrefs') as ChatPrefs;
   assert.equal(persisted.autonomousModeBySession?.[target], false);
   assert.deepEqual(persisted.subagentProviderTogglesBySession[target], { openai: true });
+  assert.deepEqual(persisted.subagentBucketTogglesBySession[target], { small: false, medium: true, frontier: false });
+  assert.deepEqual(persisted.subagentBucketTogglesBySession[source], persisted.subagentBucketTogglesBySession[target]);
   const runtimePrefs = requests.find((request) => request.method === 'runtimePrefs.set')?.params as Record<string, unknown>;
   assert.deepEqual(runtimePrefs.autonomousModeBySession, persisted.autonomousModeBySession);
   assert.deepEqual(runtimePrefs.subagentProviderTogglesBySession, persisted.subagentProviderTogglesBySession);
+  assert.deepEqual(runtimePrefs.subagentBucketTogglesBySession, persisted.subagentBucketTogglesBySession);
   service.dispose();
 });
 

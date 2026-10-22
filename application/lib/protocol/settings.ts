@@ -1,3 +1,4 @@
+import { normalizeSubagentBucketChoices, type SubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
 import type { ThinkingLevel } from './models.js';
 import { isThinkingLevel } from './thinking-level.js';
 import {
@@ -406,6 +407,7 @@ export interface ChatPrefs {
    *  {@link subagentProviderDefaults}. This does not affect the parent
    *  session's model picker. */
   subagentProviderTogglesBySession: Record<string, Record<string, boolean>>;
+  subagentBucketTogglesBySession: Record<string, SubagentBucketChoices>;
   /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
    *  queueWaitSeconds, headerWaitSeconds). maxConcurrentRequests=0 means
    *  Unlimited (no concurrency/afterburn capacity throttle). A provider absent from this map uses
@@ -499,6 +501,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   providerToggles: {},
   subagentProviderDefaults: {},
   subagentProviderTogglesBySession: {},
+  subagentBucketTogglesBySession: {},
   autonomousModeBySession: {},
   providerConcurrency: {},
   activityTailLines: 5,
@@ -834,6 +837,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     },
     subagentProviderDefaults: normalizeBooleanMap(storedPrefs.subagentProviderDefaults),
     subagentProviderTogglesBySession: normalizeNestedBooleanMap(storedPrefs.subagentProviderTogglesBySession),
+    subagentBucketTogglesBySession: normalizeSubagentBucketMap(storedPrefs.subagentBucketTogglesBySession),
     autonomousModeBySession: normalizeBooleanMap(storedPrefs.autonomousModeBySession),
     providerConcurrency: normalizeProviderConcurrency(storedPrefs.providerConcurrency),
     historyCompaction: resolveHistoryCompactionSettings(storedPrefs.historyCompaction),
@@ -876,6 +880,9 @@ export function mergeChatPrefs(current: ChatPrefs, updates: Partial<ChatPrefs>):
         ...updates.autonomousModeBySession,
       },
     }),
+    ...(updates.subagentBucketTogglesBySession && {
+      subagentBucketTogglesBySession: { ...current.subagentBucketTogglesBySession, ...updates.subagentBucketTogglesBySession },
+    }),
     ...(updates.subagentProviderTogglesBySession && {
       subagentProviderTogglesBySession: {
         ...current.subagentProviderTogglesBySession,
@@ -900,6 +907,19 @@ export function mergeChatPrefs(current: ChatPrefs, updates: Partial<ChatPrefs>):
  * Shared between the live `setPrefs` path and startup restore so a pref field
  * is never mirrored on one path but missing on the other.
  */
+export function normalizeSubagentBucketMap(value: unknown): Record<string, SubagentBucketChoices> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => key && entry !== undefined)
+    .map(([key, entry]) => [key, normalizeSubagentBucketChoices(entry)]));
+}
+
+export function resolveSubagentBucketChoices(
+  prefs: Pick<ChatPrefs, 'subagentBucketTogglesBySession'>,
+  sessionPath: string,
+): SubagentBucketChoices {
+  return normalizeSubagentBucketChoices(prefs.subagentBucketTogglesBySession?.[sessionPath]);
+}
+
 export function normalizeBooleanMap(value: unknown): Record<string, boolean> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const result: Record<string, boolean> = {};
@@ -982,6 +1002,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParam
     mcpEnabled: prefs.mcpEnabled,
     subagentProviderDefaults: prefs.subagentProviderDefaults,
     subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
+    subagentBucketTogglesBySession: prefs.subagentBucketTogglesBySession,
     autonomousModeBySession: prefs.autonomousModeBySession ?? {},
     extensionToggles: prefs.extensionToggles,
     subagentAlwaysParentModel: prefs.subagentAlwaysParentModel,

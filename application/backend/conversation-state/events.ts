@@ -261,7 +261,7 @@ export interface SessionControlSettingsResultEvent {
   corrId: string;
   request: SessionControlSettingsRequest;
   acknowledgement: SessionControlSettingsAcknowledgement;
-  persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+  persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession' | 'subagentBucketTogglesBySession'>;
 }
 
 /** Backend answered `mcp.list` / `mcp.setServerEnabled`. On success

@@ -1,3 +1,4 @@
+import { isSubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
 /**
  * Runtime validators for the host ↔ webview protocol.
  *
@@ -446,6 +447,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     }
     if (key === 'subagentBuckets') {
       if (v !== undefined && !isSubagentBucketsPatch(v)) return false;
+      continue;
+    }
+    if (key === 'subagentBucketTogglesBySession') {
+      if (v !== undefined && (!isObject(v) || Object.values(v).some((entry) => !isSubagentBucketChoices(entry)))) return false;
       continue;
     }
     if (key === 'subagentProviderTogglesBySession') {

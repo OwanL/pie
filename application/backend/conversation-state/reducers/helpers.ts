@@ -1,3 +1,4 @@
+import type { ChatPrefs } from '../../../lib/protocol/settings.js';
 import type { ArchState, PendingOp, SetModelPending } from '../arch-state.js';
 import type { ChatMessage, ComposerInput, SessionSummary, UserContentPart } from '../../../lib/protocol/index.js';
 import { markdownFromUserParts } from '../../transcript-delivery/transcript-helpers.js';
@@ -327,14 +328,17 @@ export function evictSession(
   const { [sp]: _mcpPendingApply, ...remainingMcpPendingApply } = state.settings.mcpPendingApplyBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
   const remainingAutonomousModeBySession = { ...(state.settings.prefs.autonomousModeBySession ?? {}) };
+  const remainingSubagentBucketTogglesBySession = { ...state.settings.prefs.subagentBucketTogglesBySession };
   const remainingSubagentProviderTogglesBySession = { ...state.settings.prefs.subagentProviderTogglesBySession };
   const hadSessionExecutionPrefs = removeSummary && (
     Object.prototype.hasOwnProperty.call(remainingAutonomousModeBySession, sp)
     || Object.prototype.hasOwnProperty.call(remainingSubagentProviderTogglesBySession, sp)
+    || Object.prototype.hasOwnProperty.call(remainingSubagentBucketTogglesBySession, sp)
   );
   if (removeSummary) {
     delete remainingAutonomousModeBySession[sp];
     delete remainingSubagentProviderTogglesBySession[sp];
+    delete remainingSubagentBucketTogglesBySession[sp];
   }
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
@@ -498,6 +502,7 @@ export function evictSession(
             ...state.settings.prefs,
             autonomousModeBySession: remainingAutonomousModeBySession,
             subagentProviderTogglesBySession: remainingSubagentProviderTogglesBySession,
+            subagentBucketTogglesBySession: remainingSubagentBucketTogglesBySession,
           },
         } : {}),
       },
@@ -550,6 +555,9 @@ export function evictSession(
       prefs: {
         ...(Object.prototype.hasOwnProperty.call(state.settings.prefs.autonomousModeBySession ?? {}, sp)
           ? { autonomousModeBySession: { [sp]: undefined } as unknown as Record<string, boolean> }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(state.settings.prefs.subagentBucketTogglesBySession, sp)
+          ? { subagentBucketTogglesBySession: { [sp]: undefined } as unknown as ChatPrefs['subagentBucketTogglesBySession'] }
           : {}),
         ...(Object.prototype.hasOwnProperty.call(state.settings.prefs.subagentProviderTogglesBySession, sp)
           ? { subagentProviderTogglesBySession: { [sp]: undefined } as unknown as Record<string, Record<string, boolean>> }

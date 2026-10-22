@@ -1,3 +1,4 @@
+import { resolveSubagentBucketChoices } from '../../lib/protocol/settings.js';
 import * as crypto from 'node:crypto';
 
 import { BackendClient } from '../agent-connection/client';
@@ -748,7 +749,7 @@ export class SessionService implements HostDisposable {
    * never the reducer's potentially optimistic chatPrefs snapshot. */
   async sessionControlSettings(request: SessionControlSettingsRequest): Promise<{
     acknowledgement: SessionControlSettingsAcknowledgement;
-    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession' | 'subagentBucketTogglesBySession'>;
   }> {
     const validated = validateSessionControlSettingsRequest(request);
     const { requestId, sessionPath, action } = validated;
@@ -780,12 +781,14 @@ export class SessionService implements HostDisposable {
         this.getArchState().settings.availableModelsBySession[sessionPath] ?? []);
       return {
         autonomousMode: resolveAutonomousModeForSession(prefs, sessionPath),
+        subagentBucketChoices: resolveSubagentBucketChoices(prefs, sessionPath),
         subagentProviderChoices: Object.fromEntries(Object.keys(surface).map((provider) => [provider, choices[provider]])),
       };
     };
-    const persistedPrefs = (prefs: ChatPrefs): Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'> => ({
+    const persistedPrefs = (prefs: ChatPrefs): Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession' | 'subagentBucketTogglesBySession'> => ({
       autonomousModeBySession: prefs.autonomousModeBySession ?? {},
       subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
+      subagentBucketTogglesBySession: prefs.subagentBucketTogglesBySession,
     });
 
     if (action === 'capture') {
@@ -802,7 +805,7 @@ export class SessionService implements HostDisposable {
     }
 
     // Validate the entire patch above, before constructing writes. Only the
-    // two explicitly supported per-session execution overrides are writable.
+    // explicitly supported per-session execution overrides are writable.
     const patch = validated.settings!;
     if (patch.subagentProviderChoices !== undefined) {
       const surface = configuredProviders(readSavedPrefs());
@@ -816,6 +819,8 @@ export class SessionService implements HostDisposable {
       }
     }
     const updates: Partial<ChatPrefs> = {
+      ...(patch.subagentBucketChoices !== undefined
+        ? { subagentBucketTogglesBySession: { [sessionPath]: patch.subagentBucketChoices } } : {}),
       ...(patch.autonomousMode !== undefined
         ? { autonomousModeBySession: { [sessionPath]: patch.autonomousMode } }
         : {}),
@@ -850,7 +855,12 @@ export class SessionService implements HostDisposable {
           return actualKeys.length === Object.keys(expected).length
             && Object.entries(expected).every(([provider, enabled]) => actual[provider] === enabled);
         })();
-      const persisted = autoPersisted && providersPersisted;
+      const savedBuckets = resolveSubagentBucketChoices(saved, sessionPath);
+      const bucketsPersisted = patch.subagentBucketChoices === undefined
+        || (savedBuckets.small === patch.subagentBucketChoices.small
+          && savedBuckets.medium === patch.subagentBucketChoices.medium
+          && savedBuckets.frontier === patch.subagentBucketChoices.frontier);
+      const persisted = autoPersisted && providersPersisted && bucketsPersisted;
       return {
         acknowledgement: {
           requestId,

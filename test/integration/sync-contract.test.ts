@@ -25,6 +25,15 @@ import {
   EMPTY_AGGREGATE_STATS,
 } from '../../application/lib/protocol/index.js';
 
+test('session bucket choices retain full entries across preference snapshots', () => {
+  assert.deepEqual(DEFAULT_CHAT_PREFS.subagentBucketTogglesBySession, {});
+  const choices = { small: false, medium: true, frontier: false };
+  const prefs = resolveChatPrefs({ subagentBucketTogglesBySession: { '/session/root.jsonl': choices } });
+  assert.deepEqual(resolveChatPrefs(JSON.parse(JSON.stringify(prefs))).subagentBucketTogglesBySession, {
+    '/session/root.jsonl': choices,
+  });
+});
+
 test('open acknowledgement without snapshot retains bounded read-only recovery in the contract', async () => {
   const contract = await readFile('docs/contracts/STATE_CONTRACT.md', 'utf8');
   assert.match(contract, /successful acknowledgement alone cannot prove snapshot delivery/);

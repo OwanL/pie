@@ -119,12 +119,14 @@ test('private session eviction removes durable autonomous and subagent overrides
       prefs: resolveChatPrefs({
         autonomousModeBySession: { [sessionPath]: true },
         subagentProviderTogglesBySession: { [sessionPath]: { openai: false } },
+        subagentBucketTogglesBySession: { [sessionPath]: { small: true, medium: false, frontier: false } },
       }),
     },
   };
   const result = evictSession(state, sessionPath, { removeSummary: true, removeTabs: true });
   assert.equal(result.state.settings.prefs.autonomousModeBySession?.[sessionPath], undefined);
   assert.equal(result.state.settings.prefs.subagentProviderTogglesBySession[sessionPath], undefined);
+  assert.equal(result.state.settings.prefs.subagentBucketTogglesBySession[sessionPath], undefined);
   const clear = result.effects.find((effect) => effect.kind === 'SetPrefsRpc');
   assert.ok(clear);
   assert.equal(clear?.kind === 'SetPrefsRpc'

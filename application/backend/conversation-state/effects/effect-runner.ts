@@ -130,7 +130,7 @@ export interface SessionServiceLike {
   setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
   sessionControlSettings?(request: SessionControlSettingsRequest): Promise<{
     acknowledgement: SessionControlSettingsAcknowledgement;
-    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession' | 'subagentBucketTogglesBySession'>;
   }>;
   sessionControlSettingsAcknowledgement?(acknowledgement: SessionControlSettingsAcknowledgement): Promise<void>;
   /** Re-read the effective MCP server config from the backend. */

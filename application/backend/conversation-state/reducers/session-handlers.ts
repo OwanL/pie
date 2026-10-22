@@ -1,4 +1,5 @@
 import { produce } from 'immer';
+import type { ChatPrefs } from '../../../lib/protocol/settings.js';
 
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
@@ -2220,6 +2221,11 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     // represented by its pending tab path. Move those settings along with the
     // session identity before attach clears the old scope; pending-path values
     // win on collisions because they are the latest edits made during load.
+    const bucketOverrides = draft.settings.prefs.subagentBucketTogglesBySession[oldPendingPath];
+    if (bucketOverrides) {
+      draft.settings.prefs.subagentBucketTogglesBySession[newSessionPath] = { ...bucketOverrides };
+      delete draft.settings.prefs.subagentBucketTogglesBySession[oldPendingPath];
+    }
     const providerOverrides = draft.settings.prefs.subagentProviderTogglesBySession[oldPendingPath];
     const hadProviderOverrides = Object.prototype.hasOwnProperty.call(
       draft.settings.prefs.subagentProviderTogglesBySession,
@@ -2358,11 +2364,20 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     state.settings.prefs.autonomousModeBySession ?? {},
     oldPendingPath,
   );
-  if (hadProviderOverrides || hadAutonomousOverride) {
+  const hadBucketOverrides = Object.prototype.hasOwnProperty.call(
+    state.settings.prefs.subagentBucketTogglesBySession, oldPendingPath,
+  );
+  if (hadProviderOverrides || hadAutonomousOverride || hadBucketOverrides) {
     effects.push({
       kind: 'SetPrefsRpc',
       corrId: `prefs:path-replaced:${oldPendingPath}:${newSessionPath}`,
       prefs: {
+        ...(hadBucketOverrides ? {
+          subagentBucketTogglesBySession: {
+            [newSessionPath]: finalState.settings.prefs.subagentBucketTogglesBySession[newSessionPath],
+            [oldPendingPath]: undefined,
+          } as unknown as ChatPrefs['subagentBucketTogglesBySession'],
+        } : {}),
         ...(hadProviderOverrides ? {
           subagentProviderTogglesBySession: {
             [newSessionPath]: finalState.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {},

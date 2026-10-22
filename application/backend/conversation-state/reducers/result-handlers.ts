@@ -1176,6 +1176,7 @@ export function handleSessionControlSettingsResult(
             ...state.settings.prefs,
             autonomousModeBySession: event.persistedPrefs.autonomousModeBySession,
             subagentProviderTogglesBySession: event.persistedPrefs.subagentProviderTogglesBySession,
+              subagentBucketTogglesBySession: event.persistedPrefs.subagentBucketTogglesBySession,
           }),
         },
       }

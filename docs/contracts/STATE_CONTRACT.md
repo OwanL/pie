@@ -16,6 +16,12 @@ Supporting references (never pinned by tests):
 - Every actual host-local selection transition sends the runtime-free `session.viewed` RPC with the host-observed predecessor. The host changes selection synchronously and never awaits the notification. The backend records the viewed path without opening the transcript; same-path reselection is a no-op. A notification failure never rolls back selection, is logged, and surfaces a notice only while that failed target remains current. A monotonic backend view fence prevents a slower `session.open` durable read from committing its viewed path after a newer local transition.
 - The worker-local `session_control create` flow durably marks its new session with explicit agent-created provenance. Its `session.opened` publication inserts an ordinary main tab in the background, preserves the current `activeSessionPath`, and exposes the tab tooltip `Agent-created session`; lineage such as `parentSession` is not used as provenance. See [AGENT-SESSION-CONTROL.md](AGENT-SESSION-CONTROL.md).
 
+## Per-session subagent bucket choices
+
+- `subagentBucketTogglesBySession` persists complete `{ small, medium, frontier }` boolean selections keyed by canonical session path; at least one tier must remain enabled. Legacy absence and malformed persisted entries resolve to all enabled. Incoming patches reject malformed entries and replace each supplied session entry atomically, retaining other sessions.
+- Pending paths migrate to real paths; ordinary close/reopen preserves these choices and private/deleted-session cleanup removes them, matching provider overrides. Startup restores the same map through `runtimePrefs.set`.
+- Host capture exposes readonly effective `subagentBucketChoices`; private child inheritance copies that snapshot without advertising a public tool settings patch. Later live calls see updated choices, but running calls and already-created children are not restarted or retroactively changed.
+
 ## Session Routing
 
 - Mutating backend requests require an explicit `sessionPath`.
