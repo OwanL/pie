@@ -149,6 +149,8 @@ export function useComposerInput({
   const [text, setTextState] = useState('');
   const editGenerationRef = useRef(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  // Fixed-size feedback summary for overlapping admissions, not an error queue.
+  const transferFeedbackRef = useRef({ files: 0, fileMessage: '', uri: '', blocked: '', read: '' });
   const [dictationStartError, setDictationStartError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftPostTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -555,6 +557,7 @@ export function useComposerInput({
 
   const resetComposer = useCallback(() => {
     setTextState('');
+    Object.assign(transferFeedbackRef.current, { files: 0, fileMessage: '', uri: '', blocked: '', read: '' });
     setAttachmentError(null);
     const textarea = textareaRef.current;
     if (textarea) {
@@ -752,6 +755,14 @@ export function useComposerInput({
     const ownerPath = owner.sessionPath;
     const generation = owner.generation;
     if (!ownerPath || !owner.mounted || owner.commandsAvailable === false) return;
+    if (owner.pending === 0) {
+      transferFeedbackRef.current = { files: 0, fileMessage: '', uri: '', blocked: '', read: '' };
+      setAttachmentError(null);
+    }
+    const feedback = transferFeedbackRef.current;
+    const publishFeedback = () => setAttachmentError(
+      [feedback.read, feedback.blocked, feedback.uri, feedback.fileMessage].filter(Boolean).join(' ') || null,
+    );
     owner.pending++;
     setPendingTransferReads(owner.pending);
     const predecessor = owner.tail;
@@ -767,7 +778,8 @@ export function useComposerInput({
     const outcome = await extraction;
     if (!owner.mounted || owner.generation !== generation) return;
     if (!('result' in outcome)) {
-      setAttachmentError('Could not read the selected attachment. Try again.');
+      feedback.read = 'Could not read the selected attachment. Try again.';
+      publishFeedback();
       return;
     }
     const { inputs, unsupportedInputs, rejectedFiles } = outcome.result;
@@ -786,11 +798,19 @@ export function useComposerInput({
       onAddInput(unsupportedInput, owner.sessionPath ?? undefined);
     }
 
-    const unsupportedFileMessage = formatComposerTransferError(rejectedFiles);
-    const blockedImageMessage = blockedImageCount > 0
-      ? 'The selected model does not support image inputs. Switch to an image-capable model to paste or drop images.'
-      : null;
-    setAttachmentError([blockedImageMessage, unsupportedFileMessage].filter(Boolean).join(' ') || null);
+    const invalidUris = rejectedFiles.filter((value) => /^file:/i.test(value));
+    if (invalidUris.length > 0) feedback.uri = formatComposerTransferError(invalidUris) ?? '';
+    const rejectedBlobs = rejectedFiles.filter((value) => !/^file:/i.test(value));
+    feedback.files += rejectedBlobs.length;
+    if (rejectedBlobs.length > 0) {
+      feedback.fileMessage = feedback.files === 1
+        ? formatComposerTransferError(rejectedBlobs) ?? ''
+        : `Cannot attach ${feedback.files} files: arbitrary file blobs are not supported yet. Attach filesystem paths instead.`;
+    }
+    if (blockedImageCount > 0) {
+      feedback.blocked = 'The selected model does not support image inputs. Switch to an image-capable model to paste or drop images.';
+    }
+    publishFeedback();
     } finally {
       release();
       if (owner.mounted && owner.generation === generation) {

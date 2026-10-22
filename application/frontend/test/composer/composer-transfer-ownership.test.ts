@@ -109,8 +109,11 @@ for (const reject of [false, true]) {
           sizeBytes: 1, dataBase64: 'AA==', source: 'drop' },
       ]);
       assert.equal(composer.transferPending, false);
+      if (reject) assert.match(composer.attachmentError ?? '', /Cannot attach first.gif/);
+      else assert.equal(composer.attachmentError, null);
       assert.deepEqual(sent, []);
       act(() => composer.sendCurrentText());
+      assert.equal(composer.attachmentError, null);
       assert.deepEqual(sent, [attachedOnly ? '' : 'prompt']);
       assert.equal(added.length, 2);
     } finally { act(() => render(null, container)); container.remove(); }
@@ -143,7 +146,7 @@ for (const transition of ['same', 'session', 'alias'] as const) {
       const completion = composer.applyComposerTransfer(image(() => new Promise((done) => { resolve = done; })), 'drop');
       const path = transition === 'session' ? '/B' : transition === 'alias' ? '/A' : initialPath;
       act(() => render(h(Harness, { path, resolvedPendingPath: transition === 'alias' ? initialPath : undefined }), container));
-      assert.equal(composer.attachmentError, transition === 'session' ? null : error);
+      assert.equal(composer.attachmentError, null, 'a fresh batch clears prior feedback at admission');
       await act(async () => { resolve(new ArrayBuffer(1)); await completion; });
       assert.equal(composer.attachmentError, transition === 'session' ? null : error);
     } finally {
@@ -191,6 +194,44 @@ for (const replace of [false, true]) {
       }
       act(() => render(h(Harness, { host: 'new', draft: replace ? 'new seed' : 'seed' }), container));
       assert.equal(composer.text, replace ? 'new seed' : 'local');
+    } finally { act(() => render(null, container)); container.remove(); }
+  });
+}
+
+for (const failure of ['uri', 'blocked', 'read'] as const) {
+  test(`overlapping feedback survives later success: ${failure}`, async () => {
+    const container = document.createElement('div');
+    let composer!: ReturnType<typeof useComposerInput>;
+    function Harness({ images }: { images: boolean }) {
+      composer = useComposerInput({ busy: false, onSend() {}, onRetrySend() {},
+        pendingComposerInputsLength: 0, initialRows: 1, sessionPath: '/A', draftText: '',
+        postMessage() {}, onAddInput() {}, supportsImageInputs: images });
+      return null;
+    }
+    let resolve!: (value: ArrayBuffer) => void;
+    const delayed = { files: [{ name: 'later.gif', type: 'image/gif', size: 1,
+      arrayBuffer: () => new Promise<ArrayBuffer>(done => { resolve = done; }),
+    }] } as unknown as DataTransfer;
+    const failed = failure === 'uri'
+      ? { types: ['text/uri-list'], getData: () => 'file:///tmp/%ZZ', files: [] }
+      : failure === 'read'
+        ? { get files(): never { throw new Error('unreadable transfer'); } }
+        : { files: [{ name: 'first.gif', type: 'image/gif', size: 1, arrayBuffer: async () => new ArrayBuffer(1) }] };
+    try {
+      act(() => render(h(Harness, { images: failure !== 'blocked' }), container));
+      let first!: Promise<void>, second!: Promise<void>;
+      act(() => {
+        first = composer.applyComposerTransfer(failed as unknown as DataTransfer, 'paste');
+        second = composer.applyComposerTransfer(delayed, 'drop');
+      });
+      await act(async () => { await first; });
+      const error = composer.attachmentError;
+      assert.match(error ?? '', failure === 'uri' ? /invalid file URI/ : failure === 'read' ? /Could not read/ : /does not support image/);
+      act(() => render(h(Harness, { images: true }), container));
+      await act(async () => { resolve(new ArrayBuffer(1)); await second; });
+      assert.equal(composer.attachmentError, error);
+      await act(async () => { await composer.applyComposerTransfer({ files: [] } as unknown as DataTransfer, 'paste'); });
+      assert.equal(composer.attachmentError, null);
     } finally { act(() => render(null, container)); container.remove(); }
   });
 }
