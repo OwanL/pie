@@ -276,6 +276,64 @@ function expandOpenai(container: HTMLElement): void {
     .click());
 }
 
+test('paused countdown recalculates immediately when the deadline changes', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const originalNow = Date.now;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let now = 1_000_000;
+  let nextId = 0;
+  const callbacks = new Map<number, () => void>();
+  const cleared: number[] = [];
+  Date.now = () => now;
+  globalThis.setInterval = ((handler: () => void) => {
+    const id = ++nextId;
+    callbacks.set(id, handler);
+    return id;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((id: unknown) => {
+    const intervalId = id as number;
+    callbacks.delete(intervalId);
+    cleared.push(intervalId);
+  }) as typeof clearInterval;
+
+  try {
+    const paint = (deadline: number) => renderPausedProvidersSection(container, pausedOpenaiMetrics(deadline));
+    act(() => paint(now + 5_000));
+    expandOpenai(container);
+    assert.match(container.textContent ?? '', /5s remaining/);
+    assert.equal(callbacks.size, 1);
+
+    act(() => paint(now + 12_000));
+    assert.match(container.textContent ?? '', /12s remaining/, 'an extended deadline updates without waiting for a tick');
+    assert.equal(callbacks.size, 1, 'the previous timer is replaced');
+    const extendedTimer = [...callbacks.keys()][0]!;
+    assert.ok(cleared.includes(1));
+
+    now += 3_000;
+    act(() => paint(now + 2_000));
+    assert.match(container.textContent ?? '', /2s remaining/, 'a shortened deadline updates immediately');
+    const shortenedTimer = [...callbacks.keys()][0]!;
+    assert.notEqual(shortenedTimer, extendedTimer);
+
+    now += 3_000;
+    act(() => callbacks.get(shortenedTimer)?.());
+    assert.match(container.textContent ?? '', /0s remaining/);
+    assert.doesNotMatch(container.textContent ?? '', /-\d+s remaining/);
+
+    act(() => render(null, container));
+    assert.equal(callbacks.size, 0, 'unmount clears the active timer');
+    assert.ok(cleared.includes(shortenedTimer));
+  } finally {
+    Date.now = originalNow;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
 test('paused provider countdown ticks down per second from a component-local interval', async () => {
   const container = document.createElement('div');
   document.body.appendChild(container);

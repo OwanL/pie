@@ -48,6 +48,7 @@ function PausedProviderStatus({ metrics }: { metrics: ProviderGateProviderMetric
   const [remaining, setRemaining] = useState(() => remainingSeconds(metrics.pausedUntilMs));
   useEffect(() => {
     const pausedUntilMs = metrics.pausedUntilMs;
+    setRemaining(remainingSeconds(pausedUntilMs));
     const interval = setInterval(() => {
       setRemaining((previous) => {
         const next = remainingSeconds(pausedUntilMs);
