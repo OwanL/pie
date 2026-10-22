@@ -345,7 +345,7 @@ test('message and nested-list render keys use host-projected identity while prot
   assert.doesNotMatch(anchorSource, /\[data-message-id\]/);
 });
 
-test('tool renderers share one disclosure key behind a stable ToolCallItem lifecycle boundary', async () => {
+test('tool renderers retain stable lifecycle boundaries and use child-specific disclosure identity', async () => {
   assert.equal(toolDisclosureKey('call-1'), 'tool:call-1');
   const [itemSource, genericSource, searchSource] = await Promise.all([
     readFile(new URL('../../transcript/tool-call-item.tsx', import.meta.url), 'utf8'),
@@ -354,7 +354,7 @@ test('tool renderers share one disclosure key behind a stable ToolCallItem lifec
   ]);
   assert.match(itemSource, /key=\{lifecycleKey\}/);
   assert.match(itemSource, /data-tool-lifecycle-key=\{lifecycleKey\}/);
-  assert.match(itemSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), prefs\.autoExpandSubagentCalls\)/);
+  assert.match(itemSource, /useCollapsibleOpen\(toolDisclosureKey\(subagentCallId\), prefs\.autoExpandSubagentCalls\)/);
   assert.match(genericSource, /useCollapsibleOpen\(toolDisclosureKey\(toolCall\.id\), isSubagent && autoExpand\)/);
   assert.match(searchSource, /<ToolCallCard/);
   assert.doesNotMatch(searchSource, /useCollapsibleOpen|autoExpandToolCalls/);
