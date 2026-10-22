@@ -1,3 +1,4 @@
+import { claimExplicitFulfillment, delegatedRolePrompt } from './delegated-session.js';
 import { isSubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
 import { SUBAGENT_BUCKET_TOGGLES_ENV } from '../../tools/subagent/bucket-toggles.js';
 import * as fsSync from 'node:fs';
@@ -1008,9 +1009,10 @@ export class WorkerRuntimeHost {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',
-          requestSessionControl: (body, signal) => (
-            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
-          ),
+          requestSessionControl: (body, signal) => {
+            if (body.kind === 'session.control' && body.action === 'message') claimExplicitFulfillment(this.context, body.payload);
+            return this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal);
+          },
         }),
       }),
       {
@@ -1136,6 +1138,7 @@ export class WorkerRuntimeHost {
     process.env[AUTONOMOUS_MODE_ENV] = this.autonomousMode ? '1' : '0';
     process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = JSON.stringify(this.autonomousModeBySession);
     context.activeRequest = undefined;
+    context.delegation = undefined;
     context.manualCompactionRequest = undefined;
     context.overflowRecoveryCandidate = undefined;
     if (!sameSessionPath(previousSessionPath, sessionPath)) {
@@ -1161,8 +1164,13 @@ export class WorkerRuntimeHost {
     // changes cannot briefly restore the upstream Pi prompt.
     installPieSystemPromptRebuildGuard(promptState, this.agentDir);
     if (typeof promptState._rebuildSystemPrompt === 'function') {
-      const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      const baseBuilder = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      const pieBuildSystemPrompt: typeof baseBuilder = options => baseBuilder(options) + delegatedRolePrompt(context.session.sessionManager);
       installSystemPromptToggleRebuildGuard(promptState, () => context.systemPromptDisabledEntries ?? [], pieBuildSystemPrompt);
+    }
+    const rolePrompt = delegatedRolePrompt(nextManager);
+    if (rolePrompt && promptState._baseSystemPrompt && !promptState._baseSystemPrompt.includes(rolePrompt)) {
+      promptState._baseSystemPrompt += rolePrompt;
     }
     installSystemPromptToolToggleGuard(session, () => context.systemPromptDisabledEntries ?? []);
     installAutonomousModeToolGuard(session, () => this.autonomousMode);
@@ -1840,9 +1848,10 @@ export class WorkerRuntimeHost {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',
-          requestSessionControl: (body, signal) => (
-            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
-          ),
+          requestSessionControl: (body, signal) => {
+            if (body.kind === 'session.control' && body.action === 'message') claimExplicitFulfillment(this.context, body.payload);
+            return this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal);
+          },
         }),
       }),
       {
@@ -2175,7 +2184,7 @@ export class WorkerRuntimeHost {
       const { buildSystemPrompt } = await this.getSystemPromptModule();
       const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
       const toggled = buildToggledSystemPrompt(source, next, pieBuildSystemPrompt);
-      promptState._baseSystemPrompt = toggled.prompt;
+      promptState._baseSystemPrompt = toggled.prompt + delegatedRolePrompt(context.session.sessionManager);
       promptState._baseSystemPromptOptions = toggled.options;
     }
     const disablingTools = next.includes(TOOLS_ENTRY_ID);

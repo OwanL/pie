@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { claimDelegatedHandoff } from './delegated-session.js';
+import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
 
 import type {
   AgentSettledPayload,
@@ -409,8 +411,32 @@ function handleLifecycleSessionEvent(
         } satisfies MessageAbortedPayload);
       }
 
+      let handoff: AgentSettledPayload['handoff'];
+      if (settledRequest && context.delegation?.request === settledRequest) {
+        try {
+          const branch = context.session.sessionManager.getBranch();
+          const lastInput = context.delegation.inputIds.at(-1);
+          const inputIndex = branch.findIndex(entry => entry.id === lastInput);
+          const last = branch.slice(inputIndex + 1).reverse().find(entry => entry.type === 'message'
+            && (entry.message as {role?:unknown})?.role === 'assistant');
+          const message = last?.message as {content?: Array<{type?:string;text?:string}>;stopReason?:string;errorMessage?:string} | undefined;
+          const outcome = userInitiated || message?.stopReason === 'aborted' ? 'cancelled'
+            : pendingErrorTerminal || message?.stopReason === 'error' || interruptedWithoutMessage || !message ? 'error' : 'completed';
+          const text = outcome === 'error' ? message?.errorMessage ?? settledRequest.lastProviderErrorForDiagnostics ?? 'Execution failed.'
+            : outcome === 'cancelled' ? 'Execution cancelled.'
+            : message?.content?.filter(part => part.type === 'text').map(part => part.text ?? '').join('\n') || 'Execution settled without final text.';
+          handoff = claimDelegatedHandoff(context, settledRequest, text, outcome);
+        } catch (error) {
+          deps.emit('operational-error', createOperationalIncident({
+            code: 'DELEGATED_HANDOFF_CLAIM_FAILED', message: 'Automatic creator handoff could not be claimed; it will not be retried.',
+            detail: error instanceof Error ? error.message : String(error), sessionPath: context.sessionPath,
+            requestId, severity: 'error', certainty: 'ambiguous', phase: 'runtime', recovery: {showLogs:true},
+          }));
+        }
+      }
       const capabilities = buildSessionCapabilities(context);
       deps.emit('agent.settled', {
+        ...(handoff ? { handoff } : {}),
         sessionPath: context.sessionPath,
         capabilities,
         occurredAt: settledAt,

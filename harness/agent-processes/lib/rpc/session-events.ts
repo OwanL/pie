@@ -393,7 +393,17 @@ export interface MessageAbortedPayload {
   reason?: string;
 }
 
+export interface DelegatedHandoff {
+  id: string;
+  childSessionId: string;
+  recipient: { sessionId: string; identityFallback: boolean };
+  inputIds: string[];
+  outcome: 'completed' | 'error' | 'cancelled';
+  text: string;
+}
+
 export interface AgentSettledPayload {
+  handoff?: DelegatedHandoff;
   sessionPath: string;
   /** Backend-classified inert capability facts (no host operation overlay). */
   capabilities: SessionCapabilityFacts;

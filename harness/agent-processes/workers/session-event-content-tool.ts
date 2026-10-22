@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { consumeDelegatedInput } from './delegated-session.js';
 
 import type {
   AuxiliaryLlmUsagePayload,
@@ -1334,6 +1335,11 @@ function handleContentToolSessionEvent(
       }
       if (event.message.role === 'user') {
         const active = context.activeRequest;
+        if (event.sessionEntryId && active.agentMessageDurabilityConfirmed
+          && active.agentMessageProvenanceEntryId === event.sessionEntryId
+          && active.coordinatorAttribution) {
+          consumeDelegatedInput(context, event.sessionEntryId, active.coordinatorAttribution);
+        }
         if (event.sessionEntryId) {
           const deliveredEntries = deliveredUserEntriesByRequest.get(active) ?? new Set<string>();
           if (deliveredEntries.has(event.sessionEntryId)) return;

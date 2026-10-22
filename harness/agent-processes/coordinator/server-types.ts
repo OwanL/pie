@@ -155,6 +155,8 @@ export interface ActiveRequest {
 }
 
 export interface SessionContext {
+  /** Consumed creator requests in this live SDK execution only; never replayed. */
+  delegation?: import('../workers/delegated-session.js').DelegationState;
   runtime: SdkRuntime;
   session: SdkSession;
   sessionPath: string;

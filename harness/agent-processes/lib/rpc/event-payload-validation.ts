@@ -368,10 +368,24 @@ export function isToolProgressPayload(value: unknown): value is ToolProgressPayl
   );
 }
 
+function isDelegatedHandoff(value: unknown): boolean {
+  return isObject(value) && typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 256
+    && typeof value.childSessionId === 'string' && value.childSessionId.length > 0 && value.childSessionId.length <= 256
+    && isObject(value.recipient) && typeof value.recipient.sessionId === 'string'
+    && value.recipient.sessionId.length > 0 && value.recipient.sessionId.length <= 256
+    && typeof value.recipient.identityFallback === 'boolean'
+    && Array.isArray(value.inputIds) && value.inputIds.length > 0 && value.inputIds.length <= 256
+    && value.inputIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256)
+    && new Set(value.inputIds).size === value.inputIds.length
+    && (value.outcome === 'completed' || value.outcome === 'error' || value.outcome === 'cancelled')
+    && typeof value.text === 'string' && Buffer.byteLength(value.text, 'utf8') <= 48 * 1024;
+}
+
 export function isAgentSettledPayload(value: unknown): value is AgentSettledPayload {
   return isObject(value)
     && isString(value.sessionPath)
     && isSessionCapabilityFacts(value.capabilities)
+    && (value.handoff === undefined || isDelegatedHandoff(value.handoff))
     && isOptionalFiniteNumber(value.occurredAt)
     && isOptionalFiniteNumber(value.endedAt)
     && (value.operationId === undefined || isString(value.operationId))
