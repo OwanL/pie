@@ -540,7 +540,8 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(expandedToolHtml, /aria-expanded="false"/);
   const visualBody = renderToString(h(ToolCallBody, { toolCall: toolCall(), onOpenFile: noop }));
   assert.match(visualBody, /File content/);
-  assert.doesNotMatch(visualBody, /tool-call-section-label">(?:Input|Result)</);
+  assert.doesNotMatch(visualBody, /tool-call-section-label">Input</);
+  assert.match(visualBody, /tool-call-section-label">Result</);
   assert.match(visualBody, />ok</);
   assert.match(visualBody, /export[\s\S]*const[\s\S]*value/);
 
@@ -738,7 +739,10 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   }));
 
   assert.doesNotMatch(collapsedHtml, /subagent-header-summary/);
-  assert.match(collapsedHtml, /subagent-live-preview/);
+  assert.match(collapsedHtml, /subagent-settled-preview/);
+  assert.match(collapsedHtml, /Answer excerpt/);
+  assert.match(collapsedHtml, /subagent-outcome">Done\./);
+  assert.doesNotMatch(collapsedHtml, /subagent-live-preview/);
   assert.match(collapsedHtml, /Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /reviewer: Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /subagent-secondary-meta/);
@@ -1017,7 +1021,10 @@ test('interrupted subagent renders a terminal warning state without live activit
   assert.match(html, /tool-call-subagent[^>]*interrupted/);
   assert.match(html, /status-chip-interrupted/);
   assert.match(html, /status-chip-label">Interrupted/);
-  assert.match(html, /aria-label="reviewer interrupted output"/);
+  assert.match(html, /subagent-settled-preview/);
+  assert.match(html, /Failure excerpt/);
+  assert.match(html, /subagent-outcome">Subagent was interrupted by the parent/);
+  assert.doesNotMatch(html, /subagent-live-preview/);
   assert.doesNotMatch(html, /subagent-activity/);
   assert.doesNotMatch(html, /turn-activity-tail-cursor/);
   assert.doesNotMatch(html, /\brunning\b/);
@@ -1079,7 +1086,7 @@ test('rendered parallel subagent cards keep per-child summaries and statuses whi
   assert.equal((html.match(/status-chip-failed/g) ?? []).length, 1);
 });
 
-test('subagent card shows preview rows only while collapsed', () => {
+test('subagent card keeps task context stable and shows live or settled previews only while collapsed', () => {
   const { ToolCallItem } = webviewModules;
 
   function runningSingle(): ToolCall {
@@ -1094,8 +1101,9 @@ test('subagent card shows preview rows only while collapsed', () => {
           results: [{
             agent: 'worker',
             task: 'Keep working',
-            exitCode: 0,
+            exitCode: -1,
             messages: [],
+            streamingText: 'Inspecting the implementation',
             runningTools: ['bash'],
           }],
         },
@@ -1127,7 +1135,9 @@ test('subagent card shows preview rows only while collapsed', () => {
     renderToolCall: () => null,
   }));
   assert.match(collapsedRunningHtml, /subagent-live-preview/);
-  assert.match(collapsedRunningHtml, /turn-activity-tail-composite/);
+  assert.match(collapsedRunningHtml, /Live activity/);
+  assert.match(collapsedRunningHtml, /Inspecting the implementation/);
+  assert.match(collapsedRunningHtml, /aria-label="worker live output"/);
   assert.match(collapsedRunningHtml, /Keep working/);
   assert.doesNotMatch(collapsedRunningHtml, /Running bash\.\.\./);
   assert.doesNotMatch(collapsedRunningHtml, /Generating\.\.\./);
@@ -1164,7 +1174,7 @@ test('subagent card shows preview rows only while collapsed', () => {
   assert.match(completedExpandedHtml, /Inspect regression/);
   assert.match(completedExpandedHtml, /subagent-messages/);
 
-  // Completed + collapsed retains the task preview without mounting the body.
+  // Completed + collapsed keeps task context and a genuine answer without mounting the body.
   const completedCollapsedHtml = renderToString(h(ToolCallItem, {
     toolCall: completed,
     prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: false },
@@ -1173,7 +1183,10 @@ test('subagent card shows preview rows only while collapsed', () => {
     onContextMenu: noopContextMenu,
     renderToolCall: () => null,
   }));
-  assert.match(completedCollapsedHtml, /subagent-live-preview/);
+  assert.match(completedCollapsedHtml, /subagent-settled-preview/);
+  assert.match(completedCollapsedHtml, /subagent-outcome">Looks good\./);
+  assert.match(completedCollapsedHtml, /Answer excerpt/);
+  assert.doesNotMatch(completedCollapsedHtml, /subagent-live-preview/);
   assert.match(completedCollapsedHtml, /Inspect regression/);
   assert.match(completedCollapsedHtml, /status-chip-completed[^>]*>.*Finished/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);

@@ -49,14 +49,14 @@ test('attachment sizes preserve bytes below one KB and rounded KB above it', () 
   }
 });
 
-test('attachment cards retain their accessible summary without a visual count badge', () => {
+test('attachment cards retain their accessible summary and show the included attachment count', () => {
   const html = renderToString(h(ComposerAttachments, {
     pendingComposerInputs: [imageInput, pathInput],
     attachmentSummary: '2 attachments',
     onRemoveInput: () => {},
   }));
   assert.match(html, /role="group" aria-label="Pending attachments: 2 attachments"/);
-  assert.doesNotMatch(html, /composer-attachments-summary/);
+  assert.match(html, /composer-attachments-summary">Included: 2 attachments<\/div>/);
   assert.match(html, /image.png/);
   assert.match(html, /panel.tsx/);
   assert.equal(renderToString(h(ComposerAttachments, { pendingComposerInputs: [], attachmentSummary: '', onRemoveInput: () => {} })), '');

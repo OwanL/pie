@@ -169,18 +169,20 @@ test('web_search renders a single query without an index and a Query label', () 
 test('web_search falls back to the generic card when input cannot be parsed', () => {
   // Non-object input.
   let html = render(webSearchTool({ id: 'web-search-fallback-1', input: 'not an object' }));
-  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /tool-call-section-label">Input</);
+  assert.match(html, /tool-call-section-label">Result</);
+  assert.match(html, /Collapse details/);
   assert.match(html, /not an object/);
   assert.doesNotMatch(html, /web-search-queries/);
 
   // Empty queries array / whitespace-only query.
   html = render(webSearchTool({ id: 'web-search-fallback-2', input: { queries: [] } }));
-  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /tool-call-section-label">Input</);
   assert.match(html, /queries/);
   assert.doesNotMatch(html, /web-search-queries/);
 
   html = render(webSearchTool({ id: 'web-search-fallback-3', input: { query: '   ' } }));
-  assert.doesNotMatch(html, /tool-call-section-label">Input</);
+  assert.match(html, /tool-call-section-label">Input</);
   assert.match(html, /query/);
   assert.doesNotMatch(html, /web-search-queries/);
 });
