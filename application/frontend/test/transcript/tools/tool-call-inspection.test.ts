@@ -259,8 +259,14 @@ test('raw tooltip copies only captured payload, bounds huge binary preview and f
   }
 });
 
-for (const side of ['above', 'below'] as const) {
-  test(`async raw capture growth keeps the activatable text trigger clear ${side}`, () => {
+for (const scenario of [
+  { name: 'above', anchorTop: 548, initial: 142, grown: 400, initialTop: 400, finalTop: 142, cap: 536 },
+  { name: 'below', anchorTop: 100, initial: 142, grown: 400, initialTop: 120, finalTop: 120, cap: 514 },
+  { name: 'loading below flips above', anchorTop: 480, initial: 80, grown: 501, initialTop: 500, finalTop: 6, cap: 468 },
+  { name: 'loading above flips below', anchorTop: 120, initial: 80, grown: 501, initialTop: 140, finalTop: 140, cap: 494 },
+  { name: 'neither fits chooses roomier side', anchorTop: 350, initial: 80, grown: 501, initialTop: 370, finalTop: 6, cap: 338 },
+]) {
+  test(`async raw capture growth keeps the activatable text trigger clear: ${scenario.name}`, () => {
     const originalObserver = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver');
     const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
     const originalTimeout = window.setTimeout;
@@ -268,6 +274,7 @@ for (const side of ['above', 'below'] as const) {
     const messages: WebviewToHostMessage[] = [];
     let notifyResize: (() => void) | undefined;
     let observed: Element | undefined;
+    let restoreRect = () => {};
     class MockResizeObserver {
       constructor(private callback: ResizeObserverCallback) {}
       observe(target: Element) {
@@ -287,15 +294,25 @@ for (const side of ['above', 'below'] as const) {
       const trigger = container.querySelector('span[tabindex="0"]') as HTMLElement;
       const wrapper = container.querySelector('.pie-tooltip-trigger') as HTMLElement;
       const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
-      const anchorTop = side === 'above' ? 548 : 100;
+      const anchorTop = scenario.anchorTop;
       const anchorBottom = anchorTop + 14;
       const anchorRect = { top: anchorTop, bottom: anchorBottom, left: 100, right: 140, width: 40, height: 14 } as DOMRect;
       trigger.getBoundingClientRect = wrapper.getBoundingClientRect = () => anchorRect;
-      let height = 142;
-      host.getBoundingClientRect = () => ({ top: parseFloat(host.style.top) || 0, height, width: 320 } as DOMRect);
+      let height = scenario.initial;
+      const fittedHeight = () => Math.min(height, parseFloat(host.style.getPropertyValue('--pie-tooltip-available-height')) || Infinity);
+      host.getBoundingClientRect = () => ({ top: parseFloat(host.style.top) || 0, height: fittedHeight(), width: 320 } as DOMRect);
+      // Mirror the inspector's CSS max-height, including removal for natural measurement.
+      const originalRect = HTMLElement.prototype.getBoundingClientRect;
+      const rectMock = function(this: HTMLElement) {
+        return this.classList.contains('tool-call-raw-inspector')
+          ? { height: fittedHeight() } as DOMRect : originalRect.call(this);
+      };
+      HTMLElement.prototype.getBoundingClientRect = rectMock;
+      // Restore even when an assertion fails.
+      restoreRect = () => { HTMLElement.prototype.getBoundingClientRect = originalRect; };
       act(() => { trigger.dispatchEvent(new Event('focus')); });
       act(() => pending.splice(0).forEach((fn) => fn()));
-      assert.equal(host.style.top, side === 'above' ? '400px' : '120px');
+      assert.equal(host.style.top, `${scenario.initialTop}px`);
       assert.ok(host.style.getPropertyValue('--pie-tooltip-available-height'), 'text trigger opts into anchor clearance');
       assert.equal(trigger.getAttribute('aria-describedby'), `existing-description ${host.id}`);
       assert.equal(observed, host.querySelector('.tool-call-raw-inspector'));
@@ -306,19 +323,21 @@ for (const side of ['above', 'below'] as const) {
       if (request.type !== 'requestDetail') return;
       act(() => receiveLazyDetailResult({ sessionPath: '/fixture', key: request.ref.key, status: 'loaded', value: { received: [{ type: 'text', text: 'ASYNC CAPTURE' }] }, sizeBytes: 100 }));
       assert.match(host.textContent ?? '', /ASYNC CAPTURE/);
-      height = 400;
-      if (side === 'above') {
-        const oldClampedTop = Math.max(6, Math.min(400, window.innerHeight - height - 6));
-        assert.equal(oldClampedTop, 234);
-        assert.ok(oldClampedTop + height > anchorTop, 'old viewport-only clamp would overlap the trigger');
-      }
+      // Exercise a currently-top surface too, independent of bottom preference.
+      if (scenario.name === 'loading above flips below') host.style.top = '34px';
+      height = scenario.grown;
       act(() => notifyResize!());
-      assert.equal(host.style.top, side === 'above' ? '142px' : '120px');
-      if (side === 'above') assert.equal(parseFloat(host.style.top) + height, anchorTop - 6);
-      else assert.equal(parseFloat(host.style.top), anchorBottom + 6);
+      assert.equal(host.style.top, `${scenario.finalTop}px`);
+      assert.equal(host.style.getPropertyValue('--pie-tooltip-available-height'), `${scenario.cap}px`);
+      const top = parseFloat(host.style.top);
+      assert.ok(top >= 6 && top + fittedHeight() <= 634);
+      assert.ok(top + fittedHeight() <= anchorTop - 6 || top >= anchorBottom + 6);
+      act(() => notifyResize!());
+      assert.equal(host.style.top, `${scenario.finalTop}px`, 'repeated delivery stays stable');
     } finally {
       act(() => render(null, container));
       window.setTimeout = originalTimeout;
+      restoreRect();
       if (originalObserver) Object.defineProperty(globalThis, 'ResizeObserver', originalObserver);
       else Reflect.deleteProperty(globalThis, 'ResizeObserver');
       if (originalHeight) Object.defineProperty(window, 'innerHeight', originalHeight);

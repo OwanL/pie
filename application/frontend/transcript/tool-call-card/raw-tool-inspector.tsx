@@ -57,14 +57,28 @@ function RawModelExchange({ detailRef, unavailable }: { detailRef?: LazyDetailRe
       const host = rootRef.current?.closest<HTMLElement>('.pie-tooltip-host');
       if (!host) return;
       const rect = host.getBoundingClientRect();
-      // Activatable text triggers reserve space on one side. Loading a larger
-      // capture must stay on that side rather than growing over the trigger.
+      // Activatable text triggers reserve space beside the anchor. Re-measure
+      // without the loading-state cap before deciding whether that side fits.
       const trigger = host.style.getPropertyValue('--pie-tooltip-available-height')
         ? document.querySelector<HTMLElement>(`[aria-describedby~="${host.id}"]`)
         : null;
       if (trigger) {
         const anchor = trigger.getBoundingClientRect();
-        host.style.top = `${rect.top < anchor.top ? anchor.top - rect.height - 6 : anchor.bottom + 6}px`;
+        const currentTop = rect.top < anchor.top;
+        host.style.removeProperty('--pie-tooltip-available-height');
+        const natural = host.getBoundingClientRect();
+        const above = Math.max(0, anchor.top - 12);
+        const below = Math.max(0, window.innerHeight - anchor.bottom - 12);
+        const currentSpace = currentTop ? above : below;
+        const otherSpace = currentTop ? below : above;
+        // Match Tooltip's initial placement rule, retaining the current side
+        // when it fits (or is already the roomier bounded side).
+        const useTop = natural.height > currentSpace && otherSpace > currentSpace ? !currentTop : currentTop;
+        const contentHeight = rootRef.current?.getBoundingClientRect().height ?? natural.height;
+        const chrome = Math.max(0, natural.height - contentHeight);
+        host.style.setProperty('--pie-tooltip-available-height', `${Math.max(0, (useTop ? above : below) - chrome)}px`);
+        const fitted = host.getBoundingClientRect();
+        host.style.top = `${useTop ? anchor.top - fitted.height - 6 : anchor.bottom + 6}px`;
       } else {
         host.style.top = `${Math.max(6, Math.min(rect.top, window.innerHeight - rect.height - 6))}px`;
       }
