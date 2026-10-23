@@ -336,7 +336,6 @@ The host logs resolved storage paths in its `backend` log channel entry, `starti
 
 ## More docs
 
-- [AGENTS.md](AGENTS.md) — global agent traversal and shell conventions
 - [develop-pie skill](harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
 - [Architecture](docs/architecture/ARCHITECTURE.md) — system design and boundaries
 - [Documentation policy](docs/DOCUMENTATION-POLICY.md) — keeping documentation simple and connected
