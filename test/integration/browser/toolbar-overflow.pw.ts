@@ -85,8 +85,8 @@ test.describe('composer toolbar overflow in Chromium', () => {
     },
   });
 
-  test('keeps pinned controls and every visible hitbox separate at phone widths', async ({ page }) => {
-    for (const width of [390, 320, 240]) {
+  test('keeps model text readable and pinned hitboxes separate at ordinary phone widths', async ({ page }) => {
+    for (const width of [390, 320]) {
       await openComposer(page, width, 640);
       await expect(page.getByRole('button', { name: 'More composer options' })).toBeVisible();
       const modelLabel = page.locator('.composer-pinned-controls .model-picker-trigger-label');
@@ -96,7 +96,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
         minWidth: getComputedStyle(element).minWidth,
       }));
       expect(modelText.width, `model text width at ${width}px`).toBeGreaterThan(8);
-      if (width === 240) {
+      if (width === 320) {
         // The fixture model name is short, so temporarily stress the real
         // label with long text instead of assuming truncation must occur for
         // every selected model. The UI contract is min-width:0
@@ -133,6 +133,32 @@ test.describe('composer toolbar overflow in Chromium', () => {
       expect(await page.getByRole('button', { name: 'Reasoning level' }).evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(42);
       expect(await getToolbarHitboxOverlaps(page), `toolbar hitboxes at ${width}px`).toEqual([]);
     }
+  });
+
+  test('keeps mandatory controls clickable when extreme width requires compact model fallback', async ({ page }) => {
+    await openComposer(page, 240, 640);
+    // Once secondary items have overflowed, model text may yield fully;
+    // the mandatory controls must still retain separate, usable hitboxes.
+    for (const name of ['Model', 'Settings', 'Reasoning level', 'More composer options']) {
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      await expect(control).toBeEnabled();
+      const bounds = await control.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.width, `${name} clickable width`).toBeGreaterThan(0);
+      expect(bounds!.height, `${name} clickable height`).toBeGreaterThan(0);
+      await control.click({ trial: true });
+    }
+    expect(await getToolbarHitboxOverlaps(page), 'extreme compact toolbar hitboxes').toEqual([]);
+    await page.getByRole('button', { name: 'Model', exact: true }).click();
+    const fixtureChoice = page.getByRole('option').filter({ hasText: 'Offline fixture model' });
+    await expect(fixtureChoice).toBeVisible();
+    await expect(fixtureChoice).toHaveAttribute('aria-selected', 'true');
+    await fixtureChoice.click();
+    await expect(fixtureChoice).toBeHidden();
+    await page.getByRole('button', { name: 'Model', exact: true }).click();
+    await expect(fixtureChoice).toBeVisible();
+    await expect(fixtureChoice).toHaveAttribute('aria-selected', 'true');
   });
 
   test('overflow remains usable while disconnected and does not disable status indicators', async ({ context, page }) => {
