@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
@@ -458,17 +459,30 @@ test('registry tsx configs preserve base paths without synthesizing unselected S
       assert.equal(parsed.compilerOptions?.exclude, undefined, `${entry.id} overlay must not duplicate exclude`);
       const overlayPaths = parsed.compilerOptions?.paths ?? {};
       const basePaths = baseConfig.compilerOptions?.paths ?? {};
-      // The overlay preserves the base redirection set exactly: owner aliases
-      // covered by the helper (notably Preact) become absolute owner paths,
-      // while unselected SDK aliases retain their checked-in config targets.
-      // No SDK aliases are added and test-time hooks keep their interception set.
+      // The overlay preserves the base redirection set exactly: aliases
+      // covered by the helper (notably Preact) resolve to owner packages,
+      // while unselected SDK aliases retain their checked-in targets resolved
+      // against the base config's effective paths base. No SDK aliases are
+      // added and test-time hooks keep their interception set.
       assert.deepEqual(Object.keys(overlayPaths).sort(), Object.keys(basePaths).sort(), `${entry.id} overlay redirection set`);
+      const ts = createRequire(path.join(ownerRoot, 'package.json'))('typescript');
+      const configPath = path.join(repoRoot, entry.tsxConfig);
+      const effective = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
+        ...ts.sys,
+        readDirectory: () => [],
+        onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+          throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\\n'));
+        },
+      });
+      const pathsBase = effective.options.baseUrl ?? effective.options.pathsBasePath ?? path.dirname(configPath);
       for (const [specifier, targets] of Object.entries(basePaths)) {
         const overlayTargets = overlayPaths[specifier];
-        if (path.isAbsolute(overlayTargets[0] ?? '')) {
+        if (helperPaths[specifier]) {
+          assert.deepEqual(overlayTargets, helperPaths[specifier], `${entry.id}:${specifier} must resolve through the dependency owner helper`);
           assert.ok(overlayTargets[0].startsWith(ownerRoot), `${entry.id}:${specifier} must resolve under the dependency owner`);
         } else {
-          assert.deepEqual(overlayTargets, targets, `${entry.id}:${specifier} must keep its base target verbatim`);
+          const preservedTargets = targets.map((target) => path.isAbsolute(target) ? target : path.resolve(pathsBase, target));
+          assert.deepEqual(overlayTargets, preservedTargets, `${entry.id}:${specifier} must preserve its base target`);
         }
       }
       if (basePaths.preact) {
