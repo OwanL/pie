@@ -2962,25 +2962,27 @@ test('reducer: pre-ack SendResult{ok:false} with no captured inputs restores not
   assert.deepEqual(postImperative!.imperativeMessage.inputs, []);
 });
 
-// ─── Brief H: retry-without-pruning threads + restores the prior pruning mode ─
-test('reducer: Send command threads priorPruningMode to the SendRpc effect (Brief H retry-without-pruning)', () => {
+// ─── Brief H: retry-without-pruning retains reducer-owned restoration intent ─
+test('reducer: Send command keeps priorPruningMode on the pending operation (Brief H retry-without-pruning)', () => {
   const result = reducer(readyState, {
     kind: 'Command',
     cmd: { kind: 'Send', corrId: 'c-rp', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-rp', previousSummary: null, priorPruningMode: 'auto', timestamp: 1 },
   });
   const sendRpc = result.effects.find((e) => e.kind === 'SendRpc');
   assert.ok(sendRpc, 'normal-path Send emits a SendRpc effect');
-  assert.equal((sendRpc as { priorPruningMode?: string }).priorPruningMode, 'auto', 'priorPruningMode threaded to SendRpc');
+  assert.equal('priorPruningMode' in sendRpc, false, 'the EffectRunner does not own pruning restoration intent');
+  assert.equal(result.state.pending.ops['c-rp']?.priorPruningMode, 'auto', 'pending rollback owner retains the prior mode');
 
-  // A normal send (no priorPruningMode) threads undefined — the EffectRunner
-  // leaves pruning untouched.
+  // A normal send has no pruning restoration intent on its pending operation
+  // or its SendRpc effect.
   const normal = reducer(readyState, {
     kind: 'Command',
     cmd: { kind: 'Send', corrId: 'c-norm', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-norm', previousSummary: null, timestamp: 1 },
   });
   const normalSendRpc = normal.effects.find((e) => e.kind === 'SendRpc');
   assert.ok(normalSendRpc);
-  assert.equal((normalSendRpc as { priorPruningMode?: string }).priorPruningMode, undefined, 'no priorPruningMode on a normal send');
+  assert.equal('priorPruningMode' in normalSendRpc, false, 'no priorPruningMode on a normal send effect');
+  assert.equal(normal.state.pending.ops['c-norm']?.priorPruningMode, undefined, 'normal send has no restoration intent to retain');
 });
 
 test('reducer: BackendReadyWatchdogFired restores pruning for dropped "retry without pruning" sends (Brief H)', () => {
