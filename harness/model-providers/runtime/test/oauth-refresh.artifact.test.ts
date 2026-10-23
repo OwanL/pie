@@ -25,6 +25,8 @@ for (const refreshSucceeds of [true, false]) {
     let requests = 0;
     let unexpectedRequests = 0;
     let fallbackCalls = 0;
+    const requestValidationErrors: unknown[] = [];
+    const responseStatuses: number[] = [];
     const freshAccess = token('synthetic-refreshed-account');
     globalThis.fetch = (async (input, init) => {
       // Never delegate: even an unexpected SDK endpoint must not reach the network.
@@ -34,12 +36,19 @@ for (const refreshSucceeds of [true, false]) {
         throw new Error('Unexpected synthetic OAuth request');
       }
       requests++;
-      const body = new URLSearchParams(String(init.body));
-      assert.equal(body.get('grant_type'), 'refresh_token');
-      assert.equal(body.get('refresh_token'), 'synthetic-expired-refresh');
-      return refreshSucceeds
+      try {
+        const body = new URLSearchParams(String(init.body));
+        assert.equal(body.get('grant_type'), 'refresh_token');
+        assert.equal(body.get('refresh_token'), 'synthetic-expired-refresh');
+      } catch (error) {
+        requestValidationErrors.push(error);
+        throw error;
+      }
+      const response = refreshSucceeds
         ? Response.json({ access_token: freshAccess, refresh_token: 'synthetic-rotated-refresh', expires_in: 3600 })
         : Response.json({ error: 'invalid_grant' }, { status: 400 });
+      responseStatuses.push(response.status);
+      return response;
     }) as typeof fetch;
     try {
       const file = join(dir, 'auth.json');
@@ -91,6 +100,10 @@ for (const refreshSucceeds of [true, false]) {
         assert.equal(result.ok, false);
         if (!result.ok) assert.equal(result.error, 'Captured provider authentication is unavailable');
       }
+      // SDK refresh failures are swallowed into unavailable auth: validate the mock
+      // outside that boundary so a bad request cannot masquerade as the HTTP 400.
+      assert.deepEqual(requestValidationErrors, []);
+      assert.deepEqual(responseStatuses, [refreshSucceeds ? 200 : 400]);
       assert.equal(requests, 1);
       assert.equal(unexpectedRequests, 0);
       assert.equal(fallbackCalls, 0);
