@@ -114,7 +114,12 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
         baseUrl: '', authMethods: ['api-key', 'local'], discovery: 'openai' });
       return known;
     },
-    hasSavedCredential(providerId) { return storage().get(providerId) !== undefined; },
+    hasSavedCredential(providerId) {
+      const native = storage();
+      const credential = native.get(providerId);
+      checkErrors(native);
+      return credential !== undefined;
+    },
     async stageOAuthLogin(providerId, callbacks) {
       if (!oauth(providerId)) throw new Error('Unsupported OAuth provider');
       const staged = AuthStorageConstructor.inMemory();
@@ -150,6 +155,7 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     async getApiKey(providerId) {
       const native = storage();
       const credential = native.get(providerId);
+      checkErrors(native);
       if (credential?.type !== 'api_key' && credential?.type !== 'oauth') return undefined;
       const key = await native.getApiKey(providerId, { includeFallback: false });
       checkErrors(native);
@@ -192,7 +198,9 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     async discoveryBaseUrl(providerId, configuredBaseUrl) {
       if (providerId !== 'github-copilot') return configuredBaseUrl;
       const provider = oauth(providerId);
-      const credential = storage().get(providerId);
+      const native = storage();
+      const credential = native.get(providerId);
+      checkErrors(native);
       if (!provider?.modifyModels || !getModels || credential?.type !== 'oauth') {
         throw new Error('Credential-dependent provider discovery is unsupported');
       }

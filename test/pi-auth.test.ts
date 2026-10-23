@@ -57,7 +57,11 @@ test('definitions use the registry without touching file storage; custom id is s
   assert.deepEqual(definitions.find(d => d.id === 'anthropic')?.authMethods, ['oauth', 'api-key']);
   assert.deepEqual(definitions.find(d => d.id === 'openai')?.authMethods, ['api-key']);
   assert.deepEqual(definitions.find(d => d.id === 'registered-extra')?.authMethods, ['oauth']);
-  const other = definitions.find(d => d.authMethods.includes('local'))!;
+  const ollama = definitions.find(d => d.id === 'ollama')!;
+  assert.deepEqual(ollama.authMethods, ['local']);
+  assert.equal(ollama.discovery, 'ollama');
+  const other = definitions.find(d => d.id === 'other')!;
+  assert.deepEqual(other.authMethods, ['api-key', 'local']);
   assert.equal(other.id, 'other');
   assert.equal(other.name, 'Other provider');
   assert.equal(other.api, 'openai-completions');
@@ -143,6 +147,25 @@ test('native auth resolves literal references for management and scoped runtime 
     await assert.rejects(pending, /Provider credential storage failed/);
     assert.equal(JSON.parse(await readFile(`${file}.runtime-scopes.json`, 'utf8')).referenced, 'changed-scope');
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('management credential reads surface native storage failures rather than reporting missing credentials', async () => {
+  const f = fixture();
+  let keyCalls = 0;
+  const auth = createPiProviderAuth({
+    inMemory: () => new f.FakeStorage(),
+    create: () => ({
+      getOAuthProviders: () => f.registry,
+      get: () => undefined,
+      set() {}, remove() {}, async login() {},
+      drainErrors: () => [new Error('private native read failure')],
+      async getApiKey() { keyCalls++; return undefined; },
+    }),
+  }, f.file);
+  assert.throws(() => auth.hasSavedCredential('openai'), /^Error: Provider credential storage failed$/);
+  await assert.rejects(auth.getApiKey('openai'), /^Error: Provider credential storage failed$/);
+  await assert.rejects(auth.discoveryBaseUrl('github-copilot', ''), /^Error: Provider credential storage failed$/);
+  assert.equal(keyCalls, 0);
 });
 
 test('Copilot modifies actual native models and rejects unavailable/invalid metadata', async () => {
