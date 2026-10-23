@@ -986,48 +986,51 @@
   .subagent-activity-detail { max-width: 100px; }
 }
 
-.subagent-task,
-.subagent-settled-preview {
-  padding: 5px 8px;
+.subagent-live-preview {
   font-size: 11px;
   line-height: 1.5;
   user-select: text;
   overflow-wrap: anywhere;
-}
-.subagent-task {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
   color: var(--panel-foreground-soft);
 }
-.subagent-preview-label {
-  margin-right: 6px;
-  color: var(--panel-muted);
-  font-family: var(--panel-font-sans);
-  font-size: 10px;
-}
-.subagent-settled-preview { border-top: 1px solid var(--panel-border-subtle); }
-.subagent-settled-preview > .subagent-preview-label { display: block; }
+.subagent-task,
+.subagent-current-text,
 .subagent-outcome {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 5;
   overflow: hidden;
   white-space: pre-wrap;
 }
-.subagent-transcript-actions { padding: 0 8px 4px; }
-.subagent-transcript-toggle {
-  border: 0;
-  padding: 2px 0;
-  background: transparent;
-  color: var(--panel-muted);
-  font-size: 11px;
-  cursor: pointer;
+.subagent-task {
+  -webkit-line-clamp: 3;
+  font-family: var(--vscode-font-family, sans-serif);
+  white-space: normal;
 }
-.subagent-transcript-toggle:hover { color: var(--panel-foreground); text-decoration: underline; }
-.subagent-transcript-toggle:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 2px; }
-.subagent-parallel-progress { color: var(--panel-muted); font-size: 11px; padding: 2px 0; }
+.subagent-task:has(+ *) { margin-bottom: 7px; }
+.subagent-current {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.subagent-current > .turn-activity-tail-label {
+  flex: 0 1 auto;
+  max-width: 30%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 600;
+}
+.subagent-current-text {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: var(--panel-font-mono, monospace);
+}
+.subagent-current-reasoning { font-style: italic; }
+.subagent-outcome { line-height: 1.6; }
 
 /* ── Parallel groups ─────────────────────────────────────────────────────── */
 /* One quiet 1px spine is enough to mark a batch. Keep the offset shallow and

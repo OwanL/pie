@@ -739,10 +739,10 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   }));
 
   assert.doesNotMatch(collapsedHtml, /subagent-header-summary/);
-  assert.match(collapsedHtml, /subagent-settled-preview/);
-  assert.match(collapsedHtml, /Answer excerpt/);
+  assert.doesNotMatch(collapsedHtml, /subagent-settled-preview/);
+  assert.match(collapsedHtml, /subagent-live-preview/);
   assert.match(collapsedHtml, /subagent-outcome">Done\./);
-  assert.doesNotMatch(collapsedHtml, /subagent-live-preview/);
+  assert.doesNotMatch(collapsedHtml, /subagent-preview-label|View transcript/);
   assert.match(collapsedHtml, /Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /reviewer: Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /subagent-secondary-meta/);
@@ -1021,10 +1021,10 @@ test('interrupted subagent renders a terminal warning state without live activit
   assert.match(html, /tool-call-subagent[^>]*interrupted/);
   assert.match(html, /status-chip-interrupted/);
   assert.match(html, /status-chip-label">Interrupted/);
-  assert.match(html, /subagent-settled-preview/);
-  assert.match(html, /Failure excerpt/);
+  assert.match(html, /subagent-live-preview/);
+  assert.match(html, /subagent-outcome/);
   assert.match(html, /subagent-outcome">Subagent was interrupted by the parent/);
-  assert.doesNotMatch(html, /subagent-live-preview/);
+  assert.doesNotMatch(html, /subagent-current/);
   assert.doesNotMatch(html, /subagent-activity/);
   assert.doesNotMatch(html, /turn-activity-tail-cursor/);
   assert.doesNotMatch(html, /\brunning\b/);
@@ -1135,9 +1135,9 @@ test('subagent card keeps task context stable and shows live or settled previews
     renderToolCall: () => null,
   }));
   assert.match(collapsedRunningHtml, /subagent-live-preview/);
-  assert.match(collapsedRunningHtml, /Live activity/);
+  assert.match(collapsedRunningHtml, /subagent-current/);
   assert.match(collapsedRunningHtml, /Inspecting the implementation/);
-  assert.match(collapsedRunningHtml, /aria-label="worker live output"/);
+  assert.doesNotMatch(collapsedRunningHtml, /aria-hidden="true"[^>]*>Inspecting/);
   assert.match(collapsedRunningHtml, /Keep working/);
   assert.doesNotMatch(collapsedRunningHtml, /Running bash\.\.\./);
   assert.doesNotMatch(collapsedRunningHtml, /Generating\.\.\./);
@@ -1183,10 +1183,10 @@ test('subagent card keeps task context stable and shows live or settled previews
     onContextMenu: noopContextMenu,
     renderToolCall: () => null,
   }));
-  assert.match(completedCollapsedHtml, /subagent-settled-preview/);
+  assert.doesNotMatch(completedCollapsedHtml, /subagent-settled-preview/);
   assert.match(completedCollapsedHtml, /subagent-outcome">Looks good\./);
-  assert.match(completedCollapsedHtml, /Answer excerpt/);
-  assert.doesNotMatch(completedCollapsedHtml, /subagent-live-preview/);
+  assert.match(completedCollapsedHtml, /subagent-live-preview/);
+  assert.doesNotMatch(completedCollapsedHtml, /subagent-current/);
   assert.match(completedCollapsedHtml, /Inspect regression/);
   assert.match(completedCollapsedHtml, /status-chip-completed[^>]*>.*Finished/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);

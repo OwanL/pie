@@ -192,17 +192,35 @@ test('card task stays stable as live activity settles; transcript control activa
     result: { details: { results: [{ agent: 'worker', task: 'Stable delegated task', messages: [], exitCode: status === 'running' ? -1 : 0, ...child }] } },
   });
   mount(makeCall('running', { streamingText: 'Live inspection' }), prefs);
-  assert.match(container.textContent ?? '', /Live activity/);
+  assert.match(container.textContent ?? '', /Live inspection/);
   mount(makeCall('completed', { streamingText: 'Stale activity', messages: [{ role: 'assistant', content: 'Real completed answer' }] }), prefs);
   assert.match(container.querySelector('.subagent-task')?.textContent ?? '', /Stable delegated task/);
   assert.match(container.querySelector('.subagent-outcome')?.textContent ?? '', /Real completed answer/);
   assert.doesNotMatch(container.textContent ?? '', /Stale activity|Live activity/);
-  const control = container.querySelector<HTMLButtonElement>('.subagent-transcript-toggle')!;
+  const control = container.querySelector<HTMLButtonElement>('.subagent-header')!;
   act(() => control.click());
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'true');
-  assert.equal(control.textContent, 'Hide transcript');
+  assert.equal(container.querySelector('.subagent-live-preview'), null);
   act(() => control.click());
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
+});
+
+test('compact current input wraps raw content without retained tool output or duplicate expanded preview', () => {
+  const command = 'run --value="' + 'long argument '.repeat(50) + '"\nsecond line';
+  const call: ToolCall = { id: 'current-only', name: 'subagent', status: 'running', input: {}, result: { details: { results: [{
+    agent: 'worker', task: 'One task', exitCode: -1, activityPhase: 'running_tool', messages: [
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'old', name: 'custom', arguments: { path: 'old.ts' } }] },
+      { role: 'toolResult', toolCallId: 'old', content: [{ type: 'text', text: 'Old output' }] },
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'new', name: 'custom', arguments: { command } }] },
+    ],
+  }] } } };
+  mount(call, prefsWith({ autoExpandSubagentCalls: false }));
+  assert.equal(container.querySelector('.subagent-current-text')?.textContent, command);
+  assert.doesNotMatch(container.querySelector('.subagent-live-preview')?.textContent ?? '', /Old output|old.ts/);
+  assert.equal(container.querySelectorAll('.subagent-task').length, 1);
+  act(() => container.querySelector<HTMLElement>('.subagent-header')!.click());
+  assert.equal(container.querySelector('.subagent-live-preview'), null);
+  assert.match(container.querySelector('.subagent-messages')?.textContent ?? '', /One task/);
 });
 
 test('parallel progress uses child lifecycle without changing independent disclosure', () => {
@@ -213,9 +231,9 @@ test('parallel progress uses child lifecycle without changing independent disclo
     { agent: 'active', task: 'active', exitCode: -1, streamingText: 'Working', messages: [] },
   ] } } };
   mount(call, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-parallel-progress')?.textContent, '4 tasks · 1 completed · 1 running · 1 queued · 1 failed');
+  assert.equal(container.querySelector('.subagent-parallel-progress'), null);
   assert.match(container.textContent ?? '', /No access|No answer text available/);
-  act(() => container.querySelector<HTMLButtonElement>('.subagent-transcript-toggle')!.click());
+  act(() => container.querySelector<HTMLButtonElement>('.subagent-header')!.click());
   assert.deepEqual(Array.from(container.querySelectorAll('.subagent-header')).map((header) => header.getAttribute('aria-expanded')), ['true', 'false', 'false', 'false']);
 });
 

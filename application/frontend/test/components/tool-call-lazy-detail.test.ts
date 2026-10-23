@@ -84,12 +84,12 @@ test('lazy subagents render a lightweight collapsed preview and load detail only
   let toggle = card.querySelector('[role="button"]') as HTMLElement | null;
   assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
   assert.match(container.textContent ?? '', /preview-model/);
-  assert.match(container.textContent ?? '', /Answer excerpt/);
-  assert.match(container.textContent ?? '', /No answer text available\./);
+  assert.ok(container.querySelector('.subagent-live-preview'));
+  assert.equal(container.querySelector('.subagent-outcome'), null);
   assert.doesNotMatch(container.textContent ?? '', /short retained preview/,
     'settled cards must not misrepresent stale streaming activity as a genuine answer');
   assert.ok(container.querySelector('.subagent-task'));
-  assert.doesNotMatch(container.innerHTML, /subagent-live-preview/);
+  assert.doesNotMatch(container.innerHTML, /subagent-preview-label|View transcript/);
   assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 0,
     'the collapsed preview does not fetch the recursive child transcript');
 
@@ -122,22 +122,22 @@ test('parallel subagent transcript controls expand independently and preserve se
   }), container));
   const cards = [...container.querySelectorAll('.tool-call-subagent')];
   assert.equal(cards.length, 2);
-  const toggles = cards.map((card) => card.querySelector('.subagent-transcript-toggle') as HTMLButtonElement);
+  const toggles = cards.map((card) => card.querySelector('.subagent-header') as HTMLButtonElement);
   assert.deepEqual(toggles.map((toggle) => toggle.getAttribute('aria-expanded')), ['false', 'false']);
   assert.match(cards[0].textContent ?? '', /Evidence collected\./);
-  assert.match(cards[1].textContent ?? '', /No answer text available\./);
+  assert.equal(cards[1].querySelector('.subagent-outcome'), null);
   await act(async () => toggles[0].click());
   assert.deepEqual(toggles.map((toggle) => toggle.getAttribute('aria-expanded')), ['true', 'false']);
-  assert.match(cards[0].querySelector('.subagent-task')?.textContent ?? '', /Gather evidence/);
+  assert.match(cards[0].querySelector('.subagent-messages')?.textContent ?? '', /Gather evidence/);
   assert.match(cards[0].querySelector('.subagent-messages')?.textContent ?? '', /Evidence collected\./,
     'opening the transcript must successfully render its Markdown, not leave a partial failed render');
   assert.equal(cards[0].querySelector('.subagent-settled-preview'), null);
-  assert.ok(cards[1].querySelector('.subagent-settled-preview'));
-  const secondToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-transcript-toggle')[1];
+  assert.ok(cards[1].querySelector('.subagent-live-preview'));
+  const secondToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-header')[1];
   await act(async () => secondToggle.click());
-  const firstToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-transcript-toggle')[0];
+  const firstToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-header')[0];
   await act(async () => firstToggle.click());
-  assert.deepEqual([...container.querySelectorAll('.subagent-transcript-toggle')].map((toggle) => toggle.getAttribute('aria-expanded')), ['false', 'true']);
+  assert.deepEqual([...container.querySelectorAll('.subagent-header')].map((toggle) => toggle.getAttribute('aria-expanded')), ['false', 'true']);
 });
 
 test('several expanded details are serialized so large responses cannot queue together', () => {

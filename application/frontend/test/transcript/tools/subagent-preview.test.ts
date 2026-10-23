@@ -11,6 +11,7 @@ import {
   isIdle,
   mergeContinuousPreviewSource,
   subagentPreviewTail,
+  subagentCompactActivity,
   subagentSettledExcerpt,
   TurnActivityTailBody,
 } from '../../../transcript/activity-tail-preview';
@@ -26,6 +27,20 @@ function result(overrides: Partial<SubagentSingleResult> & { agent: string; task
     ...rest,
   } as SubagentSingleResult;
 }
+
+test('compact current tool input is raw and never includes previous tool output', () => {
+  const command = 'node script.js --argument="' + 'long value '.repeat(60) + '"\nnext command';
+  const child = result({ agent: 'worker', task: 'inspect', exitCode: -1, activityPhase: 'running_tool', messages: [
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'old', name: 'custom', arguments: { path: 'old.ts' } }] },
+    { role: 'toolResult', toolCallId: 'old', content: [{ type: 'text', text: 'STALE OUTPUT' }] },
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'new', name: 'custom', arguments: { command } }] },
+  ] });
+  assert.deepEqual(subagentCompactActivity(child), { label: 'custom', text: command });
+  assert.deepEqual(subagentCompactActivity({ ...child, messages: [
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'other', name: 'unknown', arguments: { query: 'raw query', count: 2 } }] },
+  ] }), { label: 'unknown', text: JSON.stringify({ query: 'raw query', count: 2 }, null, 2) });
+  assert.deepEqual(subagentCompactActivity(result({ agent: 'a', task: 't', streamingReasoning: 'actual reasoning' })), { text: 'actual reasoning', reasoning: true });
+});
 
 test('settled excerpts exclude stale live activity and unqualified finalOutput', () => {
   const child = result({ agent: 'worker', task: 'fix', streamingText: 'old live text', finalOutput: 'recovery' });

@@ -460,6 +460,7 @@ const SUBAGENT_TOOL_OUTPUT_MAX_CHARS = 8000;
 
 interface LatestToolActivity {
   name: string;
+  rawInput?: string;
   /** One-line command/input summary, if derivable (e.g. a bash command). */
   inputLine?: string;
   /** The tool's output text (partial while running, full when complete). */
@@ -521,12 +522,37 @@ function latestToolActivity(result: SubagentSingleResult): LatestToolActivity | 
       return {
         name,
         inputLine: presentation.summary?.trim() || undefined,
+        rawInput: rawSubagentToolInput(part.arguments),
         output: output ? takeLastChars(output.replace(/\n+$/, ''), SUBAGENT_TOOL_OUTPUT_MAX_CHARS) : undefined,
         running: !completed,
       };
     }
   }
   return undefined;
+}
+
+/** Prefer actual command/path strings; unknown tools retain their raw arguments. */
+function rawSubagentToolInput(input: unknown): string | undefined {
+  if (typeof input === 'string') return input;
+  if (!input || typeof input !== 'object') return undefined;
+  const args = input as Record<string, unknown>;
+  for (const key of ['command', 'path', 'file_path']) {
+    if (typeof args[key] === 'string') return args[key];
+  }
+  return JSON.stringify(input, null, 2);
+}
+
+/** Current-only compact content. Never carry a previous tool's output into a
+ * new input, or replay completed tool output as current model activity. */
+export function subagentCompactActivity(result: SubagentSingleResult): { label?: string; text: string; reasoning?: boolean } | undefined {
+  const tool = latestToolActivity(result);
+  const executingTool = result.activityPhase === 'running_tool' || (result.runningTools?.length ?? 0) > 0;
+  if (executingTool && tool?.running && tool.rawInput) {
+    return { label: tool.name, text: tool.rawInput };
+  }
+  if (result.streamingText?.trim()) return { text: result.streamingText.trim() };
+  if (result.streamingReasoning?.trim()) return { text: result.streamingReasoning.trim(), reasoning: true };
+  return tool?.rawInput ? { label: tool.name, text: tool.rawInput } : undefined;
 }
 
 /** Settled excerpts use the same conversion as the transcript: finalOutput is
