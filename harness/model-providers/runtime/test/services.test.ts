@@ -92,7 +92,9 @@ function syntheticSdk() {
   const auth = (saved: boolean) => ({
     getOAuthProviders: () => [{ id: 'saved', name: 'Saved', modifyModels: (models: NativeRuntimeModel[]) => models.map(model => ({ ...model, baseUrl: 'https://account.example/v1' })) }],
     get: (id: string) => saved ? central.get(id) : undefined,
-    set: (id: string, value: StagedProviderCredential) => { assert.ok(saved); central.set(id, value); },
+    list: () => [...central.keys()],
+    setAsync: async (id: string, value: StagedProviderCredential) => { assert.ok(saved); central.set(id, value); },
+    removeAsync: async (id: string) => { central.delete(id); },
     drainErrors: () => [], login: async () => {}, reload() {},
     hasAuth: (id: string) => saved ? central.has(id) : id === 'default',
     getAuthStatus: () => ({ configured: true }),
@@ -110,7 +112,7 @@ function syntheticSdk() {
     },
   });
   const sdk = {
-    AuthStorage: { inMemory: () => auth(false), create: () => auth(true) },
+    AuthStorage: { inMemory: () => auth(false), create: () => auth(true), createAsync: async () => auth(true) },
     ModelRegistry: { inMemory: (authStorage: ProviderRuntimeAuthStorage) => ({
       authStorage, find: () => native, getAll: () => [native], getAvailable: () => [native],
       refresh: () => { throw new Error('native refresh must never change the capture'); }, getError: () => undefined,

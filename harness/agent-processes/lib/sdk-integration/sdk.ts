@@ -470,8 +470,11 @@ export interface SdkModelRegistry {
 }
 
 export interface SdkAuthStorage {
+  reloadAsync: () => Promise<void>;
+  setAsync: (providerId: string, credential: import('../../../model-providers/management/auth-port').StagedProviderCredential, options?: { signal?: AbortSignal }) => Promise<void>;
+  removeAsync: (providerId: string, options?: { signal?: AbortSignal }) => Promise<void>;
   remove?: (providerId: string) => void;
-  list?: () => string[];
+  list: () => string[];
   reload?: () => void;
   get?: (providerId: string) => import('../../../model-providers/management/auth-port').StagedProviderCredential | undefined;
   getApiKey?: (providerId: string, options?: { includeFallback?: boolean }) => Promise<string | undefined>;
@@ -504,6 +507,7 @@ export interface SdkModule {
   createProviderManagementAuth?: (credentialFile: string) => ProviderManagementAuthPort;
   AuthStorage: {
     create: (filePath?: string) => SdkAuthStorage;
+    createAsync: (filePath?: string) => Promise<SdkAuthStorage>;
     /** Native isolated storage, required only for captured provider runtimes. */
     inMemory?: () => SdkAuthStorage;
   };
@@ -937,7 +941,7 @@ async function loadSelectedSdk(sdkPath: string, mode: SdkLoadMode): Promise<Sour
     exports = await dynamicImport(pathToFileURL(await sourceInternalPath(verifiedPath, 'index.js')).href) as Partial<SdkModule>;
   }
   if (typeof exports.VERSION !== 'string' || typeof exports.getAgentDir !== 'function'
-      || typeof exports.AuthStorage?.create !== 'function' || typeof exports.ModelRegistry?.create !== 'function'
+      || typeof exports.AuthStorage?.create !== 'function' || typeof exports.AuthStorage?.createAsync !== 'function' || typeof exports.ModelRegistry?.create !== 'function'
       || ['create', 'open', 'forkFrom', 'listAll', 'inMemory', 'continueRecent'].some(key =>
         typeof (exports.SessionManager as unknown as Record<string, unknown>)?.[key] !== 'function')) {
     throw new Error(`SDK at ${verifiedPath} is missing required cold coordinator exports.`);

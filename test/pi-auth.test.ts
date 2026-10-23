@@ -37,6 +37,11 @@ function fixture() {
       const credential = this.data[id];
       return credential?.type === 'api_key' ? credential.key : 'refreshed';
     }
+    list() { return Object.keys(this.data); }
+    async setAsync(id: string, credential: StagedProviderCredential, options?: { signal?: AbortSignal }) { options?.signal?.throwIfAborted(); this.set(id, credential); }
+    async removeAsync(id: string) { delete this.data[id]; }
+    // SDK-free adapter: creation does not acquire any native credential lock.
+    static async createAsync(file: string) { return this.create(file); }
     static inMemory() { return new FakeStorage(); }
     static create(file: string) { creates++; path = file; return new FakeStorage(persisted); }
   }
@@ -77,10 +82,10 @@ test('login is isolated until save and forwards cancellation callbacks', async (
   assert.equal(f.creates(), 0);
   assert.equal(f.stores.at(-1)?.callbacks, supplied);
   assert.deepEqual(staged, token);
-  assert.equal(auth.hasSavedCredential('anthropic'), false);
+  assert.equal((await auth.listSavedCredentialIds()).includes('anthropic'), false);
   assert.equal(f.path(), f.file);
   await auth.saveCredential('anthropic', staged);
-  assert.equal(auth.hasSavedCredential('anthropic'), true);
+  assert.equal((await auth.listSavedCredentialIds()).includes('anthropic'), true);
   await assert.rejects(auth.stageOAuthLogin('invented', supplied));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(auth.stageOAuthLogin('anthropic', { ...callbacks, signal: controller.signal }));
@@ -88,7 +93,7 @@ test('login is isolated until save and forwards cancellation callbacks', async (
 
 test('stored presence and literal keys never invoke fallback or command resolution', async () => {
   const f = fixture(); const auth = createPiProviderAuth(f.FakeStorage, f.file);
-  assert.equal(auth.hasSavedCredential('openai'), false);
+  assert.equal((await auth.listSavedCredentialIds()).includes('openai'), false);
   assert.equal(await auth.getApiKey('openai'), undefined);
   for (const key of ['!do-not-execute', 'OPENAI_API_KEY', 'literal']) {
     await auth.saveCredential('openai', { type: 'api_key', key });
@@ -113,7 +118,9 @@ test('native auth resolves literal references for management and scoped runtime 
     const createStorage = (): NativeAuthStorage<Model> => ({
       getOAuthProviders: () => [],
       get: id => credentials[id],
-      set: (id, credential) => { credentials[id] = credential; },
+      list: () => Object.keys(credentials),
+      setAsync: async (id, credential) => { credentials[id] = credential; },
+      removeAsync: async id => { delete credentials[id]; },
       drainErrors: () => [],
       login: async () => {},
       getApiKey: async id => {
@@ -126,7 +133,7 @@ test('native auth resolves literal references for management and scoped runtime 
           ? 'native-resolved-token' : undefined;
       },
     });
-    const auth = createPiProviderAuth({ create: createStorage, inMemory: createStorage }, file);
+    const auth = createPiProviderAuth({ createAsync: async () => createStorage(), inMemory: createStorage }, file);
     await auth.saveCredential('referenced', { type: 'api_key', key: '${TEST_TOKEN}' });
     assert.deepEqual(await auth.getApiKey('referenced'), 'native-resolved-token');
     const scope = (await auth.getRuntimeCredentialScope!('referenced'))!;
@@ -154,15 +161,15 @@ test('management credential reads surface native storage failures rather than re
   let keyCalls = 0;
   const auth = createPiProviderAuth({
     inMemory: () => new f.FakeStorage(),
-    create: () => ({
+    createAsync: async () => ({
       getOAuthProviders: () => f.registry,
       get: () => undefined,
-      set() {}, remove() {}, async login() {},
+      list: () => [], async setAsync() {}, async removeAsync() {}, async login() {},
       drainErrors: () => [new Error('private native read failure')],
       async getApiKey() { keyCalls++; return undefined; },
     }),
   }, f.file);
-  assert.throws(() => auth.hasSavedCredential('openai'), /^Error: Provider credential storage failed$/);
+  await assert.rejects(auth.listSavedCredentialIds(), /^Error: Provider credential storage failed$/);
   await assert.rejects(auth.getApiKey('openai'), /^Error: Provider credential storage failed$/);
   await assert.rejects(auth.discoveryBaseUrl('github-copilot', ''), /^Error: Provider credential storage failed$/);
   assert.equal(keyCalls, 0);
@@ -187,4 +194,69 @@ test('Copilot modifies actual native models and rejects unavailable/invalid meta
   const unsupported = createPiProviderAuth(f.FakeStorage, f.file);
   await unsupported.saveCredential('github-copilot', token);
   await assert.rejects(unsupported.discoveryBaseUrl('github-copilot', ''), /unsupported/);
+});
+
+test('async mutation lane spans broker instances; tombstones precede canonical waits and captures cannot revive them', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pie-auth-lane-'));
+  try {
+    const file = join(dir, 'auth.json');
+    let credential: StagedProviderCredential | undefined = { type: 'api_key', key: 'old' };
+    let releaseOpen!: () => void;
+    let blockOpen = false;
+    let opened = false;
+    let releaseWrite!: () => void;
+    let writing = false;
+    const events: string[] = [];
+    const native = () => ({
+      getOAuthProviders: () => [], list: () => credential ? ['p'] : [], get: () => credential,
+      drainErrors: () => [], login: async () => {}, getApiKey: async () => 'key',
+      setAsync: async (_id: string, value: StagedProviderCredential) => {
+        events.push('write'); writing = true;
+        await new Promise<void>(resolve => { releaseWrite = resolve; }); credential = value;
+      },
+      removeAsync: async () => { events.push('remove'); credential = undefined; },
+    });
+    const ctor = { inMemory: native, createAsync: async () => {
+      if (blockOpen) { opened = true; await new Promise<void>(resolve => { releaseOpen = resolve; }); }
+      return native();
+    } };
+    const a = createPiProviderAuth(ctor, file), b = createPiProviderAuth(ctor, file);
+    blockOpen = true;
+    const capture = a.getRuntimeCredentialScope!('p');
+    while (!opened) await new Promise(resolve => setImmediate(resolve));
+    blockOpen = false;
+    const save = a.saveCredential('p', { type: 'api_key', key: 'new' });
+    while (!writing) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(JSON.parse(await readFile(`${file}.runtime-scopes.json`, 'utf8')).p, null);
+    releaseOpen();
+    assert.equal(await capture, undefined);
+    const remove = b.removeCredential('p');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ['write']);
+    releaseWrite(); await save; await remove;
+    assert.deepEqual(events, ['write', 'remove']);
+    assert.equal(await a.getRuntimeCredentialScope!('p'), undefined);
+    assert.equal(JSON.parse(await readFile(`${file}.runtime-scopes.json`, 'utf8')).p, null);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('missing asynchronous native capabilities fail generically without sync fallback', async () => {
+  const f = fixture();
+  let syncCalls = 0;
+  const ctor = { inMemory: () => new f.FakeStorage(), create: () => { syncCalls++; throw new Error('sync'); } };
+  const auth = createPiProviderAuth(ctor as never, f.file);
+  await assert.rejects(auth.listSavedCredentialIds(), /^Error: Provider credential storage failed$/);
+  assert.equal(syncCalls, 0);
+  const missing = createPiProviderAuth({ ...ctor, createAsync: async () => ({ get: () => undefined }) } as never, f.file);
+  await assert.rejects(missing.listSavedCredentialIds(), /^Error: Provider credential storage failed$/);
+});
+
+test('cancelled save passes the signal and retains invalidation', async () => {
+  const f = fixture(), auth = createPiProviderAuth(f.FakeStorage, f.file);
+  await auth.saveCredential('openai', { type: 'api_key', key: 'old' });
+  const scope = await auth.getRuntimeCredentialScope!('openai');
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(auth.saveCredential('openai', { type: 'api_key', key: 'new' }, controller.signal), /storage failed/);
+  assert.equal(await auth.getRuntimeCredentialScope!('openai'), undefined);
+  await assert.rejects(auth.getRuntimeApiKey!('openai', scope!), /storage failed/);
 });

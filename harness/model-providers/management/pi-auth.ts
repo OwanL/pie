@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import type { ProviderManagementAuthPort, ProviderOAuthCallbacks, StagedProviderCredential } from './auth-port';
@@ -13,16 +13,19 @@ export interface NativeOAuthProvider<Model> {
 export interface NativeAuthStorage<Model> {
   getOAuthProviders(): NativeOAuthProvider<Model>[];
   get(providerId: string): StagedProviderCredential | undefined;
-  set(providerId: string, credential: StagedProviderCredential): void;
-  remove(providerId: string): void;
+  list(): string[];
+  setAsync(providerId: string, credential: StagedProviderCredential, options?: { signal?: AbortSignal }): Promise<void>;
+  removeAsync(providerId: string, options?: { signal?: AbortSignal }): Promise<void>;
   drainErrors(): Error[];
   login(providerId: string, callbacks: ProviderOAuthCallbacks): Promise<void>;
   getApiKey(providerId: string, options: { includeFallback: false }): Promise<string | undefined>;
 }
 export interface NativeAuthStorageConstructor<Model> {
-  create(path: string): NativeAuthStorage<Model>;
+  createAsync(path: string): Promise<NativeAuthStorage<Model>>;
   inMemory(): NativeAuthStorage<Model>;
 }
+
+const mutationLanes = new Map<string, Promise<unknown>>();
 
 /** Read-only private epoch check for synchronous SDK availability predicates. */
 export function isRuntimeCredentialScopeCurrent(credentialFile: string, providerId: string, scope: string | undefined): boolean {
@@ -55,7 +58,28 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
   outsideCheckout(credentialFile);
   const registry = AuthStorageConstructor.inMemory().getOAuthProviders();
   const customId = 'other';
-  const storage = () => AuthStorageConstructor.create(credentialFile);
+  const storage = async () => {
+    try {
+      if (typeof AuthStorageConstructor.createAsync !== 'function') throw failure();
+      const native = await AuthStorageConstructor.createAsync(credentialFile);
+      if (typeof native.list !== 'function' || typeof native.setAsync !== 'function' ||
+          typeof native.removeAsync !== 'function') throw failure();
+      checkErrors(native);
+      return native;
+    } catch { throw failure(); }
+  };
+  // Resolve existing ancestors even before the credential file has been created.
+  const authorityPath = (path: string): string => existsSync(path) ? realpathSync(path)
+    : join(authorityPath(dirname(path)), path.slice(dirname(path).length + 1));
+  const resolvedAuthority = resolve(authorityPath(credentialFile));
+  const authority = process.platform === 'win32' ? resolvedAuthority.toLowerCase() : resolvedAuthority;
+  // This lane is process-local; canonical native locking still owns cross-process writes.
+  const mutate = (work: () => Promise<void>): Promise<void> => {
+    const next = (mutationLanes.get(authority) ?? Promise.resolve()).catch(() => {}).then(work);
+    mutationLanes.set(authority, next);
+    void next.finally(() => { if (mutationLanes.get(authority) === next) mutationLanes.delete(authority); }).catch(() => {});
+    return next;
+  };
   const scopeFile = `${credentialFile}.runtime-scopes.json`;
   const failure = () => new Error('Provider credential storage failed');
   const readScopes = (): Record<string, string | null> => {
@@ -114,11 +138,13 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
         baseUrl: '', authMethods: ['api-key', 'local'], discovery: 'openai' });
       return known;
     },
-    hasSavedCredential(providerId) {
-      const native = storage();
-      const credential = native.get(providerId);
-      checkErrors(native);
-      return credential !== undefined;
+    async listSavedCredentialIds() {
+      try {
+        const native = await storage();
+        const ids = native.list();
+        checkErrors(native);
+        return ids;
+      } catch { throw failure(); }
     },
     async stageOAuthLogin(providerId, callbacks) {
       if (!oauth(providerId)) throw new Error('Unsupported OAuth provider');
@@ -130,30 +156,31 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
       if (credential?.type !== 'oauth') throw new Error('OAuth login did not produce credentials');
       return structuredClone(credential);
     },
-    async saveCredential(providerId, credential) {
-      // Invalidate captured epochs before attempting the canonical native write. A failed
-      // native write does not restore the old epoch or claim a credential rollback.
-      // Pending tombstone prevents another capture admitting the previous credential
-      // under the replacement epoch while the canonical write is in progress.
-      replaceScope(providerId, null);
-      try {
-        const native = storage();
-        native.set(providerId, structuredClone(credential));
-        checkErrors(native);
-        replaceScope(providerId);
-      } catch { throw failure(); }
+    async saveCredential(providerId, credential, signal) {
+      return mutate(async () => {
+        // Invalidate before canonical storage waits; failed writes cannot restore old captures.
+        replaceScope(providerId, null);
+        try {
+          const native = await storage();
+          await native.setAsync(providerId, structuredClone(credential), { signal });
+          checkErrors(native);
+          replaceScope(providerId);
+        } catch { throw failure(); }
+      });
     },
     async removeCredential(providerId) {
-      // Revoke prior runtime captures before touching the canonical managed store.
-      replaceScope(providerId, null);
-      try {
-        const native = storage();
-        native.remove(providerId);
-        checkErrors(native);
-      } catch { throw failure(); }
+      return mutate(async () => {
+        // Revoke prior runtime captures before touching the canonical managed store.
+        replaceScope(providerId, null);
+        try {
+          const native = await storage();
+          await native.removeAsync(providerId);
+          checkErrors(native);
+        } catch { throw failure(); }
+      });
     },
     async getApiKey(providerId) {
-      const native = storage();
+      const native = await storage();
       const credential = native.get(providerId);
       checkErrors(native);
       if (credential?.type !== 'api_key' && credential?.type !== 'oauth') return undefined;
@@ -163,11 +190,13 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     },
     async getRuntimeCredentialScope(providerId) {
       try {
-        const native = storage();
+        const before = readScopes()[providerId];
+        const native = await storage();
         const credential = native.get(providerId);
         checkErrors(native);
         if (!credential) return undefined;
         const scopes = readScopes();
+        if (scopes[providerId] !== before) return undefined;
         if (Object.hasOwn(scopes, providerId)) return scopes[providerId] ?? undefined;
         return replaceScope(providerId) ?? undefined;
       } catch { throw failure(); }
@@ -175,7 +204,7 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     async getRuntimeApiKey(providerId, scope) {
       try {
         requireScope(providerId, scope);
-        const native = storage();
+        const native = await storage();
         const credential = native.get(providerId);
         checkErrors(native);
         if (!credential) throw failure();
@@ -187,7 +216,7 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     },
     async runtimeModels(providerId, models) {
       try {
-        const native = storage();
+        const native = await storage();
         const credential = native.get(providerId);
         checkErrors(native);
         const provider = oauth(providerId);
@@ -198,7 +227,7 @@ export function createPiProviderAuth<Model extends { provider: string; baseUrl: 
     async discoveryBaseUrl(providerId, configuredBaseUrl) {
       if (providerId !== 'github-copilot') return configuredBaseUrl;
       const provider = oauth(providerId);
-      const native = storage();
+      const native = await storage();
       const credential = native.get(providerId);
       checkErrors(native);
       if (!provider?.modifyModels || !getModels || credential?.type !== 'oauth') {

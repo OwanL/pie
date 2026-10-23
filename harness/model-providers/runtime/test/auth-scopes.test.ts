@@ -19,7 +19,9 @@ test('saved epochs invalidate replacement and in-flight refresh without fallback
       return {
         getOAuthProviders: () => [{ id: 'oauth', name: 'OAuth', modifyModels: models => models.map(model => ({ ...model, baseUrl: 'https://native.example' })) }],
         get: () => snapshot,
-        set: (_id, value) => { credential = value; },
+        list: () => credential ? ['oauth'] : [],
+        setAsync: async (_id, value) => { credential = value; },
+        removeAsync: async () => { credential = undefined; },
         drainErrors: () => [], login: async () => {},
         getApiKey: async (_id, options) => {
           assert.deepEqual(options, { includeFallback: false }); calls++;
@@ -31,7 +33,7 @@ test('saved epochs invalidate replacement and in-flight refresh without fallback
       };
     };
     const file = join(dir, 'auth.json');
-    const auth = createPiProviderAuth({ create, inMemory: create }, file);
+    const auth = createPiProviderAuth({ createAsync: async () => create(), inMemory: create }, file);
     assert.equal(await auth.getRuntimeCredentialScope!('oauth'), undefined);
     await assert.rejects(auth.getRuntimeApiKey!('oauth', 'missing'));
     assert.equal(calls, 0);
@@ -39,6 +41,8 @@ test('saved epochs invalidate replacement and in-flight refresh without fallback
     const scope = (await auth.getRuntimeCredentialScope!('oauth'))!;
     assert.match(scope, /^[0-9a-f-]{36}$/);
     const pending = auth.getRuntimeApiKey!('oauth', scope);
+    // Async construction must finish before releasing the simulated refresh.
+    while (!finish) await new Promise(resolve => setImmediate(resolve));
     finish!();
     assert.equal(await pending, 'refreshed');
     assert.equal(await auth.getRuntimeCredentialScope!('oauth'), scope);
@@ -66,10 +70,12 @@ test('sidecar failure prevents native credential write; native failure keeps inv
     let fail = false;
     const create = (): NativeAuthStorage<{ provider: string; baseUrl: string }> => ({
       getOAuthProviders: () => [], get: () => ({ type: 'api_key', key: 'private' }),
-      set: () => { writes++; if (fail) throw new Error('private-secret'); },
+      list: () => ['api'],
+      setAsync: async () => { writes++; if (fail) throw new Error('private-secret'); },
+      removeAsync: async () => {},
       drainErrors: () => [], login: async () => {}, getApiKey: async () => 'ambient-secret',
     });
-    const auth = createPiProviderAuth({ create, inMemory: create }, file);
+    const auth = createPiProviderAuth({ createAsync: async () => create(), inMemory: create }, file);
     const old = await auth.getRuntimeCredentialScope!('api');
     fail = true;
     await assert.rejects(auth.saveCredential('api', { type: 'api_key', key: 'replacement' }), /Provider credential storage failed/);

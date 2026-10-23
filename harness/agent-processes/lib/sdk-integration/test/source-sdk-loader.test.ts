@@ -77,7 +77,10 @@ function syntheticSdk(key: string): Record<string, string> {
 }
 ${recordImports('session-manager', ['SessionManager'])}`;
   const authStorage = `${recordImports('auth-storage')}
-export class AuthStorage { static create() { return new AuthStorage(); } }
+export class AuthStorage {
+  static create() { return new AuthStorage(); }
+  static async createAsync() { return new AuthStorage(); }
+}
 `;
   const modelRegistry = `${recordImports('model-registry')}
 export class ModelRegistry {
@@ -304,6 +307,20 @@ test('source-artifact loader rejects verified SDKs missing required cold or full
     assert.ok(record?.imports.includes(surface === 'cold' ? 'config' : 'index'),
       'the verified synthetic SDK was evaluated, but no installed SDK was returned');
     assert.deepEqual(await snapshot(current.artifactDir), before);
+  }
+});
+
+test('both source SDK surfaces require async credential construction without sync fallback', async (t) => {
+  for (const surface of ['cold', 'full'] as const) {
+    const current = await fixture(t);
+    const file = path.join(current.sdkPath, 'dist/core/auth-storage.js');
+    const source = await readFile(file, 'utf8');
+    assert.ok(source.includes('static async createAsync()'));
+    await writeFile(file, source.replace('static async createAsync()', 'static async missing_createAsync()'));
+    await writePiRuntimeManifest(current.artifactDir, provenance);
+    const descriptor = await descriptorFor(current.artifactDir, target);
+    await assertRejectsMessage(loadSdk(current.sdkPath, sourceMode(descriptor, target, surface)),
+      /missing required cold coordinator exports/);
   }
 });
 

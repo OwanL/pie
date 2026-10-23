@@ -15,10 +15,10 @@ export interface ProviderOAuthCallbacks {
 }
 export interface ProviderManagementAuthPort {
   definitions(): ProviderDefinition[];
-  /** Stored presence only, not authenticated access. Never resolve environment fallbacks. */
-  hasSavedCredential(providerId: string): boolean;
+  /** One asynchronously loaded presence batch, not authenticated access. Never resolve fallbacks. */
+  listSavedCredentialIds(): Promise<readonly string[]>;
   stageOAuthLogin(providerId: string, callbacks: ProviderOAuthCallbacks): Promise<StagedProviderCredential>;
-  saveCredential(providerId: string, credential: StagedProviderCredential): Promise<void>;
+  saveCredential(providerId: string, credential: StagedProviderCredential, signal?: AbortSignal): Promise<void>;
   /** Optional for older adapters; removal must fail closed when unavailable. */
   removeCredential?(providerId: string): Promise<void>;
   /** Explicit discovery effect only. OAuth may refresh through Pi's storage lock. */

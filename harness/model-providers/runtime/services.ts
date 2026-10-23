@@ -41,7 +41,8 @@ export interface ProviderRuntimeServices {
 }
 type NativeRuntimeAuth = ProviderRuntimeAuthStorage & NativeAuthStorage<NativeRuntimeModel>;
 interface NativeRuntimeSdk {
-  AuthStorage: { inMemory(): NativeRuntimeAuth; create(path: string): NativeRuntimeAuth };
+  // Async broker construction is required; currentSaved deliberately retains sync create.
+  AuthStorage: { inMemory(): NativeRuntimeAuth; create(path: string): NativeRuntimeAuth; createAsync(path: string): Promise<NativeRuntimeAuth> };
   ModelRegistry?: {
     inMemory?(authStorage: ProviderRuntimeAuthStorage): ProviderRuntimeModelRegistry;
     create?(authStorage: unknown, modelsFile: string): ProviderRuntimeModelRegistry;
