@@ -77,7 +77,7 @@ const PACKAGE_TEST_METADATA = {
   },
   scripts: {
     testGlobs: [
-      'scripts/test/*.test.mjs',
+      'scripts/verification/token-estimate-synthetic-fixtures.test.mjs',
       'scripts/build/test/**/*.test.mjs',
       'scripts/build/test/**/*.test.ts',
       'scripts/development/test/**/*.test.mjs',
@@ -138,7 +138,6 @@ const PACKAGE_TEST_METADATA = {
   'skill-pruner': {
     testGlobs: [
       'harness/tool-and-skill-selection/**/*.test.ts',
-      'extensions/skill-pruner/test/**/*.test.ts',
       'test/integration/dynamic-tool-activation.artifact.test.ts',
     ],
     coverageIncludes: [

@@ -114,6 +114,15 @@ test('every owner preserves metadata and complete inventory through the shared e
           called = true;
           const config = JSON.parse(readFileSync(args.at(-1), 'utf8'));
           assert.deepEqual(config.files, expected);
+          if (owner.id === 'scripts') {
+            assert.ok(config.files.includes(path.join(root, 'scripts/verification/token-estimate-synthetic-fixtures.test.mjs')),
+              'retained execution reaches the child with the sibling verification suite');
+            assert.ok(config.files.every(file => !file.includes(`${path.sep}scripts${path.sep}test${path.sep}`)));
+          }
+          if (owner.id === 'skill-pruner') {
+            assert.ok(config.files.some(file => file.includes('tool-and-skill-selection')));
+            assert.ok(config.files.every(file => !file.includes(`${path.sep}extensions${path.sep}skill-pruner${path.sep}test${path.sep}`)));
+          }
           assert.deepEqual(config.sourceFileByEntry, {}, 'retained ESM uses original entries, never CJS wrappers');
           assert.equal(config.cwd, owner.cwd);
           assert.equal(cwd, owner.cwd);

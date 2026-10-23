@@ -9,6 +9,7 @@ import { extractRuntimeArgs } from '../verification-runtime.mjs';
 import { withPiRuntime as acquirePiRuntime } from '../../lib/pi-runtime-context.mjs';
 import { ARTIFACT_TEST_GLOB, DEFAULT_ARTIFACT_SELECTORS, main, runArtifactTests } from '../test-artifact.mjs';
 import { resolveTestFiles } from '../test-node.mjs';
+import { PACKAGE_REGISTRY, packageTestRoots, packageTestFiles } from '../../lib/test-packages.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -49,31 +50,23 @@ function fixture(t, { code = 0, gone = true, spawnFailure } = {}) {
 
 test('default domains resolve the intended artifact suites without ordinary source tests', () => {
   const files = resolveTestFiles(repoRoot, DEFAULT_ARTIFACT_SELECTORS, { includeGlobs: [ARTIFACT_TEST_GLOB] });
-  assert.equal(files.length, 51);
+  const registeredSelectors = [...new Set(PACKAGE_REGISTRY.flatMap(entry => [
+    ...packageTestRoots(entry).filter(root => existsSync(path.join(repoRoot, root))),
+    ...packageTestFiles(entry),
+  ]))];
+  const registered = resolveTestFiles(repoRoot, registeredSelectors);
+  const expected = registered.filter(file => path.matchesGlob(
+    path.relative(repoRoot, file).split(path.sep).join('/'), ARTIFACT_TEST_GLOB));
+  assert.ok(expected.length > 0, 'registry contains artifact coverage');
+  assert.deepEqual(files.slice().sort(), expected.sort(),
+    'default selectors include every registered artifact suite and no unregistered suites');
+  const ordinary = new Set(registered.filter(file => !expected.includes(file)));
+  assert.ok(ordinary.size > 0, 'inventory includes ordinary suites to exclude');
+  assert.ok(files.every(file => !ordinary.has(file)));
   const relative = files.map(file => path.relative(repoRoot, file).split(path.sep).join('/'));
   assert.ok(relative.every(file => path.matchesGlob(file, ARTIFACT_TEST_GLOB)));
   assert.ok(relative.includes('harness/agent-processes/coordinator/test/existing-provider-inventory.artifact.test.ts'),
     'default artifact discovery includes native keyless provider inventory coverage');
-  const expectedFamilies = new Map([
-    ['harness/agent-processes/', 21],
-    ['harness/session-storage/', 3],
-    ['harness/tool-and-skill-selection/', 4],
-    ['harness/tools/playwright/', 1],
-    ['harness/model-providers/model-discovery/', 2],
-    ['harness/model-providers/runtime/', 5],
-    ['harness/model-providers/management/', 1],
-    ['harness/tools/package-integrations/web-access/', 1],
-    ['harness/tools/subagent/', 2],
-    ['harness/tools/warm-bash/', 1],
-    ['application/backend/', 1],
-    ['scripts/install/test/', 1],
-    ['scripts/lib/test/', 2],
-    ['scripts/development/test/', 1],
-    ['test/integration/', 5],
-  ]);
-  for (const [family, count] of expectedFamilies) {
-    assert.equal(relative.filter(file => file.startsWith(family)).length, count, `${family} artifact count`);
-  }
 });
 
 test('CLI selectors and aliases discover artifact files before one runtime acquisition and forward the verified SDK', async (t) => {

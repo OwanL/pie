@@ -212,6 +212,10 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   assert.ok(fastFiles.has(autonomousModeTest), 'Moon native selectors retain autonomous mode coverage');
   assert.ok(registryFiles.has(SELECTOR_REGRESSION_TEST), 'new scripts tests remain in the dynamic registry inventory');
   assert.ok(registryFiles.has('scripts/development/test/inspect-workspace.test.mjs'));
+  const syntheticFixture = 'scripts/verification/token-estimate-synthetic-fixtures.test.mjs';
+  assert.ok(registryFiles.has(syntheticFixture), 'sibling verification suite has a registered owner');
+  assert.ok(fastFiles.has(syntheticFixture), 'sibling verification suite remains in the ordinary Moon lane');
+  assert.equal(artifactFiles.has(syntheticFixture), false);
   for (const file of INTENTIONAL_UNREGISTERED_FAST_FILES) {
     assert.ok(fastFiles.has(file), `${file} is an intentional Moon-only fast suite`);
   }

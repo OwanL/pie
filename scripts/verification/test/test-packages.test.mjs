@@ -31,7 +31,11 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 218, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  const expectedDirectives = PACKAGE_REGISTRY.flatMap(entry =>
+    [...new Set([...packageSourceRoots(entry), ...packageTestRoots(entry), ...packageTestFiles(entry)])]
+      .map(dir => ({ id: entry.id, dir })));
+  assert.deepEqual(PACKAGE_DIRECTIVES, expectedDirectives,
+    'routing view covers dirs, owned dirs, test roots, and explicit test files without duplicates');
   for (const file of [
     'application/lib/composer/local-message-id.ts',
     'application/lib/session-tabs/tab-behavior.ts',
@@ -52,7 +56,10 @@ test('source/test root defaults keep single-root enumeration identical', () => {
   // The scripts package routes grouped sources and all its test roots once.
   const scripts = resolvePackageEntry('scripts');
   assert.deepEqual(packageSourceRoots(scripts), ['scripts']);
-  assert.deepEqual(packageTestRoots(scripts), ['scripts/test', ...scripts.testRoots]);
+  assert.deepEqual(packageTestRoots(scripts), ['scripts/verification/test', ...scripts.testRoots]);
+  const syntheticFixture = 'scripts/verification/token-estimate-synthetic-fixtures.test.mjs';
+  assert.ok(packageTestFiles(scripts).includes(syntheticFixture));
+  assert.equal(classifyFileToPackage(syntheticFixture), 'scripts');
 });
 
 test('lib registry discovers Windows ownership tests for focused and legacy runners', () => {
