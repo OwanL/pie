@@ -258,7 +258,7 @@ test('shared collapsed-header typography is defined in transcript.css', async ()
   assert.match(css, /\.transcript-header-command-details\s*\{/);
 });
 
-test('subagent headers keep primary metadata ahead of summary text without extra model or thinking chrome', async () => {
+test('subagent footer keeps metadata compact without hiding reasoning or cost', async () => {
   const css = await readToolCallCss();
   const subagentSummaryRule = css.match(/\.subagent-header-summary\s*\{[\s\S]*?\n\}/);
   const primaryMetaRule = css.match(/\.subagent-primary-meta\s*\{[\s\S]*?\n\}/);
@@ -271,6 +271,10 @@ test('subagent headers keep primary metadata ahead of summary text without extra
   assert.match(primaryMetaRule[0], /align-items:\s*center;/);
   assert.match(primaryMetaRule[0], /flex:\s*0 0 auto;/);
 
+  assert.match(css, /\.subagent-footer\s*\{[^}]*min-height:\s*29px/);
+  assert.match(css, /\.subagent-reasoning-label\s*\{[^}]*flex:\s*0 0 auto/);
+  assert.match(css, /\.subagent-footer \.subagent-runtime-telemetry\s*\{[^}]*flex:\s*0 0 auto/);
+  assert.match(css, /\.subagent-task-trigger\s*\{[^}]*display:\s*block;[^}]*min-width:\s*0/);
   assert.ok(!css.includes('.subagent-secondary-meta'), 'subagent secondary-meta chrome should be removed');
   assert.ok(!css.includes('.subagent-model-tag'), 'subagent model badges should be removed');
   assert.ok(!css.includes('.subagent-thinking-tag'), 'subagent thinking badges should be removed');

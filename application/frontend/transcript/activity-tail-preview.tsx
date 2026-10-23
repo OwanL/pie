@@ -545,6 +545,9 @@ function rawSubagentToolInput(input: unknown): string | undefined {
 /** Current-only compact content. Never carry a previous tool's output into a
  * new input, or replay completed tool output as current model activity. */
 export function subagentCompactActivity(result: SubagentSingleResult): { label?: string; text: string; reasoning?: boolean } | undefined {
+  if (result.activityPhase === 'retry_wait') {
+    return result.activityDetail?.trim() ? { text: result.activityDetail } : undefined;
+  }
   const tool = latestToolActivity(result);
   const executingTool = result.activityPhase === 'running_tool' || (result.runningTools?.length ?? 0) > 0;
   if (executingTool && tool?.running && tool.rawInput) {

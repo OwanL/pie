@@ -368,7 +368,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   // allowed gradient is the functional mask-image overflow cue (Tabs-4 edge
   // fade on clipped tool-output panes), not a painted surface.
   assert.doesNotMatch(toolCallCss, /(?:background|filter|backdrop-filter)\s*:[^;{}]*?(?:linear|radial)-gradient/);
-  assert.doesNotMatch(toolCallCss, /backdrop-filter|filter:\s*blur/);
+  // Explicitly disabling inherited popup blur is allowed; adding blur is not.
+  for (const [, value] of toolCallCss.matchAll(/(?:-webkit-)?backdrop-filter\s*:\s*([^;{}]+)/g)) {
+    assert.equal(value.trim(), 'none');
+  }
+  assert.doesNotMatch(toolCallCss, /filter:\s*blur/);
 
   assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
   // The measured strict-priority row allocates complete items instead of

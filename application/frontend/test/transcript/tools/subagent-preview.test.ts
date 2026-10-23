@@ -42,6 +42,18 @@ test('compact current tool input is raw and never includes previous tool output'
   assert.deepEqual(subagentCompactActivity(result({ agent: 'a', task: 't', streamingReasoning: 'actual reasoning' })), { text: 'actual reasoning', reasoning: true });
 });
 
+test('retry wait uses only actual current detail despite stale tools and streams', () => {
+  const child = result({ agent: 'worker', task: 'inspect', exitCode: -1,
+    activityPhase: 'retry_wait', activityDetail: '  Rate limited; retrying in 8s.  ',
+    runningTools: ['read'], streamingText: 'Old reply', streamingReasoning: 'Old reasoning',
+    messages: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'old', name: 'read', arguments: { path: 'old.ts' } }] }],
+  });
+  assert.deepEqual(subagentCompactActivity(child), { text: child.activityDetail });
+  assert.equal(subagentCompactActivity({ ...child, activityDetail: undefined }), undefined);
+  assert.equal(subagentCompactActivity({ ...child, activityDetail: ' \n ' }), undefined);
+  assert.deepEqual(subagentCompactActivity({ ...child, activityPhase: 'running_tool' }), { label: 'read', text: 'old.ts' });
+});
+
 test('settled excerpts exclude stale live activity and unqualified finalOutput', () => {
   const child = result({ agent: 'worker', task: 'fix', streamingText: 'old live text', finalOutput: 'recovery' });
   assert.equal(subagentSettledExcerpt(child, false), undefined);

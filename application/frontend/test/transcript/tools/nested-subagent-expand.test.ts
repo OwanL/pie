@@ -205,6 +205,19 @@ test('card task stays stable as live activity settles; transcript control activa
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
 });
 
+test('settled outcome preserves exact paragraph separators without parsing prose', () => {
+  const answer = 'First **literal** paragraph.\nA single line break.\n\nSecond paragraph.\r\n \r\nThird <literal> paragraph.';
+  mount({ id: 'paragraph-outcome', name: 'subagent', status: 'completed', input: {},
+    result: { details: { results: [{ agent: 'worker', task: 'Inspect', exitCode: 0,
+      messages: [{ role: 'assistant', content: answer }],
+    }] } },
+  }, prefsWith({ autoExpandSubagentCalls: false }));
+  const outcome = container.querySelector('.subagent-outcome')!;
+  assert.equal(outcome.textContent, answer);
+  assert.equal(outcome.querySelectorAll('p').length, 3);
+  assert.equal(outcome.querySelector('strong'), null);
+});
+
 test('compact current input wraps raw content without retained tool output or duplicate expanded preview', () => {
   const command = 'run --value="' + 'long argument '.repeat(50) + '"\nsecond line';
   const call: ToolCall = { id: 'current-only', name: 'subagent', status: 'running', input: {}, result: { details: { results: [{
@@ -331,11 +344,15 @@ test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recov
   mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
-  assert.match(header?.textContent ?? '', /worker-model · off/);
-  assert.match(header?.textContent ?? '', /2s/);
-  assert.match(header?.textContent ?? '', /\$0\.01/);
-  assert.match(header?.textContent ?? '', /Recovered/);
+  assert.equal(header?.getAttribute('aria-expanded'), 'false');
+  assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /2s/);
   assert.doesNotMatch(header?.textContent ?? '', /ctx|tok|cached|tokens\/s|context latest/i);
+  const footer = container.querySelector<HTMLElement>('.subagent-footer');
+  assert.ok(footer);
+  assert.match(footer?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
+  assert.match(footer?.textContent ?? '', /· off/);
+  assert.equal(footer?.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
+  assert.match(footer?.querySelector('.subagent-telemetry-recovered')?.textContent ?? '', /Recovered/);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -380,8 +397,12 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
   mount(telemetrySubagentToolCall('live'), prefsWith({ autoExpandSubagentCalls: false }));
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
-  assert.match(header?.textContent ?? '', /worker-model · high/);
-  assert.ok(container.querySelector('.subagent-telemetry-elapsed'), 'live elapsed time should remain visible');
+  assert.equal(header?.getAttribute('aria-expanded'), 'false');
+  assert.ok(header?.querySelector('.subagent-telemetry-elapsed'), 'live elapsed time should remain visible');
+  const footer = container.querySelector<HTMLElement>('.subagent-footer');
+  assert.ok(footer);
+  assert.match(footer?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
+  assert.match(footer?.textContent ?? '', /· high/);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -762,7 +783,10 @@ test('subagent with provider-reported cost renders only the two-decimal USD amou
   mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.64 }), prefsWith({ autoExpandSubagentCalls: false }));
 
   const cost = container.querySelector<HTMLElement>('.subagent-telemetry-cost');
-  assert.ok(cost, 'reported cost evidence stays visible in the header');
+  assert.ok(cost, 'reported cost evidence stays visible in the footer');
+  assert.ok(cost.closest('.subagent-footer'));
+  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-cost'), null);
+  assert.equal(cost.closest('[aria-hidden="true"]'), null, 'cost must not depend on header-fit measurement');
   assert.equal(cost.textContent, '$0.64');
 
   const host = await openModelTooltip();
@@ -797,7 +821,7 @@ test('recovery telemetry remains when no cost is available', () => {
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
 
   assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
-  assert.ok(container.querySelector('.subagent-runtime-telemetry:not(.subagent-runtime-telemetry-stable) .subagent-telemetry-recovered'));
+  assert.ok(container.querySelector('.subagent-footer .subagent-telemetry-recovered'));
 });
 
 test('parallel child costs stay separate instead of repeating the group total', () => {

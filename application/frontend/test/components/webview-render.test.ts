@@ -741,7 +741,7 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.doesNotMatch(collapsedHtml, /subagent-header-summary/);
   assert.doesNotMatch(collapsedHtml, /subagent-settled-preview/);
   assert.match(collapsedHtml, /subagent-live-preview/);
-  assert.match(collapsedHtml, /subagent-outcome">Done\./);
+  assert.match(collapsedHtml, /subagent-outcome"><p>Done\./);
   assert.doesNotMatch(collapsedHtml, /subagent-preview-label|View transcript/);
   assert.match(collapsedHtml, /Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /reviewer: Inspect regression/);
@@ -1023,7 +1023,7 @@ test('interrupted subagent renders a terminal warning state without live activit
   assert.match(html, /status-chip-label">Interrupted/);
   assert.match(html, /subagent-live-preview/);
   assert.match(html, /subagent-outcome/);
-  assert.match(html, /subagent-outcome">Subagent was interrupted by the parent/);
+  assert.match(html, /subagent-outcome"><p>Subagent was interrupted by the parent/);
   assert.doesNotMatch(html, /subagent-current/);
   assert.doesNotMatch(html, /subagent-activity/);
   assert.doesNotMatch(html, /turn-activity-tail-cursor/);
@@ -1184,7 +1184,7 @@ test('subagent card keeps task context stable and shows live or settled previews
     renderToolCall: () => null,
   }));
   assert.doesNotMatch(completedCollapsedHtml, /subagent-settled-preview/);
-  assert.match(completedCollapsedHtml, /subagent-outcome">Looks good\./);
+  assert.match(completedCollapsedHtml, /subagent-outcome"><p>Looks good\./);
   assert.match(completedCollapsedHtml, /subagent-live-preview/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-current/);
   assert.match(completedCollapsedHtml, /Inspect regression/);
@@ -1259,7 +1259,7 @@ test('parallel subagent children share one minimally indented batch wrapper', ()
 
 test('parallel-group CSS uses one thin shallow spine without connector ticks', async () => {
   const css = await readFile(new URL('../../styles/tool-call.css', import.meta.url), 'utf8');
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*gap:\s*3px/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*gap:\s*6px/);
   assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*7px/);
   assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*1px solid var\(--panel-border\)/);
   assert.doesNotMatch(css, /\.subagent-parallel-child::before\s*\{/);

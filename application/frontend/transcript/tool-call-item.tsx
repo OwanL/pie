@@ -46,7 +46,7 @@ import { isIdle, subagentCompactActivity, subagentSettledExcerpt } from './activ
 import { CommittedToolLeaf } from './commit-registry';
 import { subagentDisplayCosts, type SubagentDisplayCost } from './subagent-cost';
 import type { TokenPricingResolver } from '../session-tabs/token-usage';
-import { useSubagentCostFit } from './use-subagent-cost-fit';
+import { SubagentTaskPreview } from './subagent-task-preview';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -197,8 +197,9 @@ function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSi
         onKeyDown={(event) => event.stopPropagation()}
       >
         <span class="subagent-model-label transcript-header-summary-subtle">
-          {short}{reasoning ? ` · ${reasoning}` : ''}
+          {short}
         </span>
+        {reasoning && <span class="subagent-reasoning-label"> · {reasoning}</span>}
       </span>
     </Tooltip>
   );
@@ -432,7 +433,7 @@ function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentS
   );
 }
 
-/** Cost and recovered-retry state stay visible in the collapsed header;
+/** Elapsed stays in the header; cost and recovered-retry state stay in the footer;
  * detailed context, token, cache, throughput, and handoff metrics live in the
  * keyboard-accessible model tooltip. */
 function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
@@ -865,8 +866,6 @@ function SubagentSingleBlock({
         || (multipleResults ? req.subagentCallId === subagentCallId : req.subagentCallId.startsWith(`${toolCall.id}:`))),
   );
 
-  const costFit = useSubagentCostFit(`${activityNow}:${singleResult.agent}:${singleResult.selectedModel ?? singleResult.model}:${singleResult.thinkingLevel}:${activity?.diagnostic}:${status}:${displayCost?.cost}:${singleResult.retryCount}`);
-
   // Stable id for the body region so the header can reference it via
   // `aria-controls` (only when the body is mounted, i.e. open or closing).
   const bodyId = useId();
@@ -935,7 +934,7 @@ function SubagentSingleBlock({
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
-        <div class="subagent-header-content" ref={costFit.contentRef}>
+        <div class="subagent-header-content">
           <span
             class="subagent-agent-trigger"
             onClick={(event) => event.stopPropagation()}
@@ -964,39 +963,25 @@ function SubagentSingleBlock({
           {!activity && status === 'idle' && (
             <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
           )}
-          <PrimaryMeta
-            result={singleResult}
-            requestedMode={requestedParentUserContextMode(toolCall.input)}
-            displayCost={displayCost}
-          />
           <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
             <ElapsedTelemetry result={singleResult} now={activityNow} />
           </span>
-          <RuntimeTelemetry result={singleResult} />
-          {displayCost !== undefined && (
-            <span
-              ref={costFit.costRef}
-              class="subagent-inline-cost"
-              style={!costFit.fits ? { position: 'absolute', visibility: 'hidden', pointerEvents: 'none' } : undefined}
-              aria-hidden={!costFit.fits || undefined}
-            >
-              <RuntimeTelemetry result={singleResult} displayCost={displayCost} costOnly />
-            </span>
-          )}
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
       </div>
       {!renderBody && (
         <div class="subagent-live-preview">
-          <div class="subagent-task">{singleResult.task}</div>
+          <SubagentTaskPreview task={singleResult.task} agent={singleResult.agent} />
           {compactActivity && (
             <div class={cx('subagent-current', compactActivity.reasoning && 'subagent-current-reasoning')}>
               {compactActivity.label && <span class="turn-activity-tail-label">{compactActivity.label}</span>}
               <span class="subagent-current-text">{compactActivity.text}</span>
             </div>
           )}
-          {settledExcerpt && <div class="subagent-outcome">{settledExcerpt}</div>}
+          {settledExcerpt && <div class="subagent-outcome">{settledExcerpt.split(/((?:\r?\n)[\t ]*\r?\n(?:[\t ]*\r?\n)*)/).map((part, index) =>
+            index % 2 ? part : part && <p>{part}</p>,
+          )}</div>}
         </div>
       )}
       {renderBody && (
@@ -1057,6 +1042,14 @@ function SubagentSingleBlock({
           </div>
         </div>
       )}
+      <div class="subagent-footer">
+        <PrimaryMeta
+          result={singleResult}
+          requestedMode={requestedParentUserContextMode(toolCall.input)}
+          displayCost={displayCost}
+        />
+        <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
+      </div>
     </div>
   );
 }
