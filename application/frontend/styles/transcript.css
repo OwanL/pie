@@ -253,35 +253,30 @@
 .transcript-latest-dock {
   flex: 0 0 auto;
   display: flex;
-  justify-content: flex-end;
-  padding: 4px 24px 4px 8px;
+  justify-content: center;
+  padding: 4px 8px;
 }
 
 .transcript-jump-latest {
+  width: 32px;
   min-width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  border-radius: 999px;
+  border-radius: 50%;
   border: 1px solid var(--panel-border-subtle);
-  background: var(--panel-overlay-surface);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--panel-control-surface);
   color: var(--panel-muted);
-  font-size: 12px;
-  font-weight: 500;
   line-height: 1;
-  padding: 0 12px;
+  padding: 0;
   cursor: pointer;
   box-shadow: var(--panel-shadow-sm);
   transition:
     background var(--panel-transition-fast),
     border-color var(--panel-transition-fast),
     color var(--panel-transition-fast),
-    transform var(--panel-duration-fast) var(--panel-ease-spring),
-    box-shadow var(--panel-transition-normal);
+    transform var(--panel-duration-fast) var(--panel-ease-spring);
   animation: transcript-jump-latest-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
 }
 
@@ -289,15 +284,10 @@
   .transcript-jump-latest { height: 44px; min-width: 44px; }
 }
 
-.transcript-jump-latest-icon {
-  font-size: 15px;
-}
-
 .transcript-jump-latest:hover {
   background: var(--panel-control-hover);
   border-color: var(--panel-border);
   color: var(--panel-foreground);
-  box-shadow: var(--panel-shadow-md);
 }
 
 .transcript-jump-latest:active {

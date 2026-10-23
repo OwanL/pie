@@ -43,7 +43,7 @@ test('markdown tables and code scroll locally without forcing ordinary words to 
   assert.match(css, /\.message-body pre\s*\{[^}]*white-space:\s*pre;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*normal;/);
   assert.match(css, /\.message-body table\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*100%;/);
   assert.match(css, /\.message-body td\s*\{[^}]*min-width:\s*12ch;[^}]*max-width:\s*40ch;[^}]*word-break:\s*normal;[^}]*overflow-wrap:\s*break-word;/);
-  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*flex:\s*0 0 auto;[^}]*display:\s*flex;[^}]*justify-content:\s*flex-end;/);
+  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*flex:\s*0 0 auto;[^}]*display:\s*flex;[^}]*justify-content:\s*center;/);
   const latestRule = css.match(/\.transcript-jump-latest\s*\{[^}]*\}/)?.[0] ?? '';
   assert.doesNotMatch(latestRule, /position:\s*absolute|bottom:|right:/);
   const source = await readFile(new URL('../../../transcript/virtual-list.tsx', import.meta.url), 'utf8');
@@ -474,6 +474,8 @@ test('jump-to-latest stays in its flow dock without assuming composer or footer 
   const rule = css.match(/\.transcript-jump-latest\s*\{[\s\S]*?\n\}/);
   assert.ok(rule, 'expected .transcript-jump-latest rule in transcript.css');
   assert.doesNotMatch(rule![0], /--composer-height|position:\s*(?:fixed|absolute);|bottom:/);
-  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*padding:\s*4px 24px 4px 8px;/);
+  assert.match(css, /\.transcript-latest-dock\s*\{[^}]*padding:\s*4px 8px;/);
+  assert.match(rule![0], /width:\s*32px;[^}]*height:\s*32px;/);
+  assert.match(rule![0], /padding:\s*0;/);
   assert.match(css, /@media \(pointer: coarse\)\s*\{\s*\.transcript-jump-latest \{ height: 44px;/);
 });

@@ -621,8 +621,9 @@ export function TranscriptVirtualList({
             title="Jump to latest"
             onClick={jumpToLatest}
           >
-            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
-            <span>Latest</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M8 3v9m-4-4 4 4 4-4" />
+            </svg>
           </button>
         </div>
       )}

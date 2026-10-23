@@ -13,6 +13,34 @@ test.use({
   },
 });
 
+for (const width of [320, 900]) {
+  test(`Latest is a centered icon control at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+    const scroll = page.locator('.transcript-virtual');
+    await expect(scroll).not.toHaveClass(/transcript-positioning/);
+    await scroll.dispatchEvent('pointerdown', { button: 0 });
+    await scroll.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 200; });
+    const button = page.getByRole('button', { name: 'Jump to latest' });
+    await expect(button).toBeVisible();
+    await expect(button).toHaveText('');
+    await expect(button.locator('svg')).toBeVisible();
+    await button.evaluate(async (el) => {
+      await Promise.all(el.getAnimations().map(animation => animation.finished));
+    });
+    const dock = (await page.locator('.transcript-latest-dock').boundingBox())!;
+    const before = (await button.boundingBox())!;
+    expect(Math.abs(before.x + before.width / 2 - dock.x - dock.width / 2)).toBeLessThanOrEqual(1);
+    expect(before.width).toBe(before.height);
+    await button.hover();
+    expect(await button.boundingBox()).toEqual(before);
+    await button.focus();
+    await button.press('Enter');
+    await expect(button).toHaveCount(0);
+    await expect.poll(() => scroll.evaluate(el => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop))).toBeLessThanOrEqual(1);
+  });
+}
+
 test('Latest remains stable around the 24px boundary as its flow dock mounts and resizes', async ({ page }) => {
   await page.setViewportSize({ width: 520, height: 900 });
   await page.goto('/');
