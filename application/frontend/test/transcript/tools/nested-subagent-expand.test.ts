@@ -370,10 +370,35 @@ test('responsive usage CSS uses per-card named thresholds without replacing tool
   const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
   assert.match(css, /container: tool-row subagent-card \/ inline-size/);
   assert.match(css, /container: tool-row \/ inline-size/);
-  for (const width of [560, 820, 1100, 1450]) {
+  for (const width of [760, 1050, 1350, 1600]) {
     assert.ok(css.includes(`@container subagent-card (min-width: ${width}px)`));
   }
-  assert.match(css, /\.subagent-inline-usage \{ flex: 0 0 auto;/);
+  assert.match(css, /\.subagent-inline-usage \{[^}]*flex: 0 0 auto;/);
+  assert.match(css, /\.subagent-header \{[^}]*flex-wrap: nowrap;/);
+  assert.match(css, /\.subagent-header \.subagent-primary-meta \{[^}]*min-width: 52px;/);
+  const runtimeRule = css.indexOf('.subagent-header .subagent-runtime-telemetry {');
+  const elapsedRule = css.indexOf('.subagent-header .subagent-runtime-telemetry-stable {');
+  assert.ok(elapsedRule > runtimeRule, 'elapsed owns its trailing order and zero margin after the shared telemetry rule');
+  assert.match(css.slice(elapsedRule), /^\.subagent-header \.subagent-runtime-telemetry-stable \{ order: 5; margin-left: 0; \}/);
+  assert.doesNotMatch(css, /\.subagent-footer/);
+});
+
+test('model interactions stay inside the single-row header while header Enter expands', async () => {
+  mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
+  const header = container.querySelector<HTMLElement>('.subagent-header')!;
+  const model = header.querySelector<HTMLElement>('.subagent-model-details-trigger')!;
+  for (const key of ['Enter', ' ']) {
+    await act(async () => {
+      model.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    });
+    assert.equal(header.getAttribute('aria-expanded'), 'false');
+  }
+  await act(async () => { model.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+  assert.equal(header.getAttribute('aria-expanded'), 'false');
+  await act(async () => {
+    header.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  });
+  assert.equal(header.getAttribute('aria-expanded'), 'true');
 });
 
 test('responsive inline usage omits unknown and invalid values without inventing zero', () => {
@@ -394,13 +419,11 @@ test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recov
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
   assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /2s/);
-  assert.doesNotMatch(header?.textContent ?? '', /ctx|tok|cached|tokens\/s|context latest/i);
-  const footer = container.querySelector<HTMLElement>('.subagent-footer');
-  assert.ok(footer);
-  assert.match(footer?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.match(footer?.textContent ?? '', /· off/);
-  assert.equal(footer?.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
-  assert.match(footer?.querySelector('.subagent-telemetry-recovered')?.textContent ?? '', /Recovered/);
+  assert.equal(container.querySelector('.subagent-footer'), null);
+  assert.match(header.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
+  assert.match(header.textContent ?? '', /· off/);
+  assert.equal(header.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
+  assert.match(header.querySelector('.subagent-telemetry-recovered')?.textContent ?? '', /Recovered/);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -447,10 +470,9 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
   assert.ok(header?.querySelector('.subagent-telemetry-elapsed'), 'live elapsed time should remain visible');
-  const footer = container.querySelector<HTMLElement>('.subagent-footer');
-  assert.ok(footer);
-  assert.match(footer?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.match(footer?.textContent ?? '', /· high/);
+  assert.equal(container.querySelector('.subagent-footer'), null);
+  assert.match(header?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
+  assert.match(header?.textContent ?? '', /· high/);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -831,9 +853,9 @@ test('subagent with provider-reported cost renders only the two-decimal USD amou
   mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.64 }), prefsWith({ autoExpandSubagentCalls: false }));
 
   const cost = container.querySelector<HTMLElement>('.subagent-telemetry-cost');
-  assert.ok(cost, 'reported cost evidence stays visible in the footer');
-  assert.ok(cost.closest('.subagent-footer'));
-  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-cost'), null);
+  assert.ok(cost, 'reported cost evidence stays visible in the header');
+  assert.ok(cost.closest('.subagent-header'));
+  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-cost'), cost);
   assert.equal(cost.closest('[aria-hidden="true"]'), null, 'cost must not depend on header-fit measurement');
   assert.equal(cost.textContent, '$0.64');
 
@@ -869,7 +891,7 @@ test('recovery telemetry remains when no cost is available', () => {
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
 
   assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
-  assert.ok(container.querySelector('.subagent-footer .subagent-telemetry-recovered'));
+  assert.ok(container.querySelector('.subagent-header .subagent-telemetry-recovered'));
 });
 
 test('parallel child costs stay separate instead of repeating the group total', () => {

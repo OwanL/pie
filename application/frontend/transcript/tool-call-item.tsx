@@ -459,7 +459,7 @@ function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentS
   );
 }
 
-/** Elapsed stays in the header; cost and recovered-retry state stay in the footer.
+/** Elapsed, cost and recovered-retry state share the single-row header.
  * The keyboard-accessible model tooltip retains all detailed metrics, including
  * usage groups that are hidden in narrower cards. */
 function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
@@ -950,7 +950,7 @@ function SubagentSingleBlock({
       onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}
     >
       <div
-        class={cx('subagent-header min-h-[26px] select-none', isNested && 'subagent-header-nested')}
+        class={cx('subagent-header select-none', isNested && 'subagent-header-nested')}
         role="button"
         tabIndex={0}
         aria-expanded={open}
@@ -974,6 +974,7 @@ function SubagentSingleBlock({
                 class="subagent-agent-name transcript-header-title-mono"
                 tabIndex={0}
                 aria-label={`Inspect ${singleResult.agent} model exchange`}
+                title={singleResult.agent}
               >
                 {singleResult.agent}
               </span>
@@ -989,6 +990,13 @@ function SubagentSingleBlock({
           {!activity && status === 'idle' && (
             <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
           )}
+          <PrimaryMeta
+            result={singleResult}
+            requestedMode={requestedParentUserContextMode(toolCall.input)}
+            displayCost={displayCost}
+          />
+          <InlineUsage result={singleResult} />
+          <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
           <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
             <ElapsedTelemetry result={singleResult} now={activityNow} />
           </span>
@@ -1068,15 +1076,6 @@ function SubagentSingleBlock({
           </div>
         </div>
       )}
-      <div class="subagent-footer">
-        <PrimaryMeta
-          result={singleResult}
-          requestedMode={requestedParentUserContextMode(toolCall.input)}
-          displayCost={displayCost}
-        />
-        <InlineUsage result={singleResult} />
-        <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
-      </div>
     </div>
   );
 }

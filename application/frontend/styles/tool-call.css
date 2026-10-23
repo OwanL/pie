@@ -650,10 +650,13 @@
 .subagent-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
+  height: 30px;
   min-height: 30px;
-  padding: 4px 10px;
+  padding: 0 8px;
+  flex-wrap: nowrap;
+  font: 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
   border-radius: calc(var(--panel-radius-md) - 1px);
   cursor: pointer;
   /* `relative` (not `sticky`): the header used to pin to the top of the
@@ -684,14 +687,7 @@
 }
 
 
-.subagent-header-content {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 6px;
-}
+.subagent-header-content { display: contents; }
 
 .subagent-header-summary {
   min-width: 32px;
@@ -764,7 +760,7 @@
    running worker useful preview rows without reserving blank space. */
 .subagent-live-preview {
   margin: 0;
-  padding: 6px 10px;
+  padding: 8px;
   border-top: 0;
   border-radius: 0;
   background: var(--panel-code-surface);
@@ -989,7 +985,6 @@
 }
 
 .subagent-live-preview {
-  padding: 0 10px;
   font: 12px/1.5 var(--vscode-font-family, Segoe UI, sans-serif);
   user-select: text;
   overflow-wrap: anywhere;
@@ -1008,11 +1003,13 @@
   -webkit-line-clamp: 3;
   font-family: var(--vscode-font-family, Segoe UI, sans-serif);
   white-space: pre-wrap;
-  color: var(--panel-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--panel-foreground) 72%, var(--subagent-card-surface));
   cursor: help;
 }
 .subagent-current,
-.subagent-outcome { margin: 6px 0 0; }
+.subagent-outcome { margin: 8px 0 0; color: var(--panel-foreground); }
 .subagent-current {
   min-width: 0;
   font-size: 12px;
@@ -1033,7 +1030,7 @@
 .subagent-outcome > p { white-space: pre-wrap; margin: 0; }
 .subagent-outcome > p:not(:last-child) { margin-bottom: 6px; }
 
-/* Approved compact card bands and metadata: only model text may shrink. */
+/* Single-row card bands: model yields first; long role/activity may ellipsize. */
 .tool-call.tool-call-subagent {
   --subagent-card-surface: var(--vscode-editor-background, var(--panel-surface));
   border-radius: 4px;
@@ -1041,16 +1038,15 @@
 }
 .tool-call.tool-call-subagent .subagent-header,
 .tool-call.tool-call-subagent .subagent-header[aria-expanded="false"],
-.tool-call.tool-call-subagent:hover .subagent-header[aria-expanded="false"],
-.subagent-footer {
+.tool-call.tool-call-subagent:hover .subagent-header[aria-expanded="false"] {
   background: color-mix(in srgb, var(--vscode-foreground, var(--panel-foreground)) 4%, var(--subagent-card-surface));
   border-radius: 0;
 }
 /* Flatten only the layout wrapper so terminal status follows the role while
    elapsed and disclosure remain at the trailing edge. Controls stay native. */
-.subagent-header-content { display: contents; }
-.subagent-header-content > .subagent-runtime-telemetry-stable { order: 2; margin-left: auto; flex: 0 0 auto; font: 11px/18px var(--vscode-font-family, Segoe UI, sans-serif); }
-.subagent-header > .collapsible-chevron { order: 3; }
+.subagent-header > .collapsible-chevron { order: 6; margin-left: 0; }
+.subagent-header .subagent-agent-trigger { order: 0; max-width: 20%; }
+.subagent-header .subagent-activity { order: 1; max-width: 30%; }
 .subagent-header > .status-chip {
   order: 1;
   margin: 0;
@@ -1060,7 +1056,8 @@
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  font: 400 10px/18px var(--vscode-font-family, Segoe UI, sans-serif);
+  flex: 0 0 auto;
+  font: 400 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
 }
 .subagent-header > .status-chip::before {
   display: block;
@@ -1073,40 +1070,29 @@
 .subagent-header .subagent-activity-detail { display: none; }
 .subagent-header .subagent-agent-name { font-family: var(--vscode-font-family, Segoe UI, sans-serif); font-size: 12px; font-weight: 600; }
 .subagent-live-preview { background: transparent; }
-.subagent-footer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  min-height: 29px;
-  padding: 4px 10px;
-  border-top: 1px solid var(--panel-border-subtle);
-  font: 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
-}
-.subagent-footer .subagent-primary-meta { flex: 1 1 0; overflow: hidden; }
-.subagent-footer .pie-tooltip-trigger { min-width: 0; max-width: 100%; }
-.subagent-footer .subagent-model-details-trigger { max-width: 100%; }
-.subagent-footer .subagent-model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
-.subagent-reasoning-label { flex: 0 0 auto; white-space: pre; }
-.subagent-footer .subagent-runtime-telemetry { flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto; font: inherit; font-variant-numeric: tabular-nums; }
-/* Whole optional clusters progressively reveal; only model text may shrink.
+.subagent-header .subagent-primary-meta { order: 2; flex: 1 0 auto; min-width: 52px; width: 0; max-width: 370px; }
+.subagent-primary-meta .pie-tooltip-trigger { display: flex; min-width: 0; max-width: 100%; }
+.subagent-header .subagent-model-details-trigger { max-width: 100%; font: inherit; color: var(--panel-foreground-soft); }
+.subagent-reasoning-label { flex: 0 0 auto; white-space: pre; color: var(--panel-foreground-soft); }
+.subagent-header .subagent-runtime-telemetry { order: 4; flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto; font: inherit; color: var(--panel-foreground-soft); font-variant-numeric: tabular-nums; }
+.subagent-header .subagent-runtime-telemetry-stable { order: 5; margin-left: 0; }
+/* Whole optional clusters progressively reveal without clipping.
    Named card containment leaves generic nested tool-row queries intact. */
 .subagent-inline-usage, .subagent-model-qualified { display: none; }
-.subagent-inline-usage { flex: 0 0 auto; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-@container subagent-card (min-width: 560px) {
+.subagent-inline-usage { order: 3; color: var(--panel-muted); flex: 0 0 auto; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@container subagent-card (min-width: 760px) {
   .subagent-inline-context { display: inline-flex; }
-  .subagent-footer { gap: 10px; }
-  .subagent-footer .subagent-primary-meta { flex: 0 1 auto; }
+  .subagent-header { column-gap: 8px; }
 }
-@container subagent-card (min-width: 820px) {
+@container subagent-card (min-width: 1050px) {
   .subagent-inline-tokens { display: inline-flex; }
 }
-@container subagent-card (min-width: 1100px) {
+@container subagent-card (min-width: 1350px) {
   .subagent-inline-cache { display: inline-flex; }
   .subagent-model-short { display: none; }
   .subagent-model-qualified { display: inline; }
 }
-@container subagent-card (min-width: 1450px) {
+@container subagent-card (min-width: 1600px) {
   .subagent-inline-turns { display: inline-flex; }
 }
 .subagent-task-trigger { display: block; min-width: 0; }
@@ -1281,11 +1267,13 @@
 /* ── Subagent model label ─────────────────────────────────────────────────── */
 
 .subagent-model-label {
-  font-size: 10.5px;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 180px;
+  max-width: none;
 }
 
 /* ── Subagent model selection detail panel ───────────────────────────────── */
