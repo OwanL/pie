@@ -230,6 +230,42 @@ test('fresh refresh returns selected models; failed refresh and later reads pres
     assert.ok(afterPreferences.draft?.models.some(m => m.id === 'discovered'));
   } finally { await f.close(); }
 });
+for (const scenario of ['nonempty', 'empty', 'older-error'] as const) test(`latest requested discovery owns memory and reopened cache (${scenario})`, async () => {
+  const newerIds = scenario === 'empty' ? [] : ['newer'];
+  const pending: ((value: Response) => void)[] = [];
+  const snapshots: import('../contracts').ProviderManagementSnapshot[] = [];
+  const f = await fixture({}, async () => new Promise<Response>(resolve => pending.push(resolve)), value => snapshots.push(value));
+  let reopened: ReturnType<typeof createProviderManagementService> | undefined;
+  try {
+    await f.service.request({ type: 'save', operationId: 'seed', expectedRevision: null,
+      draft: { ...draft, enabled: true, manualModelIds: [] } });
+    const older = f.service.request({ type: 'refresh', operationId: 'older', id: 'local' });
+    while (pending.length < 1) await new Promise(r => setTimeout(r, 1));
+    const newer = f.service.request({ type: 'refresh', operationId: 'newer', id: 'local' });
+    while (pending.length < 2) await new Promise(r => setTimeout(r, 1));
+    pending[1](new Response(JSON.stringify({ data: newerIds.map(id => ({ id })) })));
+    const fresh = await newer;
+    assert.equal(fresh.status, 'ok');
+    assert.deepEqual(fresh.draft!.models.map(model => model.id), newerIds);
+    const published = snapshots.length;
+    pending[0](scenario === 'older-error' ? new Response(null, { status: 500 })
+      : new Response(JSON.stringify({ data: [{ id: 'older' }] })));
+    await older;
+    const current = await f.service.request({ type: 'read-provider', operationId: 'current', id: 'local' });
+    const auth: ProviderManagementAuthPort = { definitions: () => [], hasSavedCredential: () => false,
+      stageOAuthLogin: async () => { throw new Error('No login expected'); }, saveCredential: async () => {},
+      getApiKey: async () => undefined, discoveryBaseUrl: async (_, url) => url };
+    reopened = createProviderManagementService({ configFile: f.configFile, modelCacheDir: f.modelCacheDir, auth,
+      fetch: async () => { throw new Error('No network expected'); } });
+    const cached = await reopened.request({ type: 'read-provider', operationId: 'reopened', id: 'local' });
+    assert.deepEqual({ memory: current.draft!.models.map(model => model.id), cache: cached.draft!.models.map(model => model.id) },
+      { memory: newerIds, cache: newerIds });
+    assert.ok(snapshots.slice(published).every(value => value.providers[0].modelCount === newerIds.length
+      && value.providers[0].discovery === 'fresh'));
+    assert.equal(cached.snapshot.providers[0].discovery, 'cached');
+  } finally { reopened?.dispose(); await f.close(); }
+});
+
 test('default/local discovery never resolves an unrelated saved credential', async () => {
   let keyReads = 0;
   const f = await fixture({ hasSavedCredential: () => true, getApiKey: async () => { keyReads++; return 'OLD-SECRET'; } }, async (_, init) => {

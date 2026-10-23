@@ -40,6 +40,7 @@ export function createProviderManagementService(options: { configFile: string; m
   const discovered: Record<string, ProviderCatalogSnapshot> = Object.create(null);
   const discoveryProvenance: Record<string, string> = Object.create(null);
   const discoveryEpoch: Record<string, number> = Object.create(null);
+  const cacheWrites = new Map<string, Promise<void>>();
   const states: Record<string, 'idle' | 'refreshing' | 'fresh' | 'cached' | 'error' | 'unsupported'> = Object.create(null);
   const operations = new Map<string, { intent: string; promise: Promise<ProviderManagementResponse>; controller: AbortController; providerId?: string }>();
   const prompts = new Map<string, { operationId: string; resolve: (value: string) => void; reject: () => void }>();
@@ -92,7 +93,10 @@ export function createProviderManagementService(options: { configFile: string; m
   const acquire = async () => { if (running >= 3) await new Promise<void>(r => queue.push(r)); else running++; };
   const refresh = async (id: string, controller: AbortController) => {
     if (!own(config.providers, id)?.enabled || supported(id) === 'unsupported') { states[id] = 'unsupported'; publish(); return; }
-    const epoch = own(discoveryEpoch, id) ?? 0;
+    // Match the caller's request fence: an older observation cannot become a
+    // newer providers.changed fact merely because its network request is slower.
+    const epoch = (own(discoveryEpoch, id) ?? 0) + 1;
+    discoveryEpoch[id] = epoch;
     let finish!: () => void;
     const finished = new Promise<void>(resolve => { finish = resolve; });
     const controllers = refreshControllers.get(id) ?? new Map<AbortController, Promise<void>>();
@@ -102,7 +106,7 @@ export function createProviderManagementService(options: { configFile: string; m
     const stamp = provenance(id);
     try {
       if (disposed || controller.signal.aborted || !own(config.providers, id)?.enabled || supported(id) === 'unsupported') return;
-      states[id] = 'refreshing'; publish();
+      if (epoch === own(discoveryEpoch, id)) { states[id] = 'refreshing'; publish(); }
       timer = setTimeout(() => controller.abort(), 10_000);
       const effect = async () => {
         const entry = config.providers[id], definition = definitions.find(d => d.id === id);
@@ -116,7 +120,14 @@ export function createProviderManagementService(options: { configFile: string; m
       const observed = await Promise.race([effect(), new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true }))]);
       if (disposed || controller.signal.aborted || epoch !== (own(discoveryEpoch, id) ?? 0) || stamp !== provenance(id)) return;
       discovered[id] = observed; discoveryProvenance[id] = stamp; states[id] = 'fresh'; publish();
-      try { await saveDiscoveryCache(options.modelCacheDir, id, stamp, observed, (options.now ?? Date.now)()); } catch { /* usable in-memory observation remains fresh */ }
+      // An already-started atomic write must finish before the next one; checking
+      // ownership only before staging would still allow a late rename to win.
+      const write = (cacheWrites.get(id) ?? Promise.resolve()).then(async () => {
+        if (disposed || controller.signal.aborted || epoch !== own(discoveryEpoch, id) || stamp !== provenance(id)) return;
+        try { await saveDiscoveryCache(options.modelCacheDir, id, stamp, observed, (options.now ?? Date.now)()); } catch { /* usable in-memory observation remains fresh */ }
+      });
+      cacheWrites.set(id, write);
+      try { await write; } finally { if (cacheWrites.get(id) === write) cacheWrites.delete(id); }
     } catch { if (!disposed && epoch === (own(discoveryEpoch, id) ?? 0) && stamp === provenance(id)) { states[id] = 'error'; publish(); } }
     finally {
       finish(); controllers.delete(controller); if (controllers.size === 0) refreshControllers.delete(id);
