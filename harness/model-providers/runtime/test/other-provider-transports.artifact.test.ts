@@ -14,12 +14,33 @@ import { saveProviderRuntimeProjection } from '../store';
 const cases = [
   { provider: 'openai', api: 'openai-completions', baseUrl: 'https://api.openai.com/v1' },
   { provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://api.anthropic.com' },
+  { provider: 'custom-responses', api: 'openai-responses', baseUrl: 'https://synthetic-responses.invalid/v1' },
+  { provider: 'custom-google', api: 'google-generative-ai', baseUrl: 'https://synthetic-google.invalid/v1beta' },
   { provider: 'github-copilot', api: 'openai-completions', baseUrl: 'https://synthetic-account.invalid' },
   { provider: 'custom-compatible', api: 'openai-completions', baseUrl: 'https://synthetic-compatible.invalid/v1' },
 ] as const;
 
-function response(anthropic: boolean): Response {
-  const events = anthropic ? [
+type TransportApi = typeof cases[number]['api'];
+const sse = (events: string): Response => new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+
+function response(api: TransportApi): Response {
+  if (api === 'google-generative-ai') return sse(`data: ${JSON.stringify({
+    candidates: [{ content: { role: 'model', parts: [{ text: 'Hello' }] }, finishReason: 'STOP', index: 0 }],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+  })}\n\n`);
+  if (api === 'openai-responses') {
+    const item = { id: 'msg_mock', type: 'message', role: 'assistant', status: 'completed',
+      content: [{ type: 'output_text', text: 'Hello', annotations: [] }] };
+    return sse([
+      { type: 'response.created', response: { id: 'resp_mock' } },
+      { type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } },
+      { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'Hello' },
+      { type: 'response.output_item.done', output_index: 0, item },
+      { type: 'response.completed', response: { id: 'resp_mock', status: 'completed', output: [item],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+    ].map(data => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`).join(''));
+  }
+  const events = api === 'anthropic-messages' ? [
     ['message_start', { type: 'message_start', message: { id: 'msg_mock', type: 'message', role: 'assistant', model: 'synthetic', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } }],
     ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
     ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }],
@@ -30,7 +51,7 @@ function response(anthropic: boolean): Response {
     { id: 'mock', object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }] },
     { id: 'mock', object: 'chat.completion.chunk', created: 1, model: 'synthetic', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
   ].map(data => `data: ${JSON.stringify(data)}\n\n`).join('') + 'data: [DONE]\n\n';
-  return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+  return sse(events);
 }
 
 for (const entry of cases) for (const unauthorized of [false, true]) {
@@ -40,6 +61,7 @@ for (const entry of cases) for (const unauthorized of [false, true]) {
     const originalFetch = globalThis.fetch;
     const anthropic = entry.provider === 'anthropic';
     const copilot = entry.provider === 'github-copilot';
+    const google = entry.api === 'google-generative-ai';
     const key = 'synthetic-access';
     let requests = 0;
     let host: WorkerRuntimeHost | undefined;
@@ -69,19 +91,27 @@ for (const entry of cases) for (const unauthorized of [false, true]) {
       globalThis.fetch = (async (input, init) => {
         requests++;
         const request = new Request(input, init);
-        assert.equal(request.url, `${entry.baseUrl}${anthropic ? '/v1/messages' : '/chat/completions'}`);
+        const path = anthropic ? '/v1/messages' : google ? '/models/synthetic:streamGenerateContent?alt=sse'
+          : entry.api === 'openai-responses' ? '/responses' : '/chat/completions';
+        assert.equal(request.url, `${entry.baseUrl}${path}`);
         assert.equal(request.method, 'POST');
-        assert.equal(request.headers.get(anthropic ? 'x-api-key' : 'authorization'), anthropic ? key : `Bearer ${key}`);
+        assert.equal(request.headers.get(anthropic ? 'x-api-key' : google ? 'x-goog-api-key' : 'authorization'),
+          anthropic || google ? key : `Bearer ${key}`);
         assert.equal(request.headers.get('content-type'), 'application/json');
         if (anthropic) {
           assert.equal(request.headers.get('anthropic-version'), '2023-06-01');
           assert.equal(request.headers.get('authorization'), null);
         } else assert.equal(request.headers.get('x-api-key'), null);
         const body = await request.json();
-        assert.equal(body.model, 'synthetic');
-        assert.equal(body.stream, true);
+        if (google) {
+          assert.ok(Array.isArray(body.contents));
+          assert.equal(request.headers.get('authorization'), null);
+        } else {
+          assert.equal(body.model, 'synthetic');
+          assert.equal(body.stream, true);
+        }
         return unauthorized ? new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'synthetic unauthorized' } }),
-          { status: 401, headers: { 'content-type': 'application/json' } }) : response(anthropic);
+          { status: 401, headers: { 'content-type': 'application/json' } }) : response(entry.api);
       }) as typeof fetch;
       await writeFile(join(dir, 'settings.json'), JSON.stringify({ transport: 'sse', retry: { enabled: false, provider: { maxRetries: 0 } } }));
       const reference = await saveProviderRuntimeProjection(dir, snapshot);
