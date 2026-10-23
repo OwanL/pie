@@ -103,7 +103,11 @@ test('primary intent is visible and dispatches busy, attachment-only, and author
     props.onSend = () => { sends++; return true; };
     act(() => render(h(Composer, props), container));
     const button = container.querySelector<HTMLButtonElement>('.composer-action-submit')!;
-    assert.equal(button.textContent, intent);
+    assert.equal(button.getAttribute('aria-label'), {
+      Queue: 'Queue message', Send: 'Send message', Continue: 'Continue agent work',
+    }[intent]);
+    assert.equal(button.textContent, '', 'icon-only submit button has no visible text');
+    assert.ok(button.querySelector('svg'), 'submit intent is represented by its icon');
     assert.equal(button.disabled, false);
     if (intent !== 'Continue') {
       assert.equal(container.querySelector('.composer-attachments-summary')?.textContent, 'Included: 1 path');

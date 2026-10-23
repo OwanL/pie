@@ -181,10 +181,8 @@
 }
 
 .tool-call-disclosure { flex: 0 0 auto; color: var(--panel-muted); }
-/* Every ordinary tool row now carries this muted disclosure chevron (a
-   deliberate revision of the earlier arrow-free design): the native toggle
-   and collapse rail keep their roles, and the chevron only marks the
-   disclosure affordance. */
+/* Ordinary rows stay arrow-free; their native toggle and collapse rail
+   retain disclosure behavior. Subagent cards keep their own chevron. */
 /* Natural metadata flow. Missing values do not reserve columns or gaps. */
 .tool-call-header-meta {
   display: flex;
@@ -226,14 +224,12 @@
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--panel-danger) 32%, var(--panel-border));
 }
 
-/* File opening is secondary; the left inspection icon always stays visible.
-   The action is visible at a low opacity at rest (and stays operable),
-   reaching full contrast only on hover/keyboard focus; absent file controls
-   still take no space and coarse-pointer rows keep full-opacity controls. */
+/* File opening is secondary: reveal it on hover or keyboard focus without
+   shifting the row. Touch users retain a visible, operable control. */
 @media (hover: hover) and (pointer: fine) {
-  .tool-call-header .tool-call-action { opacity: 0.45; }
+  .tool-call-header .tool-call-action { opacity: 0; pointer-events: none; }
   .tool-call-header:hover .tool-call-action,
-  .tool-call-header:focus-within .tool-call-action { opacity: 1; }
+  .tool-call-header:focus-within .tool-call-action { opacity: 1; pointer-events: auto; }
 }
 
 .tool-call-status-draft {
@@ -1057,16 +1053,22 @@
   background: transparent;
   box-shadow: none;
   flex: 0 0 auto;
+  min-width: 0;
+  gap: 5px;
+  justify-content: flex-start;
   font: 400 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
+  text-transform: none;
+  letter-spacing: normal;
 }
 .subagent-header > .status-chip::before {
   display: block;
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   opacity: 1;
 }
-.subagent-header .subagent-activity { overflow: hidden; font-family: var(--vscode-font-family, Segoe UI, sans-serif); font-size: 11px; }
-.subagent-header .subagent-activity-label { flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+.subagent-header .subagent-activity { overflow: hidden; min-height: 18px; font: 400 11px/18px var(--vscode-font-family, Segoe UI, sans-serif); }
+.subagent-header .subagent-activity-label,
+.subagent-header > .status-chip .status-chip-label { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
 .subagent-header .subagent-activity-detail { display: none; }
 .subagent-header .subagent-agent-name { font-family: var(--vscode-font-family, Segoe UI, sans-serif); font-size: 12px; font-weight: 600; }
 .subagent-live-preview { background: transparent; }
@@ -1712,16 +1714,14 @@
 
 /* Lifecycle changes the bounded header/border rather than adding rings,
    sheens, gradients, or shadows. */
-.tool-call.tool-call-subagent.running {
+.tool-call.tool-call-subagent.running,
+.tool-call.tool-call-subagent.completed {
   border-color: var(--panel-subagent-header-border);
 }
 
-.tool-call.tool-call-subagent.running > .subagent-header {
-  background: var(--panel-subagent-header-surface);
-}
-
+.tool-call.tool-call-subagent.running > .subagent-header,
 .tool-call.tool-call-subagent.completed > .subagent-header {
-  background: var(--panel-ink-3);
+  background: var(--panel-subagent-header-surface);
 }
 
 .tool-call.tool-call-subagent.failed {
@@ -1740,12 +1740,9 @@
   background: color-mix(in srgb, var(--panel-warning) 6%, var(--panel-subagent-header-surface));
 }
 
-.tool-call.tool-call-subagent.running:hover > .subagent-header {
-  background: var(--panel-subagent-header-surface-hover);
-}
-
+.tool-call.tool-call-subagent.running:hover > .subagent-header,
 .tool-call.tool-call-subagent.completed:hover > .subagent-header {
-  background: var(--panel-ink-4);
+  background: var(--panel-subagent-header-surface-hover);
 }
 
 .tool-call.tool-call-subagent.failed:hover > .subagent-header,

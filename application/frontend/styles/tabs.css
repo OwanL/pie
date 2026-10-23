@@ -422,8 +422,7 @@ body.session-tab-dragging {
 /* z-index 1 keeps both interactive children above the shell backdrop */
 
 .session-tab-main,
-.session-tab-close,
-.session-tab-actions {
+.session-tab-close {
   position: relative;
   z-index: 1;
 }
@@ -650,8 +649,7 @@ body.session-tab-dragging {
 /* ── Compact per-tab controls ───────────────────────────────────────────── */
 
 .session-tab-retry,
-.session-tab-close,
-.session-tab-actions {
+.session-tab-close {
   width: 20px;
   height: 20px;
   border: 1px solid transparent;
@@ -677,11 +675,6 @@ body.session-tab-dragging {
     transform var(--panel-duration-fast) var(--panel-ease-spring);
 }
 
-.session-tab-actions {
-  font-size: 15px;
-  opacity: 0.88;
-}
-
 .session-tab-retry {
   color: var(--panel-warning);
   opacity: 0.9;
@@ -703,9 +696,7 @@ body.session-tab-dragging {
 .session-tab-retry:hover,
 .session-tab-retry:focus-visible,
 .session-tab-close:hover,
-.session-tab-close:focus-visible,
-.session-tab-actions:hover,
-.session-tab-actions:focus-visible {
+.session-tab-close:focus-visible {
   background: var(--panel-control-hover);
   border-color: var(--session-tab-outline);
   color: var(--panel-foreground);

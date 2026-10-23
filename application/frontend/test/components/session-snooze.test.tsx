@@ -152,7 +152,7 @@ function contextMenu(container: HTMLElement) {
   act(() => { tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); });
 }
 
-test('active tab actions target the clicked session and reflect host pin updates', () => fixture((container) => {
+test('tab context actions target the clicked session and reflect host pin updates', () => fixture((container) => {
   const secondPath = '/sessions/two.jsonl';
   const secondSession = { path: secondPath, name: 'The right-hand session' } as SessionSummary;
   const sessions = [session, secondSession];
@@ -164,14 +164,9 @@ test('active tab actions target the clicked session and reflect host pin updates
   const publish = (pinnedTabPaths: string[] = []) => act(() => render(h(SessionTabs, { ...props, pinnedTabPaths }), container));
 
   publish();
-  const activeActions = container.querySelector<HTMLButtonElement>('[aria-label="The right-hand session session actions"]');
-  assert.ok(activeActions);
-  assert.equal(container.querySelector('[aria-label="A quiet session session actions"]'), null,
-    'inactive tabs have no permanent action button');
-  act(() => { activeActions.focus(); activeActions.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); });
-  assert.equal(document.activeElement, activeActions, 'keyboard activation stays outside tab-list navigation');
-  assert.deepEqual(selected, []);
-  act(() => activeActions.click());
+  const clickedTab = container.querySelector<HTMLElement>(`[data-tab-path="${secondPath}"]`);
+  assert.ok(clickedTab);
+  act(() => { clickedTab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })); });
   assert.equal(container.querySelector('[role="menu"]')?.getAttribute('aria-label'), 'The right-hand session tab actions');
   assert.equal(container.querySelector('.session-tab-context-title')?.textContent, 'The right-hand session');
   assert.deepEqual(selected, [], 'opening tab actions does not select a tab');

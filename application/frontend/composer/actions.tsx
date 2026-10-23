@@ -148,7 +148,6 @@ export function ComposerActions({
         data-action={busy ? 'queue' : continueMode ? 'continue' : 'send'}
       >
         <SubmitIcon queued={busy} />
-        <span aria-hidden="true">{interrupting ? 'Wait' : busy ? 'Queue' : continueMode ? 'Continue' : 'Send'}</span>
       </button>
     </div>
   );

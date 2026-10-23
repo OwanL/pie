@@ -17,7 +17,7 @@ function session(path: string, name: string): SessionSummary {
   return { path, name, cwd: '/workspace', modifiedAt: '2026-08-30T00:00:00.000Z', messageCount: 3 };
 }
 
-test('session tab actions omit session history and retain new session', () => {
+test('session tabs omit the actions button and retain new session and context menus', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const originalResizeObserver = globalThis.ResizeObserver;
@@ -60,18 +60,37 @@ test('session tab actions omit session history and retain new session', () => {
     assert.equal(container.querySelector('[aria-label="Open session history"]'), null);
     assert.equal(container.querySelector('[role="dialog"][aria-label="Session history"]'), null);
     assert.ok(container.querySelector('[aria-label="New session"]'));
+    assert.equal(container.querySelector('[aria-label="Open session actions"]'), null,
+      'session tabs do not render the removed ellipsis actions button');
 
-    const actionsButton = container.querySelector<HTMLButtonElement>('[aria-label="Open session actions"]');
-    assert.ok(actionsButton);
-    actionsButton.getBoundingClientRect = () => ({
+    const tab = container.querySelector<HTMLElement>('.session-tab[data-tab-path="/sessions/open"]');
+    assert.ok(tab);
+    act(() => { tab.dispatchEvent(new window.MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 24, clientY: 36,
+    })); });
+    let menu = container.querySelector<HTMLElement>('.session-tab-context-menu');
+    assert.ok(menu, 'right-click opens the existing tab context menu');
+    assert.equal(menu.getAttribute('aria-label'), 'Open tab actions');
+    assert.match(menu.getAttribute('style') ?? '', /top:\s*36px;\s*left:\s*24px/,
+      'right-click menu is anchored at the pointer coordinates');
+
+    act(() => { menu!.dispatchEvent(new window.KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true,
+    })); });
+    const mainButton = tab!.querySelector<HTMLElement>('.session-tab-main');
+    assert.ok(mainButton);
+    mainButton!.getBoundingClientRect = () => ({
       x: 70, y: 80, left: 70, top: 80, right: 90, bottom: 90, width: 20, height: 10,
       toJSON: () => ({}),
     });
-    act(() => actionsButton.click());
-    const menu = container.querySelector<HTMLElement>('.session-tab-context-menu');
-    assert.ok(menu, 'activating session actions opens the existing context menu');
+    act(() => { mainButton.dispatchEvent(new window.KeyboardEvent('keydown', {
+      key: 'F10', shiftKey: true, bubbles: true, cancelable: true,
+    })); });
+    menu = container.querySelector<HTMLElement>('.session-tab-context-menu');
+    assert.ok(menu, 'Shift+F10 opens the existing tab context menu');
+    assert.equal(menu.getAttribute('aria-label'), 'Open tab actions');
     assert.match(menu.getAttribute('style') ?? '', /top:\s*85px;\s*left:\s*80px/,
-      'menu activation is grounded at the actions button instead of click coordinates 0,0');
+      'keyboard menu is grounded at the invoking tab control instead of 0,0');
   } finally {
     act(() => render(null, container));
     container.remove();

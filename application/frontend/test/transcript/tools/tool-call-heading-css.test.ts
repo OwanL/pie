@@ -26,12 +26,10 @@ test('ordinary inspectors tighten spacing without shrinking control hitboxes or 
   assert.match(css, /\.tool-call-input-field dd\s*\{[^}]*font-size:\s*12px;/);
 });
 
-test('file actions stay visible at low rest opacity and reach full contrast on hover or keyboard focus', async () => {
+test('file actions appear on hover or keyboard focus on fine pointers', async () => {
   const css = await readToolCallCss();
-  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)\s*\{[^}]*\.tool-call-header \.tool-call-action\s*\{\s*opacity:\s*0\.45;/);
-  assert.match(css, /\.tool-call-header:hover \.tool-call-action,\s*\.tool-call-header:focus-within \.tool-call-action\s*\{\s*opacity:\s*1;/);
-  // Visible at rest means operable at rest: no pointer-events suppression.
-  assert.doesNotMatch(css, /\.tool-call-header \.tool-call-action\s*\{[^}]*pointer-events:\s*none/);
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)\s*\{[^}]*\.tool-call-header \.tool-call-action\s*\{\s*opacity:\s*0;\s*pointer-events:\s*none;/);
+  assert.match(css, /\.tool-call-header:hover \.tool-call-action,\s*\.tool-call-header:focus-within \.tool-call-action\s*\{\s*opacity:\s*1;\s*pointer-events:\s*auto;/);
   assert.match(css, /\.tool-call-heading-content \.transcript-header-path-target,\s*\.tool-call-heading-content \.transcript-header-summary-command\s*\{\s*font-weight:\s*400;/);
 });
 
@@ -51,16 +49,22 @@ test('coarse-pointer tools gain touch hitboxes and font floors without wrapping 
   assert.match(touch, /\.tool-call-card \.resizable-scroll-hint\s*\{[^}]*display:\s*block;[^}]*user-select:\s*none;/);
 });
 
-test('ordinary headers disclose with a muted chevron beside the native toggle', async () => {
+test('ordinary headers remain arrow-free while preserving the native toggle', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
   const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {}, onOpenFile: () => {} }));
-  assert.match(html, /tool-call-disclosure/);
-  assert.match(html, /collapsible-chevron/);
+  assert.doesNotMatch(html, /tool-call-disclosure|collapsible-chevron/);
   assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
   assert.match(html, /Collapse details/);
   assert.match(html, /tool-call-kind-icon/);
+});
+
+test('subagent headers retain the collapsible chevron', async () => {
+  const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
+  const html = renderToString(h(ToolCallHeader, { open: true, name: 'subagent', status: 'running', summary: 'task', onToggle: () => {}, onOpenFile: () => {} }));
+  assert.match(html, /tool-call-disclosure/);
+  assert.match(html, /collapsible-chevron/);
+  assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
   const css = await readToolCallCss();
-  assert.match(css, /Every ordinary tool row now carries this muted disclosure chevron/);
   assert.match(css, /\.tool-call-disclosure\s*\{\s*flex:\s*0 0 auto;\s*color:\s*var\(--panel-muted\);\s*\}/);
   assert.match(css, /\.tool-call-inspector-body\s*\{\s*padding-left:\s*10px;/);
   assert.match(css, /\.tool-call-collapse-rail\s*\{\s*left:\s*0;/);
@@ -256,6 +260,18 @@ test('shared collapsed-header typography is defined in transcript.css', async ()
   assert.match(css, /\.transcript-header-summary-command\s*\{/);
   assert.match(css, /\.transcript-header-path-preview\s*\{/);
   assert.match(css, /\.transcript-header-command-details\s*\{/);
+});
+
+test('working and finished subagents share header geometry without uppercase terminal badges', async () => {
+  const css = await readToolCallCss();
+  const terminal = css.match(/\.subagent-header > \.status-chip\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(terminal, /text-transform:\s*none;/);
+  assert.match(terminal, /letter-spacing:\s*normal;/);
+  assert.match(terminal, /font:\s*400 11px\/18px/);
+  assert.match(terminal, /gap:\s*5px;/);
+  assert.match(css, /\.subagent-header \.subagent-activity\s*\{[^}]*font:\s*400 11px\/18px/);
+  assert.match(css, /\.tool-call\.tool-call-subagent\.running > \.subagent-header,\s*\.tool-call\.tool-call-subagent\.completed > \.subagent-header\s*\{/);
+  assert.match(css, /\.tool-call\.tool-call-subagent\.running:hover > \.subagent-header,\s*\.tool-call\.tool-call-subagent\.completed:hover > \.subagent-header\s*\{/);
 });
 
 test('subagent header keeps metadata in one row without hiding reasoning or cost', async () => {

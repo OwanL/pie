@@ -27,7 +27,10 @@ test('attachment layout wraps with bounded vertical scrolling and labeled action
   const composer = await readFile('application/frontend/styles/composer.css', 'utf8');
   const overflow = await readFile('application/frontend/composer/toolbar-overflow.tsx', 'utf8');
   assert.match(attachments, /\.composer-attachments-strip\s*\{[^}]*flex-wrap: wrap;[^}]*max-height: 132px;[^}]*overflow-y: auto;/);
-  assert.match(composer, /\.composer-actions \.composer-action-submit\s*\{[^}]*width: auto;/);
+  const submitRule = composer.match(/\.composer-actions \.composer-action-submit\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.doesNotMatch(submitRule, /width:|padding|gap:|font-size:/);
+  assert.match(composer, /\.composer-actions \.composer-action-icon\s*\{[^}]*width: 26px;[^}]*min-width: 26px;[^}]*height: 26px;/);
+  assert.doesNotMatch(composer, /\.composer-actions \.composer-action-submit\s*\{\s*width: auto;/);
   assert.match(overflow, /actionsWidth: readWidth\(actions\)/);
   assert.match(overflow, /observer\?\.observe\(element\)/);
 });
@@ -359,7 +362,7 @@ test('composer uses the configured initial textarea rows and defaults to one', (
   assert.doesNotMatch(emptySessionHtml, /panel-chip-indicator-time/);
 });
 
-test('composer actions keep secondary controls icon-only and the primary queue intent visible', () => {
+test('composer action controls are icon-only while accessible labels preserve their intent', () => {
   const html = renderToString(h(ComposerActions, {
     busy: true,
     hasQueuedMessages: true,
@@ -385,7 +388,10 @@ test('composer actions keep secondary controls icon-only and the primary queue i
   for (const [, content] of secondaryButtons) {
     assert.equal(content.replace(/<[^>]*>/g, '').trim(), '', 'secondary controls remain icon-only');
   }
-  assert.match(html, /data-action="queue"[^>]*>[\s\S]*<span aria-hidden="true">Queue<\/span><\/button>/);
+  assert.match(html, /aria-label="Queue message"[^>]*data-action="queue"/);
+  const submitContent = html.match(/<button\b[^>]*data-action="queue"[^>]*>([\s\S]*?)<\/button>/)?.[1] ?? '';
+  assert.equal((submitContent.match(/<svg/g) ?? []).length, 1);
+  assert.equal(submitContent.replace(/<[^>]*>/g, '').trim(), '', 'primary queue action remains icon-only');
   assert.doesNotMatch(html, /Attach file|paperclip/i);
 });
 
@@ -413,8 +419,26 @@ test('composer submit icon exposes send and waiting states accessibly', () => {
     canSend: true,
   }));
   assert.match(idleHtml, /aria-label="Send message"/);
+  assert.match(idleHtml, /title="Send message \(Enter\)"/);
   assert.match(idleHtml, /data-action="send"/);
-  assert.match(idleHtml, /<svg/);
+  const idleSubmit = idleHtml.match(/<button\b[^>]*data-action="send"[^>]*>([\s\S]*?)<\/button>/)?.[1] ?? '';
+  assert.equal((idleSubmit.match(/<svg/g) ?? []).length, 1);
+  assert.equal(idleSubmit.replace(/<[^>]*>/g, '').trim(), '');
+
+  const continueHtml = renderToString(h(ComposerActions, {
+    busy: false,
+    continueMode: true,
+    hasQueuedMessages: false,
+    onInterrupt: () => {},
+    onClearQueue: () => {},
+    sendCurrentText: () => {},
+    canSend: true,
+  }));
+  assert.match(continueHtml, /aria-label="Continue agent work"/);
+  assert.match(continueHtml, /data-action="continue"/);
+  const continueSubmit = continueHtml.match(/<button\b[^>]*data-action="continue"[^>]*>([\s\S]*?)<\/button>/)?.[1] ?? '';
+  assert.equal((continueSubmit.match(/<svg/g) ?? []).length, 1);
+  assert.equal(continueSubmit.replace(/<[^>]*>/g, '').trim(), '');
 
   const waitingHtml = renderToString(h(ComposerActions, {
     busy: true,
@@ -427,6 +451,9 @@ test('composer submit icon exposes send and waiting states accessibly', () => {
   }));
   assert.match(waitingHtml, /aria-label="Stopping response"[^>]*aria-busy="true"/);
   assert.match(waitingHtml, /disabled aria-label="Waiting for stop"/);
+  const waitingSubmit = waitingHtml.match(/<button\b[^>]*data-action="queue"[^>]*>([\s\S]*?)<\/button>/)?.[1] ?? '';
+  assert.equal((waitingSubmit.match(/<svg/g) ?? []).length, 1);
+  assert.equal(waitingSubmit.replace(/<[^>]*>/g, '').trim(), '');
 });
 
 test('disconnected browser state disables queued, stop, and submit mutations', () => {

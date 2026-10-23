@@ -71,8 +71,8 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
     && Number.isFinite(p.maxConcurrentRequests));
   // Reserve ordinary digit growth but measure large values in full. No compact
   // cost rounding: the exact adaptive precision remains available everywhere.
-  const number = (value: number, format: (n: number) => string, width: number) => (
-    <span class="aggregate-strip-num" style={`min-width:${Math.max(width, format(value).length)}ch`}>{format(value)}</span>
+  const number = (value: number, format: (n: number) => string, width = 0) => (
+    <span class="aggregate-strip-num" style={width ? `min-width:${Math.max(width, format(value).length)}ch` : undefined}>{format(value)}</span>
   );
   // Per-anchor token-series selection. Each anchor opens on its own matching
   // series (input → input, output → output) on a fresh selection — one anchor's
@@ -107,7 +107,7 @@ function AggregateStatsStripView({ stats, snoozedSessionCount = 0, deferredTrigg
   for (const kind of ['input', 'output'] as const) {
     const value = kind === 'input' ? todayInputTokens : todayOutputTokens;
     items.push({
-      key: kind, body: <span>{kind === 'input' ? '↓' : '↑'}{number(value, formatCompactTokens, 5)}</span>,
+      key: kind, body: <span>{kind === 'input' ? '↓' : '↑'}{number(value, formatCompactTokens)}</span>,
       tooltip: tokensTooltipNode(stats, tokenSeriesByAnchor[kind], (series) => setTokenSeries(kind, series)), className: 'aggregate-strip-tokens',
       label: `Today's ${kind} tokens: ${formatCompactTokens(value)}${(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; known subtotal with incomplete invocation usage' : ''}. Focus for token chart and provider details.`,
     });

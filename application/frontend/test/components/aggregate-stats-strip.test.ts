@@ -295,6 +295,23 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
   assert.match(html, /Focus for 14-day work trend/);
 });
 
+test('compact token values sit beside their arrows without reserved numeric columns', () => {
+  for (const tokens of [0, 1200, 3_000_000]) {
+    const html = renderToString(h(AggregateStatsStrip, {
+      stats: { ...EMPTY_AGGREGATE_STATS, ready: true, todayInputTokens: tokens, todayOutputTokens: tokens },
+      deferredTriggers: [],
+      onOpenDeferredMenu: () => {},
+    }));
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    for (const kind of ['input', 'output']) {
+      const value = root.querySelector(`[data-stat="${kind}"] .aggregate-strip-num`) as HTMLElement;
+      assert.ok(value, `${kind} retains its numeric value`);
+      assert.equal(value.style.minWidth, '', `${kind} must not push short values away from the arrow`);
+    }
+  }
+});
+
 test("independent token popovers open on their anchor's series and retain the toggle", () => {
   const stats = { ...EMPTY_AGGREGATE_STATS, ready: true };
   for (const kind of ['input', 'output'] as const) {

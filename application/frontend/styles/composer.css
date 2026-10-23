@@ -286,11 +286,6 @@
 }
 
 .composer-actions .composer-action-submit {
-  width: auto;
-  padding-inline: 7px;
-  gap: 4px;
-  white-space: nowrap;
-  font-size: 11px;
   background: transparent;
   color: var(--panel-accent-strong);
 }
@@ -324,7 +319,6 @@
     height: 44px;
     min-height: 44px;
   }
-  .composer-actions .composer-action-submit { width: auto; }
   .composer-overflow-trigger { flex-basis: 44px; }
 }
 

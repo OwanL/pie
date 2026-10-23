@@ -5,7 +5,7 @@ import { memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../lib/protocol/index.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
-import { dispatchSyntheticContextMenu, handleContextMenuKeyRequest } from '../lib/components/context-menu-key';
+import { handleContextMenuKeyRequest } from '../lib/components/context-menu-key';
 import { AgentIcon } from './icons';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 import type { SessionTabContextTarget } from './types';
@@ -166,25 +166,6 @@ export const SessionTabPresentation = memo(function SessionTabPresentation({
           </>
         )}
       </button>
-      {isActive && (
-        <button
-          class="session-tab-actions"
-          type="button"
-          aria-label={`${label} session actions`}
-          title="Session actions"
-          onPointerDown={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            // Keyboard-generated clicks (and pointer clicks) commonly carry
-            // 0,0 coordinates. Route through the same contextmenu hook as a
-            // right-click, grounded at this actions button's bounding rect.
-            dispatchSyntheticContextMenu(event.currentTarget as HTMLElement);
-          }}
-        >
-          ⋯
-        </button>
-      )}
       {isCreationDelayed && createOperationId && onRetryCreate && (
         <button
           class="session-tab-retry"

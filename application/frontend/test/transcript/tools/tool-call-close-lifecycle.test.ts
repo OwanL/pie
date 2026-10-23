@@ -126,7 +126,7 @@ test('whole-row disclosure stays a focusable native button with accurate aria wi
   assert.equal(header.type, 'button');
   assert.equal(header.disabled, false);
   assert.equal(header.tabIndex, 0, 'native button retains keyboard activation semantics');
-  assert.ok(header.querySelector('.tool-call-disclosure'), 'ordinary rows keep the muted disclosure chevron');
+  assert.equal(header.querySelector('.tool-call-disclosure'), null, 'ordinary rows omit the muted disclosure chevron');
   assert.equal(header.getAttribute('aria-expanded'), 'false');
   header.focus();
   assert.equal(document.activeElement, header);
