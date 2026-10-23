@@ -553,6 +553,13 @@ export function runNodeTests(files, {
         reject(teardownError);
         return;
       }
+      // An outer tree-empty proof cannot discharge a nested owner's uncertainty.
+      if (code === TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE) {
+        reject(Object.assign(new Error('Nested test teardown is unconfirmed'), {
+          teardownUnconfirmed: true, diagnosticPath: configRoot,
+        }));
+        return;
+      }
       rmSync(configRoot, { recursive: true, force: true });
       if (child.spawnError) reject(child.spawnError);
       else resolve({ code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1), teardownConfirmed: true });

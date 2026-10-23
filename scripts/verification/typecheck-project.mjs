@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -221,6 +221,7 @@ export function runTypecheckLocal({
   compilerPath = projectCompiler(root),
   spawnImpl = spawn,
   watchChildProcessImpl = watchChildProcess,
+  writeDiagnosticImpl = writeFileSync,
 }) {
   const absoluteRoot = path.resolve(root);
   const absoluteConfig = path.resolve(absoluteRoot, configPath);
@@ -266,6 +267,30 @@ export function runTypecheckLocal({
       let output = '';
       const timeoutMs = resolveChildProcessTimeoutMs();
       let watchdog;
+      const bounded = (value, limit = 2048) => String(value ?? '').replace(/(bearer\s+|(?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s,;]+/gi, '$1[REDACTED]').slice(-limit);
+      const uncertain = (cause, cleanup) => {
+        const error = cause instanceof Error ? cause : new Error('TypeScript typecheck process tree teardown is unconfirmed');
+        const diagnosticPath = path.join(cacheDirectory, `teardown-${randomUUID()}.json`);
+        Object.assign(error, { teardownUnconfirmed: true, diagnosticPath, root: absoluteRoot, cacheDirectory, overlayPath: overlay.configPath });
+        const processes = entries => (Array.isArray(entries) ? entries : []).slice(0, 64).map(entry => ({
+          pid: entry.pid, ppid: entry.ppid, identity: bounded(entry.identity, 128), creationDate: bounded(entry.creationDate, 128),
+        }));
+        const evidence = {
+          root: bounded(absoluteRoot), compiler: bounded(path.resolve(compilerPath)), config: bounded(absoluteConfig),
+          cacheDirectory: bounded(cacheDirectory), overlayPath: bounded(overlay.configPath), childPid: child.pid ?? null,
+          gone: false, timedOut: watchdog?.timedOut === true, aborted: watchdog?.aborted === true,
+          diagnostics: (cleanup?.diagnostics ?? ['Tree extinction was not confirmed; absent identities remain unknown']).slice(0, 32).map(value => bounded(value)),
+          ownedProcesses: processes(cleanup?.ownedProcesses), survivorProcesses: processes(cleanup?.survivorProcesses),
+          output: bounded(output, 16384), settlementCause: cause ? bounded(cause.message ?? cause) : null,
+          evidenceScope: 'current invocation only; missing identity evidence is unknown',
+        };
+        try { writeDiagnosticImpl(diagnosticPath, `${JSON.stringify(evidence)}\n`, { flag: 'wx', mode: 0o600 }); }
+        catch (diagnosticWriteError) { error.diagnosticWriteError = diagnosticWriteError; }
+        reject(error);
+      };
+      child.stdout.on('data', (chunk) => { output += chunk; });
+      child.stderr.on('data', (chunk) => { output += chunk; });
+      child.on('error', (error) => { child.spawnError = error; });
       try {
         watchdog = watchChildProcessImpl(child, {
           timeoutMs,
@@ -277,19 +302,15 @@ export function runTypecheckLocal({
           },
         });
       } catch (error) {
-        reject(Object.assign(new Error('TypeScript child watchdog setup failed; process teardown is unconfirmed.'), {
-          cause: error,
-          teardownUnconfirmed: true,
-        }));
+        uncertain(error);
         return;
       }
-      child.stdout.on('data', (chunk) => { output += chunk; });
-      child.stderr.on('data', (chunk) => { output += chunk; });
-      child.on('error', (error) => { child.spawnError = error; });
       child.on('close', async (code) => {
-        const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-        if (!cleanup.gone) {
-          reject(Object.assign(new Error('TypeScript typecheck process tree teardown is unconfirmed'), { teardownUnconfirmed: true }));
+        let cleanup;
+        try { cleanup = await watchdog.settle(); }
+        catch (error) { uncertain(error); return; }
+        if (cleanup?.gone !== true) {
+          uncertain(child.spawnError, cleanup);
           return;
         }
         if (child.spawnError) {

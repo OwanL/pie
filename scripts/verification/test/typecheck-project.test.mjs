@@ -87,7 +87,12 @@ test('typecheck always performs no-emit incremental checks with stable build-inf
 
 test('incremental compiler state is reused without skipping checks', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-typecheck-run-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let uncertain = false;
+  const check = async options => {
+    try { return await runTypecheck(options); }
+    catch (error) { uncertain ||= error?.teardownUnconfirmed === true; throw error; }
+  };
+  t.after(() => { if (!uncertain) rmSync(root, { recursive: true, force: true }); });
   const configPath = path.join(root, 'tsconfig.json');
   const sourcePath = path.join(root, 'src.ts');
   write(configPath, JSON.stringify({
@@ -96,14 +101,14 @@ test('incremental compiler state is reused without skipping checks', async (t) =
   }));
   write(sourcePath, 'const answer: number = 42;\n');
   const compilerPath = resolveTypeScriptCompiler();
-  const first = await runTypecheck({ configPath, compilerPath, root });
+  const first = await check({ configPath, compilerPath, root });
   assert.equal(first.code, 0, first.output);
   assert.equal(first.cacheDirectory.startsWith(path.join(root, '.cache', 'typecheck')), true);
   assert.equal(existsSync(path.join(first.cacheDirectory, 'tsconfig.overlay.json')), true);
   assert.equal(existsSync(path.join(first.cacheDirectory, 'project.tsbuildinfo')), true);
 
   write(sourcePath, "const answer: number = 'wrong';\n");
-  const second = await runTypecheck({ configPath, compilerPath, root });
+  const second = await check({ configPath, compilerPath, root });
   assert.notEqual(second.code, 0, 'source errors are rechecked with existing .tsbuildinfo');
   assert.match(second.output, /string.*not assignable.*number/u);
 });

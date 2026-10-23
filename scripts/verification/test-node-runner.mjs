@@ -125,9 +125,22 @@ if (process.env.PIE_TEST_FILE_DIAGNOSTICS === '1') {
   timer.unref();
   testStream.once('end', () => clearInterval(timer));
 }
-testStream.on('test:fail', () => { process.exitCode = 1; });
+// Node serializes enumerable Error metadata and wraps failures in ERR_TEST_FAILURE.
+// Inspect only failed events: expected assert.rejects errors are not failures.
+function teardownUnconfirmed(error, seen = new Set()) {
+  if (!error || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  return error.teardownUnconfirmed === true
+    || teardownUnconfirmed(error.cause, seen)
+    || (Array.isArray(error.errors) && error.errors.some(value => teardownUnconfirmed(value, seen)));
+}
+let uncertainFailure = false;
+testStream.on('test:fail', data => {
+  uncertainFailure ||= teardownUnconfirmed(data.details?.error);
+  process.exitCode = uncertainFailure ? 125 : 1;
+});
 testStream.on('test:summary', data => {
-  if (data.success === false || (data.failed ?? 0) > 0) process.exitCode = 1;
+  if (data.success === false || (data.failed ?? 0) > 0) process.exitCode = uncertainFailure ? 125 : 1;
 });
 for (let index = 0; index < reporterTransforms.length; index += 1) {
   testStream.compose(reporterEventTransform(sourceFileByEntry))
