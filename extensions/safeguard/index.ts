@@ -7,7 +7,7 @@
  */
 
 import { resolvePathForComparison, isUnderCwd } from "../../harness/tools/execution-safety/paths.js";
-import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocBodies, type ShellInvocation } from "../../harness/tools/execution-safety/shell.js";
+import { analyzeRecursiveRm, maskShellData, parseShellInvocations, resolveShellTarget, shellInvocationsWithCwd, stripHeredocBodies, type ShellInvocation, type ShellInvocationWithCwd } from "../../harness/tools/execution-safety/shell.js";
 import { isAutonomousModeEnabled } from "../../harness/tool-and-skill-selection/settings/autonomous-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -31,7 +31,7 @@ const HARD_BLOCK_PATHS: { pattern: RegExp; reason: string }[] = [
 const PROMPT_PATHS: { pattern: RegExp; reason: string }[] = [
 	{ pattern: /\/(?:\.aws\/credentials|\.docker\/config\.json|\.npmrc)$/, reason: "Writing to a credential-bearing config file" },
 	{ pattern: /\/\.gnupg\//, reason: "Writing to GnuPG credentials" },
-	{ pattern: /\/\.ssh\/(?:id_[^/]+|[^/]+\.(?:pem|key))$/, reason: "Writing to a private key file" },
+	{ pattern: /\/\.ssh\/(?:id_(?![^/]*\.pub$)[^/]+|[^/]+\.(?:pem|key))$/, reason: "Writing to a private key file" },
 ];
 
 function hasArg(invocation: ShellInvocation, pattern: RegExp): boolean {
@@ -46,7 +46,58 @@ function prompt(reason: string): Safety {
 	return { action: "prompt", reason };
 }
 
-function analyzeInvocation(inv: ShellInvocation): Safety | undefined {
+// Only recognize inspection actions in their command-specific positions.
+function isNetworkInspection(name: string, args: string[]): boolean {
+	if (name === "ufw") return /^(?:status(?: (?:verbose|numbered))?|show (?:raw|builtins|before-rules|user-rules|after-rules|logging-rules|listening|added)|help|--help|--version)$/.test(args.join(" "));
+	if (name === "netsh") {
+		const words = args.map((arg) => arg.toLowerCase());
+		const contexts = /^(?:interface|ipv4|ipv6|ip|advfirewall|firewall|wlan|lan|http|winhttp|winsock|portproxy|dnsclient|tcp|ipsec|mainmode|consec|monitor)$/;
+		let index = 0;
+		while (contexts.test(words[index] ?? "")) index++;
+		return ["show", "dump", "help", "?"].includes(words[index] ?? "");
+	}
+	if (name !== "iptables") return false;
+	let inspection = false;
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (["-t", "--table", "-w", "--wait"].includes(arg)) {
+			if (!/^[\w.-]+$/.test(args[++index] ?? "")) return false;
+		} else if (["--list", "--list-rules", "--version", "--help"].includes(arg) || /^-[LSVhvnx]+$/.test(arg)) {
+			inspection ||= /[LSVh]/.test(arg) || arg.startsWith("--");
+		} else if (["--numeric", "--verbose", "--exact", "--line-numbers"].includes(arg)) {
+			continue;
+		} else if (!inspection || !/^[\w.][\w.-]*$/.test(arg)) return false;
+	}
+	return inspection;
+}
+
+function isBroadChmod(args: string[], cwd: string, executionCwd: string | undefined): boolean {
+	let recursive = false;
+	let reference = false;
+	let options = true;
+	const operands: string[] = [];
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (options && arg === "--") { options = false; continue; }
+		if (options && arg.startsWith("--reference=")) { reference = true; continue; }
+		if (options && arg === "--reference") { reference = true; index++; continue; }
+		if (options && arg.startsWith("-")) {
+			recursive ||= arg === "--recursive" || /^-[Rvcf]+$/.test(arg) && arg.includes("R");
+			continue;
+		}
+		operands.push(arg);
+	}
+	const mode = reference ? undefined : operands.shift();
+	return operands.some((target) => {
+		const normalized = resolveShellTarget(target, executionCwd);
+		if (normalized === undefined) return mode === "777" || mode === "0777" || recursive;
+		const system = /^\/(?:etc|usr|var|boot)(?:\/|$)/.test(normalized);
+		const broad = !isUnderCwd(normalized, cwd) || normalized === resolvePathForComparison(cwd, cwd) || /[*?\[\]{}$`]/.test(target);
+		return (mode === "777" || mode === "0777") && (broad || system) || recursive && system;
+	});
+}
+
+function analyzeInvocation(inv: ShellInvocationWithCwd, cwd: string): Safety | undefined {
 	const { name, args, text } = inv;
 	const argText = args.join(" ");
 
@@ -85,7 +136,7 @@ function analyzeInvocation(inv: ShellInvocation): Safety | undefined {
 
 	if (["sudo", "doas", "runas"].includes(name)) return prompt(`Privilege escalation (${name})`);
 	if (name === "su") return prompt("Switching user (su)");
-	if (name === "chmod" && (hasArg(inv, /^777$/) || (hasArg(inv, /^-R$/) && /\/(?:etc|usr|var|boot)\b/.test(argText)))) return prompt("Broad permission change");
+	if (name === "chmod" && inv.cwds.some((dir) => isBroadChmod(args, cwd, dir))) return prompt("Broad permission change");
 	if (name === "chown" && hasArg(inv, /^-R$/) && /\/(?:etc|usr|var|boot)\b/.test(argText)) return prompt("Recursive ownership change on system path");
 	if (name === "systemctl" && /^(?:stop|disable|mask)$/.test(args[0] ?? "")) return prompt("Stopping/disabling a system service");
 	if (name === "service" && args[1]?.toLowerCase() === "stop") return prompt("Stopping a service");
@@ -95,7 +146,7 @@ function analyzeInvocation(inv: ShellInvocation): Safety | undefined {
 	if (["remove-localuser", "add-localgroupmember"].includes(name) || (name === "net" && /(?:user.*\/delete|localgroup.*administrators.*\/add)/i.test(argText))) return prompt("Changing Windows users or administrators");
 	if (["disable-bitlocker", "set-executionpolicy", "disable-netfirewallrule"].includes(name)) return prompt(`Sensitive system configuration (${name})`);
 	if (name === "set-netfirewallprofile" && /-enabled\s+false/i.test(argText)) return prompt("Disabling Windows Firewall");
-	if (["iptables", "ufw", "netsh"].includes(name)) return prompt(`Modifying firewall/network configuration (${name})`);
+	if (["iptables", "ufw", "netsh"].includes(name) && !isNetworkInspection(name, args)) return prompt(`Modifying firewall/network configuration (${name})`);
 	if (["takeown", "icacls"].includes(name) && /[a-z]:\\windows/i.test(argText)) return prompt("Changing Windows system-file ownership");
 
 	const first = args[0]?.toLowerCase();
@@ -141,17 +192,16 @@ function findNestedShellPayload(invocation: ShellInvocation): string | undefined
 	return undefined;
 }
 
-function analyzeBash(command: string, cwd: string, depth = 0): Safety {
+function analyzeBash(command: string, cwd: string, depth = 0, executionCwds: (string | undefined)[] = [cwd]): Safety {
 	const executableSyntax = maskShellData(command);
 	if (/(?:^|[;|&\n]\s*|\s)\d*>{1,2}\s*\/dev\/(?:sd[a-z]|nvme\d|hd[a-z]|vd[a-z])/i.test(executableSyntax)) {
 		return block("Redirecting output to a block device");
 	}
-	const rmAnalysis = analyzeRecursiveRm(command, cwd);
+	const invocations = shellInvocationsWithCwd(parseShellInvocations(command), executionCwds);
+	const rmAnalysis = analyzeRecursiveRm(command, cwd, invocations);
 	if (rmAnalysis?.action === "block") return rmAnalysis;
-
-	const invocations = parseShellInvocations(command);
 	for (const invocation of invocations) {
-		const result = analyzeInvocation(invocation);
+		const result = analyzeInvocation(invocation, cwd);
 		if (result?.action === "block") return result;
 	}
 
@@ -167,19 +217,22 @@ function analyzeBash(command: string, cwd: string, depth = 0): Safety {
 		if (current?.operatorAfter === "|" && current.name === "base64" && ["bash", "sh", "zsh", "cmd"].includes(next?.name ?? "")) return block("Base64-decoded content piped to shell");
 	}
 
+	let nestedPrompt: Safety | undefined;
 	if (depth < 2) {
 		for (const invocation of invocations) {
 			const payload = findNestedShellPayload(invocation);
 			if (payload) {
-				const nested = analyzeBash(payload, cwd, depth + 1);
-				if (nested.action !== "allow") return nested;
+				const nested = analyzeBash(payload, cwd, depth + 1, invocation.cwds);
+				if (nested.action === "block") return nested;
+				if (nested.action === "prompt") nestedPrompt ??= nested;
 			}
 		}
 	}
 
 	if (rmAnalysis?.action === "prompt") return rmAnalysis;
+	if (nestedPrompt) return nestedPrompt;
 	for (const invocation of invocations) {
-		const result = analyzeInvocation(invocation);
+		const result = analyzeInvocation(invocation, cwd);
 		if (result?.action === "prompt") return result;
 	}
 

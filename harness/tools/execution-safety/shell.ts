@@ -4,6 +4,7 @@ import { win32 as win32Path } from "node:path";
 import {
 	collapseLeadingSlashes,
 	isUnderCwd,
+	isWindowsLikePath,
 	normalizeSlashes,
 	resolvePathForComparison,
 	trimTrailingPathSeparatorForComparison,
@@ -16,6 +17,8 @@ export interface ShellInvocation {
 	text: string;
 	/** Unquoted shell operator following this invocation, when present. */
 	operatorAfter?: "|" | "&&" | "||" | ";" | "&" | "newline";
+	/** Leading shell '!' inverts exit status, not the command's effects. */
+	negated?: boolean;
 }
 
 /**
@@ -116,6 +119,8 @@ export function parseShellInvocations(command: string): ShellInvocation[] {
 		pushToken();
 		let start = 0;
 		while (start < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[start] ?? "")) start += 1;
+		let negated = false;
+		while (tokens[start] === "!") { negated = !negated; start += 1; }
 		if (tokens[start] === "command") start += 1;
 		if (tokens[start] === "env") {
 			start += 1;
@@ -125,13 +130,19 @@ export function parseShellInvocations(command: string): ShellInvocation[] {
 		if (executable) {
 			const normalizedName = executable.replace(/^.*[\\/]/, "").toLowerCase();
 			const args = tokens.slice(start + 1);
-			invocations.push({ name: normalizedName, args, text: [normalizedName, ...args].join(" ") });
+			invocations.push({ name: normalizedName, args, text: [normalizedName, ...args].join(" "), ...(negated ? { negated } : {}) });
 		}
 		tokens = [];
 	};
 
 	for (let index = 0; index < source.length; index += 1) {
 		const char = source[index] ?? "";
+		// POSIX removes an unquoted/double-quoted backslash-newline pair
+		// before tokenization, even in the middle of a command name.
+		if (char === "\\" && source[index + 1] === "\n" && quote !== "'" && !escaped) {
+			index += 1;
+			continue;
+		}
 
 		if (awaitingRedirectionTarget) {
 			if (/\s/.test(char) && char !== "\n") continue;
@@ -319,10 +330,58 @@ function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
 	});
 }
 
-export function analyzeRecursiveRm(command: string, cwd: string): { action: "allow" | "block" | "prompt"; reason?: string } | null {
+/** Undefined means a directory change could not be resolved statically. */
+export interface ShellInvocationWithCwd extends ShellInvocation {
+	cwds: (string | undefined)[];
+}
+
+export function resolveShellTarget(target: string, cwd: string | undefined): string | undefined {
+	if (cwd !== undefined || target.startsWith("/") || isWindowsLikePath(target)) {
+		return resolvePathForComparison(target, cwd ?? "/");
+	}
+	return undefined;
+}
+
+/** Track possible directories without executing commands. Failed cd branches
+ * remain possible after ';', but only its success branch reaches '&&'. This
+ * intentionally models simple command lists, not a complete shell grammar. */
+export function shellInvocationsWithCwd(invocations: ShellInvocation[], initialCwds: (string | undefined)[]): ShellInvocationWithCwd[] {
+	const merge = (...groups: (string | undefined)[][]): (string | undefined)[] => {
+		const values = [...new Set(groups.flat())];
+		return values.length > 32 ? [undefined] : values;
+	};
+	let success = initialCwds;
+	let failure = initialCwds;
+	let previousOperator: ShellInvocation["operatorAfter"];
+	let listStartCwds = initialCwds;
+	return invocations.map((invocation) => {
+		const cwds = previousOperator === "&&" ? success : previousOperator === "||" ? failure : merge(success, failure);
+		if (previousOperator === undefined || [";", "newline", "&"].includes(previousOperator)) listStartCwds = cwds;
+		const skippedSuccess = previousOperator === "||" ? success : [];
+		const skippedFailure = previousOperator === "&&" ? failure : [];
+		let changed = cwds;
+		const inChild = previousOperator === "|" || invocation.operatorAfter === "|" || invocation.operatorAfter === "&";
+		if (!inChild && ["cd", "pushd", "popd"].includes(invocation.name)) {
+			const args = invocation.args.filter((arg, index) => !(index === 0 && ["--", "-P", "-L"].includes(arg)));
+			const target = args.length === 1 ? args[0] : undefined;
+			changed = invocation.name === "cd" && target && !/[$`~*?\[\]{}]/.test(target) && target !== "-"
+				? merge(cwds.map((dir) => resolveShellTarget(target, dir)))
+				: [undefined];
+		}
+		success = merge(invocation.negated ? cwds : changed, skippedSuccess);
+		failure = merge(invocation.negated ? changed : cwds, skippedFailure);
+		// '&' backgrounds the entire preceding and/or list, not just its
+		// final command. Its directory changes never reach the parent shell.
+		if (invocation.operatorAfter === "&") success = failure = listStartCwds;
+		previousOperator = invocation.operatorAfter;
+		return { ...invocation, cwds };
+	});
+}
+
+export function analyzeRecursiveRm(command: string, cwd: string, invocations = shellInvocationsWithCwd(parseShellInvocations(command), [cwd])): { action: "allow" | "block" | "prompt"; reason?: string } | null {
 	let foundRecursiveForceRm = false;
 	let prompted: { action: "prompt"; reason: string } | undefined;
-	for (const invocation of parseShellInvocations(command)) {
+	for (const invocation of invocations) {
 		if (invocation.name !== "rm") continue;
 		let recursive = false;
 		let force = false;
@@ -345,8 +404,11 @@ export function analyzeRecursiveRm(command: string, cwd: string): { action: "all
 		if (!recursive || !force || targets.length === 0) continue;
 		foundRecursiveForceRm = true;
 		for (const target of targets) {
-			if (isRootDeleteTarget(target)) return { action: "block", reason: "Recursive force-delete on root (/)" };
-			if (!isUnderCwd(target, cwd) && !isTemporaryDirectoryChild(target, cwd)) {
+			const resolvedTargets = invocation.cwds.map((dir) => resolveShellTarget(target, dir));
+			if (isRootDeleteTarget(target) || resolvedTargets.some((resolved) => resolved !== undefined && isRootDeleteTarget(resolved))) {
+				return { action: "block", reason: "Recursive force-delete on root (/)" };
+			}
+			if (resolvedTargets.some((resolved) => resolved === undefined || (!isUnderCwd(resolved, cwd) && !isTemporaryDirectoryChild(resolved, cwd)))) {
 				// Remember the prompt but keep scanning every rm invocation and
 				// target: a later root-delete hard block must dominate this
 				// earlier prompt (a confirmable prompt must never launder a

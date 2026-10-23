@@ -12,8 +12,16 @@ export function isWindowsLikePath(value: string): boolean {
 	return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("//./");
 }
 
+function normalizeComparisonInput(value: string): string {
+	const withSlashes = collapseLeadingSlashes(normalizeSlashes(value.trim()));
+	// Git Bash drive mounts are Windows aliases, not arbitrary POSIX roots.
+	return process.platform === "win32"
+		? withSlashes.replace(/^\/([a-zA-Z])(?:\/|$)/, "$1:/")
+		: withSlashes;
+}
+
 export function normalizePath(p: string): string {
-	const withSlashes = collapseLeadingSlashes(normalizeSlashes(p.trim()));
+	const withSlashes = normalizeComparisonInput(p);
 	const normalized = isWindowsLikePath(withSlashes)
 		? path.win32.normalize(withSlashes).replace(/\\/g, "/")
 		: path.posix.normalize(withSlashes || ".");
@@ -21,8 +29,8 @@ export function normalizePath(p: string): string {
 }
 
 export function resolvePathForComparison(targetPath: string, cwd: string): string {
-	const rawTarget = collapseLeadingSlashes(normalizeSlashes(targetPath.trim()));
-	const rawCwd = collapseLeadingSlashes(normalizeSlashes(cwd.trim()));
+	const rawTarget = normalizeComparisonInput(targetPath);
+	const rawCwd = normalizeComparisonInput(cwd);
 	if (!rawTarget) {
 		return normalizePath(rawCwd || "/");
 	}
@@ -56,5 +64,6 @@ export function trimTrailingPathSeparatorForComparison(p: string): string {
 export function isUnderCwd(targetPath: string, cwd: string): boolean {
 	const norm = trimTrailingPathSeparatorForComparison(resolvePathForComparison(targetPath, cwd));
 	const cwdNorm = trimTrailingPathSeparatorForComparison(resolvePathForComparison(cwd, cwd));
-	return norm === cwdNorm || norm.startsWith(`${cwdNorm}/`);
+	const cwdPrefix = cwdNorm.endsWith("/") ? cwdNorm : `${cwdNorm}/`;
+	return norm === cwdNorm || norm.startsWith(cwdPrefix);
 }

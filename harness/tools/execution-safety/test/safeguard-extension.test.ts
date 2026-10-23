@@ -963,7 +963,7 @@ describe('policy coverage – destructive and system-changing commands', () => {
 		const { isSafe } = await loadSafeguard();
 		for (const command of [
 			'su root',
-			'chmod 777 file',
+			'chmod 777 /outside/file',
 			'chown -R root /etc/example',
 			'service nginx stop',
 			'net stop wuauserv',
