@@ -61,21 +61,57 @@ test('local uncertainty retains unique bounded receipts and original causes', as
   assert.equal(paths.size, 4);
 });
 
+test('enclosing teardown diagnostic proof requires positive watchdog confirmation', async () => {
+  // No real child admission: fake ownership evidence tests the proof boundary.
+  for (const gone of [false, undefined, 'truthy is not proof', true]) {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: Object.assign(new EventEmitter(), { end() {} }),
+    });
+    const running = runNodeTests([], {
+      spawnImpl: () => child,
+      watchChildProcessImpl: () => ({ ownershipReady: true, settle: async () => ({ gone }) }),
+    });
+    child.emit('close', 125);
+    let retained;
+    await assert.rejects(running, error => {
+      retained = error.diagnosticPath;
+      assert.equal(error.teardownUnconfirmed, true);
+      assert.equal(error.enclosingTeardownConfirmed, gone === true ? true : undefined);
+      assert.ok(existsSync(retained));
+      return true;
+    });
+    // Fake children cannot own descendants; only these synthetic artifacts may
+    // be removed without real enclosing teardown proof.
+    rmSync(gone === true ? retained : path.dirname(retained), { recursive: true, force: true });
+  }
+});
+
 test('actual isolated Node failure serialization preserves sticky uncertainty, not expected rejections', async t => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-synthetic-serialization-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let enclosingUnknown = false;
+  const run = async () => {
+    try { return await runNodeTests([source], { env }); }
+    catch (error) {
+      // Latch before assertion callbacks or t.after can run. An actual unknown
+      // enclosing tree must retain both this fixture and the runner's config.
+      enclosingUnknown ||= error?.teardownUnconfirmed === true && error.enclosingTeardownConfirmed !== true;
+      throw error;
+    }
+  };
+  t.after(() => { if (!enclosingUnknown) rmSync(root, { recursive: true, force: true }); });
   const source = path.join(root, 'synthetic.test.mjs');
   const base = "import test from 'node:test'; import assert from 'node:assert/strict';\n";
   writeFileSync(source, base + "test('expected', async () => { await assert.rejects(Promise.reject(Object.assign(new Error('expected'), {teardownUnconfirmed:true}))); });\n");
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
-  const ordinary = await runNodeTests([source], { env });
+  const ordinary = await run();
   assert.equal(ordinary.code, 0);
   assert.equal(ordinary.teardownConfirmed, true);
   writeFileSync(source, base + "test('simulated unknown', () => { throw new Error('wrapper', {cause:Object.assign(new AggregateError([new Error('synthetic only')], 'aggregate wrapper'), {teardownUnconfirmed:true,diagnosticPath:'synthetic'})}); }); test('later ordinary', () => { assert.fail('ordinary'); });\n");
   let retained;
-  await assert.rejects(runNodeTests([source], { env }), error => {
+  await assert.rejects(run(), error => {
     assert.equal(error.teardownUnconfirmed, true);
+    assert.equal(error.enclosingTeardownConfirmed, true, 'must be nested simulated uncertainty, not actual watchdog uncertainty');
     retained = error.diagnosticPath;
     assert.ok(existsSync(retained));
     return true;

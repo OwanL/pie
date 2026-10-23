@@ -512,7 +512,7 @@ export function runNodeTests(files, {
         gone: false,
         diagnostics: [`watchdog cleanup failed: ${error?.message ?? error}`],
       }));
-      if (!cleanup.gone) {
+      if (cleanup?.gone !== true) {
         const ownedProcesses = Array.isArray(cleanup.ownedProcesses) ? cleanup.ownedProcesses : [];
         const survivorProcesses = Array.isArray(cleanup.survivorProcesses) ? cleanup.survivorProcesses : [];
         const whyUnknown = [];
@@ -557,6 +557,8 @@ export function runNodeTests(files, {
       if (code === TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE) {
         reject(Object.assign(new Error('Nested test teardown is unconfirmed'), {
           teardownUnconfirmed: true, diagnosticPath: configRoot,
+          // Diagnostic scope only, never authority to release nested readers.
+          enclosingTeardownConfirmed: true,
         }));
         return;
       }
