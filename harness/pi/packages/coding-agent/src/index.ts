@@ -30,6 +30,7 @@ export {
 	type AuthCredential,
 	type AuthStatus,
 	AuthStorage,
+	type AuthStorageAsyncOptions,
 	type AuthStorageBackend,
 	FileAuthStorageBackend,
 	InMemoryAuthStorageBackend,

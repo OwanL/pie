@@ -474,6 +474,22 @@ const { session } = await createAgentSession({
 const simpleRegistry = ModelRegistry.inMemory(authStorage);
 ```
 
+For hosts that must remain responsive while another process refreshes OAuth tokens, use the async storage APIs:
+
+```typescript
+const authStorage = await AuthStorage.createAsync("/my/app/auth.json");
+await authStorage.reloadAsync();
+await authStorage.setAsync("my-provider", { type: "api_key", key: "my-key" }, { signal });
+await authStorage.removeAsync("my-provider", { signal });
+const savedProviderIds = authStorage.list(); // Loaded snapshot; no refresh or lock acquisition
+```
+
+`createAsync(path?)` and `fromStorageAsync(backend)` load using only asynchronous lock acquisition. `reloadAsync()` buffers load errors in `drainErrors()` and retains the previous snapshot, like `reload()`. Async mutations read fresh locked contents, merge only the target provider, and reject and buffer persistence errors without overwriting malformed files. Cancellation is checked before acquisition, after acquisition, and immediately before the canonical write; it does not undo an already committed write. Lock acquisition retains finite retries. `login()` awaits `setAsync()` with the login callbacks' signal; OAuth refresh-error recovery uses `reloadAsync()`. A successful rotating refresh remains persisted even if its caller no longer needs the key. Snapshots are published only after backend success, in locked observation order rather than promise completion order.
+
+The existing `create`, `fromStorage`, `reload`, `set`, `remove`, and `logout` APIs still synchronously wait for locks. Async APIs avoid that lock wait blocking the event loop, not all synchronous filesystem work. Getters read the current in-memory snapshot; call `reloadAsync()` for fresh inventory.
+
+Custom `AuthStorageBackend.withLockAsync(fn, options?)` implementations must hold real exclusion through the awaited callback and canonical write. Honor `options.signal` before and after acquisition and **after awaiting `fn`, immediately before writing `next`, without another await in between**. A check inside `fn` alone is insufficient. `FileAuthStorageBackend` retains cross-process refresh locking. `InMemoryAuthStorageBackend` serializes async transactions and explicitly rejects synchronous backend access while any async transaction is pending.
+
 > See [examples/sdk/09-api-keys-and-oauth.ts](../examples/sdk/09-api-keys-and-oauth.ts)
 
 ### System Prompt

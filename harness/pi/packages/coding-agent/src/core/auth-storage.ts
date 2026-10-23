@@ -52,9 +52,21 @@ type LockResult<T> = {
 
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
+export interface AuthStorageAsyncOptions {
+	signal?: AbortSignal;
+}
+
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
-	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	/**
+	 * Exclude other transactions through callback completion and canonical write.
+	 * Check signal before acquisition, after acquisition, and after awaiting fn,
+	 * immediately before writing next (without an intervening await).
+	 */
+	withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options?: AuthStorageAsyncOptions,
+	): Promise<T>;
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
@@ -126,7 +138,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
-	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
+	async withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options: AuthStorageAsyncOptions = {},
+	): Promise<T> {
+		options.signal?.throwIfAborted();
 		this.ensureParentDir();
 		this.ensureFileExists();
 
@@ -156,9 +172,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			});
 
 			throwIfCompromised();
+			options.signal?.throwIfAborted();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = await fn(current);
 			throwIfCompromised();
+			options.signal?.throwIfAborted();
 			if (next !== undefined) {
 				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
 				chmodSync(this.authPath, 0o600);
@@ -179,8 +197,13 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+	private asyncTail: Promise<void> = Promise.resolve();
+	private pendingAsyncTransactions = 0;
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
+		if (this.pendingAsyncTransactions > 0) {
+			throw new Error("Cannot access auth storage synchronously during an async transaction");
+		}
 		const { result, next } = fn(this.value);
 		if (next !== undefined) {
 			this.value = next;
@@ -188,12 +211,30 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 		return result;
 	}
 
-	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
-		const { result, next } = await fn(this.value);
-		if (next !== undefined) {
-			this.value = next;
+	async withLockAsync<T>(
+		fn: (current: string | undefined) => Promise<LockResult<T>>,
+		options: AuthStorageAsyncOptions = {},
+	): Promise<T> {
+		options.signal?.throwIfAborted();
+		const previous = this.asyncTail;
+		let release!: () => void;
+		this.asyncTail = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		this.pendingAsyncTransactions++;
+		try {
+			await previous;
+			options.signal?.throwIfAborted();
+			const { result, next } = await fn(this.value);
+			options.signal?.throwIfAborted();
+			if (next !== undefined) {
+				this.value = next;
+			}
+			return result;
+		} finally {
+			this.pendingAsyncTransactions--;
+			release();
 		}
-		return result;
 	}
 }
 
@@ -206,18 +247,32 @@ export class AuthStorage {
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
 	private storage: AuthStorageBackend;
+	// Advance inside locked callbacks: invocation and backend return order can both differ from lock order.
+	private observationVersion = 0;
+	private appliedObservationVersion = 0;
 
 	private constructor(storage: AuthStorageBackend) {
 		this.storage = storage;
-		this.reload();
 	}
 
 	static create(authPath?: string): AuthStorage {
-		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")));
+		return AuthStorage.fromStorage(new FileAuthStorageBackend(authPath));
 	}
 
 	static fromStorage(storage: AuthStorageBackend): AuthStorage {
-		return new AuthStorage(storage);
+		const authStorage = new AuthStorage(storage);
+		authStorage.reload();
+		return authStorage;
+	}
+
+	static async createAsync(authPath?: string): Promise<AuthStorage> {
+		return AuthStorage.fromStorageAsync(new FileAuthStorageBackend(authPath));
+	}
+
+	static async fromStorageAsync(storage: AuthStorageBackend): Promise<AuthStorage> {
+		const authStorage = new AuthStorage(storage);
+		await authStorage.reloadAsync();
+		return authStorage;
 	}
 
 	static inMemory(data: AuthStorageData = {}): AuthStorage {
@@ -253,25 +308,88 @@ export class AuthStorage {
 		return JSON.parse(content) as AuthStorageData;
 	}
 
+	/** Only publish confirmed backend results, ordered by locked observation rather than promise completion. */
+	private publishSnapshot(data: AuthStorageData, version: number): void {
+		if (version <= this.appliedObservationVersion) return;
+		this.data = data;
+		this.loadError = null;
+		this.appliedObservationVersion = version;
+	}
+
+	private recordLoadError(error: unknown, version: number): void {
+		if (version >= this.appliedObservationVersion) {
+			this.loadError = error instanceof Error ? error : new Error(String(error));
+			this.appliedObservationVersion = version;
+		}
+		this.recordError(error);
+	}
+
 	/**
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
-		let content: string | undefined;
+		// Until the callback runs, a load failure must not claim an in-flight observation's ticket.
+		let version = this.appliedObservationVersion;
 		try {
-			this.storage.withLock((current) => {
-				content = current;
-				return { result: undefined };
+			const data = this.storage.withLock((current) => {
+				version = ++this.observationVersion;
+				return { result: this.parseStorageData(current) };
 			});
-			this.data = this.parseStorageData(content);
-			this.loadError = null;
+			this.publishSnapshot(data, version);
 		} catch (error) {
-			this.loadError = error as Error;
-			this.recordError(error);
+			this.recordLoadError(error, version);
 		}
 	}
 
-	private persistProviderChange(provider: string, credential: AuthCredential | undefined): AuthStorageData {
+	/** Reload without synchronously waiting for a credential lock. Errors are buffered like reload(). */
+	async reloadAsync(): Promise<void> {
+		// Until the callback runs, a load failure must not claim an in-flight observation's ticket.
+		let version = this.appliedObservationVersion;
+		try {
+			const data = await this.storage.withLockAsync(async (current) => {
+				version = ++this.observationVersion;
+				return { result: this.parseStorageData(current) };
+			});
+			this.publishSnapshot(data, version);
+		} catch (error) {
+			this.recordLoadError(error, version);
+		}
+	}
+
+	private async persistProviderChangeAsync(
+		provider: string,
+		credential: AuthCredential | undefined,
+		options: AuthStorageAsyncOptions,
+	): Promise<void> {
+		try {
+			options.signal?.throwIfAborted();
+			if (this.loadError) {
+				await this.reloadAsync();
+			}
+			options.signal?.throwIfAborted();
+			if (this.loadError) {
+				throw new Error(`Cannot update auth storage because it could not be loaded: ${this.loadError.message}`);
+			}
+
+			let version = this.observationVersion;
+			const persistedData = await this.storage.withLockAsync(async (current) => {
+				version = ++this.observationVersion;
+				const merged = { ...this.parseStorageData(current) };
+				if (credential) {
+					merged[provider] = credential;
+				} else {
+					delete merged[provider];
+				}
+				return { result: merged, next: JSON.stringify(merged, null, 2) };
+			}, options);
+			this.publishSnapshot(persistedData, version);
+		} catch (error) {
+			this.recordError(error);
+			throw error;
+		}
+	}
+
+	private persistProviderChange(provider: string, credential: AuthCredential | undefined): void {
 		if (this.loadError) {
 			this.reload();
 		}
@@ -285,8 +403,9 @@ export class AuthStorage {
 		}
 
 		try {
-			let persistedData: AuthStorageData = {};
-			this.storage.withLock((current) => {
+			let version = this.observationVersion;
+			const persistedData = this.storage.withLock((current) => {
+				version = ++this.observationVersion;
 				const currentData = this.parseStorageData(current);
 				const merged: AuthStorageData = { ...currentData };
 				if (credential) {
@@ -294,11 +413,9 @@ export class AuthStorage {
 				} else {
 					delete merged[provider];
 				}
-				persistedData = merged;
-				return { result: undefined, next: JSON.stringify(merged, null, 2) };
+				return { result: merged, next: JSON.stringify(merged, null, 2) };
 			});
-			this.loadError = null;
-			return persistedData;
+			this.publishSnapshot(persistedData, version);
 		} catch (error) {
 			this.recordError(error);
 			throw error;
@@ -324,14 +441,24 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
-		this.data = this.persistProviderChange(provider, credential);
+		this.persistProviderChange(provider, credential);
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
-		this.data = this.persistProviderChange(provider, undefined);
+		this.persistProviderChange(provider, undefined);
+	}
+
+	/** Persist one provider into fresh locked contents without synchronously waiting for the lock. */
+	async setAsync(provider: string, credential: AuthCredential, options: AuthStorageAsyncOptions = {}): Promise<void> {
+		await this.persistProviderChangeAsync(provider, credential, options);
+	}
+
+	/** Remove one provider from fresh locked contents. Cancellation before the write prevents persistence. */
+	async removeAsync(provider: string, options: AuthStorageAsyncOptions = {}): Promise<void> {
+		await this.persistProviderChangeAsync(provider, undefined, options);
 	}
 
 	/**
@@ -402,7 +529,7 @@ export class AuthStorage {
 		}
 
 		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
+		await this.setAsync(providerId, { type: "oauth", ...credentials }, { signal: callbacks.signal });
 	}
 
 	/**
@@ -424,10 +551,12 @@ export class AuthStorage {
 			return null;
 		}
 
+		let version = this.observationVersion;
+		let snapshot: AuthStorageData = {};
 		const result = await this.storage.withLockAsync(async (current) => {
+			version = ++this.observationVersion;
 			const currentData = this.parseStorageData(current);
-			this.data = currentData;
-			this.loadError = null;
+			snapshot = currentData;
 
 			const cred = currentData[providerId];
 			if (cred?.type !== "oauth") {
@@ -454,11 +583,11 @@ export class AuthStorage {
 				...currentData,
 				[providerId]: { type: "oauth", ...refreshed.newCredentials },
 			};
-			this.data = merged;
-			this.loadError = null;
+			snapshot = merged;
 			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 		});
 
+		this.publishSnapshot(snapshot, version);
 		return result;
 	}
 
@@ -503,10 +632,10 @@ export class AuthStorage {
 				} catch (error) {
 					this.recordError(error);
 					// Refresh failed - re-read file to check if another instance succeeded
-					this.reload();
+					await this.reloadAsync();
 					const updatedCred = this.data[providerId];
 
-					if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
+					if (!this.loadError && updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
 						// Another instance refreshed successfully, use those credentials
 						return provider.getApiKey(updatedCred);
 					}
