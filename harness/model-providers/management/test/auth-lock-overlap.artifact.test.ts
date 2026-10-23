@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { watchChildProcess, withProcessTreeIsolation } from '../../../../scripts/lib/process-watchdog.mjs';
+import { watchChildProcess, withProcessTreeIsolation } from './artifact-process-watchdog';
 import { loadSdk, type SourceArtifactSdkModule } from '../../../agent-processes/lib/sdk-integration/sdk';
 import { sourceDescriptor, sourceLoadMode } from '../../../agent-processes/lib/sdk-integration/test/source-fixture';
 import { createProviderManagementService } from '../service';
