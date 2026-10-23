@@ -107,6 +107,7 @@ export function ImageViewer({
         arrowNext: false,
         counter: false,
         mainClass: 'pie-image-viewer',
+        errorMsg: LOAD_ERROR,
       });
     } catch {
       pswp.current = null;
@@ -134,8 +135,6 @@ export function ImageViewer({
         });
       }
     });
-    // Loading failures surface through the status row, not the default box.
-    instance.addFilter('contentErrorElement', element => { element.textContent = ''; return element; });
     try {
       instance.init();
       setViewerOpen(true);
