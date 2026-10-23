@@ -437,7 +437,7 @@ function InlineUsage({ result }: { result: SubagentSingleResult }) {
     write !== undefined && write > 0 ? `${read !== undefined && read > 0 ? 'write' : 'Cache write'} ${formatDetailTokens(write)}` : undefined,
   ].filter(Boolean).join(' · ');
   return <>
-    {context !== undefined && window !== undefined && window > 0 && <span class="subagent-inline-usage subagent-inline-context">Context {formatDetailTokens(context)} / {formatDetailTokens(window)} ({formatContextPercent(context, window)})</span>}
+    {context !== undefined && window !== undefined && window > 0 && <span class="subagent-inline-usage subagent-inline-context" title="Context tokens used / context window">{formatDetailTokens(context)}/{formatDetailTokens(window)}</span>}
     {(input !== undefined || output !== undefined) && <span class="subagent-inline-usage subagent-inline-tokens">
       {input !== undefined && <span>In {formatDetailTokens(input)}</span>}
       {output !== undefined && <span>Out {formatDetailTokens(output)}</span>}

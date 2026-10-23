@@ -1082,6 +1082,8 @@
 .subagent-inline-usage { order: 3; color: var(--panel-muted); flex: 0 0 auto; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 @container subagent-card (min-width: 760px) {
   .subagent-inline-context { display: inline-flex; }
+  /* Keep usage beside the model instead of reserving an empty model column. */
+  .subagent-header .subagent-primary-meta { flex: 0 1 auto; width: auto; }
   .subagent-header { column-gap: 8px; }
 }
 @container subagent-card (min-width: 1050px) {

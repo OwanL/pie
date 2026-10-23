@@ -846,7 +846,7 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
   // Optional header groups are rendered for card-local CSS to reveal; SSR
   // cannot establish which groups are visible at a particular width.
-  assert.match(runningParentHtml, /subagent-inline-context">Context 51k \/ 200k \(26%\)/);
+  assert.match(runningParentHtml, /subagent-inline-context"[^>]*>51k\/200k<\/span>/);
   assert.match(runningParentHtml, /<span>In 51k<\/span><span>Out 2\.4k<\/span>/);
   assert.match(runningParentHtml, /subagent-inline-cache">Cache read 38\.6k<\/span>/);
   assert.match(runningParentHtml, /subagent-inline-turns">2 provider turns<\/span>/);

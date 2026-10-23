@@ -345,7 +345,8 @@ test('responsive inline usage keeps valid zero channels, omits invalid groups, a
   const child = (toolCall.result as any).details.results[0];
   child.usage = { input: 0, output: NaN, contextTokens: 0, cacheRead: 0, cacheWrite: 1200, turns: 1 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, 'Context 0 / 200k (0.0%)');
+  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '0/200k');
+  assert.equal(container.querySelector('.subagent-inline-context')?.getAttribute('title'), 'Context tokens used / context window');
   assert.equal(container.querySelector('.subagent-inline-tokens')?.textContent?.trim(), 'In 0');
   assert.equal(container.querySelector('.subagent-inline-cache')?.textContent, 'Cache write 1.2k');
   assert.equal(container.querySelector('.subagent-inline-turns')?.textContent, '1 provider turn');
