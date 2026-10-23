@@ -107,16 +107,6 @@ profiles:
       - high
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: github-copilot
-    id: gpt-5.4-mini
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
     id: gpt-6-astra
     eligible: false
     thinking:
@@ -126,15 +116,6 @@ profiles:
       - high
       - xhigh
       - max
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
-    id: grok-4.5
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: github-copilot
     id: grok-4.6
@@ -160,15 +141,6 @@ profiles:
     eligible: false
     thinking:
       - minimal
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
-    id: gemini-3.7-flash
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: github-copilot
     id: claude-opus-4.8-fast
