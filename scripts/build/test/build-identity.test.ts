@@ -180,6 +180,45 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.equal(afterRuntimeNode.buildId, afterRuntimeWebview.buildId);
 });
 
+test('analytics implementation changes coordinate identity and watches without scanning analytics data', (t) => {
+  const identityRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-analytics-identity-'));
+  t.after(() => rmSync(identityRoot, { recursive: true, force: true }));
+  const implementationRoots = [
+    'authority', 'capture', 'contracts', 'legacy', 'projections',
+    'queries', 'recording', 'storage', 'usage-accounting',
+  ];
+  const included = implementationRoots.map((root) => path.join(identityRoot, 'analytics', root, 'fixture.ts'));
+  const excluded = [
+    ...['analysis', 'runtime', 'data'].map((root) => path.join(identityRoot, 'analytics', root, 'fixture.ts')),
+    ...['data', 'node_modules', 'out', '.cache', 'coverage', 'sessions', 'logs'].map(
+      (root) => path.join(identityRoot, 'analytics', 'recording', root, 'fixture.ts'),
+    ),
+  ];
+  for (const input of [...included, ...excluded]) {
+    mkdirSync(path.dirname(input), { recursive: true });
+    writeFileSync(input, 'export const value = "before";\n');
+  }
+  const node = createBuildIdentityPlugin(identityRoot);
+  const webview = createBuildIdentityPlugin(identityRoot);
+  let previous = runIdentityPlugin(node);
+  for (const input of included) {
+    assert.ok(previous.watched.includes(input), `${input} must be watched`);
+    writeFileSync(input, 'export const value = "after";\n');
+    const nextNode = runIdentityPlugin(node);
+    const nextWebview = runIdentityPlugin(webview);
+    assert.notEqual(nextNode.buildId, previous.buildId, `${input} must affect identity`);
+    assert.equal(nextNode.buildId, nextWebview.buildId);
+    assert.ok(nextWebview.watched.includes(input));
+    previous = nextNode;
+  }
+  for (const input of excluded) {
+    assert.ok(!previous.watched.includes(input), `${input} must not be watched`);
+    writeFileSync(input, 'export const value = "ignored";\n');
+    assert.equal(runIdentityPlugin(node).buildId, previous.buildId);
+    assert.equal(runIdentityPlugin(webview).buildId, previous.buildId);
+  }
+});
+
 test('delivery node builds emit the neutral runtime lock bytes unchanged', () => {
   const plugin = createShippedRuntimeLockPlugin();
   assert.equal(plugin.name, 'pie-shipped-runtime-lock');

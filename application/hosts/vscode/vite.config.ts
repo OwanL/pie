@@ -92,7 +92,14 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   const applicationHosts = path.join(production ? repoDir : identityRoot, 'application', 'hosts');
   const applicationLib = path.join(production ? repoDir : identityRoot, 'application', 'lib');
   const rootLib = path.join(production ? repoDir : identityRoot, 'lib');
+  // Enumerate implementation owners, not analytics itself: analysis, runtime,
+  // and data contain non-build inputs and potentially large runtime stores.
+  const analyticsRoots = [
+    'authority', 'capture', 'contracts', 'legacy', 'projections',
+    'queries', 'recording', 'storage', 'usage-accounting',
+  ].map((owner) => path.join(production ? repoDir : identityRoot, 'analytics', owner));
   return [
+    ...analyticsRoots.flatMap((directory) => fs.existsSync(directory) ? sourceFiles(directory) : []),
     ...(production && fs.existsSync(harnessInstructions) ? sourceFiles(harnessInstructions) : []),
     ...(fs.existsSync(harnessTools) ? sourceFiles(harnessTools) : []),
     ...(fs.existsSync(harnessModelProviders) ? sourceFiles(harnessModelProviders) : []),
