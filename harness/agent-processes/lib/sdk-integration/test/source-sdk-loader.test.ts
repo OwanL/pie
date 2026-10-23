@@ -319,7 +319,8 @@ test('both source SDK surfaces require async credential construction without syn
     await writeFile(file, source.replace('static async createAsync()', 'static async missing_createAsync()'));
     await writePiRuntimeManifest(current.artifactDir, provenance);
     const descriptor = await descriptorFor(current.artifactDir, target);
-    await assertRejectsMessage(loadSdk(current.sdkPath, sourceMode(descriptor, target, surface)),
+    await assertRejectsMessage(loadSdk(current.sdkPath, surface === 'cold'
+      ? sourceMode(descriptor, target, 'cold') : sourceMode(descriptor, target, 'full')),
       /missing required cold coordinator exports/);
   }
 });
