@@ -13,8 +13,8 @@ import type { ProviderManagementAuthPort, StagedProviderCredential } from './aut
 import type { ProviderManagementRequest, ProviderManagementResponse, ProviderManagementSnapshot, ProviderAuthPrompt } from './contracts';
 
 export function createProviderManagementService(options: { configFile: string; modelCacheDir: string; auth: ProviderManagementAuthPort;
-  existingConnections?: () => readonly { id: string; modelCount: number; credentials: 'saved' | 'environment' | 'default' | 'none';
-    models?: ShippedProviderDefinition['models']; canForgetCredential?: boolean }[];
+  existingConnections?: () => Promise<readonly { id: string; modelCount: number; credentials: 'saved' | 'environment' | 'default' | 'none';
+    models?: ShippedProviderDefinition['models']; canForgetCredential?: boolean }[]>;
   /** Caller must prove this is Pie-owned native storage; never revoke remotely or mutate environment. */
   forgetExistingCredential?: (id: string) => Promise<void>;
   fetch?: typeof globalThis.fetch; readEnvironment?: (name: string) => string | undefined; now?: () => number;
@@ -23,14 +23,14 @@ export function createProviderManagementService(options: { configFile: string; m
   invalidateCache?: typeof invalidateDiscoveryCache;
   onSnapshot?: (snapshot: ProviderManagementSnapshot) => void }) {
   const definitions = options.auth.definitions();
-  let existing: NonNullable<ReturnType<NonNullable<typeof options.existingConnections>>> = [];
+  let existing: Awaited<ReturnType<NonNullable<typeof options.existingConnections>>> = [];
   const existingRow = (id: string) => existing.find(row => row.id === id);
   const inherited = (id: string) => !Object.hasOwn(config.providers, id) && !!existingRow(id);
   const legacyPolicy = (id: string) => inherited(id) || own(config.providers, id)?.credentialRef?.source === 'legacy';
   const settingsSupported = (id: string) => !!existingRow(id)?.models;
-  const capabilities = (id: string) => ({ settings: !legacyPolicy(id) || settingsSupported(id),
+  const capabilities = (id: string, saved: ReadonlySet<string>) => ({ settings: !legacyPolicy(id) || settingsSupported(id),
     editConnection: !legacyPolicy(id), remove: loaded,
-    forgetCredential: !!(options.auth.removeCredential && options.auth.hasSavedCredential(id))
+    forgetCredential: !!(options.auth.removeCredential && saved.has(id))
       || !!(existingRow(id)?.canForgetCredential && options.forgetExistingCredential) });
   const refreshControllers = new Map<string, Map<AbortController, Promise<void>>>();
   let config: ProviderConfig = { version: 1, providers: {} }, configRevision: string | null = null;
@@ -60,21 +60,54 @@ export function createProviderManagementService(options: { configFile: string; m
   const dao = <T>(work: () => Promise<T>): Promise<T> => {
     const next = daoTail.then(work, work); daoTail = next.catch(() => {}); return next;
   };
-  const snapshot = (): ProviderManagementSnapshot => { const catalog = list(); return ({ revision, configRevision, loaded, definitions: structuredClone(definitions), protocols: providerProtocolOptions,
+  const snapshot = (catalog: ReturnType<typeof list>, saved: ReadonlySet<string>, presenceFailed: boolean): ProviderManagementSnapshot => ({ revision, configRevision, loaded: loaded && !presenceFailed, definitions: structuredClone(definitions), protocols: providerProtocolOptions,
     removedProviderIds: Object.keys(config.providers).filter(id => config.providers[id].removed),
     providers: [...existing.filter(row => !Object.hasOwn(config.providers, row.id)).map(row => ({ id: row.id, modelCount: row.modelCount, credentials: row.credentials,
-      name: definitions.find(d => d.id === row.id)?.name ?? row.id, origin: 'existing' as const, readOnly: !settingsSupported(row.id), capabilities: capabilities(row.id),
+      name: definitions.find(d => d.id === row.id)?.name ?? row.id, origin: 'existing' as const, readOnly: !settingsSupported(row.id), capabilities: capabilities(row.id, saved),
       configured: true, enabled: true, discovery: 'unsupported' as const })), ...Object.keys(config.providers).filter(id => !config.providers[id].removed).map((id): ProviderManagementSnapshot['providers'][number] => {
       const entry = Object.hasOwn(config.providers, id) ? config.providers[id] : undefined;
       const definition = definitions.find(d => d.id === id);
       let name = definition?.name ?? id;
       if (entry?.baseUrl && (!definition || id === 'other')) { try { name = new URL(entry.baseUrl).host; } catch { /* schema owns URL validation */ } }
-      return { id, name, origin: legacyPolicy(id) ? 'existing' as const : 'managed' as const, readOnly: !capabilities(id).settings, capabilities: capabilities(id), configured: !!entry, enabled: entry?.enabled === true, modelCount: Object.keys(own(catalog.providers, id)?.models ?? {}).length,
-        credentials: entry?.credentialRef?.source === 'legacy' ? existingRow(id)?.credentials ?? 'missing' : entry?.credentialRef?.source === 'none' ? 'none' : entry?.credentialRef?.source === 'environment' ? 'environment' : options.auth.hasSavedCredential(id) ? 'saved' : entry?.credentialRef?.source === 'saved' ? 'missing' : 'default',
+      return { id, name, origin: legacyPolicy(id) ? 'existing' as const : 'managed' as const, readOnly: !capabilities(id, saved).settings, capabilities: capabilities(id, saved), configured: !!entry, enabled: entry?.enabled === true, modelCount: Object.keys(own(catalog.providers, id)?.models ?? {}).length,
+        credentials: entry?.credentialRef?.source === 'legacy' ? existingRow(id)?.credentials ?? 'missing' : entry?.credentialRef?.source === 'none' ? 'none' : entry?.credentialRef?.source === 'environment' ? 'environment' : saved.has(id) ? 'saved' : entry?.credentialRef?.source === 'saved' ? 'missing' : 'default',
         discovery: own(states, id) ?? (supported(id) === 'unsupported' ? 'unsupported' : 'idle') };
-    })], ...(auth ? { auth: structuredClone(auth) } : {}), ...(authBrowser ? { authBrowser: { ...authBrowser } } : {}), ...(mutation ? { mutation: { ...mutation } } : {}), ...(error ? { error } : {}) }); };
-  const publish = () => { revision++; try { options.onSnapshot?.(snapshot()); } catch { /* observer cannot fail an operation */ } };
-  const result = (operationId: string, status: ProviderManagementResponse['status'], draft?: ProviderManagementResponse['draft']): ProviderManagementResponse => ({ operationId, status, snapshot: snapshot(), ...(draft ? { draft } : {}) });
+    })], ...(auth ? { auth: structuredClone(auth) } : {}), ...(authBrowser ? { authBrowser: { ...authBrowser } } : {}), ...(mutation ? { mutation: { ...mutation } } : {}), ...(presenceFailed ? { error: 'Saved credential presence could not be loaded. Check authentication storage and try again.' } : error ? { error } : {}) });
+  type Outcome = { operationId: string; status: ProviderManagementResponse['status']; draft?: (catalog: ReturnType<typeof list>) => ProviderManagementResponse['draft'] };
+  // No DAO work may enter this lane. Presence is awaited first; everything state-dependent,
+  // including response drafts, is captured together at the final synchronous boundary.
+  let projectionTail: Promise<unknown> = Promise.resolve();
+  const project = (outcome?: Outcome): Promise<ProviderManagementResponse> => {
+    const next = projectionTail.then(async () => {
+      let saved: ReadonlySet<string> = new Set(), presenceFailed = false;
+      try { saved = new Set(await options.auth.listSavedCredentialIds()); } catch { presenceFailed = true; }
+      const catalog = list();
+      revision++;
+      const view = snapshot(catalog, saved, presenceFailed);
+      const draft = presenceFailed ? undefined : outcome?.draft?.(catalog);
+      if (!outcome && !disposed) { try { options.onSnapshot?.(view); } catch { /* observer cannot fail an operation */ } }
+      return { operationId: outcome?.operationId ?? '', status: presenceFailed && outcome?.status === 'ok' ? 'error' as const : outcome?.status ?? 'ok' as const,
+        snapshot: view, ...(draft ? { draft } : {}) };
+    });
+    projectionTail = next.catch(() => {});
+    return next;
+  };
+  const publish = () => { void project().catch(() => {}); };
+  const result = (operationId: string, status: Outcome['status'], draft?: Outcome['draft']): Outcome => ({ operationId, status, draft });
+  const currentDraft = (id: string, catalog: ReturnType<typeof list>) => {
+    if (own(config.providers, id)?.removed) {
+      const available = { ...config, providers: { ...config.providers } }; delete available.providers[id];
+      const draft = createProviderSetupDraft(available, resolveProviderModelList({ config: available }), id);
+      const definition = definitions.find(d => d.id === id);
+      if (definition) { draft.api = definition.api; draft.baseUrl = definition.baseUrl; }
+      return draft;
+    }
+    if (legacyPolicy(id)) return settingsSupported(id) ? createExistingProviderSetupDraft(config, catalog, id) : undefined;
+    const draft = createProviderSetupDraft(config, catalog, id);
+    const definition = definitions.find(d => d.id === id);
+    if (draft.originalId === null && definition) { draft.api = definition.api; draft.baseUrl = definition.baseUrl; }
+    return draft;
+  };
   const supported = (id: string) => {
     if (legacyPolicy(id) || own(config.providers, id)?.removed) return 'unsupported';
     const definition = definitions.find(d => d.id === id);
@@ -112,9 +145,11 @@ export function createProviderManagementService(options: { configFile: string; m
         const entry = config.providers[id], definition = definitions.find(d => d.id === id);
         const key = definition?.discovery === 'ollama' ? undefined : entry.credentialRef?.source === 'environment' ? options.readEnvironment?.(entry.credentialRef.name)
           : entry.credentialRef?.source === 'saved' ? await options.auth.getApiKey(id) : undefined;
+        if (disposed || controller.signal.aborted) throw new Error('Cancelled');
         const configuredBaseUrl = entry.baseUrl ?? definition?.baseUrl ?? '';
         const baseUrl = definition?.discovery !== 'ollama' && entry.credentialRef?.source === 'saved'
           ? await options.auth.discoveryBaseUrl(id, configuredBaseUrl) : configuredBaseUrl;
+        if (disposed || controller.signal.aborted) throw new Error('Cancelled');
         return discoverModels({ kind: supported(id) as 'openai' | 'copilot' | 'ollama', baseUrl, key, fetch: options.fetch ?? globalThis.fetch, signal: controller.signal });
       };
       const observed = await Promise.race([effect(), new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true }))]);
@@ -139,7 +174,7 @@ export function createProviderManagementService(options: { configFile: string; m
     const read = await readProviderConfig(options.configFile);
     if (read.status !== 'valid' && read.status !== 'missing') { loaded = false; error = 'Provider configuration could not be loaded. Check file access and version 1 YAML syntax.'; publish(); return false; }
     config = read.config; configRevision = read.revision; loaded = true; error = undefined;
-    try { existing = options.existingConnections?.() ?? []; }
+    try { existing = await options.existingConnections?.() ?? []; }
     catch { loaded = false; error = 'Existing provider connections could not be loaded. Check authentication and model configuration.'; publish(); return false; }
     for (const id of Object.keys(discovered)) if (discoveryProvenance[id] !== provenance(id)) { delete discovered[id]; delete states[id]; delete discoveryProvenance[id]; }
     for (const id of Object.keys(config.providers)) {
@@ -160,7 +195,7 @@ export function createProviderManagementService(options: { configFile: string; m
     clearPrompts(id);
     if (activeLogin === id) { activeLogin = undefined; auth = undefined; authBrowser = undefined; publish(); }
   };
-  const execute = async (request: ProviderManagementRequest, controller: AbortController): Promise<ProviderManagementResponse> => {
+  const execute = async (request: ProviderManagementRequest, controller: AbortController): Promise<Outcome> => {
     const id = request.operationId;
     if (disposed) return result(id, 'cancelled');
     if (request.type === 'cancel') {
@@ -203,7 +238,7 @@ export function createProviderManagementService(options: { configFile: string; m
         // Never forget the native credential unless that first step succeeded.
         try {
           if (options.auth.removeCredential) await options.auth.removeCredential(request.id);
-          else if (prior?.credentialRef?.source === 'saved' || options.auth.hasSavedCredential(request.id)) throw new Error('Removal unavailable');
+          else if (prior?.credentialRef?.source === 'saved' || (await options.auth.listSavedCredentialIds()).includes(request.id)) throw new Error('Removal unavailable');
           if (existingRow(request.id)?.canForgetCredential) {
             if (!options.forgetExistingCredential) throw new Error('Removal unavailable');
             await options.forgetExistingCredential(request.id);
@@ -214,16 +249,12 @@ export function createProviderManagementService(options: { configFile: string; m
         publish(); return result(id, partial ? 'error' : 'ok');
       } finally { mutation = undefined; publish(); }
       });
-      return { ...response, snapshot: snapshot() };
+      return response;
     }
     if (request.type === 'read-provider' || request.type === 'refresh') {
       if (own(config.providers, request.id)?.removed) {
         if (request.type === 'refresh') return result(id, 'conflict');
-        const available = { ...config, providers: { ...config.providers } }; delete available.providers[request.id];
-        const draft = createProviderSetupDraft(available, resolveProviderModelList({ config: available }), request.id);
-        const definition = definitions.find(d => d.id === request.id);
-        if (definition) { draft.api = definition.api; draft.baseUrl = definition.baseUrl; }
-        return result(id, 'ok', draft);
+        return result(id, 'ok', catalog => currentDraft(request.id, catalog));
       }
       if (legacyPolicy(request.id)) {
         if (request.type === 'refresh' || !settingsSupported(request.id)) {
@@ -231,7 +262,7 @@ export function createProviderManagementService(options: { configFile: string; m
             : 'Existing model metadata is unavailable for a safe settings round trip. This connection can still be removed.';
           publish(); return result(id, 'conflict');
         }
-        return result(id, 'ok', createExistingProviderSetupDraft(config, list(), request.id));
+        return result(id, 'ok', catalog => currentDraft(request.id, catalog));
       }
     }
     if ((request.type === 'save' || request.type === 'connect') && legacyPolicy(request.draft.id)) {
@@ -243,12 +274,9 @@ export function createProviderManagementService(options: { configFile: string; m
       }
     }
     if (request.type === 'read-provider') {
-      const draft = createProviderSetupDraft(config, list(), request.id);
-      const definition = definitions.find(d => d.id === request.id);
-      if (draft.originalId === null && definition) { draft.api = definition.api; draft.baseUrl = definition.baseUrl; }
-      return result(id, 'ok', draft);
+      return result(id, 'ok', catalog => currentDraft(request.id, catalog));
     }
-    if (request.type === 'refresh') { await refresh(request.id, controller); return result(id, controller.signal.aborted ? 'cancelled' : own(states, request.id) === 'error' ? 'error' : 'ok', createProviderSetupDraft(config, list(), request.id)); }
+    if (request.type === 'refresh') { await refresh(request.id, controller); return result(id, controller.signal.aborted ? 'cancelled' : own(states, request.id) === 'error' ? 'error' : 'ok', catalog => currentDraft(request.id, catalog)); }
     let credential: StagedProviderCredential | undefined;
     if (request.type === 'connect') {
       const definition = definitions.find(d => d.id === request.draft.id);
@@ -340,14 +368,14 @@ export function createProviderManagementService(options: { configFile: string; m
       catch { states[draft.id] = 'error'; error = 'Configuration saved, but new credentials were not saved because the previous model cache could not be cleared. Check cache access and reconnect.'; publish(); return result(id, 'error'); }
       delete discovered[draft.id]; delete discoveryProvenance[draft.id]; delete states[draft.id];
       if (controller.signal.aborted || disposed) { error = 'Configuration was saved, but credentials were not saved because the operation was cancelled.'; publish(); return result(id, 'cancelled'); }
-      try { await options.auth.saveCredential(draft.id, credential); }
-      catch { error = 'Configuration was saved, but credentials could not be saved. Reconnect the provider.'; publish(); return result(id, 'error'); }
+      try { await options.auth.saveCredential(draft.id, credential, controller.signal); }
+      catch { error = 'Configuration was saved, but credentials could not be saved. Reconnect the provider.'; publish(); return result(id, controller.signal.aborted || disposed ? 'cancelled' : 'error'); }
     }
     if (controller.signal.aborted || disposed) { error = 'Configuration was saved, but the operation was cancelled. Review the provider settings.'; publish(); return result(id, 'cancelled'); }
     publish(); if (request.type === 'connect') automatic(); return result(id, 'ok');
     } finally { mutation = undefined; publish(); }
     });
-    return { ...response, snapshot: snapshot() };
+    return response;
   };
   return {
     /** Private offline capture: never publishes, logs in, refreshes or loads management state. */
@@ -400,10 +428,10 @@ export function createProviderManagementService(options: { configFile: string; m
     request(request: ProviderManagementRequest): Promise<ProviderManagementResponse> {
       const intent = fingerprint(request);
       const existing = operations.get(request.operationId);
-      if (existing) return existing.intent === intent ? existing.promise : Promise.resolve(result(request.operationId, 'conflict'));
+      if (existing) return existing.intent === intent ? existing.promise : project(result(request.operationId, 'conflict'));
       const controller = new AbortController();
       const input = structuredClone(request);
-      const promise = Promise.resolve().then(() => execute(input, controller)).catch(() => { error = 'Provider operation failed. Check settings and try again.'; publish(); return result(request.operationId, 'error'); });
+      const promise = Promise.resolve().then(() => execute(input, controller)).catch(() => { error = 'Provider operation failed. Check settings and try again.'; publish(); return result(request.operationId, 'error'); }).then(outcome => project(outcome));
       const providerId = 'draft' in input ? input.draft.id : 'id' in input ? input.id : undefined;
       operations.set(request.operationId, { intent, promise, controller, providerId }); return promise;
     },

@@ -12,7 +12,7 @@ async function fixture(authChanges: Partial<ProviderManagementAuthPort> = {}, fe
   invalidateCache?: Parameters<typeof createProviderManagementService>[0]['invalidateCache'],
   shipped?: Parameters<typeof createProviderManagementService>[0]['shipped']) {
   const dir = await mkdtemp(join(tmpdir(), 'pie-provider-core-'));
-  const auth: ProviderManagementAuthPort = { definitions: () => [], hasSavedCredential: () => false,
+  const auth: ProviderManagementAuthPort = { definitions: () => [], listSavedCredentialIds: async () => [],
     stageOAuthLogin: async () => ({ type: 'oauth', access: 'private', refresh: 'private', expires: 1 }), saveCredential: async () => {},
     getApiKey: async () => undefined, discoveryBaseUrl: async (_, url) => url, ...authChanges };
   const configFile = join(dir, 'providers.yaml');
@@ -26,7 +26,7 @@ test('configured Codex lists offline shipped models with unknown account listing
   const requested: string[] = [];
   const f = await fixture({ definitions: () => [{ id: 'openai-codex', name: 'Codex', kind: 'chatgpt',
     api: 'openai-codex-responses', baseUrl: 'https://example.com', authMethods: ['oauth'], discovery: 'unsupported' }],
-    hasSavedCredential: () => true,
+    listSavedCredentialIds: async () => ['openai-codex'],
     getApiKey: async () => { credentials++; throw new Error('unexpected'); },
     discoveryBaseUrl: async () => { credentials++; throw new Error('unexpected'); }
   }, async () => { network++; throw new Error('unexpected'); }, undefined, undefined, id => {
@@ -60,7 +60,7 @@ test('environment discovery does not inherit stored OAuth account routing', asyn
   let savedLookups = 0, endpointLookups = 0, requestedUrl = '';
   const f = await fixture({ definitions: () => [{ id: 'github-copilot', name: 'Copilot', kind: 'copilot',
     api: 'openai-completions', baseUrl: 'https://default.invalid', authMethods: ['oauth'], discovery: 'copilot' }],
-    hasSavedCredential: () => true,
+    listSavedCredentialIds: async () => ['github-copilot'],
     getApiKey: async () => { savedLookups++; return 'unused-stored-account-key'; },
     discoveryBaseUrl: async () => { endpointLookups++; return 'https://stored-account.invalid'; }
   }, async url => { requestedUrl = String(url); return new Response(JSON.stringify({ data: [] })); });
@@ -147,7 +147,7 @@ test('synchronous browser then manual code retains public context and clears ter
     try {
       const pending = f.service.request({ type: 'connect', operationId: outcome, expectedRevision: null, draft, method: 'oauth' });
       await started;
-      const current = snapshots.at(-1)!;
+      const current = (await f.service.request({ type: 'read', operationId: 'prompt-observed' })).snapshot;
       assert.equal(current.auth?.kind, 'input');
       assert.deepEqual(current.authBrowser, { operationId: outcome, url: 'https://login.invalid', instructions: 'Continue' });
       assert.equal(JSON.stringify(current).includes('SECRET'), false);
@@ -252,7 +252,7 @@ for (const scenario of ['nonempty', 'empty', 'older-error'] as const) test(`late
       : new Response(JSON.stringify({ data: [{ id: 'older' }] })));
     await older;
     const current = await f.service.request({ type: 'read-provider', operationId: 'current', id: 'local' });
-    const auth: ProviderManagementAuthPort = { definitions: () => [], hasSavedCredential: () => false,
+    const auth: ProviderManagementAuthPort = { definitions: () => [], listSavedCredentialIds: async () => [],
       stageOAuthLogin: async () => { throw new Error('No login expected'); }, saveCredential: async () => {},
       getApiKey: async () => undefined, discoveryBaseUrl: async (_, url) => url };
     reopened = createProviderManagementService({ configFile: f.configFile, modelCacheDir: f.modelCacheDir, auth,
@@ -268,7 +268,7 @@ for (const scenario of ['nonempty', 'empty', 'older-error'] as const) test(`late
 
 test('default/local discovery never resolves an unrelated saved credential', async () => {
   let keyReads = 0;
-  const f = await fixture({ hasSavedCredential: () => true, getApiKey: async () => { keyReads++; return 'OLD-SECRET'; } }, async (_, init) => {
+  const f = await fixture({ listSavedCredentialIds: async () => ['local'], getApiKey: async () => { keyReads++; return 'OLD-SECRET'; } }, async (_, init) => {
     assert.equal((init?.headers as Record<string, string>)?.Authorization, undefined);
     return new Response(JSON.stringify({ data: [{ id: 'local-model' }] }));
   });
@@ -403,7 +403,7 @@ test('local connect persists explicit no-credential intent through reload and pr
   let savedKey = 'old-secret', apiKeyLookups = 0, endpointLookups = 0, credentialWrites = 0;
   const f = await fixture({ definitions: () => [{ id: 'local', name: 'Local', kind: 'custom', api: 'openai-completions',
     baseUrl: 'http://localhost:1234/v1', authMethods: ['api-key', 'local'], discovery: 'openai' }],
-    hasSavedCredential: () => true,
+    listSavedCredentialIds: async () => ['local'],
     getApiKey: async () => { apiKeyLookups++; return savedKey; },
     discoveryBaseUrl: async () => { endpointLookups++; return 'https://credential-routed.invalid'; },
     saveCredential: async (_, value) => { credentialWrites++; if (value.type === 'api_key') savedKey = value.key; },
@@ -459,7 +459,7 @@ test('unknown native OAuth integrations do not guess a protocol or endpoint', ()
 });
 test('cache invalidation failure drains stale discovery and leaves old credentials/cache intact', async () => {
   let savedKey = 'old-key', writes = 0, fetches = 0, invalidationFails = false, aborted = false;
-  const f = await fixture({ hasSavedCredential: () => true, getApiKey: async () => savedKey,
+  const f = await fixture({ listSavedCredentialIds: async () => ['local'], getApiKey: async () => savedKey,
     saveCredential: async (_, credential) => { writes++; savedKey = credential.type === 'api_key' ? credential.key : savedKey; } }, async (_, init) => {
       fetches++;
       if (fetches === 1) return new Response(JSON.stringify({ data: [{ id: 'old-account-model' }] }));
@@ -486,11 +486,11 @@ test('cache invalidation failure drains stale discovery and leaves old credentia
     assert.equal(writes, 1); assert.equal(savedKey, 'old-key');
     assert.equal((await staleRefresh).status, 'cancelled'); assert.equal(aborted, true);
     const restarted = createProviderManagementService({ configFile: f.configFile, modelCacheDir: f.modelCacheDir,
-      auth: { definitions: () => [], hasSavedCredential: () => true, stageOAuthLogin: async () => ({ type: 'oauth', access: '', refresh: '', expires: 1 }),
+      auth: { definitions: () => [], listSavedCredentialIds: async () => ['local'], stageOAuthLogin: async () => ({ type: 'oauth', access: '', refresh: '', expires: 1 }),
         saveCredential: async () => { throw new Error('restart must not save'); }, getApiKey: async () => savedKey,
         discoveryBaseUrl: async (_, url) => url }, fetch: async () => { throw new Error('No network expected'); } });
     try {
-      const afterRestart = await restarted.request({ type: 'read', operationId: 'restart-read' });
+      const afterRestart = await restarted.request({ type: 'read-provider', id: 'local', operationId: 'restart-read' });
       assert.equal(afterRestart.snapshot.providers[0].credentials, 'saved');
       assert.equal(afterRestart.snapshot.providers[0].discovery, 'cached');
       const cached = await restarted.request({ type: 'read-provider', operationId: 'restart-detail', id: 'local' });

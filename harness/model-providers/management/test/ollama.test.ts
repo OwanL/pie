@@ -101,7 +101,7 @@ test('Ollama cache preserves incomplete metadata and rejects mismatched provenan
 test('Ollama local connection saves keyless configuration without authentication calls', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pie-ollama-service-'));
   const forbidden = async (): Promise<never> => { throw new Error('No auth calls allowed'); };
-  const auth: ProviderManagementAuthPort = { definitions: () => [definition], hasSavedCredential: () => false,
+  const auth: ProviderManagementAuthPort = { definitions: () => [definition], listSavedCredentialIds: async () => [],
     stageOAuthLogin: forbidden, saveCredential: forbidden, getApiKey: forbidden, discoveryBaseUrl: forbidden };
   const service = createProviderManagementService({ configFile: join(dir, 'providers.yaml'), modelCacheDir: join(dir, 'cache'), auth,
     fetch: async url => { assert.equal(String(url), 'http://localhost:11434/api/tags'); return Response.json({ models: [] }); } });

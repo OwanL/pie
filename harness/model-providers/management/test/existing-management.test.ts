@@ -18,10 +18,10 @@ async function fixture(changes: Partial<Parameters<typeof createProviderManageme
   const configFile = join(dir, 'providers.yaml');
   const auth: ProviderManagementAuthPort = { definitions: () => [{ id: 'openai', name: 'OpenAI', kind: 'openai',
     api: 'openai-responses', baseUrl: 'https://template.invalid/v1', authMethods: ['api-key', 'oauth'], discovery: 'unsupported' }],
-    hasSavedCredential: () => false, stageOAuthLogin: async () => { throw new Error('Unexpected login'); }, saveCredential: async () => {},
+    listSavedCredentialIds: async () => [], stageOAuthLogin: async () => { throw new Error('Unexpected login'); }, saveCredential: async () => {},
     removeCredential: async () => {}, getApiKey: async () => { throw new Error('Unexpected key lookup'); }, discoveryBaseUrl: async (_, url) => url };
   const service = createProviderManagementService({ configFile, modelCacheDir: join(dir, 'cache'), auth,
-    existingConnections: () => [{ id: 'openai', modelCount: 1, credentials: 'saved', canForgetCredential: true,
+    existingConnections: async () => [{ id: 'openai', modelCount: 1, credentials: 'saved', canForgetCredential: true,
       models: { [native.id]: { name: native.name, input: native.input, reasoning: native.reasoning,
         contextWindow: native.contextWindow, maxTokens: native.maxTokens, pricing: { input: 3, output: 7, cacheRead: 1, cacheWrite: 2 } } } }],
     forgetExistingCredential: async () => {}, fetch: async () => { throw new Error('Unexpected network'); }, ...changes });
@@ -73,7 +73,7 @@ test('existing settings round trip writes policy only, preserves native models a
 });
 
 test('native Ollama settings remain legacy policy rather than managed daemon setup', async () => {
-  const f = await fixture({ existingConnections: () => [{ id: 'ollama', modelCount: 1, credentials: 'none', models: { installed: { name: 'Installed' } } }] });
+  const f = await fixture({ existingConnections: async () => [{ id: 'ollama', modelCount: 1, credentials: 'none', models: { installed: { name: 'Installed' } } }] });
   try {
     const read = await f.service.request({ type: 'read-provider', operationId: 'detail', id: 'ollama' });
     const saved = await f.service.request({ type: 'save', operationId: 'disable', expectedRevision: null, draft: { ...read.draft!, enabled: false } });
@@ -86,7 +86,7 @@ test('native Ollama settings remain legacy policy rather than managed daemon set
 });
 
 test('unavailable safe metadata is precisely read-only but still removable', async () => {
-  const f = await fixture({ existingConnections: () => [{ id: 'openai', modelCount: 2, credentials: 'environment' }] });
+  const f = await fixture({ existingConnections: async () => [{ id: 'openai', modelCount: 2, credentials: 'environment' }] });
   try {
     const read = await f.service.request({ type: 'read-provider', operationId: 'read', id: 'openai' });
     assert.equal(read.status, 'conflict'); assert.match(read.snapshot.error!, /metadata.*safe settings round trip/);
@@ -148,7 +148,7 @@ test('failure after tombstone remains hidden and retryable, managed revocation p
 
 test('removal aborts live OAuth and suppresses late prompts and credential commits', async () => {
   let callbacks!: ProviderOAuthCallbacks, finish!: (value: any) => void, writes = 0;
-  const f = await fixture({ existingConnections: () => [] });
+  const f = await fixture({ existingConnections: async () => [] });
   f.auth.stageOAuthLogin = async (_, value) => { callbacks = value; return new Promise(resolve => { finish = resolve; }); };
   f.auth.saveCredential = async () => { writes++; };
   try {
@@ -168,7 +168,7 @@ test('removal aborts live OAuth and suppresses late prompts and credential commi
 
 test('removal aborts pending discovery and ignores a late native listing', async () => {
   let signal!: AbortSignal, finish!: (response: Response) => void;
-  const f = await fixture({ existingConnections: () => [], fetch: async (_, init) => {
+  const f = await fixture({ existingConnections: async () => [], fetch: async (_, init) => {
     signal = init!.signal!; return new Promise(resolve => { finish = resolve; });
   } });
   try {
@@ -190,7 +190,7 @@ test('removal aborts pending discovery and ignores a late native listing', async
 test('removal preserves environment and an unrelated disabled provider remains visible', async () => {
   const key = 'PIE_SYNTHETIC_REMOVAL_ENV'; const previous = process.env[key]; process.env[key] = 'synthetic';
   let forgot = 0;
-  const f = await fixture({ existingConnections: () => [{ id: 'openai', modelCount: 1, credentials: 'environment', models: {} }],
+  const f = await fixture({ existingConnections: async () => [{ id: 'openai', modelCount: 1, credentials: 'environment', models: {} }],
     forgetExistingCredential: async () => { forgot++; } });
   try {
     await writeFile(f.configFile, JSON.stringify({ version: 1, providers: { disabled: { enabled: false }, openai: { enabled: true, credentialRef: { source: 'environment', name: key } } } }));

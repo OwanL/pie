@@ -12,9 +12,9 @@ test('empty management configuration lists existing connections offline and refu
   let inventoryError = false;
   const forbidden = () => { throw new Error('Forbidden credential/network access'); };
   const service = createProviderManagementService({ configFile, modelCacheDir: join(dir, 'cache'),
-    auth: { definitions: () => [], hasSavedCredential: () => false, getApiKey: forbidden,
+    auth: { definitions: () => [], listSavedCredentialIds: async () => [], getApiKey: forbidden,
       discoveryBaseUrl: forbidden, stageOAuthLogin: forbidden, saveCredential: forbidden }, fetch: forbidden,
-    existingConnections: () => {
+    existingConnections: async () => {
       if (inventoryError) throw new Error('private auth failure');
       return ['oauth', 'apikey', 'env', 'custom'].map(id => ({ id, modelCount: 2, credentials: id === 'env' ? 'environment' as const : 'saved' as const }));
     } });

@@ -13,11 +13,11 @@ test('managed native removal targets explicit store and revokes old runtime scop
   const file = path.join(dir, 'credentials.json');
   const entries = new Map([['old', { type: 'api_key' as const, key: 'synthetic' }]]);
   const opened: string[] = [];
-  const native = { getOAuthProviders: () => [], get: (id: string) => entries.get(id),
-    set: () => {}, remove: (id: string) => { entries.delete(id); }, drainErrors: () => [],
+  const native = { getOAuthProviders: () => [], get: (id: string) => entries.get(id), list: () => [...entries.keys()],
+    setAsync: async () => {}, removeAsync: async (id: string) => { entries.delete(id); }, drainErrors: () => [],
     login: async () => {}, getApiKey: async () => 'synthetic' };
   try {
-    const auth = createPiProviderAuth({ create: p => { opened.push(p); return native; }, inMemory: () => native }, file);
+    const auth = createPiProviderAuth({ createAsync: async p => { opened.push(p); return native; }, inMemory: () => native }, file);
     const scope = await auth.getRuntimeCredentialScope!('old');
     assert.equal(isRuntimeCredentialScopeCurrent(file, 'old', scope), true);
     await auth.removeCredential!('old');
@@ -50,11 +50,14 @@ test('private remove requires exact operation, revision and provider identity', 
 });
 test('legacy forgetting fails closed outside proved authority and removes only named saved entry', async () => {
   const removed: string[] = [];
-  const authority = { auth: { get: () => ({ type: 'api_key' as const, key: 'synthetic' }), remove: (id: string) => { removed.push(id); } }, models: { getAvailable: () => [], find: () => undefined } };
+  let reloads = 0;
+  const authority = { auth: { get: () => ({ type: 'api_key' as const, key: 'synthetic' }),
+    reloadAsync: async () => { reloads++; }, removeAsync: async (id: string) => { removed.push(id); } },
+    models: { getAvailable: () => [], find: () => undefined } };
   await assert.rejects(forgetExistingProviderCredential(authority, 'old'));
-  assert.deepEqual(removed, []);
+  assert.deepEqual(removed, []); assert.equal(reloads, 0);
   await forgetExistingProviderCredential({ ...authority, canForgetCredential: true }, 'old');
   assert.deepEqual(removed, ['old']);
   await assert.rejects(forgetExistingProviderCredential({ ...authority, canForgetCredential: true, auth: { ...authority.auth, drainErrors: () => [new Error('synthetic')] } }, 'other'));
-  assert.deepEqual(removed, ['old']);
+  assert.deepEqual(removed, ['old']); assert.equal(reloads, 2);
 });

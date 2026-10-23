@@ -26,7 +26,7 @@ for (const definition of definitions) test(`${definition.id}: service setup, per
   const auth: ProviderManagementAuthPort = {
     // Custom connection deliberately exercises the unregistered compatible-provider path.
     definitions: () => definitions.filter(d => d.kind !== 'custom'),
-    hasSavedCredential: id => !!saved[id],
+    listSavedCredentialIds: async () => Object.keys(saved),
     stageOAuthLogin: async (_, callbacks) => {
       callbacks.onDeviceCode({ userCode: 'PUBLIC-CODE', verificationUri: 'https://login.invalid' });
       callbacks.onProgress?.(secret);
@@ -102,7 +102,7 @@ for (const outcome of ['failure', 'cancel'] as const) test(`Copilot OAuth ${outc
   let ready!: () => void, finish!: () => void, writes = 0;
   const started = new Promise<void>(r => { ready = r; });
   const values: unknown[] = [];
-  const auth: ProviderManagementAuthPort = { definitions: () => definitions, hasSavedCredential: () => false,
+  const auth: ProviderManagementAuthPort = { definitions: () => definitions, listSavedCredentialIds: async () => [],
     stageOAuthLogin: async (_, cb) => {
       cb.onDeviceCode({ userCode: 'PUBLIC', verificationUri: 'https://login.invalid' }); ready();
       await new Promise<void>(r => { finish = r; });
