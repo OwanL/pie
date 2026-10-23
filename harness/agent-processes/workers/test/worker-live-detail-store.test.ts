@@ -76,7 +76,7 @@ test('baseline pages reassemble huge non-ASCII strings exactly under a tiny inje
     emit: (frame) => { frames.push(frame as DetailFrame); return true; },
     budgets: { maxPageBytes: 768, maxCanonicalBytes: 1024 },
   });
-  const text = '🙂é漢字\\\"\n\t'.repeat(800);
+  const text = '🙂é漢字\\"\n\t'.repeat(800);
   store.observe({ ...root, details: details(text) });
   store.subscribe('request-1', 'subscription-1', address, undefined, 768);
   await settle();

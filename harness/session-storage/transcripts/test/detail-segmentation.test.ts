@@ -169,7 +169,7 @@ test('huge values segment into bounded pages and reassemble exactly (tiny budget
 // `npm run test:large-detail` -> test/large-detail.e2e.ts.
 
 test('cursor preserves exact minimum-budget pages and optional source hash verification', () => {
-  const source = JSON.stringify({ text: '🌍é漢\\\"\n\t'.repeat(300) });
+  const source = JSON.stringify({ text: '🌍é漢\\"\n\t'.repeat(300) });
   const pages = segmentDetailPages(source, 5, MIN_DETAIL_PAGE_BYTES, 'stable-fixture');
   for (const expectedHash of [undefined, sha256(source), sha256('wrong')]) {
     const cursor = new DetailPageCursor(new StringCodePointReader(source), 5,

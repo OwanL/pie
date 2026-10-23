@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { memo } from 'preact/compat';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useMemo, useRef } from 'preact/hooks';
 
 import type {
   ActiveRunSummary,

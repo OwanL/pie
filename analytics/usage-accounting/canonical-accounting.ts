@@ -52,8 +52,7 @@ export interface CanonicalAccountingDeps {
 
 interface AppendUsageOptions { kind?: BillableInvocationKind; branchId?: string | null; operationId?: string | null; toolId?: string | null; outcome?: BillableInvocationRecord['outcome']; sessionId?: string | null; stableMissingTime?: boolean; }
 /** Structural accounting surface; no legacy persistence owner is required. */
-export interface AccountingPort extends Pick<CanonicalAccounting, 'observeAssistantTurnStarted' | 'observeSkillPruningUsage' | 'observeSubagentToolResult' | 'observeAssistantTurnEnded' | 'observeSessionUsageSnapshot' | 'observeBranchEntry' | 'observeAuxiliaryLlmUsage' | 'observeAutoRetry' | 'onSessionClosed' | 'replaceSessionPath'> {
-}
+export type AccountingPort = Pick<CanonicalAccounting, 'observeAssistantTurnStarted' | 'observeSkillPruningUsage' | 'observeSubagentToolResult' | 'observeAssistantTurnEnded' | 'observeSessionUsageSnapshot' | 'observeBranchEntry' | 'observeAuxiliaryLlmUsage' | 'observeAutoRetry' | 'onSessionClosed' | 'replaceSessionPath'>;
 export function createCanonicalAccounting(deps: CanonicalAccountingDeps): AccountingPort { return new CanonicalAccounting(deps); }
 export class CanonicalAccounting implements AccountingPort {
  constructor(private readonly deps: CanonicalAccountingDeps) {}

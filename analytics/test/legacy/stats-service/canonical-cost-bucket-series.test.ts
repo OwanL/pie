@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import type { CanonicalAnalyticsReadModel } from '../../../queries/query-entry.js';
