@@ -48,9 +48,9 @@ for (const mode of ['empty', 'admitted', 'legacy'] as const) {
       server.modelRegistry = { getAll: () => [candidate], getAvailable: () => [] };
       server.authStorage = { hasAuth: () => mode === 'admitted' };
       server.sdk = { ...server.sdk,
-        AuthStorage: { create: () => ({ get: () => undefined }), inMemory: () => ({ hasAuth: () => mode === 'admitted' }) },
+        AuthStorage: { createAsync: async () => ({ get: () => undefined }), inMemory: () => ({ hasAuth: () => mode === 'admitted' }) },
         getProviderRuntimeBuiltinModel: () => candidate,
-        createProviderManagementAuth: () => ({ definitions: () => [], hasSavedCredential: () => false }),
+        createProviderManagementAuth: () => ({ definitions: () => [], listSavedCredentialIds: async () => [] }),
       };
       if (mode !== 'legacy') {
         // Keep production's shipped authority enabled; this synthetic fixture

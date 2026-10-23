@@ -22,7 +22,7 @@ test('native keyless models.json identities allow Settings/Remove but deny conne
     await writeFile(modelsFile, modelsText);
     await writeFile(credentialsFile, credentialsText);
     const sdk = await loadSdk(sourceDescriptor.sdkPath, { ...sourceLoadMode, surface: 'cold' });
-    const auth = { getOAuthProviders: () => [], list: () => ['fake'], hasAuth: (id: string) => id === 'fake',
+    const auth = { reloadAsync: async () => {}, reload: forbidden, setAsync: forbidden, removeAsync: forbidden, getOAuthProviders: () => [], list: () => ['fake'], hasAuth: (id: string) => id === 'fake',
       getAuthStatus: (id: string) => ({ configured: id === 'fake', source: id === 'fake' ? 'stored' : undefined }),
       get: forbidden, getAll: forbidden, getApiKey: forbidden };
     const models = sdk.ModelRegistry.create(auth, modelsFile);
@@ -36,7 +36,7 @@ test('native keyless models.json identities allow Settings/Remove but deny conne
     (models as unknown as { unregisterProvider(id: string): void }).unregisterProvider('dynamic');
     assert.deepEqual(models.getConfiguredProviderIds!(), ['local']);
     service = await createCoordinatorProviderManagement({ ...sdk, createProviderManagementAuth: () => ({
-      definitions: () => [], hasSavedCredential: () => false, getApiKey: forbidden,
+      definitions: () => [], listSavedCredentialIds: async () => [], getApiKey: forbidden,
       saveCredential: forbidden, discoveryBaseUrl: forbidden,
     }) }, () => {}, () => ({ auth, models }));
     const read = await service.request({ type: 'read', operationId: 'read' });

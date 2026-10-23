@@ -169,6 +169,18 @@ test('provider management is host-global, credential-free and separate from chat
     message: 'Connecting…', access: 'synthetic-private-input' } }), false);
 });
 
+test('coordinator credential waits and ordered management projection have explicit contract boundaries', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /each awaits a fresh batch of saved-credential IDs, then captures current service state/u);
+  assert.match(contract, /response drafts and `configRevision` are projected at the same final current-state boundary, including inherited settings/u);
+  assert.match(contract, /Projection never acquires the configuration mutation lane/u);
+  assert.match(contract, /supported asynchronous native credential storage without synchronous fallback/u);
+  assert.match(contract, /No authoritative credential inventory is cached across admissions/u);
+  assert.match(contract, /synchronous SDK APIs and `runtime\/services\.ts::currentSaved\(\)` remain synchronous and can still contend on the native lock/u);
+  assert.match(contract, /The native lock remains held across OAuth refresh/u);
+  assert.match(contract, /credential persistence checks cancellation at the canonical write boundary/u);
+});
+
 test('explicit provider removal masks stale catalogs without rewriting selections or preferences', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /Explicit provider removal is live policy for existing and new chats/u);

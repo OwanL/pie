@@ -529,7 +529,8 @@ export class BackendServer {
     const runtime = await this.sessionProviderRuntime(sessionPath);
     if (!runtime) return await loadConfiguredModels(this.agentDir, this.modelRegistry);
     const management = await this.getProviderManagement();
-    const models = management.admittedRuntimeModels(runtime.snapshot, this.authStorage);
+    const models = await management.admittedRuntimeModels(runtime.snapshot, this.authStorage);
+    if (this.disposed) throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
     return { ok: true as const, models, managed: true as const };
   }
   private sdkPath: string;
@@ -1055,14 +1056,18 @@ export class BackendServer {
         && path.resolve(authPath) === path.join(privateAuthDir, 'auth.json')
         && await fs.realpath(privateAuthDir).catch(() => '') === privateAuthDir
         && !(await fs.lstat(authPath).catch(() => undefined))?.isSymbolicLink();
-      this.authStorage = this.sdk.AuthStorage.create(authPath);
+      if (!this.sdk.AuthStorage.createAsync) throw new Error('Native asynchronous credential storage is unavailable');
+      const authStorage = await this.sdk.AuthStorage.createAsync(authPath);
+      if (this.disposed) throw new Error('Backend stopped during credential initialization');
+      this.authStorage = authStorage;
       this.modelRegistry = this.sdk.ModelRegistry.create(
-        this.authStorage,
+        authStorage,
         path.join(this.agentDir, 'models.json'),
       );
       this.registerProviderGateModelUrls();
     });
 
+    if (this.disposed) throw new Error('Backend stopped during credential initialization');
     const coldStore = this.initializeColdSessionStore();
     this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
       coldLeaseAuthority: coldStore.leases,
@@ -2139,7 +2144,7 @@ export class BackendServer {
   }
 
   private async pollSessionCatalog(): Promise<void> {
-    if (!this.sessionCatalogPollingActive || this.sessionCatalogPollInFlight) return;
+    if (this.disposed || !this.sessionCatalogPollingActive || this.sessionCatalogPollInFlight) return;
     this.sessionCatalogPollInFlight = true;
     let catalogChanged = false;
     try {
@@ -2162,22 +2167,30 @@ export class BackendServer {
       // retires unacknowledging workers) and a moved models.json re-broadcasts
       // the configured catalog authority. Both are best-effort poll extensions;
       // the next poll retries a failed broadcast.
-      if (this.workerRuntimeRouter) {
+      const router = this.workerRuntimeRouter;
+      if (!this.disposed && this.sessionCatalogPollingActive && router) {
         try {
           const authPath = this.authPath || path.join(this.agentDir, 'auth.json');
           const authFingerprint = await fs.stat(authPath)
             .then((stat) => `${stat.size}:${stat.mtimeMs}`)
             .catch(() => 'missing');
+          if (this.disposed || !this.sessionCatalogPollingActive || this.workerRuntimeRouter !== router) return;
           if (authFingerprint !== this.authFingerprint) {
+            const authStorage = this.authStorage;
+            if (!authStorage?.reloadAsync) throw new Error('Native asynchronous credential reload is unavailable');
+            await authStorage.reloadAsync();
+            if (authStorage.drainErrors?.().length) throw new Error('Credential reload failed');
+            if (this.disposed || !this.sessionCatalogPollingActive || this.workerRuntimeRouter !== router || this.authStorage !== authStorage) return;
+            await router.refreshAuth(authFingerprint, authPath);
+            if (this.disposed || !this.sessionCatalogPollingActive || this.workerRuntimeRouter !== router) return;
             this.authFingerprint = authFingerprint;
-            this.authStorage?.reload?.();
-            await this.workerRuntimeRouter.refreshAuth(authFingerprint, authPath);
           }
         } catch (error) {
           backendWarn('backend-session', 'authFingerprintPoll.failed', {
             error: toErrorMessage(error),
           });
         }
+        if (this.disposed || !this.sessionCatalogPollingActive || this.workerRuntimeRouter !== router) return;
         try {
           const modelsPath = path.join(this.agentDir, 'models.json');
           const modelsFingerprint = await fs.stat(modelsPath)
@@ -4230,7 +4243,11 @@ export class BackendServer {
     if (await hasCoordinatorProviderConfiguration()) {
       const management = await this.getProviderManagement();
       const snapshot = await management.previewRuntimeProjection(this.creationProviderRuntimeInputs());
-      if (snapshot) return { ok: true as const, models: management.admittedRuntimeModels(snapshot, this.authStorage) };
+      if (snapshot) {
+        const models = await management.admittedRuntimeModels(snapshot, this.authStorage);
+        if (this.disposed) throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
+        return { ok: true as const, models };
+      }
     }
     return await loadConfiguredModels(this.agentDir, this.modelRegistry);
   }
@@ -5483,7 +5500,8 @@ export class BackendServer {
         if (providerRuntimeReference) {
           const management = await this.getProviderManagement();
           const snapshot = await management.readRuntimeProjection(providerRuntimeReference);
-          const admitted = management.admittedRuntimeModels(snapshot, this.authStorage);
+          const admitted = await management.admittedRuntimeModels(snapshot, this.authStorage);
+          if (this.disposed) throw new BackendError('PROVIDER_MANAGEMENT_UNAVAILABLE', 'Provider management is unavailable.');
           const defaults = await this.readModelSettings();
           const selected = selectAdmittedInitialModel(this.sdk, admitted, defaults.defaultProvider, defaults.defaultModel);
           if (selected) await store.setHandleModelSettings(handle, { model: { provider: selected.provider, modelId: selected.id } });

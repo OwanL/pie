@@ -3,10 +3,10 @@ import test from 'node:test';
 import { captureExistingProviderConnections } from '../provider-management';
 import type { SdkModelRegistry } from '../../lib/sdk-integration/sdk';
 
-test('explicit keyless configuration is inventoried without secret-bearing model or credential reads', () => {
+test('explicit keyless configuration is inventoried without secret-bearing model or credential reads', async () => {
   const forbidden = () => { throw new Error('forbidden secret read'); };
-  const rows = captureExistingProviderConnections({
-    auth: { list: () => ['saved'], getOAuthProviders: () => [{ id: 'registered', name: 'Registered' }],
+  const rows = await captureExistingProviderConnections({
+    auth: { reloadAsync: async () => {}, reload: forbidden, setAsync: forbidden, removeAsync: forbidden, list: () => ['saved'], getOAuthProviders: () => [{ id: 'registered', name: 'Registered' }],
       getAuthStatus: id => ({ configured: id !== 'local', source: id === 'saved' ? 'stored' : undefined }),
       hasAuth: id => id !== 'local', get: forbidden, getAll: forbidden, getApiKey: forbidden },
     models: { getConfiguredProviderIds: () => ['local'], getAvailable: forbidden,

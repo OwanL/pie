@@ -22,7 +22,7 @@ test('coordinator injects public native models without resolving OAuth credentia
       createProviderManagementAuth: () => ({
         definitions: () => [{ id: 'openai-codex', name: 'Codex', kind: 'native', api: 'openai-codex-responses',
           baseUrl: 'https://example.com', authMethods: ['oauth'], discovery: 'unsupported' }],
-        hasSavedCredential: () => true,
+        listSavedCredentialIds: async () => ['openai-codex'],
         getApiKey: async () => { throw new Error('must not resolve credentials'); },
         discoveryBaseUrl: async () => { throw new Error('must not resolve account endpoint'); }
       }),

@@ -21,17 +21,21 @@ export interface ExistingProviderAuthority {
 }
 
 export async function forgetExistingProviderCredential(authority: ExistingProviderAuthority, id: string): Promise<void> {
-  if (!authority.canForgetCredential || !authority.auth.remove) throw new Error('Existing credential removal is unavailable');
-  authority.auth.reload?.();
+  if (!authority.canForgetCredential || !authority.auth.reloadAsync || !authority.auth.removeAsync || !authority.auth.get) {
+    throw new Error('Existing credential removal is unavailable');
+  }
+  await authority.auth.reloadAsync();
   if (authority.auth.drainErrors?.().length) throw new Error('Existing credential storage failed');
   // No environment, fallback keys or plugin stores are ever altered.
-  if (!authority.auth.get?.(id)) return;
-  authority.auth.remove(id);
+  if (!authority.auth.get(id)) return;
+  await authority.auth.removeAsync(id);
   if (authority.auth.drainErrors?.().length) throw new Error('Existing credential storage failed');
 }
 
-export function captureExistingProviderConnections(authority: ExistingProviderAuthority) {
-  authority.auth.reload?.();
+export async function captureExistingProviderConnections(authority: ExistingProviderAuthority) {
+  if (!authority.auth.reloadAsync) throw new Error('Existing metadata unavailable');
+  await authority.auth.reloadAsync();
+  if (authority.auth.drainErrors?.().length) throw new Error('Existing metadata unavailable');
   // Explicit allowlist: never pass native headers, auth, extensions or transport objects.
   const models = (authority.models.getAll?.() ?? []).map(model => ({ id: model.id, provider: model.provider,
     name: model.name ?? model.id, input: model.input, reasoning: model.reasoning,
@@ -48,7 +52,7 @@ export function captureExistingProviderConnections(authority: ExistingProviderAu
       || models.some(model => model.provider === id && authority.models.hasConfiguredAuth?.(model));
     if (!(configured.has(id) || hasAuth)) continue;
     rows.push({ id, models: Object.fromEntries(models.filter(model => model.provider === id).map(({ provider: _provider, id: modelId, ...model }) => [modelId, model])),
-      canForgetCredential: authority.canForgetCredential === true && !!authority.auth.remove && !!authority.auth.get?.(id), modelCount: new Set(models.filter(model => model.provider === id).map(model => model.id)).size,
+      canForgetCredential: authority.canForgetCredential === true && !!authority.auth.removeAsync && !!authority.auth.get?.(id), modelCount: new Set(models.filter(model => model.provider === id).map(model => model.id)).size,
       credentials: !hasAuth ? 'none' : status?.source === 'env' || status?.source === 'environment' ? 'environment' : status?.source === 'stored' || status?.source === 'oauth' || status?.source === 'api_key' ? 'saved' : 'default' });
   }
   if (authority.auth.drainErrors?.().length || authority.models.getError?.()) throw new Error('Existing metadata unavailable');
@@ -91,6 +95,7 @@ export async function createCoordinatorProviderManagement(
         input: model.input, reasoning: model.reasoning, contextWindow: model.contextWindow,
         maxTokens: model.maxTokens, pricing: parseModelPricing(model.cost) }])) }),
   });
+  let disposed = false;
   // Session captures are durable configuration, not disposable discovery cache.
   const artifactDir = path.join(paths.configDir, 'provider-runtime');
   const credentialFile = path.join(paths.configDir, 'credentials.json');
@@ -100,16 +105,25 @@ export async function createCoordinatorProviderManagement(
       return builtin ? [builtin] : [];
     }));
   return { ...service,
-    admittedRuntimeModels(snapshot: RuntimeSnapshot, legacyAuth?: SdkAuthStorage) {
+    dispose() { disposed = true; service.dispose(); },
+    async admittedRuntimeModels(snapshot: RuntimeSnapshot, legacyAuth?: SdkAuthStorage) {
+      if (disposed) throw new Error('Provider management is unavailable');
+      // One fresh observation per invocation, never a persistent inventory cache or
+      // one lock acquisition per model. Epoch checks remain in the pure projection.
+      let saved: SdkAuthStorage | undefined;
+      if (snapshot.models.some(row => row.credential.source === 'saved')) {
+        if (!sdk.AuthStorage.createAsync) throw new Error('Provider credential storage is unavailable');
+        try { saved = await sdk.AuthStorage.createAsync(credentialFile); }
+        catch { throw new Error('Provider credential storage failed'); }
+        if (!saved.get || saved.drainErrors?.().length) throw new Error('Provider credential storage failed');
+      }
+      if (disposed) throw new Error('Provider management is unavailable');
+      // A removal may commit while initialization is awaiting the native lock.
       snapshot = currentProviderSelectorSnapshot(snapshot);
       const environment = sdk.AuthStorage.inMemory?.();
       const available = availableProviderRuntimeModels(snapshot, {
         credentialFile,
-        savedCredential: id => {
-          const native = sdk.AuthStorage.create(credentialFile);
-          const credential = native.get?.(id);
-          return native.drainErrors?.().length ? undefined : credential;
-        },
+        savedCredential: id => saved?.get?.(id),
         // Native configured-auth checks inspect references only: no shell execution or OAuth refresh.
         legacyHasAuth: (id, model) => legacy?.().models.hasConfiguredAuth?.(model) ?? legacyAuth?.hasAuth?.(id) ?? false,
         defaultHasAuth: id => environment?.hasAuth?.(id) ?? false,

@@ -24,7 +24,7 @@ function makeSdk(counters: { authConstructors: number; builtinReads: number; aut
   const auth: ProviderManagementAuthPort = {
     definitions: () => [{ id: 'openai', name: 'OpenAI', kind: 'openai', api: 'openai-completions',
       baseUrl: 'https://api.openai.com/v1', authMethods: [], discovery: 'openai' }],
-    hasSavedCredential: () => { counters.authEffects++; throw new Error('unexpected auth read'); },
+    listSavedCredentialIds: async () => { counters.authEffects++; throw new Error('unexpected auth read'); },
     stageOAuthLogin: async () => { counters.authEffects++; throw new Error('unexpected auth effect'); },
     saveCredential: async () => { counters.authEffects++; throw new Error('unexpected auth effect'); },
     getApiKey: async () => { counters.authEffects++; throw new Error('unexpected auth read'); },
@@ -56,7 +56,7 @@ test('coordinator runtime capture is SDK-free, durable and immutable across conf
     // The service's missing-config path must not invoke its builtin-model supplier.
     const pureService = createProviderManagementService({ configFile: join(configDir, 'providers.yaml'),
       modelCacheDir: join(dataDir, 'cache', 'provider-models'), auth: {
-        definitions: () => [], hasSavedCredential: () => { counters.authEffects++; throw new Error('unexpected auth read'); },
+        definitions: () => [], listSavedCredentialIds: async () => { counters.authEffects++; throw new Error('unexpected auth read'); },
         stageOAuthLogin: async () => { counters.authEffects++; throw new Error('unexpected auth effect'); },
         saveCredential: async () => { counters.authEffects++; throw new Error('unexpected auth effect'); },
         getApiKey: async () => { counters.authEffects++; throw new Error('unexpected auth read'); },
