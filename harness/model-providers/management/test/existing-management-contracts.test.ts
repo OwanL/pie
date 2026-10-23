@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { parseProviderConfig } from '../../catalog/provider-config';
 import { isProviderManagementRequest, isProviderManagementSnapshot } from '../validation';
 import { forgetExistingProviderCredential } from '../../../agent-processes/coordinator/provider-management';
+import type { SdkAuthStorage } from '../../../agent-processes/lib/sdk-integration/sdk';
+import type { StagedProviderCredential } from '../auth-port';
 
 test('managed native removal targets explicit store and revokes old runtime scope', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'pie-provider-remove-'));
@@ -51,13 +53,22 @@ test('private remove requires exact operation, revision and provider identity', 
 test('legacy forgetting fails closed outside proved authority and removes only named saved entry', async () => {
   const removed: string[] = [];
   let reloads = 0;
-  const authority = { auth: { get: () => ({ type: 'api_key' as const, key: 'synthetic' }),
-    reloadAsync: async () => { reloads++; }, removeAsync: async (id: string) => { removed.push(id); } },
-    models: { getAvailable: () => [], find: () => undefined } };
+  const entries = new Map<string, StagedProviderCredential>([
+    ['old', { type: 'api_key', key: 'synthetic-old' }],
+    ['other', { type: 'api_key', key: 'synthetic-other' }],
+  ]);
+  const auth: SdkAuthStorage = {
+    get: id => entries.get(id), list: () => [...entries.keys()],
+    reloadAsync: async () => { reloads++; },
+    setAsync: async (id, credential, options) => { options?.signal?.throwIfAborted(); entries.set(id, structuredClone(credential)); },
+    removeAsync: async (id, options) => { options?.signal?.throwIfAborted(); entries.delete(id); removed.push(id); },
+  };
+  const authority = { auth, models: { getAvailable: () => [], find: () => undefined } };
   await assert.rejects(forgetExistingProviderCredential(authority, 'old'));
   assert.deepEqual(removed, []); assert.equal(reloads, 0);
   await forgetExistingProviderCredential({ ...authority, canForgetCredential: true }, 'old');
-  assert.deepEqual(removed, ['old']);
+  assert.deepEqual(removed, ['old']); assert.deepEqual(auth.list(), ['other']);
   await assert.rejects(forgetExistingProviderCredential({ ...authority, canForgetCredential: true, auth: { ...authority.auth, drainErrors: () => [new Error('synthetic')] } }, 'other'));
   assert.deepEqual(removed, ['old']); assert.equal(reloads, 2);
+  assert.deepEqual(auth.get?.('other'), { type: 'api_key', key: 'synthetic-other' });
 });
