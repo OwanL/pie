@@ -202,9 +202,13 @@ export function installWorkerProviderNetworkLease(
       publishProgress('headers_wait');
       const transportController = new AbortController();
       const activeReader: { current?: ReadableStreamDefaultReader<Uint8Array> } = {};
+      let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
       const onTransportAbort = (): void => {
         const reason = signal ? abortError(signal) : new Error('Provider transport aborted.');
         if (!transportController.signal.aborted) transportController.abort(reason);
+        // Error the consumer before cancelling the source: cancel() resolves
+        // pending reads as clean EOF and must not make an aborted turn succeed.
+        bodyController?.error(reason);
         if (activeReader.current) void activeReader.current.cancel(reason).catch(() => undefined);
         settleProgress('transport_error');
         observe({ classification: 'cancelled', retryable: false });
@@ -257,6 +261,10 @@ export function installWorkerProviderNetworkLease(
       const reader = response.body.getReader();
       activeReader.current = reader;
       const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+          if (signal?.aborted) controller.error(abortError(signal));
+        },
         async pull(controller) {
           let idleTimer: ReturnType<typeof setTimeout> | undefined;
           try {
@@ -276,6 +284,7 @@ export function installWorkerProviderNetworkLease(
                 idleTimer.unref?.();
               }),
             ]);
+            if (signal?.aborted) throw abortError(signal);
             if (result.done) {
               if (response.ok) observe({ classification: 'success', status: response.status, retryable: false });
               settleProgress('transport_terminal');

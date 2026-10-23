@@ -645,6 +645,35 @@ test('worker provider lease bounds hung response headers and releases coordinato
   }
 });
 
+test('worker provider body abort rejects consumption instead of reporting clean EOF', async () => {
+  const originalFetch = globalThis.fetch;
+  const observations: string[] = [];
+  const releases: string[] = [];
+  let bodyCancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    cancel() { bodyCancelled = true; },
+  }))) as typeof fetch;
+  const uninstall = installWorkerProviderNetworkLease({
+    acquire: async () => ({ leaseId: 'lease-body-abort', headerWaitMs: 1_000, streamIdleTimeoutMs: 1_000 }),
+    cancel: async () => undefined,
+    observe: (_leaseId, observation) => { observations.push(observation.classification); },
+    release: async (_leaseId, outcome) => { releases.push(outcome); },
+  });
+  try {
+    const controller = new AbortController();
+    const response = await globalThis.fetch('https://provider.example/v1/chat', { signal: controller.signal });
+    const consuming = response.text();
+    controller.abort();
+    await assert.rejects(consuming, (error: Error) => error.name === 'AbortError');
+    assert.equal(bodyCancelled, true);
+    assert.deepEqual(observations, ['cancelled']);
+    assert.deepEqual(releases, ['cancelled']);
+  } finally {
+    uninstall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker provider lease bounds a stalled response body', async () => {
   const originalFetch = globalThis.fetch;
   const observations: string[] = [];
