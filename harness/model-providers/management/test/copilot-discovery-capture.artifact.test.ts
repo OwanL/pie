@@ -19,6 +19,7 @@ test('Copilot discovery captures the native account endpoint and saved scope for
   const access = 'synthetic;proxy-ep=proxy.business.githubcopilot.com;';
   const refresh = 'synthetic-unused-refresh';
   const calls: string[] = [];
+  const observedRequests: { authorization?: string | null; integration?: string | null; contentType?: string | null; body?: unknown }[] = [];
   let unexpected = 0;
   let modelId = '';
   let phase: 'offline' | 'discovery' | 'runtime' = 'offline';
@@ -26,19 +27,13 @@ test('Copilot discovery captures the native account endpoint and saved scope for
     const request = new Request(input, init);
     calls.push(`${request.method} ${request.url}`);
     if (phase === 'discovery' && request.method === 'GET' && request.url === 'https://api.business.githubcopilot.com/models') {
-      assert.equal(request.headers.get('Authorization'), `Bearer ${access}`);
-      assert.equal(request.headers.get('Copilot-Integration-Id'), 'vscode-chat');
+      observedRequests.push({ authorization: request.headers.get('Authorization'), integration: request.headers.get('Copilot-Integration-Id') });
       return Response.json({ data: [{ id: modelId, name: 'Synthetic account listing', model_picker_enabled: true,
         supported_endpoints: ['/chat/completions'], billing: { token_prices: { default: { input_price: 1, output_price: 2 } } } }] });
     }
     if (phase === 'runtime' && request.method === 'POST' && request.url === 'https://api.business.githubcopilot.com/chat/completions') {
-      assert.equal(request.headers.get('Authorization'), `Bearer ${access}`);
-      assert.equal(request.headers.get('content-type'), 'application/json');
-      assert.equal(request.headers.get('Copilot-Integration-Id'), 'vscode-chat');
-      const body = await request.json() as { model: string; stream: boolean; messages: { role: string; content: unknown }[] };
-      assert.equal(body.model, modelId);
-      assert.equal(body.stream, true);
-      assert.ok(body.messages.some(message => message.role === 'user' && message.content === 'artifact fixture'));
+      observedRequests.push({ authorization: request.headers.get('Authorization'), integration: request.headers.get('Copilot-Integration-Id'),
+        contentType: request.headers.get('content-type'), body: await request.json() });
       return Response.json({ error: { message: 'synthetic unauthorized' } }, { status: 401 });
     }
     unexpected++;
@@ -74,13 +69,16 @@ test('Copilot discovery captures the native account endpoint and saved scope for
     phase = 'discovery';
     const discovered = await service.request({ type: 'refresh', operationId: 'refresh', id: 'github-copilot' });
     assert.equal(discovered.status, 'ok');
-    assert.ok(discovered.draft?.models.some(model => model.id === modelId));
+    const discoveredModel = discovered.draft?.models.find(model => model.id === modelId);
+    assert.equal(discoveredModel?.name, 'Synthetic account listing');
     assert.deepEqual(calls, ['GET https://api.business.githubcopilot.com/models']);
+    assert.deepEqual(observedRequests[0], { authorization: `Bearer ${access}`, integration: 'vscode-chat' });
     phase = 'offline';
     const captured = await service.captureRuntimeProjection(baseline, baseline);
     assert.ok(captured);
     const row = captured.models.find(model => model.providerId === 'github-copilot' && model.id === modelId);
     assert.ok(row?.model);
+    assert.equal(row.model.name, 'Synthetic account listing');
     assert.equal(row.model.baseUrl, 'https://api.business.githubcopilot.com');
     assert.equal(row.rejection, undefined);
     assert.deepEqual(row.credential, { source: 'saved', scope: await auth.getRuntimeCredentialScope!('github-copilot') });
@@ -100,6 +98,9 @@ test('Copilot discovery captures the native account endpoint and saved scope for
     assert.equal(response.stopReason, 'error');
     assert.match(response.errorMessage ?? '', /401|synthetic unauthorized/);
     assert.deepEqual(calls, ['GET https://api.business.githubcopilot.com/models', 'POST https://api.business.githubcopilot.com/chat/completions']);
+    const runtimeRequest = observedRequests[1];
+    assert.deepEqual(runtimeRequest, { authorization: `Bearer ${access}`, integration: 'vscode-chat', contentType: 'application/json',
+      body: { model: modelId, stream: true, stream_options: { include_usage: true }, messages: [{ role: 'user', content: 'artifact fixture' }] } });
     assert.equal(unexpected, 0);
   } finally {
     service?.dispose();
