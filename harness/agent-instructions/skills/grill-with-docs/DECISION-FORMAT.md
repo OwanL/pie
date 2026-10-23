@@ -23,7 +23,7 @@ Only include these when they add genuine value. Most records won't need them.
 
 - **Fits an existing doc** (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) → add it there under the relevant section
 - **Standalone concern** → create a new file in `docs/` with a descriptive name (e.g. `PRUNING-DESIGN.md`)
-- **Pie convention or terminology** → add it to the [develop-pie skill](../develop-pie/SKILL.md), as directed by the root `AGENTS.md`
+- **Pie convention or terminology** → add it to the [develop-pie skill](../develop-pie/SKILL.md)
 
 Don't create a separate `docs/adr/` directory — this project records decisions inline in the relevant docs, not in a numbered ADR sequence.
 

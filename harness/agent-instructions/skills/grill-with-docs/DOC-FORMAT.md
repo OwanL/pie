@@ -6,7 +6,7 @@ This project uses specific docs for different concerns. Update the right one:
 
 ### develop-pie — conventions and instructions
 
-Add Pie-specific terminology, conventions, and contributor instructions to the [develop-pie skill](../develop-pie/SKILL.md), as directed by the root `AGENTS.md`. Keep it concise — this is the "how we work here" file, not a spec.
+Add Pie-specific terminology, conventions, and contributor instructions to the [develop-pie skill](../develop-pie/SKILL.md). Keep it concise — this is the "how we work here" file, not a spec.
 
 When adding a term, use this pattern:
 

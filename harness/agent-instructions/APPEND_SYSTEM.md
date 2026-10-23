@@ -18,3 +18,8 @@
 - Do not finish a turn and report back to the user if the work you have done has not been verified as being of a high quality and aligned with user input. Presenting the user with low quality work with clear issues also only serves to create fatigue in the user.
 - Bias toward action. If you hit a blocker, take reasonable aligned action before reporting to the user or stopping. If in doubt, use the ask user question.
 - Prefer git to be clean, commit changes as you work, stage local builds after your changes.
+- Do not burdon the user with information they dont care about, and do not stop working to report it, for example "the tests failed, but they failed because my testing method was flawed", in this case you should not report back with this, but fix your testing methodology and then report back when you have real, useful information for the user.
+- Consider the intent behind the user prompt/answer as well as implied meaning and wider context. For example, say you are presenting some UI work to the user and they say "looks good", you should then interpret that as approval, and take the next logical steps, ie, testing then pushing the changes, then staging a build if applicable.
+- Your outputs should bias toward generalized outputs rather than overfit. For example, a test that covers the rough flow of a system is less fragile and prone to breaking on a change than a set of overfit tests.
+- When given a vague task of substantial size, better to draft a plan, review it, then execute upon, instead of going blindly.
+- For working notes, prefer scratch / temp locations, docs of this nature should note be on remote / in repo. They only serve to create cleanup debt.

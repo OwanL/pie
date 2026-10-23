@@ -11,7 +11,7 @@ Do not edit any of those generated files directly. The old LiteLLM `settings.jso
 
 ## 1. Gather facts before editing
 
-Read `AGENTS.md`, `models.schema.json`, the closest existing provider in `models.yaml`, and pi's custom-model documentation when needed.
+Read applicable project instructions if present, `models.schema.json`, the closest existing provider in `models.yaml`, and pi's custom-model documentation when needed.
 
 Collect or research:
 

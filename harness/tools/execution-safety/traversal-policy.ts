@@ -11,8 +11,7 @@
  *   {@link PROTECTED_DIRECTORIES} by that skill's scanner regression tests
  *   (`test_scanner_regressions.py`), so the scanner ignores cannot silently
  *   fall behind this policy.
- * - `AGENTS.md` mirrors {@link TRAVERSAL_POLICY_PROMPT} under a drift-tested
- *   marker, and every subagent task prompt embeds it, so root agents and
+ * - Every subagent task prompt embeds {@link TRAVERSAL_POLICY_PROMPT}, so
  *   subagents receive the same policy without putting traversal prose in the
  *   Pie base prompt.
  *
