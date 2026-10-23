@@ -840,14 +840,17 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
 
   assert.doesNotMatch(runningParentHtml, /status-chip-label">Running/);
   assert.doesNotMatch(runningParentHtml, /subagent-model-tag/);
-  assert.match(runningParentHtml, /gpt-4\.1/);  // model now shown in header
+  assert.match(runningParentHtml, /gpt-4\.1/);  // model remains available in the footer
   assert.match(runningParentHtml, /status-chip-completed[^>]*>.*Finished/);
   assert.doesNotMatch(runningParentHtml, /Starting|waiting for first status update/);
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
-  assert.doesNotMatch(runningParentHtml, /ctx 51k \/ 200k/);
-  assert.doesNotMatch(runningParentHtml, /26%/);
-  assert.doesNotMatch(runningParentHtml, /tok 92k/);
-  assert.doesNotMatch(runningParentHtml, />in 51k<|>out 2\.4k<|>cache 38\.6k<|>2t</);
+  // Optional footer groups are rendered for card-local CSS to reveal; SSR
+  // cannot establish which groups are visible at a particular width.
+  assert.match(runningParentHtml, /subagent-inline-context">Context 51k \/ 200k \(26%\)/);
+  assert.match(runningParentHtml, /<span>In 51k<\/span><span>Out 2\.4k<\/span>/);
+  assert.match(runningParentHtml, /subagent-inline-cache">Cache read 38\.6k<\/span>/);
+  assert.match(runningParentHtml, /subagent-inline-turns">2 provider turns<\/span>/);
+  assert.doesNotMatch(runningParentHtml, /Cache write|tok 92k/);
   assert.doesNotMatch(runningParentHtml, /last 12\.0 tok\/s/);
   assert.match(runningParentHtml, /Recovered/);
 

@@ -7,6 +7,7 @@
   border-radius: var(--panel-radius-md);
   background: var(--panel-card-surface);
   box-shadow: none;
+  container: tool-row subagent-card / inline-size;
 }
 
 /* When collapsed the header acts as the entire visible tile. */
@@ -1088,6 +1089,26 @@
 .subagent-footer .subagent-model-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
 .subagent-reasoning-label { flex: 0 0 auto; white-space: pre; }
 .subagent-footer .subagent-runtime-telemetry { flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto; font: inherit; font-variant-numeric: tabular-nums; }
+/* Whole optional clusters progressively reveal; only model text may shrink.
+   Named card containment leaves generic nested tool-row queries intact. */
+.subagent-inline-usage, .subagent-model-qualified { display: none; }
+.subagent-inline-usage { flex: 0 0 auto; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@container subagent-card (min-width: 560px) {
+  .subagent-inline-context { display: inline-flex; }
+  .subagent-footer { gap: 10px; }
+  .subagent-footer .subagent-primary-meta { flex: 0 1 auto; }
+}
+@container subagent-card (min-width: 820px) {
+  .subagent-inline-tokens { display: inline-flex; }
+}
+@container subagent-card (min-width: 1100px) {
+  .subagent-inline-cache { display: inline-flex; }
+  .subagent-model-short { display: none; }
+  .subagent-model-qualified { display: inline; }
+}
+@container subagent-card (min-width: 1450px) {
+  .subagent-inline-turns { display: inline-flex; }
+}
 .subagent-task-trigger { display: block; min-width: 0; }
 .subagent-task:focus-visible,
 .subagent-task-tooltip:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 2px; }

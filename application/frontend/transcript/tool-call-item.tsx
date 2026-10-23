@@ -197,7 +197,8 @@ function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSi
         onKeyDown={(event) => event.stopPropagation()}
       >
         <span class="subagent-model-label transcript-header-summary-subtle">
-          {short}
+          <span class="subagent-model-short">{short}</span>
+          <span class="subagent-model-qualified">{model}</span>
         </span>
         {reasoning && <span class="subagent-reasoning-label"> · {reasoning}</span>}
       </span>
@@ -421,6 +422,31 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
   );
 }
 
+/** Optional reported usage; CSS reveals whole groups against this card's width. */
+function InlineUsage({ result }: { result: SubagentSingleResult }) {
+  const usage = result.usage;
+  const context = knownNonNegative(usage?.contextTokens);
+  const window = knownNonNegative(result.contextWindow);
+  const input = knownNonNegative(usage?.input);
+  const output = knownNonNegative(usage?.output);
+  const read = knownNonNegative(usage?.cacheRead);
+  const write = knownNonNegative(usage?.cacheWrite);
+  const turns = knownNonNegative(usage?.turns);
+  const cache = [
+    read !== undefined && read > 0 ? `Cache read ${formatDetailTokens(read)}` : undefined,
+    write !== undefined && write > 0 ? `${read !== undefined && read > 0 ? 'write' : 'Cache write'} ${formatDetailTokens(write)}` : undefined,
+  ].filter(Boolean).join(' · ');
+  return <>
+    {context !== undefined && window !== undefined && window > 0 && <span class="subagent-inline-usage subagent-inline-context">Context {formatDetailTokens(context)} / {formatDetailTokens(window)} ({formatContextPercent(context, window)})</span>}
+    {(input !== undefined || output !== undefined) && <span class="subagent-inline-usage subagent-inline-tokens">
+      {input !== undefined && <span>In {formatDetailTokens(input)}</span>}
+      {output !== undefined && <span>Out {formatDetailTokens(output)}</span>}
+    </span>}
+    {cache && <span class="subagent-inline-usage subagent-inline-cache">{cache}</span>}
+    {turns !== undefined && <span class="subagent-inline-usage subagent-inline-turns">{formatDetailTokens(turns)} provider {turns === 1 ? 'turn' : 'turns'}</span>}
+  </>;
+}
+
 /** High-priority metadata that should remain visible before summary text. */
 function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
   const hasModel = !!(result.selectedModel ?? result.model);
@@ -433,9 +459,9 @@ function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentS
   );
 }
 
-/** Elapsed stays in the header; cost and recovered-retry state stay in the footer;
- * detailed context, token, cache, throughput, and handoff metrics live in the
- * keyboard-accessible model tooltip. */
+/** Elapsed stays in the header; cost and recovered-retry state stay in the footer.
+ * The keyboard-accessible model tooltip retains all detailed metrics, including
+ * usage groups that are hidden in narrower cards. */
 function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
   const startedAt = result.startedAt ?? result.activitySince;
   if (startedAt === undefined || !Number.isFinite(startedAt)) return null;
@@ -1048,6 +1074,7 @@ function SubagentSingleBlock({
           requestedMode={requestedParentUserContextMode(toolCall.input)}
           displayCost={displayCost}
         />
+        <InlineUsage result={singleResult} />
         <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
       </div>
     </div>

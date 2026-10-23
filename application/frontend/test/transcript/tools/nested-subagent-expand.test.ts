@@ -340,6 +340,54 @@ test('subagent model tooltip shows the exact inherited context packet', async ()
   assert.equal(container.querySelector('.subagent-model-label')?.getAttribute('title'), null, 'model label must not duplicate the tooltip natively');
 });
 
+test('responsive inline usage keeps valid zero channels, omits invalid groups, and preserves model identity', () => {
+  const toolCall = telemetrySubagentToolCall('legacy');
+  const child = (toolCall.result as any).details.results[0];
+  child.usage = { input: 0, output: NaN, contextTokens: 0, cacheRead: 0, cacheWrite: 1200, turns: 1 };
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, 'Context 0 / 200k (0.0%)');
+  assert.equal(container.querySelector('.subagent-inline-tokens')?.textContent?.trim(), 'In 0');
+  assert.equal(container.querySelector('.subagent-inline-cache')?.textContent, 'Cache write 1.2k');
+  assert.equal(container.querySelector('.subagent-inline-turns')?.textContent, '1 provider turn');
+  assert.equal(container.querySelector('.subagent-model-qualified')?.textContent, 'provider/worker-model');
+  const trigger = container.querySelector('.subagent-model-details-trigger');
+  assert.equal(trigger?.getAttribute('tabindex'), '0');
+  assert.match(trigger?.getAttribute('aria-label') ?? '', /provider\/worker-model/);
+});
+
+test('wide model identity never combines a requested model with a different actual provider', () => {
+  for (const selectedModel of ['requested/model', 'unqualified-model']) {
+    const toolCall = telemetrySubagentToolCall('legacy');
+    const child = (toolCall.result as any).details.results[0];
+    Object.assign(child, { selectedModel, model: 'actual-model', provider: 'different-provider' });
+    mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+    assert.equal(container.querySelector('.subagent-model-qualified')?.textContent, selectedModel);
+    assert.ok(container.querySelector('.subagent-model-details-trigger')?.getAttribute('aria-label')?.includes(selectedModel));
+  }
+});
+
+test('responsive usage CSS uses per-card named thresholds without replacing tool-row containment', async () => {
+  const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
+  assert.match(css, /container: tool-row subagent-card \/ inline-size/);
+  assert.match(css, /container: tool-row \/ inline-size/);
+  for (const width of [560, 820, 1100, 1450]) {
+    assert.ok(css.includes(`@container subagent-card (min-width: ${width}px)`));
+  }
+  assert.match(css, /\.subagent-inline-usage \{ flex: 0 0 auto;/);
+});
+
+test('responsive inline usage omits unknown and invalid values without inventing zero', () => {
+  const toolCall = telemetrySubagentToolCall('legacy');
+  const child = (toolCall.result as any).details.results[0];
+  child.contextWindow = 0;
+  child.usage = { input: -1, output: Infinity, contextTokens: 10, cacheRead: 0, cacheWrite: -2, turns: 0 };
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  assert.equal(container.querySelector('.subagent-inline-context'), null);
+  assert.equal(container.querySelector('.subagent-inline-tokens'), null);
+  assert.equal(container.querySelector('.subagent-inline-cache'), null);
+  assert.equal(container.querySelector('.subagent-inline-turns')?.textContent, '0 provider turns');
+});
+
 test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recovery inline while detailed metrics move to the model tooltip', async () => {
   mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
   const header = container.querySelector<HTMLElement>('.subagent-header');
