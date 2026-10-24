@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -187,15 +188,20 @@ assert.ok(aliases.typebox[0].startsWith(${JSON.stringify(candidate.artifactDir)}
   assert.equal((await verifyPiRuntimeArtifact(candidate.artifactDir)).identity, candidate.identity);
 });
 
-test('help/list entrypoints do not acquire or validate a deliberately missing artifact', () => {
+test('help/list entrypoints do not acquire or validate a deliberately missing artifact', async () => {
   const missing = path.resolve(os.tmpdir(), 'pie-artifact-that-does-not-exist');
-  for (const [script, args] of [
+  const entrypoints = [
     ['run-tests.mjs', ['--list']], ['run-typechecks.mjs', ['--list']],
     ['run-verification.mjs', ['--help']],
     ['run-package-group.mjs', ['tests', 'extensions', '--list']],
-  ]) {
-    const result = spawnSync(process.execPath, [path.join(root, 'scripts/verification', script), ...args, '--pi-runtime', missing], { encoding: 'utf8', timeout: 30_000, windowsHide: true });
-    assert.equal(result.status, 0, `${script}: ${result.stderr}`);
-    assert.doesNotMatch(result.stderr, /ENOENT|manifest/);
+  ];
+  const run = promisify(execFile);
+  // Join every independent probe before asserting, including when a child fails.
+  const results = await Promise.allSettled(entrypoints.map(([script, args]) =>
+    run(process.execPath, [path.join(root, 'scripts/verification', script), ...args, '--pi-runtime', missing], { encoding: 'utf8', timeout: 30_000, windowsHide: true })));
+  for (const [index, result] of results.entries()) {
+    const [script] = entrypoints[index];
+    assert.equal(result.status, 'fulfilled', `${script}: ${result.reason?.stderr ?? result.reason}`);
+    assert.doesNotMatch(result.value.stderr, /ENOENT|manifest/);
   }
 });
