@@ -34,6 +34,7 @@ import {
 } from '../lib/rpc/session-control-attribution.js';
 import { normalizeThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import { buildSessionCapabilities, hasBillableSessionActivity } from '../workers/session-activity';
+import { beginSessionQueueEdit, clearSessionNoteQueue } from '../workers/session-notes.js';
 import type { ActiveRequest, SessionContext } from './server-types.js';
 import { BackendLiveTurnAccumulator } from '../workers/live-turn-accumulator';
 import { reportAgentMessageProvenanceFailure } from '../workers/session-event-shared';
@@ -276,6 +277,9 @@ async function executeMessageSend(
   }
   const billableActivity = hasBillableSessionActivity(context);
   const conversationActivity = context.activeRequest !== undefined || context.session.isStreaming;
+  if (params.coordinatorAttribution?.message?.kind === 'assignment' && (billableActivity || conversationActivity)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Task assignment was not admitted: the worker became busy.');
+  }
   // Recheck at execution (the operation ledger defers by a microtask): an
   // idle admission can race another send. Never downgrade refresh to queueing.
   if (params.refreshPruning === true && (billableActivity || conversationActivity)) {
@@ -466,6 +470,13 @@ async function executeMessageSend(
           if (!ownsRequest()) return;
           if (preflightFailed) return;
           if (success) {
+            const assignment = ownedRequest.coordinatorAttribution?.message;
+            if (assignment?.kind === 'assignment') {
+              const activeTools = ownedSession.getActiveToolNames?.();
+              if (!activeTools || !activeTools.includes('session_finish')) {
+                throw new Error('Task assignment cannot start because session_finish is unavailable in this session. Enable the session_finish tool and retry the assignment.');
+              }
+            }
             preflightAccepted = true;
             // Explicit phase boundary for the host watchdog. This internal
             // custom event is not inserted into the visible transcript; the
@@ -856,6 +867,7 @@ async function executeMessageInterrupt(
     // turn boundaries; treating that race as an error wedges the optimistic
     // "Stopping…" state and makes rapid stop→send unnecessarily fragile.
     context.session.clearQueue();
+    clearSessionNoteQueue(context);
     emitQueuedSendCancellations(deps, context, 'The queued message was cancelled by Stop before delivery.');
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
@@ -884,6 +896,7 @@ async function executeMessageInterrupt(
   // of an unrelated future send. The host also removes 'queued' transcript
   // messages on `InterruptResult{ok:true}` to stay in sync.
   context.session.clearQueue();
+  clearSessionNoteQueue(context);
   emitQueuedSendCancellations(deps, context, 'The queued message was cancelled by Stop before delivery.');
   // the SDK queue is gone; drop the localId correlation queue so
   // we don't try to match stale ids if the backend emits a late user-role
@@ -1113,51 +1126,66 @@ async function handleMessageReplaceQueue(
     );
   }
 
-  const existingCoordinatorAttributions = context.queuedCoordinatorAttributions ?? [];
-  const attributionByLocalId = new Map<string, SessionControlSender | undefined>(
-    authoritativeLocalIds.map((localId, index) => [localId, existingCoordinatorAttributions[index]]),
-  );
-  const enqueueAll = async (messages: typeof params.messages): Promise<void> => {
-    context.queuedLocalIds = messages.map((message) => message.localId);
-    context.queuedCoordinatorAttributions = messages.map((message) => attributionByLocalId.get(message.localId));
-    const enqueues: Promise<void>[] = [];
-    for (const message of messages) {
-      const sender = attributionByLocalId.get(message.localId);
-      const text = sender ? formatSessionControlPrompt(message.text, sender) : message.text;
-      const promptText = buildPromptText(text, message.inputs);
-      const images = lowerImageInputs(message.inputs);
-      const imagePayload = images.length > 0 ? images : undefined;
-      enqueues.push(context.session.steer
-        ? context.session.steer(promptText, imagePayload)
-        : context.session.followUp(promptText, imagePayload));
-    }
-    await Promise.all(enqueues);
-  };
-
-  context.session.clearQueue();
-  try {
-    await enqueueAll(params.messages);
-  } catch (replaceError) {
-    // Queue replacement is all-or-nothing from the host's perspective. Restore
-    // the original ordered queue before returning the edit failure.
-    context.session.clearQueue();
-    try {
-      await enqueueAll(params.fallbackMessages);
-    } catch (restoreError) {
-      context.session.clearQueue();
-      context.queuedLocalIds = [];
-      context.queuedOperationIds = [];
-      context.queuedOperationAttempts = [];
-      context.queuedCoordinatorAttributions = [];
-      return {
-        updated: false,
-        queueCleared: true,
-        error: `Could not update or restore the queued messages: ${toErrorMessage(replaceError)}; restore failed: ${toErrorMessage(restoreError)}`,
-      };
-    }
-    throw replaceError;
+  const releaseQueueEdit = beginSessionQueueEdit(context);
+  if (!releaseQueueEdit) {
+    throw new BackendError(
+      'SESSION_NOTE_DELIVERY_PENDING',
+      'SESSION_NOTE_DELIVERY_PENDING: A cross-session note is waiting to enter this session. The queued message was not edited; wait for note delivery and try again.',
+    );
   }
-  return { updated: true, count: params.messages.length };
+
+  try {
+    const existingCoordinatorAttributions = context.queuedCoordinatorAttributions ?? [];
+    const attributionByLocalId = new Map<string, SessionControlSender | undefined>(
+      authoritativeLocalIds.map((localId, index) => [localId, existingCoordinatorAttributions[index]]),
+    );
+    const enqueueAll = async (messages: typeof params.messages): Promise<void> => {
+      context.queuedLocalIds = messages.map((message) => message.localId);
+      context.queuedCoordinatorAttributions = messages.map((message) => attributionByLocalId.get(message.localId));
+      const enqueues: Promise<void>[] = [];
+      for (const message of messages) {
+        const sender = attributionByLocalId.get(message.localId);
+        const text = sender ? formatSessionControlPrompt(message.text, sender) : message.text;
+        const promptText = buildPromptText(text, message.inputs);
+        const images = lowerImageInputs(message.inputs);
+        const imagePayload = images.length > 0 ? images : undefined;
+        enqueues.push(context.session.steer
+          ? context.session.steer(promptText, imagePayload)
+          : context.session.followUp(promptText, imagePayload));
+      }
+      await Promise.all(enqueues);
+    };
+
+    context.session.clearQueue();
+    clearSessionNoteQueue(context);
+    try {
+      await enqueueAll(params.messages);
+    } catch (replaceError) {
+      // Queue replacement is all-or-nothing from the host's perspective. Restore
+      // the original ordered queue before returning the edit failure.
+      context.session.clearQueue();
+      clearSessionNoteQueue(context);
+      try {
+        await enqueueAll(params.fallbackMessages);
+      } catch (restoreError) {
+        context.session.clearQueue();
+        clearSessionNoteQueue(context);
+        context.queuedLocalIds = [];
+        context.queuedOperationIds = [];
+        context.queuedOperationAttempts = [];
+        context.queuedCoordinatorAttributions = [];
+        return {
+          updated: false,
+          queueCleared: true,
+          error: `Could not update or restore the queued messages: ${toErrorMessage(replaceError)}; restore failed: ${toErrorMessage(restoreError)}`,
+        };
+      }
+      throw replaceError;
+    }
+    return { updated: true, count: params.messages.length };
+  } finally {
+    releaseQueueEdit();
+  }
 }
 
 function emitQueuedSendCancellations(
@@ -1196,6 +1224,7 @@ async function handleMessageClearQueue(
   // optimistic 'queued' transcript messages on the result; this is the
   // authoritative backend clear so the SDK will not drain them later.
   const cleared = context.session.clearQueue();
+  clearSessionNoteQueue(context);
   // Emit one operation terminal independently of the correlated clear
   // acknowledgement, which may be delayed or dropped after the queue changed.
   emitQueuedSendCancellations(deps, context, 'The queued message was cleared before delivery.');

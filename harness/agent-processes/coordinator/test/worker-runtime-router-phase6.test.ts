@@ -1268,6 +1268,88 @@ test('phase6 intentional retirement does not terminalize a live checkpoint', asy
   assert.deepEqual(emitted, [], 'intentional retirement must not synthesize interruption events');
 });
 
+test('ordinary runtime release stops a hot worker, preserves a cold reopen path, and joins duplicate callers', async () => {
+  let releaseStop!: () => void;
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  let starts = 0;
+  let stops = 0;
+  const client = makeClient();
+  const { router, sessionPath } = makeRouter(client, {
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        starts += 1;
+        await prepare({ workerId: `release-worker-${starts}`, workerGeneration: starts, sessionPath: root });
+        return { workerId: `release-worker-${starts}`, workerGeneration: starts, sessionPath: root, client };
+      },
+      stopWorker: async () => { stops += 1; await stopGate; },
+    },
+  });
+  await router.promote(sessionPath);
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+
+  const first = router.releaseSessionRuntime(sessionPath);
+  const second = router.releaseSessionRuntime(sessionPath);
+  for (let turn = 0; turn < 10 && router.getRoute(sessionPath).state !== 'retiring'; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(router.getRoute(sessionPath).state, 'retiring');
+  assert.equal(stops, 1, 'concurrent close callers join one process stop');
+  await assert.rejects(router.route({
+    id: 'release-fenced-send', method: 'message.send',
+    params: { sessionPath, text: 'must not cross close', inputs: [] },
+  }), (error: any) => error.code === 'SESSION_CLOSING');
+  releaseStop();
+  await Promise.all([first, second]);
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+
+  await router.promote(sessionPath);
+  assert.equal(starts, 2, 'the retained cold session can promote a fresh worker after release');
+  assert.equal(router.getRoute(sessionPath).state, 'hot');
+});
+
+test('ordinary runtime release of a cold session does not promote and stop failure cannot report cold', async () => {
+  const cold = makeRouter(makeClient());
+  await cold.router.releaseSessionRuntime(cold.sessionPath);
+  assert.equal(cold.router.getRoute(cold.sessionPath).state, 'cold');
+  assert.equal(cold.stopped.length, 0, 'cold release does not spawn a worker');
+
+  const failed = makeRouter(makeClient(), {
+    supervisor: { stopWorker: async () => { throw new Error('process-tree stop unconfirmed'); } },
+  });
+  await failed.router.promote(failed.sessionPath);
+  await assert.rejects(failed.router.releaseSessionRuntime(failed.sessionPath), /process-tree stop unconfirmed/);
+  assert.equal(failed.router.getRoute(failed.sessionPath).state, 'retiring', 'failed retirement stays fenced and is not a false cold success');
+});
+
+test('ordinary runtime release joins a pre-existing promotion and retires its confirmed owner', async () => {
+  let finishPromotion!: () => void;
+  let stops = 0;
+  const promotionGate = new Promise<void>((resolve) => { finishPromotion = resolve; });
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      if (body.kind === 'runtime.promote') {
+        await promotionGate;
+        return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router, sessionPath } = makeRouter(client, {
+    supervisor: { stopWorker: async () => { stops += 1; } },
+  });
+  const promotion = router.promote(sessionPath);
+  for (let turn = 0; turn < 10 && router.getRoute(sessionPath).state !== 'promoting'; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(router.getRoute(sessionPath).state, 'promoting');
+  const release = router.releaseSessionRuntime(sessionPath);
+  finishPromotion();
+  await Promise.all([promotion, release]);
+  assert.equal(stops, 1, 'release waits for the exact promotion owner, then stops it');
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+});
+
 test('phase6 sync failure terminalizes an early-acknowledged send as preflight failed', async () => {
   const client = makeClient({
     requestFrame: async (body: any) => {

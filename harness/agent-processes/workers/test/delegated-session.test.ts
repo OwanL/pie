@@ -41,7 +41,8 @@ test('fork role absent, ordinary human runs inert; error and cancelled outcomes 
     assert.equal(claimDelegatedHandoff(context,context.activeRequest,'x'.repeat(40000),outcome)?.outcome,outcome);
   }
   const {manager} = fixture();
-  assert.match(delegatedRolePrompt(manager),/automatically handed back/);
+  assert.match(delegatedRolePrompt(manager),/session_finish/);
+  assert.match(delegatedRolePrompt(manager),/awaiting-result/);
   assert.match(delegatedRolePrompt(manager),/human/i);
   manager.getSessionId = () => 'fork';
   assert.equal(delegatedRolePrompt(manager),'');

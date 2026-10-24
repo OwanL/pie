@@ -17,6 +17,8 @@ import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-loggin
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
 import { readSessionControlTranscript, SessionControlReadError, type SessionControlReadOptions } from './session-control-read.js';
 import { SessionControlOperations, type SessionControlMutation } from './session-control-operations.js';
+import { SessionCollaborationCoordinator } from './session-collaboration.js';
+import { createSessionAddress, resolveSessionAddress } from './session-address.js';
 import { selectSessionControlModel, parseBucketConfig, type SessionControlModelSelection } from './session-control-model-selection.js';
 import { parseProviderToggles } from '../../tools/subagent/provider-toggles.js';
 import type { BucketTier } from '../../tools/subagent/bucket-config.js';
@@ -64,7 +66,6 @@ import {
   createSessionControlSender,
   createSessionReplyReference,
   isSessionControlSender,
-  parseSessionReplyReference,
   type SessionControlSender,
   type SessionControlSenderIdentity,
 } from '../lib/rpc/session-control-attribution.js';
@@ -212,6 +213,22 @@ const INTERRUPT_TRANSITION_WAIT_MS = 10_000;
 const AGENT_SESSION_CONTROL_MAX_LIST_ITEMS = 256;
 const AGENT_SESSION_CONTROL_MAX_RESULT_BYTES = 192 * 1024;
 const AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES = 64 * 1024;
+const AGENT_SESSION_CONTROL_MAX_INITIAL_ASSIGNMENT_BYTES = 16 * 1024;
+// Only these typed errors arise before an authenticated session-control send
+// can be admitted. Other worker/runtime errors may follow SDK side effects and
+// therefore leave delivery uncertain, even when they have a structured code.
+const KNOWN_SESSION_CONTROL_SEND_PRE_ADMISSION_CODES = new Set([
+  'INVALID_PARAMS',
+  'MESSAGE_SEND_PRECOMMIT_FAILED',
+  'SESSION_CLOSING',
+  'SESSION_NOT_FOUND',
+  'SESSION_SNOOZED',
+  'SESSION_NOT_IDLE',
+  'SESSION_OPERATION_CANCELLED',
+  'SESSION_TRANSITION_IN_PROGRESS',
+  'SESSION_TRANSITION_TIMEOUT',
+  'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
+]);
 const LIVE_TITLE_NAMESPACE_RETRY_BASE_DELAY_MS = 100;
 const LIVE_TITLE_NAMESPACE_RETRY_MAX_DELAY_MS = 5_000;
 const LIVE_TITLE_NAMESPACE_RETRY_LIMIT = 5;
@@ -703,6 +720,7 @@ export class BackendServer {
    *  while a worker owns a session's lease. */
   private readonly liveSessionTitles = new LiveSessionTitles();
   private readonly sessionControlOperations = new SessionControlOperations();
+  private sessionCollaboration?: SessionCollaborationCoordinator;
   private readonly delegatedHandoffAttempts = new Set<string>();
   private readonly sessionControlCreators = new Map<string, { sessionId: string; creator?: SessionControlSenderIdentity }>();
   /** Initial namespace hydration from the first complete restored host
@@ -2233,6 +2251,7 @@ export class BackendServer {
     // (recovery replacement emissions, catalog polling, late SDK events) cannot
     // push stale state to a host that is already tearing the backend down.
     if (this.disposed) return;
+    this.sessionCollaboration?.observe(event, payload);
     if (event === 'session.list.changed' && payload && typeof payload === 'object'
       && this.coldSessionStore?.ownershipStamp(payload as object)) {
       try {
@@ -2943,6 +2962,7 @@ export class BackendServer {
       entry.accepted = true;
       entry.accept?.(true);
     } else {
+      if (params.phase === 'completed') this.sessionCollaboration?.retire(entry.sessionPath, entry.delete, true);
       this.settleHostCloseRequest(entry, params.phase === 'unknown'
         ? { phase: 'unknown' }
         : { phase: params.phase, ...(params.error ? { error: params.error } : {}) });
@@ -2998,6 +3018,7 @@ export class BackendServer {
     for (const [key, { entry }] of previousSessions) {
       if (!sessions.has(key) && !closing.has(key)) {
         this.workerRuntimeRouter?.invalidatePendingRuntimeOperations?.(entry.path);
+        this.sessionCollaboration?.retire(entry.path);
       }
     }
     for (const [key, entry] of closing) {
@@ -3526,6 +3547,7 @@ export class BackendServer {
           : undefined;
         const projected = {
           path: entry.path,
+          address: createSessionAddress(resolveSessionIdentity(entry.path)),
           ...(entry.name !== undefined ? { name: entry.name } : {}),
           ...(assignedTitle !== undefined ? { title: assignedTitle } : {}),
           ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
@@ -3533,6 +3555,11 @@ export class BackendServer {
           activity: entry.activity,
           busy,
           runtimeState: route?.state ?? 'cold',
+          ...(this.sessionCollaboration ? {
+            tasks: this.sessionCollaboration.tasks.inspect(createHash('sha256').update(JSON.stringify(resolveSessionIdentity(entry.path))).digest('hex'))
+              .filter(task => task.worker.address === createSessionAddress(resolveSessionIdentity(entry.path)) && !['terminal', 'rejected'].includes(task.status))
+              .slice(0, 1).map(task => ({ taskId: task.taskId, revision: task.revision, status: task.status, requester: task.requester.address })),
+          } : {}),
           ...(entry.hidden === true ? { hidden: true } : {}),
           ...(entry.agentCreated === true ? { agentCreated: true } : {}),
           ...(sourceSessionPath ? this.sessionControlOwnership(entry.path, sourceSessionPath) : {}),
@@ -3632,7 +3659,7 @@ export class BackendServer {
   /** Resolve one explicitly targeted session-control request against the
    *  assigned-title authority and the host live membership. Existing-session
    *  actions require exactly one target: an assigned `title` (resolved
-   *  exactly after trimming) or an explicit `self` selector (the caller's own
+   *  exactly after trimming), a compact or historical identity address, or an explicit `self` selector (the caller's own
    *  session, valid even while the caller is unnamed). There is no implicit
    *  current-session or path default: an omitted or conflicting target is an
    *  error, and an assigned title is never authority over retained closed
@@ -3642,6 +3669,22 @@ export class BackendServer {
     payload: Record<string, unknown>,
     sourceSessionPath: string,
   ): { status: 'live' | 'closing'; sessionPath: string; entry?: LiveSessionMembershipEntry } {
+    if (payload.address !== undefined) {
+      if (payload.title !== undefined || payload.self !== undefined || payload.replyTo !== undefined) throw new BackendError('INVALID_PARAMS', 'address cannot be combined with another target selector.');
+      if (typeof payload.address !== 'string'
+        || (!payload.address.startsWith('pie-session:v1:') && !payload.address.startsWith('pie-reply:v1:'))) {
+        throw new BackendError('INVALID_PARAMS', 'address must be a compact session address from list/create or a historical reply reference.');
+      }
+      if (action === 'close') {
+        const closing = [...this.hostMembershipClosing.values()].map(entry => ({
+          identity: resolveSessionIdentity(entry.path), value: entry.path,
+        }));
+        const match = resolveSessionAddress(payload.address, closing);
+        if (match.status === 'ambiguous') throw new BackendError('SESSION_NOT_FOUND', 'The address matches more than one closing session and is unavailable.');
+        if (match.status === 'resolved') return { status: 'closing', sessionPath: match.value };
+      }
+      return this.resolveSessionControlReplyTarget({ replyTo: payload.address }, sourceSessionPath);
+    }
     const rawTitle = payload['title'];
     const hasSelf = payload['self'] === true;
     const hasTitle = typeof rawTitle === 'string' && rawTitle.trim().length > 0;
@@ -3664,12 +3707,12 @@ export class BackendServer {
     }
     throw new BackendError(
       'INVALID_PARAMS',
-      `${action} requires an explicit target: an assigned title or the self selector.`,
+      `${action} requires an explicit target: an assigned title, session address, or the self selector.`,
     );
   }
 
-  /** Resolve a reply address by stable identity, then re-check current host
-   * membership. The reference is never a title or an addressable session path. */
+  /** Resolve a compact or historical identity address, then re-check current
+   * host membership. Addresses are never titles or session paths. */
   private resolveSessionControlReplyTarget(
     payload: Record<string, unknown>,
     sourceSessionPath: string,
@@ -3677,33 +3720,31 @@ export class BackendServer {
     if (payload.title !== undefined || payload.self !== undefined) {
       throw new BackendError('INVALID_PARAMS', 'message.replyTo cannot be combined with title or self.');
     }
-    const identity = parseSessionReplyReference(payload.replyTo);
-    if (!identity) throw new BackendError('INVALID_PARAMS', 'message.replyTo is not a valid bounded session reply reference.');
-
-    const candidates = new Map<string, LiveSessionMembershipEntry>();
+    if (typeof payload.replyTo !== 'string') throw new BackendError('INVALID_PARAMS', 'message.replyTo must be a compact session address or historical reply reference.');
+    const candidates = new Map<string, { identity: SessionControlSenderIdentity; value: { path: string; entry?: LiveSessionMembershipEntry } }>();
     if (this.hostMembershipSeen) {
       for (const { entry } of this.hostMembershipSessions.sessions.values()) {
         const key = backendSessionPathKey(entry.path);
         if (this.hostMembershipClosing.has(key)) continue;
-        candidates.set(key, entry);
+        candidates.set(key, { identity: resolveSessionIdentity(entry.path), value: { path: entry.path, entry } });
       }
     } else {
       // Before the first host snapshot only the calling worker itself is
       // authoritative; other identities cannot be guessed from catalog state.
-      const sourceIdentity = resolveSessionIdentity(sourceSessionPath);
-      if (sourceIdentity.sessionId === identity.sessionId
-        && sourceIdentity.identityFallback === identity.identityFallback) {
-        return { status: 'live', sessionPath: sourceSessionPath };
-      }
+      const key = backendSessionPathKey(sourceSessionPath);
+      candidates.set(key, { identity: resolveSessionIdentity(sourceSessionPath), value: { path: sourceSessionPath } });
     }
-    for (const entry of candidates.values()) {
-      const candidateIdentity = resolveSessionIdentity(entry.path);
-      if (candidateIdentity.sessionId === identity.sessionId
-        && candidateIdentity.identityFallback === identity.identityFallback) {
-        return { status: 'live', sessionPath: entry.path, entry };
-      }
+    for (const key of this.newCreatePublicationPaths) {
+      const path = this.coldSessionManagerHandles.get(key)?.handle.sessionPath;
+      if (!path || this.hostMembershipClosing.has(key)) continue;
+      if (!candidates.has(key)) candidates.set(key, { identity: resolveSessionIdentity(path), value: { path } });
     }
-    throw new BackendError('SESSION_NOT_FOUND', 'The reply reference does not resolve to a live session.');
+    const resolution = resolveSessionAddress(payload.replyTo, [...candidates.values()]);
+    if (resolution.status === 'invalid') throw new BackendError('INVALID_PARAMS', 'message.replyTo is not a valid bounded session address.');
+    if (resolution.status === 'ambiguous') throw new BackendError('SESSION_NOT_FOUND', 'The address matches more than one live session and is unavailable.');
+    if (resolution.status === 'unavailable') throw new BackendError('SESSION_NOT_FOUND', 'The address does not resolve to a live session.');
+    return { status: 'live', sessionPath: resolution.value.path,
+      ...(resolution.value.entry ? { entry: resolution.value.entry } : {}) };
   }
 
   private resolveLiveSessionPath(
@@ -3818,6 +3859,7 @@ export class BackendServer {
   }
 
   private async forgetSessionAdmitted(sessionPath: string, operationId?: string): Promise<void> {
+    this.sessionCollaboration?.retire(sessionPath, true);
     // The isolated worker has already been retired by the request router.
     // Validate and retry only its durable exact-path manifests before any
     // transcript/session artifact deletion can commit.
@@ -4467,6 +4509,57 @@ export class BackendServer {
     };
   }
 
+  private initializeSessionCollaboration(): SessionCollaborationCoordinator {
+    if (this.sessionCollaboration) return this.sessionCollaboration;
+    const participant = (sessionPath: string) => {
+      const identity = resolveSessionIdentity(sessionPath);
+      return { owner: createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
+        address: createSessionAddress(identity),
+        ...(this.liveSessionTitles.assigned(sessionPath) ? { title: this.liveSessionTitles.assigned(sessionPath) } : {}) };
+    };
+    this.sessionCollaboration = new SessionCollaborationCoordinator({
+      participant,
+      sender: sessionPath => createSessionControlSender(resolveSessionIdentity(sessionPath), this.liveSessionTitles.assigned(sessionPath), { sentAt: Date.now(), expectReply: false }),
+      resolve: (target, sourcePath) => {
+        const resolved = target === 'self'
+          ? this.resolveLiveSessionPath(sourcePath, sourcePath, 'read')
+          : target.startsWith('pie-reply:') || target.startsWith('pie-session:')
+            ? this.resolveSessionControlReplyTarget({ replyTo: target }, sourcePath)
+            : this.resolveSessionControlTarget('read', { title: target }, sourcePath);
+        this.assertSessionNotClosing(resolved.sessionPath);
+        return { path: resolved.sessionPath, participant: participant(resolved.sessionPath) };
+      },
+      busy: sessionPath => {
+        const router = this.workerRuntimeRouter;
+        const route = router?.getRoute(sessionPath);
+        const entry = this.hostMembershipSessions.sessions.get(backendSessionPathKey(sessionPath))?.entry;
+        return router?.hasPendingRuntimeWork?.(sessionPath) === true
+          || (route !== undefined && route.state !== 'cold' && (route.state !== 'hot' || route.checkpoint.requestId !== undefined))
+          || entry?.activity === 'running' || entry?.activity === 'waiting-user-input';
+      },
+      assignment: async (requesterAddress, targetPath, prompt, operationId, task) => {
+        const source = this.resolveSessionControlReplyTarget({ replyTo: requesterAddress }, targetPath);
+        return this.sendSessionControlPrompt({ requestId: operationId }, source.sessionPath, targetPath, prompt, operationId, false,
+          this.workerRuntimeRouter?.operationCancellationGeneration?.(targetPath), 'assignment', task);
+      },
+      note: (targetPath, payload) => {
+        const router = this.workerRuntimeRouter;
+        if (!router?.hasHotOwner(targetPath)) return undefined;
+        this.assertSessionControlSendAdmissionOpen(targetPath);
+        return router.routeExisting({ id: `session-note:${payload.id}`, method: 'message.note', params: { sessionPath: targetPath, note: payload } }) as Promise<WorkerJsonObject>;
+      },
+      workerMemory: () => {
+        const snapshot = this.workerRuntimeRouter?.inspectWorkerResources() ?? { workers: [], total: 0, truncated: false };
+        return { ...snapshot, workers: snapshot.workers.map(row => {
+          const { sessionPath, ...sample } = row;
+          const session = participant(String(sessionPath));
+          return { ...sample, address: session.address, ...(session.title ? { title: session.title } : {}) };
+        }) };
+      },
+    });
+    return this.sessionCollaboration;
+  }
+
   private async sendSessionControlPrompt(
     frame: Pick<WorkerSessionControlFrame, 'requestId'>,
     sourceSessionPath: string,
@@ -4475,7 +4568,8 @@ export class BackendServer {
     operationId: string,
     expectReply: boolean,
     expectedCancellationGeneration?: number,
-    kind?: 'completion',
+    kind?: 'completion' | 'assignment',
+    task?: { taskId: string; revision: number },
   ): Promise<WorkerJsonObject> {
     try {
       if (expectedCancellationGeneration !== undefined
@@ -4500,7 +4594,7 @@ export class BackendServer {
     const sender: SessionControlSender = createSessionControlSender(
       sourceIdentity,
       this.liveSessionTitles.assigned(sourceSessionPath),
-      { sentAt, expectReply, ...(kind ? { kind } : {}) },
+      { sentAt, expectReply, ...(kind ? { kind } : {}), ...(task ? { taskId: task.taskId, taskRevision: task.revision } : {}) },
     );
     if (!isSessionControlSender(sender)) throw new BackendError('INVALID_PARAMS', 'Unable to authenticate the source session.');
     const localId = `${AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX}${frame.requestId}`;
@@ -4537,8 +4631,14 @@ export class BackendServer {
       };
     } catch (error) {
       const code = error instanceof BackendError ? error.code : '';
-      const unknown = error instanceof WorkerRequestTimeoutError
-        || /TIMEOUT|GENERATION_ENDED|UNKNOWN|PROVENANCE_UNAVAILABLE/u.test(code);
+      // Only explicit typed pre-admission errors prove the prompt was not
+      // admitted. Worker/runtime errors, including structured errors outside
+      // this small allowlist, may arrive after SDK side effects. A worker may
+      // also emit correlated lifecycle evidence before its RPC response frame
+      // is written, so transport failure alone cannot prove rejection.
+      const knownPreAdmission = error instanceof BackendError
+        && KNOWN_SESSION_CONTROL_SEND_PRE_ADMISSION_CODES.has(code);
+      const unknown = error instanceof WorkerRequestTimeoutError || !knownPreAdmission;
       if (!unknown) this.emit('message.agent', { ...agentMessage, status: 'rejected' });
       return {
         status: unknown ? 'unknown' : 'rejected',
@@ -4622,6 +4722,27 @@ export class BackendServer {
       // a title, last speaker, parentSession or the agent-created tooltip.
       return { ownedByCaller: false, ownershipUnavailable: true };
     }
+  }
+
+  private assertSessionControlAuthority(
+    targetSessionPath: string,
+    sourceSessionPath: string,
+    operation: 'close' | 'settings.set' | 'interrupt',
+  ): void {
+    if (backendSessionPathKey(targetSessionPath) === backendSessionPathKey(sourceSessionPath)) return;
+    if (this.sessionControlOwnership(targetSessionPath, sourceSessionPath).ownedByCaller === true) return;
+
+    if (operation === 'interrupt' && this.sessionCollaboration) {
+      const requesterOwner = createHash('sha256').update(JSON.stringify(resolveSessionIdentity(sourceSessionPath))).digest('hex');
+      const workerOwner = createHash('sha256').update(JSON.stringify(resolveSessionIdentity(targetSessionPath))).digest('hex');
+      const requesterOwnsCurrentTask = this.sessionCollaboration.tasks.inspect(workerOwner).some(task =>
+        task.worker.owner === workerOwner && task.requester.owner === requesterOwner
+          && task.status !== 'terminal' && task.status !== 'rejected');
+      if (requesterOwnsCurrentTask) return;
+    }
+
+    throw new BackendError('SESSION_CONTROL_FORBIDDEN',
+      `Cross-session ${operation} requires the target's durable direct creator identity${operation === 'interrupt' ? ' or the requester of its current task' : ''}.`);
   }
 
   private async cleanupOwnedSessions(
@@ -4736,7 +4857,7 @@ export class BackendServer {
       }
       return { result: this.sessionControlOperations.status(owner, requestKey) };
     }
-    const mutation = ['create', 'message', 'settings.set', 'close', 'cleanup'].includes(frame.action);
+    const mutation = ['create', 'message', 'settings.set', 'close', 'cleanup', 'note', 'task.assign', 'interrupt', 'resources'].includes(frame.action);
     if (!mutation) return await this.executeWorkerSessionControl(frame, sourceSessionPath);
     // Public clients assign a key before transport. Legacy internal requests
     // keep their existing semantics rather than inventing a recovery address.
@@ -4773,24 +4894,50 @@ export class BackendServer {
       if (receiptOwner && requestKey) this.sessionControlOperations.phase(receiptOwner, requestKey, name, result);
     };
     const payload = frame.payload as Record<string, unknown>;
-    const allowedPayloadKeys: Readonly<Record<WorkerSessionControlAction, readonly string[]>> = {
+    if (SessionCollaborationCoordinator.handles(frame.action)) {
+      try {
+        return { result: await this.initializeSessionCollaboration().execute(frame.action, frame.payload, sourceSessionPath, frame.requestId) };
+      } catch (error) {
+        throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
+      }
+    }
+    const allowedPayloadKeys: Readonly<Partial<Record<WorkerSessionControlAction, readonly string[]>>> = {
       list: [],
       create: ['cwd', 'title', 'bucket', 'prompt', 'settings'],
-      read: ['title', 'self', 'direction', 'cursor', 'maxCharacters', 'includeReasoning', 'includeToolCalls'],
+      read: ['title', 'self', 'address', 'direction', 'cursor', 'maxCharacters', 'includeReasoning', 'includeToolCalls'],
       message: ['title', 'self', 'replyTo', 'prompt', 'expectReply', 'fulfills', 'settings'],
-      'settings.get': ['title', 'self'],
-      'settings.set': ['title', 'self', 'settings'],
-      close: ['title', 'self', 'delete'],
+      'settings.get': ['title', 'self', 'address'],
+      'settings.set': ['title', 'self', 'address', 'settings'],
+      close: ['title', 'self', 'address', 'delete'],
+      interrupt: ['title', 'self', 'address'],
       cleanup: ['dontCloseRunning'],
       'operation.status': ['requestKey'],
     };
-    const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys[frame.action].includes(key));
+    const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys[frame.action]?.includes(key));
     if (unexpectedPayloadKey) {
       throw new BackendError('INVALID_PARAMS', `Unexpected session_control payload key: ${unexpectedPayloadKey}`);
     }
     const operationId = `agent-session:${frame.requestId}`;
 
     if (frame.action === 'list') return { result: this.listLiveSessions(sourceSessionPath) };
+    if (frame.action === 'interrupt') {
+      const target = this.resolveSessionControlTarget('read', payload, sourceSessionPath);
+      this.assertSessionControlAuthority(target.sessionPath, sourceSessionPath, 'interrupt');
+      const interruption = await this.handleRequest({ id: `${frame.requestId}:interrupt`, method: 'message.interrupt', params: { sessionPath: target.sessionPath } });
+      const evidence = interruption && typeof interruption === 'object'
+        ? interruption as { interrupted?: unknown; alreadyStopped?: unknown; settled?: unknown }
+        : {};
+      const authoritative = evidence.settled === true
+        && (evidence.interrupted === true || evidence.alreadyStopped === true);
+      if (authoritative) this.sessionCollaboration?.interruptTaskForWorker(target.sessionPath);
+      return { result: {
+        sessionPath: target.sessionPath,
+        interrupted: evidence.interrupted === true,
+        settled: evidence.settled === true,
+        ...(evidence.alreadyStopped === true ? { alreadyStopped: true } : {}),
+        closed: false,
+      } };
+    }
     if (frame.action === 'cleanup') {
       phase('cleanup');
       return await this.cleanupOwnedSessions(frame, sourceSessionPath, result => phase('cleanup', result));
@@ -4810,8 +4957,8 @@ export class BackendServer {
         throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
       }
       if (payload.prompt !== undefined
-        && (!boundedAgentString(payload.prompt, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.prompt.trim())) {
-        throw new BackendError('INVALID_PARAMS', 'create.prompt must be non-empty and bounded when supplied.');
+        && (!boundedAgentString(payload.prompt, AGENT_SESSION_CONTROL_MAX_INITIAL_ASSIGNMENT_BYTES) || !payload.prompt.trim())) {
+        throw new BackendError('INVALID_PARAMS', 'create.prompt must be non-empty and no larger than 16 KiB UTF-8 when supplied.');
       }
       const explicitSettings = payload.settings === undefined
         ? {}
@@ -4933,6 +5080,7 @@ export class BackendServer {
           : {}),
         sessionId: identity.sessionId,
         identityFallback: identity.identityFallback,
+        address: createSessionAddress(identity),
       };
       if (createdRecord.titleAssigned === false) {
         return { result: workerJson({
@@ -4942,27 +5090,32 @@ export class BackendServer {
         } satisfies WorkerJsonObject) };
       }
       const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(sessionPath);
+      let admissionReleased = false;
       try {
         phase('configuration', { creation, configuration: { status: 'pending' }, message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' } });
         const configuration = await this.configureSessionControlSettings(sessionPath, settings, frame.requestId);
         phase('message', { creation, configuration, message: { status: payload.prompt === undefined ? 'not_requested' : 'pending' } });
         const configurationSucceeded = configuration.status === 'succeeded';
-        const message = payload.prompt === undefined
+        // Settings are committed. Assignment admission has its own identity,
+        // task and execution fences and must not see this configuration guard
+        // as unrelated pending work.
+        releaseAdmission?.();
+        admissionReleased = true;
+        const message: WorkerJsonObject = payload.prompt === undefined
           ? { status: 'not_requested' }
           : !configurationSucceeded
             ? { status: 'not_sent', reason: configuration.status }
-            : await this.sendSessionControlPrompt(
-              frame,
-              sourceSessionPath,
-              sessionPath,
-              payload.prompt as string,
-              `${operationId}:send`,
-              true,
-              sendCancellationGeneration,
-            );
-        return { result: workerJson({ creation, configuration, message, modelSelection: workerJson(modelSelection) } satisfies WorkerJsonObject) };
+            : sendCancellationGeneration !== undefined && this.workerRuntimeRouter?.operationCancellationGeneration?.(sessionPath) !== sendCancellationGeneration
+              ? { status: 'rejected', error: 'The initial assignment was invalidated by close before admission.' }
+            : await this.initializeSessionCollaboration().execute('task.assign', {
+              target: String(creation.address), prompt: payload.prompt as string,
+            }, sourceSessionPath, frame.requestId);
+        return { result: workerJson({ creation, configuration,
+          ...(message.task ? { task: message.task } : {}),
+          message: message.task && message.message ? message.message : message,
+          modelSelection: workerJson(modelSelection) } satisfies WorkerJsonObject) };
       } finally {
-        releaseAdmission?.();
+        if (!admissionReleased) releaseAdmission?.();
       }
     }
 
@@ -4983,6 +5136,7 @@ export class BackendServer {
         throw new BackendError('INVALID_PARAMS', 'settings.set requires at least one supported setting.');
       }
       const resolved = this.resolveSessionControlTarget('settings.set', payload, sourceSessionPath);
+      this.assertSessionControlAuthority(resolved.sessionPath, sourceSessionPath, 'settings.set');
       this.assertSessionNotClosing(resolved.sessionPath);
       const releaseAdmission = this.workerRuntimeRouter?.beginAgentOperation?.(resolved.sessionPath);
       try {
@@ -5020,6 +5174,7 @@ export class BackendServer {
       const resolved = payload.replyTo !== undefined
         ? this.resolveSessionControlReplyTarget(payload, sourceSessionPath)
         : this.resolveSessionControlTarget('message', payload, sourceSessionPath);
+      if (patch) this.assertSessionControlAuthority(resolved.sessionPath, sourceSessionPath, 'settings.set');
       const sendCancellationGeneration = this.workerRuntimeRouter
         ?.operationCancellationGeneration?.(resolved.sessionPath);
       this.assertSessionNotClosing(resolved.sessionPath);
@@ -5059,6 +5214,7 @@ export class BackendServer {
     }
     const deleteRequested = deletePayload === true;
     const resolvedClose = this.resolveSessionControlTarget('close', payload, sourceSessionPath);
+    this.assertSessionControlAuthority(resolvedClose.sessionPath, sourceSessionPath, 'close');
     const selfRequester = backendSessionPathKey(sourceSessionPath) === backendSessionPathKey(resolvedClose.sessionPath);
     if (resolvedClose.status === 'closing') {
       const owningClose = this.closingSessionRequests.get(backendSessionPathKey(resolvedClose.sessionPath));
@@ -5126,6 +5282,9 @@ export class BackendServer {
     trustedSessionControlMessage = false,
     expectedCancellationGeneration?: number,
   ): Promise<unknown> {
+    if (request.method === 'message.note') {
+      throw new BackendError('INVALID_PARAMS', 'message.note is a private coordinator-to-worker operation.');
+    }
     // This is the actual coordinator ingress, before either hot-worker routing
     // or the standalone handler can inspect the raw envelope. Only the
     // authenticated worker session_control send above may carry attribution.
@@ -5661,6 +5820,11 @@ export class BackendServer {
       writeModelSettingsIfCurrent: (expected, updates, unset) => (
         this.writeModelSettingsIfCurrent(expected, updates, unset)
       ),
+      releaseSessionRuntime: async (sessionPath) => {
+        const runtimeRouter = this.workerRuntimeRouter;
+        if (!runtimeRouter) throw new BackendError('RUNTIME_RELEASE_UNAVAILABLE', 'The session runtime owner is unavailable; close could not confirm runtime release.');
+        await runtimeRouter.releaseSessionRuntime(sessionPath);
+      },
       retireSessionRuntime: async (sessionPath, reason) => {
         const runtimeRouter = this.workerRuntimeRouter;
         if (!runtimeRouter || !runtimeRouter.hasHotOwner(sessionPath)) return false;
@@ -5766,6 +5930,7 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
+    this.sessionCollaboration?.dispose();
     this.durableDetailStore?.dispose();
     // Dispose provider operations before runtime owners, without exposing errors.
     try { (await this.providerManagementPromise)?.dispose(); } catch { /* unavailable */ }

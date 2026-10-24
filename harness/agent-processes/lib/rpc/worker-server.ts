@@ -655,6 +655,7 @@ export class WorkerServer {
     this.heartbeatInterval = setInterval(() => {
       const now = performance.now();
       const eventLoopDelayMs = Math.max(0, Math.trunc(now - this.nextHeartbeatAt));
+      const memory = process.memoryUsage();
       this.nextHeartbeatAt = now + this.heartbeatIntervalMs;
       this.send({
         ...this.frameBase,
@@ -665,6 +666,7 @@ export class WorkerServer {
           lastEventSeq: 0,
           lastDetailRevision: this.lastDetailRevision,
           eventLoopDelayMs,
+          memory: { observedAt: Date.now(), rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, externalBytes: memory.external },
           ...(this.lastDurableAppendId ? { lastDurableAppendId: this.lastDurableAppendId } : {}),
         },
       });

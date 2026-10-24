@@ -451,6 +451,11 @@
   text-overflow: ellipsis;
 }
 
+.transcript-prompt-context-meta .transcript-header-summary-subtle {
+  color: inherit;
+  opacity: 1;
+}
+
 .transcript-prompt-context-action-description {
   position: absolute;
   width: 1px;
@@ -1559,6 +1564,12 @@
    integrated with the light graphite surface; retain dark code blocks so the
    shared syntax palette remains readable. Synthetic sends intentionally keep
    the normal dark transcript palette. */
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .transcript-header-label,
+.message-item-shell[data-role="user"]:not([data-synthetic="true"]) .transcript-header-label .transcript-header-summary-subtle {
+  color: var(--panel-user-foreground);
+  opacity: 1;
+}
+
 .message-item-shell[data-role="user"]:not([data-synthetic="true"]) .message-body a {
   color: var(--panel-user-link);
   text-decoration: underline;

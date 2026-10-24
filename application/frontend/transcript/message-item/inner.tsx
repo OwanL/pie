@@ -217,6 +217,7 @@ export function MessageItemInner({
         actions={headerActions}
         customType={message.customType}
         sender={message.sender}
+        customDetails={message.customDetails}
       />
 
       {pruningHeaderState?.kind === 'result' && pruningExpanded && (

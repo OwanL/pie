@@ -15,6 +15,7 @@ import type { BackendClient as BackendClientType } from '../../agent-connection/
 import { createOperationalIncident } from '../../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import type { ChatPrefs } from '../../../lib/protocol/index.js';
 import type { SessionControlSettingsRequest } from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
+import { STORAGE_CUTOFF_AUTHORIZATION_ENV, STORAGE_CUTOFF_AUTHORIZATION_VALUE } from '../../../../analytics/authority/storage-cutoff-authorization';
 
 function createPlatform(context: ReturnType<typeof createExtensionContext>) {
   const unexpectedBackendStartup = (): never => {
@@ -555,6 +556,59 @@ test('backend generation failure rejects an undispatched deferred send and remov
   assert.equal(archState.transcript.bySession[sessionPath]?.some((message) => message.id === 'deferred-local'), false);
   assert.equal(archState.operations['deferred-operation']?.terminal?.reason, 'backend-generation-ended');
   service.dispose();
+});
+
+test('ordinary close releases the worker before durable and host-local close completion', async () => {
+  const previousAuthorization = process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
+  process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = STORAGE_CUTOFF_AUTHORIZATION_VALUE;
+  const calls: string[] = [];
+  const service = new SessionServiceCtor(
+    createPlatform(createExtensionContext()),
+    { request: async (method: string) => { calls.push(method); return {}; } } as any,
+    () => undefined,
+    () => undefined,
+    () => undefined,
+    () => createInitialArchState(),
+  );
+  const tabs = (service as any).tabs;
+  tabs.closeSession = async () => { calls.push('host-close'); };
+
+  try {
+    await service.closeSession('/sessions/ordinary.jsonl', null, false, false, 'ordinary-close', 3);
+    assert.deepEqual(calls, ['session.releaseRuntime', 'session.lifecycleClose', 'host-close']);
+  } finally {
+    service.dispose();
+    if (previousAuthorization === undefined) delete process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV];
+    else process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = previousAuthorization;
+  }
+});
+
+test('ordinary close does not complete host cleanup when runtime release is unconfirmed', async () => {
+  const calls: string[] = [];
+  const service = new SessionServiceCtor(
+    createPlatform(createExtensionContext()),
+    { request: async (method: string) => {
+      calls.push(method);
+      if (method === 'session.releaseRuntime') throw new Error('worker process-tree stop is unconfirmed');
+      return {};
+    } } as any,
+    () => undefined,
+    () => undefined,
+    () => undefined,
+    () => createInitialArchState(),
+  );
+  const tabs = (service as any).tabs;
+  tabs.closeSession = async () => { calls.push('host-close'); };
+
+  try {
+    await assert.rejects(
+      service.closeSession('/sessions/uncertain.jsonl', null),
+      /worker process-tree stop is unconfirmed/,
+    );
+    assert.deepEqual(calls, ['session.releaseRuntime'], 'durable and host-local close do not claim success after an unknown stop');
+  } finally {
+    service.dispose();
+  }
 });
 
 test('private close fails and retains its retry marker when the final analytics scrub fails', async () => {

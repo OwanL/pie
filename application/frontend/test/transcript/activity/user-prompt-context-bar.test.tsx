@@ -8,7 +8,8 @@ import type { Virtualizer } from '@tanstack/virtual-core';
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
-import type { ChatMessage } from '../../../../lib/protocol/index.js';
+import { AGENT_MESSAGE_CUSTOM_TYPE, type ChatMessage } from '../../../../lib/protocol/index.js';
+import { createSessionControlSender } from '../../../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
 import { UserPromptContextBar } from '../../../transcript/user-prompt-context-bar';
 import { buildUserPromptEntries } from '../../../transcript/user-prompt-context';
 import type { TranscriptRow } from '../../../transcript/virtual-list-rows';
@@ -142,6 +143,72 @@ test('sequential navigation follows target starts while preview remains offscree
   assert.deepEqual(located, [2, 3, 2, 0]);
   assert.equal(button('Previous').disabled, true, 'loaded beginning bound');
   assert.equal(container.querySelector('.transcript-prompt-context-preview'), null);
+  render(null, container);
+});
+
+test('sticky context identifies agent notes, results, and assignments instead of calling them auto-resume', () => {
+  const cases = [
+    {
+      id: 'note', kind: 'note',
+      sender: createSessionControlSender({ sessionId: 'sender-note', identityFallback: false }, 'Note sender'),
+      details: { kind: 'note' },
+    },
+    {
+      id: 'result', kind: 'result',
+      sender: createSessionControlSender({ sessionId: 'sender-result', identityFallback: false }, 'Result sender'),
+      details: { kind: 'result' },
+    },
+    {
+      id: 'task', kind: 'Task',
+      sender: createSessionControlSender({ sessionId: 'sender-task', identityFallback: false }, 'Task sender', {
+        sentAt: 1, expectReply: false, kind: 'assignment', taskId: 'task-1', taskRevision: 2,
+      }),
+      details: undefined,
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const container = document.createElement('div');
+    renderBar(container, {
+      rows: [
+        messageRow(userMessage(entry.id, 'agent content', {
+          customType: AGENT_MESSAGE_CUSTOM_TYPE, sender: entry.sender, customDetails: entry.details,
+        })),
+        messageRow(userMessage('next', 'next prompt')),
+      ],
+      measurements: [{ start: 0, end: 40 }, { start: 100, end: 140 }],
+      metrics: { scrollTop: 50, scrollHeight: 300, clientHeight: 100 },
+      scrollElement: makeScrollElement({ scrollTop: 50, scrollHeight: 300, clientHeight: 100 }),
+    });
+    const metadata = container.querySelector<HTMLElement>('.transcript-prompt-context-meta');
+    assert.ok(metadata, `${entry.kind} agent message should render sticky metadata`);
+    assert.match(metadata.textContent ?? '', /Agent/u);
+    assert.match(metadata.textContent ?? '', new RegExp(entry.sender.title!, 'u'));
+    assert.match(metadata.textContent ?? '', new RegExp(entry.kind, 'iu'));
+    assert.match(metadata.innerHTML, /session-tab-agent-icon/u);
+    assert.doesNotMatch(metadata.textContent ?? '', /Auto-resume/u);
+    if (entry.id === 'task') {
+      assert.equal(metadata.querySelector('[title]')?.getAttribute('title'), 'Task assignment · revision 2');
+    }
+    render(null, container);
+  }
+});
+
+test('sticky context keeps the Auto-resume label for real host auto-resume prompts', () => {
+  const container = document.createElement('div');
+  renderBar(container, {
+    rows: [
+      messageRow(userMessage('resume', 'continue the turn', { customType: 'auto-resume' })),
+      messageRow(userMessage('next', 'next prompt')),
+    ],
+    measurements: [{ start: 0, end: 40 }, { start: 100, end: 140 }],
+    metrics: { scrollTop: 50, scrollHeight: 300, clientHeight: 100 },
+    scrollElement: makeScrollElement({ scrollTop: 50, scrollHeight: 300, clientHeight: 100 }),
+  });
+  const metadata = container.querySelector<HTMLElement>('.transcript-prompt-context-meta');
+  assert.ok(metadata);
+  assert.match(metadata.textContent ?? '', /Auto-resume/u);
+  assert.doesNotMatch(metadata.textContent ?? '', /Agent|Note|Result|Task/u);
   render(null, container);
 });
 

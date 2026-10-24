@@ -13,6 +13,7 @@ installSdkResolverForTests();
 const require = createRequire(import.meta.url);
 const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting, getHiddenSkills, recordHiddenSkills, recordPrunedTools, clearCapabilityStateForTesting } = require("../../../extensions/skill-pruner/index.ts") as typeof import("../../../extensions/skill-pruner/index.js");
 const { DEFAULT_CONFIG } = require("../settings/config.ts") as typeof import("../settings/config.js");
+const { SESSION_TASK_PROMPT_PREFIX } = require("../../tools/selection/tool-policy.ts") as typeof import("../../tools/selection/tool-policy.js");
 // Sibling repo modules are require()d (not ESM-imported) so this child holds
 // ONE module instance per source file. Mixing ESM imports with the CJS shim
 // require compiled the same files twice and node's coverage reporter then
@@ -272,7 +273,7 @@ function piePrompt(skills: Skill[], toolNames: string[], customPrompt?: string):
 	return `${base}${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16\nCurrent working directory: /repo`;
 }
 
-async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1", refreshPruning = false): Promise<BeforeAgentStartReturn> {
+async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1", refreshPruning = false, selectedTools?: string[]): Promise<BeforeAgentStartReturn> {
 	const handler = handlers.get("before_agent_start");
 	assert.ok(handler, "before_agent_start handler registered");
 	return await handler({
@@ -284,6 +285,7 @@ async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: strin
 			cwd: "/repo",
 			skills,
 			contextFiles: [{ path: "AGENTS.md", content: "Project context" }],
+			...(selectedTools !== undefined ? { selectedTools } : {}),
 		},
 	}, { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } }) as BeforeAgentStartReturn;
 }
@@ -710,6 +712,104 @@ test("ordinary turns may still prune the wake-up timer tool", async () => {
 
 		assert.ok(!setActiveToolsCalls.at(-1)?.includes("wakeup_timer"));
 		assert.ok(result?.message?.details.excludedTools.includes("wakeup_timer"));
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("task assignments retain finish and requester paths retain wait without defeating user tool selection", async () => {
+	const coordinationTools = ["session_control", "session_assign", "session_finish", "session_wait"].map((name) => ({
+		name,
+		description: `${name} coordinates task work.`,
+		parameters: { type: "object", properties: {} },
+		sourceInfo: mockToolInfo[0]!.sourceInfo,
+	}));
+	const tools = [...mockToolInfo, ...coordinationTools];
+	const toolUpdates: string[][] = [];
+	let scorerContext: unknown;
+	__setCompleteFn(async (_model, context) => {
+		scorerContext = context;
+		return { text: JSON.stringify({ pruneSkills: [], pruneTools: ["session_finish", "session_wait"] }) };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => tools as ToolInfo[],
+			getActiveTools: () => tools.map((tool) => tool.name),
+			setActiveTools: (names) => { toolUpdates.push([...names]); },
+		});
+		const assigned = await runBeforeAgentStart(
+			handlers,
+			`${SESSION_TASK_PROMPT_PREFIX}task-1; revision: 1.\n\nInspect and summarize this module.`,
+			realisticSkills,
+			undefined,
+			"assigned-session-finish-protection",
+		);
+		assert.doesNotMatch(JSON.stringify(scorerContext), /session_finish/u, "assigned finish is withheld from pruning candidates");
+		assert.ok(assigned?.message?.details.includedTools.includes("session_finish"));
+		assert.ok(assigned?.message?.details.includedTools.includes("session_wait"), "remaining requester coordination path protects wait");
+		assert.ok(!assigned?.message?.details.excludedTools.includes("session_finish"));
+		assert.ok(!assigned?.message?.details.excludedTools.includes("session_wait"));
+
+		__setCompleteFn(async () => ({ text: JSON.stringify({ pruneSkills: [], pruneTools: ["session_assign", "session_wait"] }) }));
+		const requester = await runBeforeAgentStart(handlers, "Coordinate the outstanding assignment", realisticSkills, undefined, "requester-wait-protection");
+		assert.ok(requester?.message?.details.includedTools.includes("session_control"));
+		assert.ok(requester?.message?.details.includedTools.includes("session_assign"), "control keeps the assignment tool available for a cold peer");
+		assert.ok(requester?.message?.details.includedTools.includes("session_wait"));
+		assert.ok(!requester?.message?.details.excludedTools.includes("session_assign"));
+
+		const beforeDisabled = toolUpdates.length;
+		const disabled = await runBeforeAgentStart(
+			handlers,
+			`${SESSION_TASK_PROMPT_PREFIX}task-2; revision: 1.\n\nContinue work.`,
+			realisticSkills,
+			undefined,
+			"manually-disabled-coordination",
+			false,
+			[],
+		);
+		assert.equal(toolUpdates.length, beforeDisabled, "an explicit empty selected-tools list is never overridden");
+		assert.ok(disabled?.message);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("sticky tool selection preserves assignment when session control remains active", async () => {
+	let scorerCalls = 0;
+	const coordinationTools = ["session_control", "session_assign", "session_finish", "session_wait"].map((name) => ({
+		name,
+		description: `${name} coordinates task work.`,
+		parameters: { type: "object", properties: {} },
+		sourceInfo: mockToolInfo[0]!.sourceInfo,
+	}));
+	const tools = [...mockToolInfo, ...coordinationTools];
+	let active = tools.map((tool) => tool.name);
+	__setCompleteFn(async () => {
+		scorerCalls++;
+		return { text: JSON.stringify({ pruneSkills: [], pruneTools: ["web_search", "session_assign", "session_wait"] }) };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => tools as ToolInfo[],
+			getActiveTools: () => active,
+			setActiveTools: (names) => { active = [...names]; },
+		});
+		const first = await runBeforeAgentStart(handlers, "Create a cold peer and give it work", realisticSkills, undefined, "sticky-coordination-tools");
+		assert.equal(scorerCalls, 1);
+		assert.ok(first?.message?.details.includedTools.includes("session_assign"));
+		assert.ok(first?.message?.details.includedTools.includes("session_wait"));
+		assert.ok(!active.includes("web_search"), "a normal unrelated tool remains pruned to exercise sticky reapplication");
+
+		const sticky = await runBeforeAgentStart(handlers, "Continue", realisticSkills, undefined, "sticky-coordination-tools");
+		assert.equal(scorerCalls, 1, "ordinary continuation reuses the existing selection");
+		assert.equal(sticky?.message, undefined, "sticky selection does not emit another prepass decision");
+		assert.ok(active.includes("session_control"));
+		assert.ok(active.includes("session_assign"));
+		assert.ok(active.includes("session_wait"));
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });

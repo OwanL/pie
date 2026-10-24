@@ -340,6 +340,7 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
   'models.list',
   'liveTurn.checkpoint',
   'message.send',
+  'message.note',
   'operation.status',
   'message.continue',
   'message.compact',
@@ -354,6 +355,8 @@ const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
 export class WorkerRuntimeRouter {
   private readonly roots = new Map<string, WorkerRuntimeRouteState>();
   private readonly snoozeReservations = new Map<string, { reservationId: string; wakeAt: number }>();
+  private readonly releasingSessionPaths = new Set<string>();
+  private readonly sessionReleaseBarriers = new Map<string, Promise<void>>();
   private readonly pendingRuntimeCommands = new Map<string, number>();
   private readonly currentPaths = new Map<string, HotWorkerRoute>();
   private readonly workersById = new Map<string, HotWorkerRoute>();
@@ -641,7 +644,7 @@ export class WorkerRuntimeRouter {
     // eslint-disable-next-line prefer-const
     barrier = (async () => {
       try {
-        await this.retireSessionForForget(sessionPath);
+        await this.retireSessionRuntime(sessionPath, 'session forgotten');
         return await operation();
       } catch (error) {
         for (const key of keys) {
@@ -652,6 +655,31 @@ export class WorkerRuntimeRouter {
       }
     })();
     for (const key of keys) this.sessionForgetBarriers.set(key, barrier);
+    return barrier;
+  }
+
+  /** Stop a closed session's isolated worker while retaining its durable
+   * manager/session artifacts for a later fresh-generation reopen. Duplicate
+   * callers join the same process-tree retirement, and admissions stay fenced
+   * until death is confirmed or the stop fails. */
+  releaseSessionRuntime(sessionPath: string): Promise<void> {
+    const keys = this.sessionForgetKeys(sessionPath);
+    const existing = [...keys].map((key) => this.sessionReleaseBarriers.get(key))
+      .find((barrier): barrier is Promise<void> => barrier !== undefined);
+    if (existing) return existing;
+
+    for (const key of keys) this.releasingSessionPaths.add(key);
+    const barrier: Promise<void> = (async () => {
+      try {
+        await this.retireSessionRuntime(sessionPath, 'session closed');
+      } finally {
+        for (const key of keys) {
+          if (this.sessionReleaseBarriers.get(key) === barrier) this.sessionReleaseBarriers.delete(key);
+          this.releasingSessionPaths.delete(key);
+        }
+      }
+    })();
+    for (const key of keys) this.sessionReleaseBarriers.set(key, barrier);
     return barrier;
   }
 
@@ -1337,7 +1365,7 @@ export class WorkerRuntimeRouter {
     await retirement;
   }
 
-  private async retireSessionForForget(sessionPath: string): Promise<void> {
+  private async retireSessionRuntime(sessionPath: string, reason: string): Promise<void> {
     // Promotion can already own a spawned worker before runtime.ready. Join it
     // before selecting the next state, then retire that owner. An unconfirmed
     // promotion failure settles as `retiring` and must propagate rather than
@@ -1357,10 +1385,10 @@ export class WorkerRuntimeRouter {
         // Cancel and stop before joining completion. This also breaks worker
         // tool/deferred-forget cycles where a transition is waiting for that
         // worker to finish its current tool call.
-        await this.forceRecoverTransition(route.rootSessionPath, 'session forgotten');
+        await this.forceRecoverTransition(route.rootSessionPath, reason);
         continue;
       }
-      await this.retire(route.currentLeasePath, 'session forgotten');
+      await this.retire(route.currentLeasePath, reason);
     }
   }
 
@@ -1391,6 +1419,9 @@ export class WorkerRuntimeRouter {
     else if (reservation) throw new BackendError('SESSION_SNOOZED', 'Session admission is reserved for snooze.');
     if (this.forgettingSessionPaths.has(routeKey(sessionPath))) {
       throw new BackendError('SESSION_NOT_FOUND', `Session ${sessionPath} is being forgotten.`);
+    }
+    if (this.releasingSessionPaths.has(key)) {
+      throw new BackendError('SESSION_CLOSING', 'Session runtime is being released for close.');
     }
   }
 
@@ -3144,6 +3175,22 @@ export class WorkerRuntimeRouter {
       reportedAt: report.reportedAt,
       models: report.models,
     }));
+  }
+
+  /** Worker-reported OS process samples. Context tokens are a separate fact. */
+  inspectWorkerResources(): { workers: WorkerJsonObject[]; total: number; truncated: boolean } {
+    const routes = [...this.currentPaths.values()];
+    const workers = routes.slice(0, 256).map(route => {
+      const snapshot = route.worker.client.getSnapshot();
+      const memory = snapshot.lastHeartbeat?.memory;
+      return {
+        sessionPath: route.currentLeasePath, workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        ...(snapshot.pid ? { pid: snapshot.pid } : {}),
+        ...(memory ? { memory: { ...memory, scope: 'worker-process', excludesChildProcesses: true, ageMs: Math.max(0, Date.now() - memory.observedAt), freshness: Date.now() - memory.observedAt < 15_000 ? 'fresh' : 'stale' } } : { memory: { freshness: 'unavailable' } }),
+      };
+    });
+    return { workers, total: routes.length, truncated: routes.length > workers.length };
   }
 
   /** Cross-worker provider truth used by the public metrics strip. The legacy

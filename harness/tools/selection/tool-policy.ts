@@ -4,6 +4,51 @@ import type { PruningConfig } from "../../tool-and-skill-selection/settings/conf
 /** The pruner's own recovery tool. Hard-protected so hidden tools and skills
  * always retain one minimal, model-visible recovery path. */
 export const RECOVERY_TOOL_NAME = "request_capability";
+export const SESSION_TASK_PROMPT_PREFIX = "[Pie session task:";
+export const SESSION_CONTROL_TOOL_NAME = "session_control";
+export const SESSION_ASSIGN_TOOL_NAME = "session_assign";
+export const SESSION_FINISH_TOOL_NAME = "session_finish";
+export const SESSION_WAIT_TOOL_NAME = "session_wait";
+
+/** A coordinator-authenticated assignment prompt carries this display prefix.
+ * It is a tool-visibility hint only; task ownership is enforced by the
+ * coordinator, not inferred from model-visible prompt text. */
+export function assignmentPromptProtectedTools(
+	availableTools: readonly Pick<ToolInfo, "name">[],
+	prompt: string,
+): string[] {
+	if (!prompt.startsWith(SESSION_TASK_PROMPT_PREFIX)) return [];
+	return availableTools.some((tool) => tool.name === SESSION_FINISH_TOOL_NAME)
+		? [SESSION_FINISH_TOOL_NAME]
+		: [];
+}
+
+/** Retain a useful requester completion path when either lifecycle discovery
+ * or assignment survives this selection. Names absent from the caller's
+ * available set are never introduced, preserving user/child allowlists. */
+export function sessionWorkflowProtectedTools(
+	availableTools: readonly Pick<ToolInfo, "name">[],
+	prunedTools: readonly string[] | null,
+	prompt: string,
+): string[] {
+	const availableNames = new Set(availableTools.map((tool) => tool.name));
+	const pruned = new Set(prunedTools ?? []);
+	const protectedTools = assignmentPromptProtectedTools(availableTools, prompt);
+	const controlSurvives = availableNames.has(SESSION_CONTROL_TOOL_NAME) && !pruned.has(SESSION_CONTROL_TOOL_NAME);
+	const assignSurvives = availableNames.has(SESSION_ASSIGN_TOOL_NAME) && !pruned.has(SESSION_ASSIGN_TOOL_NAME);
+	// A live lifecycle path must be able to start work on an already-created
+	// cold peer. Keep assignment discoverable alongside lifecycle control, but
+	// only when the caller's available catalog contains it (allowlists remain
+	// authoritative).
+	if (controlSurvives && availableNames.has(SESSION_ASSIGN_TOOL_NAME)) {
+		protectedTools.push(SESSION_ASSIGN_TOOL_NAME);
+	}
+	const requesterPathSurvives = controlSurvives || assignSurvives;
+	if (requesterPathSurvives && availableNames.has(SESSION_WAIT_TOOL_NAME)) {
+		protectedTools.push(SESSION_WAIT_TOOL_NAME);
+	}
+	return protectedTools;
+}
 
 export function applyToolSelection(
 	allTools: ToolInfo[],
@@ -44,13 +89,20 @@ export function applyToolSelection(
 	// A tool that is a dependency (transitively) of a KEPT tool must not be pruned —
 	// pruning it would strand the tool that needs it. Walk to a fixpoint.
 	const dependencies = activeConfig.tools.dependencies;
-	if (dependencies && pruneSet.size > 0) {
+	if (pruneSet.size > 0) {
 		let changed = true;
 		while (changed) {
 			changed = false;
 			const kept = allTools.filter((t) => !pruneSet.has(t.name)).map((t) => t.name);
 			for (const keptTool of kept) {
-				for (const dep of dependencies[keptTool] ?? []) {
+				const required = [
+					...(dependencies?.[keptTool] ?? []),
+					...(keptTool === SESSION_CONTROL_TOOL_NAME && allNames.has(SESSION_ASSIGN_TOOL_NAME)
+						? [SESSION_ASSIGN_TOOL_NAME] : []),
+					...((keptTool === SESSION_CONTROL_TOOL_NAME || keptTool === SESSION_ASSIGN_TOOL_NAME)
+						&& allNames.has(SESSION_WAIT_TOOL_NAME) ? [SESSION_WAIT_TOOL_NAME] : []),
+				];
+				for (const dep of required) {
 					if (pruneSet.has(dep)) {
 						pruneSet.delete(dep);
 						changed = true;

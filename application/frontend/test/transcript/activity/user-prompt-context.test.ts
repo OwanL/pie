@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { ChatMessage } from '../../../../lib/protocol/index.js';
+import { AGENT_MESSAGE_CUSTOM_TYPE, type ChatMessage } from '../../../../lib/protocol/index.js';
+import { createSessionControlSender } from '../../../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
 import {
   buildUserPromptEntries,
   selectPromptFromElementMetrics,
@@ -96,6 +97,22 @@ test('entries expose queued and auto-resume state for user messages', () => {
   assert.equal(entries[0]?.isAutoResume, false);
   assert.equal(entries[1]?.isQueued, false);
   assert.equal(entries[1]?.isAutoResume, true);
+});
+
+test('agent notes, results, and assignments are not classified as auto-resume prompts', () => {
+  const sender = createSessionControlSender({ sessionId: 'coordinator', identityFallback: false }, 'Coordinator');
+  const entries = buildUserPromptEntries([
+    messageRow(userMessage('note', 'context', { customType: AGENT_MESSAGE_CUSTOM_TYPE, sender, customDetails: { kind: 'note' } })),
+    messageRow(userMessage('result', 'finished', { customType: AGENT_MESSAGE_CUSTOM_TYPE, sender, customDetails: { kind: 'result' } })),
+    messageRow(userMessage('task', 'work', { customType: AGENT_MESSAGE_CUSTOM_TYPE, sender: createSessionControlSender(
+      { sessionId: 'coordinator', identityFallback: false }, 'Coordinator',
+      { sentAt: 1, expectReply: false, kind: 'assignment', taskId: 'task-1', taskRevision: 1 },
+    ) })),
+    messageRow(userMessage('resume', 'continue', { customType: 'auto-resume' })),
+  ]);
+
+  assert.deepEqual(entries.map(entry => entry.isAgentMessage), [true, true, true, false]);
+  assert.deepEqual(entries.map(entry => entry.isAutoResume), [false, false, false, true]);
 });
 
 test('viewport selection only returns prompts fully above the viewport', () => {

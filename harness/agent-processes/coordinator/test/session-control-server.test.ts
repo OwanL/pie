@@ -17,7 +17,8 @@ import {
   type SessionControlSettingsAcknowledgement,
   type SessionControlSettingsRequest,
 } from '../../lib/rpc/session-control-settings.js';
-import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { createSessionControlSender, createSessionReplyReference } from '../../lib/rpc/session-control-attribution.js';
+import { createSessionAddress } from '../session-address.js';
 import { resolveSessionIdentity } from '../../../session-storage/ownership/session-identity.js';
 import { readAgentCreatedSessionCreator } from '../../../session-storage/metadata/session-provenance.js';
 import { appendAdmissionFallbackMarker, getAdmissionFallbackTitle } from '../../../session-storage/metadata/session-title.js';
@@ -42,6 +43,7 @@ type FakeServer = {
     operationCancellationGeneration?(path: string): number;
     invalidatePendingRuntimeOperations?(path: string): number;
     hasPendingRuntimeWork?(path: string): boolean;
+    hasHotOwner?(path: string): boolean;
   };
 };
 
@@ -192,6 +194,17 @@ function applyMembership(server: FakeServer, snapshot: unknown): void {
   (server as unknown as { applyHostLiveMembership(snapshot: unknown): void }).applyHostLiveMembership(snapshot);
 }
 
+/** Model an explicitly durable direct-creator marker for lifecycle mechanics tests. */
+function allowDirectCreator(server: FakeServer, creatorPath: string, targetPath: string): void {
+  const internal = server as unknown as {
+    sessionControlOwnership(path: string, sourcePath: string): Record<string, unknown>;
+  };
+  const original = internal.sessionControlOwnership.bind(server);
+  internal.sessionControlOwnership = (path, sourcePath) => path === targetPath && sourcePath === creatorPath
+    ? { ownedByCaller: true }
+    : original(path, sourcePath);
+}
+
 function membershipEntry(path: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     path,
@@ -273,6 +286,7 @@ async function readyServerWithMembers(dir: string): Promise<{
   const operationGenerations = new Map<string, number>();
   server.workerRuntimeRouter = {
     getRoute: () => ({ state: 'cold' }),
+    hasHotOwner: () => false,
     operationCancellationGeneration: (sessionPath) => operationGenerations.get(sessionPath) ?? 0,
     invalidatePendingRuntimeOperations: (sessionPath) => {
       const next = (operationGenerations.get(sessionPath) ?? 0) + 1;
@@ -1139,6 +1153,29 @@ test('coordinator ingress strips forged attribution before the authenticated wor
   assert.equal((routed[0] as { params: Record<string, unknown> }).params.coordinatorAttribution, undefined);
 });
 
+test('public coordinator ingress rejects private message.note before hot-worker routing', async () => {
+  const server = serverForTests();
+  const routed: unknown[] = [];
+  (server as unknown as { workerRuntimeRouter: unknown }).workerRuntimeRouter = {
+    getRoute: () => ({ state: 'hot', owner: { workerId: 'target-worker' } }),
+    operationCancellationGeneration: () => 0,
+    route: async (request: unknown) => { routed.push(request); return { status: 'accepted' }; },
+  };
+
+  await assert.rejects(server.handleRequest({
+    id: 'public-forged-note',
+    method: 'message.note',
+    params: {
+      sessionPath: '/workspace/target.jsonl',
+      note: {
+        id: 'forged-note', kind: 'note', body: 'Impersonated coordinator instruction.',
+        sender: currentSender,
+      },
+    },
+  }), (error: { code?: string }) => error.code === 'INVALID_PARAMS');
+  assert.deepEqual(routed, [], 'public host ingress must reject before looking at or routing to a hot worker');
+});
+
 test('hot session-control settings and create cwd capture use durable metadata under the real hot lease', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-hot-durable-capture-'));
   const { server, currentPath } = await readyServerWithMembers(dir);
@@ -1483,6 +1520,7 @@ test('created session-control sends stop after confirmed close during gated conf
     title: 'Created race', prompt: 'send only if still live',
   }), currentPath);
   await configurationStarted;
+  allowDirectCreator(server, currentPath, targetPath);
   const closing = server.handleWorkerSessionControl(frame('close', { title: 'Created race' }), currentPath);
   applyMembership(server, membership(
     [membershipEntry(currentPath), membershipEntry(idlePath)],
@@ -1593,13 +1631,14 @@ test('agent send records reply intent and send time, leaving delivery time to th
   assert.deepEqual(event.sender, sender);
 });
 
-test('combined create captures settings once, honors explicit overrides, then sends with attribution', async () => {
+test('combined create captures settings once, honors explicit overrides, then returns an explicit task assignment', async () => {
   const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-combined-'));
   const { server, currentPath } = await readyServerWithMembers(dir);
   const events: Array<{ event: string; payload?: unknown }> = [];
   installSessionControlSettingsHarness(server, events);
   const requests: Array<{ method: string; params?: unknown }> = [];
   const createdPath = '/workspace/combined.jsonl';
+  const initialPrompt = 'x'.repeat(16 * 1024);
   const coordinator = server as unknown as {
     retainColdSessionManager(handle: unknown, creationReason: 'new'): void;
     newCreatePublicationPaths: Set<string>;
@@ -1623,7 +1662,7 @@ test('combined create captures settings once, honors explicit overrides, then se
 
   const outcome = await server.handleWorkerSessionControl(frame('create', { bucket: 'medium',
     title: 'Combined worker',
-    prompt: 'start after configuration',
+    prompt: initialPrompt,
     settings: {
       reasoning: 'low',
       autonomousMode: false,
@@ -1634,6 +1673,10 @@ test('combined create captures settings once, honors explicit overrides, then se
   assert.equal((outcome.result.creation as Record<string, unknown>).status, 'created');
   assert.equal((outcome.result.configuration as Record<string, unknown>).status, 'succeeded');
   assert.equal((outcome.result.message as Record<string, unknown>).status, 'accepted');
+  const task = outcome.result.task as Record<string, unknown>;
+  assert.equal(typeof task.taskId, 'string');
+  assert.equal(task.revision, 1);
+  assert.equal(task.status, 'accepted');
   assert.deepEqual(requests.map((request) => request.method), [
     'session.create', 'settings.set', 'systemPromptToggles.set', 'message.send',
   ]);
@@ -1645,7 +1688,19 @@ test('combined create captures settings once, honors explicit overrides, then se
   assert.deepEqual(requests[2]?.params, {
     sessionPath: '/workspace/combined.jsonl', disabledEntries: ['override-entry'],
   });
-  const sender = assertStampedSender((requests[3]?.params as Record<string, unknown>).coordinatorAttribution);
+  const rawSender = (requests[3]?.params as Record<string, unknown>).coordinatorAttribution as Record<string, unknown>;
+  const sender = rawSender as typeof currentSender & { message: {
+    sentAt: number; expectReply: boolean; kind: string; taskId: string; taskRevision: number;
+  } };
+  assert.deepEqual(sender.identity, currentSender.identity);
+  assert.equal(sender.message.expectReply, false);
+  assert.equal(sender.message.kind, 'assignment');
+  assert.equal(sender.message.taskId, task.taskId);
+  assert.equal(sender.message.taskRevision, task.revision);
+  assert.equal((requests[3]?.params as Record<string, unknown>).text, initialPrompt,
+    'an initial assignment exactly at 16 KiB UTF-8 is accepted and sent');
+  assert.equal((task.requester as Record<string, unknown>).address, createSessionAddress(currentSender.identity));
+  assert.equal((task.worker as Record<string, unknown>).address, (outcome.result.creation as Record<string, unknown>).address);
   const settingsRequests = events
     .filter((entry) => entry.event === SESSION_CONTROL_SETTINGS_REQUEST_EVENT)
     .map((entry) => entry.payload as SessionControlSettingsRequest);
@@ -1658,6 +1713,169 @@ test('combined create captures settings once, honors explicit overrides, then se
   assert.deepEqual(events.filter((entry) => entry.event === 'message.agent').map((entry) => (
     (entry.payload as Record<string, unknown>).sender
   )), [sender, sender]);
+});
+
+test('unrelated sessions may coordinate and request task interruption, but cannot close or reconfigure a peer', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-authority-'));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const requests: Array<{ method: string; params?: unknown }> = [];
+  server.handleRequest = async request => {
+    requests.push(request);
+    return request.method === 'message.interrupt' ? { interrupted: true, settled: true } : { queued: true };
+  };
+
+  const note = await server.handleWorkerSessionControl(frame('note', {
+    target: 'Idle plan', message: 'Shared file changed; please inspect it.',
+  }), currentPath);
+  assert.equal((note.result as Record<string, unknown>).status, 'accepted', JSON.stringify(note.result));
+
+  const assignment = await server.handleWorkerSessionControl(frame('task.assign', {
+    target: 'Idle plan', prompt: 'Inspect the shared files and report findings.',
+  }), currentPath);
+  assert.equal((assignment.result as Record<string, unknown>).status, 'accepted');
+  const task = assignment.result.task as Record<string, unknown>;
+  assert.equal(task.status, 'accepted');
+
+  await assert.rejects(server.handleWorkerSessionControl(frame('settings.set', {
+    title: 'Idle plan', settings: { reasoning: 'low' },
+  }), currentPath), (error: { code?: string }) => error.code === 'SESSION_CONTROL_FORBIDDEN');
+  await assert.rejects(server.handleWorkerSessionControl(frame('close', {
+    title: 'Idle plan', delete: true,
+  }), currentPath), (error: { code?: string }) => error.code === 'SESSION_CONTROL_FORBIDDEN');
+
+  const interrupted = await server.handleWorkerSessionControl(frame('interrupt', { address: task.worker && (task.worker as Record<string, unknown>).address }), currentPath);
+  assert.equal((interrupted.result as Record<string, unknown>).interrupted, true,
+    'the authenticated requester may interrupt its worker while the assignment is nonterminal');
+  assert.equal(requests.filter(request => request.method === 'message.interrupt').length, 1);
+
+  await assert.rejects(server.handleWorkerSessionControl(frame('close', { title: 'Idle plan' }), currentPath),
+    (error: { code?: string }) => error.code === 'SESSION_CONTROL_FORBIDDEN',
+    'task requester authority does not extend to close');
+  await assert.rejects(server.handleWorkerSessionControl(frame('settings.set', {
+    address: createSessionReplyReference(resolveSessionIdentity(idlePath)), settings: { reasoning: 'low' },
+  }), currentPath), (error: { code?: string }) => error.code === 'SESSION_CONTROL_FORBIDDEN',
+  'task requester authority does not extend to settings');
+});
+
+test('requester interrupt cancels an awaiting-result task only after confirmed settlement', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-task-interrupt-'));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  let interruption: Record<string, unknown> = { interrupted: true, settled: false, teardownTimedOut: true };
+  server.handleRequest = async request => request.method === 'message.interrupt' ? interruption : { queued: true };
+
+  const assigned = await server.handleWorkerSessionControl(frame('task.assign', {
+    target: 'Idle plan', prompt: 'inspect then report',
+  }), currentPath);
+  const task = assigned.result.task as Record<string, unknown>;
+  server.emit('agent.settled', { sessionPath: idlePath, operationId: 'agent-session:control-task.assign' });
+  const unknownInterrupt = await server.handleWorkerSessionControl(frame('interrupt', {
+    address: (task.worker as Record<string, unknown>).address,
+  }), currentPath);
+  assert.equal((unknownInterrupt.result as Record<string, unknown>).settled, false);
+  const stillAwaiting = await server.handleWorkerSessionControl(frame('wait', {
+    waitId: 'still-awaiting', taskIds: [task.taskId], timeoutMs: 0,
+  }), currentPath);
+  assert.equal((stillAwaiting.result.tasks as Array<Record<string, unknown>>)[0]?.status, 'awaiting-result');
+  await assert.rejects(server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'next task' }) as Record<string, unknown>), requestId: 'next-after-unknown-interrupt',
+  }, currentPath));
+
+  interruption = { interrupted: true, settled: true };
+  const confirmedInterrupt = await server.handleWorkerSessionControl(frame('interrupt', {
+    address: (task.worker as Record<string, unknown>).address,
+  }), currentPath);
+  assert.equal((confirmedInterrupt.result as Record<string, unknown>).interrupted, true);
+  const cancelled = await server.handleWorkerSessionControl(frame('wait', {
+    waitId: 'cancelled-task', taskIds: [task.taskId], timeoutMs: 0,
+  }), currentPath);
+  assert.equal((cancelled.result.tasks as Array<Record<string, unknown>>)[0]?.outcome, 'cancelled');
+
+  const next = await server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'next task' }) as Record<string, unknown>), requestId: 'next-after-confirmed-interrupt',
+  }, currentPath);
+  assert.equal((next.result.task as Record<string, unknown>).status, 'accepted');
+  await assert.rejects(server.handleWorkerSessionControl(frame('task.finish', {
+    taskId: task.taskId, revision: task.revision, outcome: 'completed', result: 'late success',
+  }), idlePath), /different immutable finish/u);
+});
+
+test('generic IPC failure after correlated task start returns unknown evidence, never a known rejection', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-late-task-ack-'));
+  const { server, currentPath, idlePath } = await readyServerWithMembers(dir);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  server.handleRequest = async () => {
+    server.emit('message.started', { sessionPath: idlePath, operationId: 'agent-session:late-task-ack' });
+    // WorkerClient rejects pending requests with a generic Error when the
+    // process/IPC dies, even if an earlier correlated event already arrived.
+    throw new Error('Worker IPC read descriptor closed after dispatch.');
+  };
+
+  const outcome = await server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'inspect and report', requestKey }) as Record<string, unknown>),
+    requestId: 'late-task-ack',
+  }, currentPath);
+  const assigned = outcome.result as Record<string, unknown>;
+  assert.equal(assigned.status, 'unknown');
+  assert.equal((assigned.task as Record<string, unknown>).status, 'running');
+  assert.equal((assigned.message as Record<string, unknown>).status, 'unknown');
+  assert.match(String(assigned.guidance), /do not repeat/u);
+
+  const receipt = (await server.handleWorkerSessionControl(frame('operation.status', { requestKey }), currentPath))
+    .result.operation as Record<string, unknown>;
+  assert.equal(receipt.status, 'known', 'the operation response is durably recorded');
+  assert.equal(receipt.outcome, 'unknown');
+  assert.equal((receipt.result as Record<string, unknown>).status, 'unknown');
+  assert.equal(receipt.error, undefined, 'no INVALID_PARAMS known rejection was recorded');
+});
+
+test('explicit typed preflight rejection remains conclusive and known', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-task-preflight-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  server.handleRequest = async () => {
+    throw new BackendError('MESSAGE_SEND_PRECOMMIT_FAILED', 'Prompt rejected before admission.');
+  };
+  const outcome = await server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'do not execute', requestKey }) as Record<string, unknown>),
+    requestId: 'typed-preflight-rejection',
+  }, currentPath);
+  const assigned = outcome.result as Record<string, unknown>;
+  assert.equal(assigned.status, 'rejected');
+  assert.equal((assigned.task as Record<string, unknown>).status, 'rejected');
+  assert.equal((assigned.message as Record<string, unknown>).status, 'rejected');
+  const receipt = (await server.handleWorkerSessionControl(frame('operation.status', { requestKey }), currentPath))
+    .result.operation as Record<string, unknown>;
+  assert.equal(receipt.status, 'known');
+  assert.equal(receipt.outcome, 'known');
+  assert.equal((receipt.result as Record<string, unknown>).status, 'rejected');
+});
+
+test('unallowlisted structured worker errors remain unknown and reserve the task slot', async () => {
+  const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-structured-worker-error-'));
+  const { server, currentPath } = await readyServerWithMembers(dir);
+  const requestKey = `${Date.now()}:${randomUUID()}`;
+  server.handleRequest = async () => {
+    throw new BackendError('INTERNAL_ERROR', 'Worker returned a structured error without admission proof.');
+  };
+  const outcome = await server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'may have started', requestKey }) as Record<string, unknown>),
+    requestId: 'structured-worker-error',
+  }, currentPath);
+  const assigned = outcome.result as Record<string, unknown>;
+  assert.equal(assigned.status, 'unknown');
+  assert.equal((assigned.task as Record<string, unknown>).status, 'unknown');
+  assert.match(String(assigned.guidance), /do not repeat/u);
+
+  const receipt = (await server.handleWorkerSessionControl(frame('operation.status', { requestKey }), currentPath))
+    .result.operation as Record<string, unknown>;
+  assert.equal(receipt.status, 'known');
+  assert.equal(receipt.outcome, 'unknown');
+  assert.equal((receipt.result as Record<string, unknown>).status, 'unknown');
+
+  await assert.rejects(server.handleWorkerSessionControl({
+    ...(frame('task.assign', { target: 'Idle plan', prompt: 'must not overlap unknown task' }) as Record<string, unknown>),
+    requestId: 'blocked-by-unknown-task',
+  }, currentPath), /non-terminal task/u, 'unknown admission retains the registry worker slot');
 });
 
 test('message settings require confirmed effective reasoning before sending', async () => {
@@ -1737,6 +1955,28 @@ test('create validates the complete explicit settings patch before durable creat
   assert.equal(requests, 0);
   assert.deepEqual(events, []);
 });
+
+for (const [label, prompt] of [
+  ['ASCII', 'x'.repeat(16 * 1024 + 1)],
+  ['multibyte UTF-8', '🧭'.repeat(4 * 1024 + 1)],
+] as const) {
+  test(`create rejects an initial assignment above 16 KiB UTF-8 (${label}) before durable effects`, async (t) => {
+    const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'session-control-prompt-bound-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const { server, currentPath } = await readyServerWithMembers(dir);
+    const events: Array<{ event: string; payload?: unknown }> = [];
+    installSessionControlSettingsHarness(server, events);
+    let writes = 0;
+    server.handleRequest = async () => { writes += 1; return {}; };
+
+    await assert.rejects(server.handleWorkerSessionControl(frame('create', {
+      bucket: 'medium', title: 'Too large', prompt,
+    }), currentPath), (error: { code?: string; message?: string }) =>
+      error.code === 'INVALID_PARAMS' && /16 KiB UTF-8/u.test(error.message ?? ''));
+    assert.equal(writes, 0, 'no durable create or settings operation was sent');
+    assert.deepEqual(events, [], 'no settings capture or mutation was emitted');
+  });
+}
 
 for (const payload of [
   { title: 'Missing bucket' },
@@ -2110,6 +2350,7 @@ test('session-control server addresses a newly created retained cold session des
     frame('message', { title: 'New plan', prompt: 'wake the new session' }),
     '/workspace/current.jsonl',
   );
+  allowDirectCreator(server, '/workspace/current.jsonl', newSessionPath);
   const closeControl = server.handleWorkerSessionControl(
     frame('close', { title: 'New plan' }),
     '/workspace/current.jsonl',
@@ -2237,7 +2478,7 @@ test('session-control message rows reflect queued delivery and roll back rejecte
   );
   assert.equal((events[0]?.payload as { status: string }).status, 'queued');
 
-  server.handleRequest = async () => { throw new Error('send rejected'); };
+  server.handleRequest = async () => { throw new BackendError('INVALID_PARAMS', 'send rejected before admission'); };
   const rejected = await server.handleWorkerSessionControl(
     { requestId: 'control-message-rejected', action: 'message', payload: { title: 'Idle plan', prompt: 'rejected message', expectReply: false } },
     currentPath,
@@ -2691,6 +2932,7 @@ test('cross-session close resolves with the typed host confirmation and late req
   (server as unknown as { emit(event: string, payload?: unknown): void }).emit = (event, payload) => {
     events.push({ event, payload });
   };
+  allowDirectCreator(server, currentPath, pathMod.join(dir, 'idle.jsonl'));
   const closePromise = server.handleWorkerSessionControl(
     frame('close', { title: 'Idle plan' }),
     currentPath,
@@ -2734,6 +2976,7 @@ test('a cross-session close joins an owning close after target membership report
   (server as unknown as { emit(event: string, payload?: unknown): void }).emit = (event, payload) => {
     events.push({ event, payload });
   };
+  allowDirectCreator(server, currentPath, idlePath);
   const first = server.handleWorkerSessionControl(frame('close', { title: 'Idle plan' }), currentPath);
   for (let tick = 0; tick < 100 && events.length === 0; tick += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2));

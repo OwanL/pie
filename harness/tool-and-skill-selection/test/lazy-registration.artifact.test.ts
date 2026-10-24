@@ -33,6 +33,13 @@ exports.getCompleteFn = () => { globalThis.scorerTouches++; return null; };
 exports.runPruningPrepass = () => { throw new Error('must not call a provider'); };
 `);
     const alias = Object.fromEntries(Object.entries(paths).map(([name, targets]) => [name, (targets as string[])[0]]));
+    // The tsconfig overlay's bare package alias resolves to the package's
+    // exported root file. Jiti treats aliases as prefixes, so that target
+    // corrupts real package subpaths (e.g. main.js/encoding/...). Preserve the
+    // owning source package's actual tokenizer exports explicitly.
+    const sourceRequire = createRequire(entry);
+    alias['gpt-tokenizer/encoding/cl100k_base'] = sourceRequire.resolve('gpt-tokenizer/encoding/cl100k_base');
+    alias['gpt-tokenizer/encoding/o200k_base'] = sourceRequire.resolve('gpt-tokenizer/encoding/o200k_base');
     alias['../prepass/prepass.js'] = stub;
     alias['../prepass/prepass.ts'] = stub;
     alias[prepass] = stub;

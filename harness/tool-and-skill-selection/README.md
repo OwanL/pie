@@ -20,6 +20,8 @@ The parser is **fail-open**: unreadable output keeps everything. It first recove
 
 A single `request_capability` recovery tool progressively discloses both hidden tools and hidden skills. With no arguments it returns grouped names only. Selecting an exact tool activates it for the next model step in the same request; selecting an exact trusted skill returns its full `SKILL.md` body immediately. Recovered tools stay active across main-session requests until a fresh pruning decision reconsiders them. Recoveries are logged to `data/pruning.jsonl` as over-pruning quality signals.
 
+Session coordination keeps its available workflow dependencies together: retained `session_control` preserves available `session_assign` and `session_wait`; retained `session_assign` preserves available `session_wait`. This also applies when a configured always-keep or transitive dependency restores control, and when a main session reuses its selection. An authenticated assignment's prompt protects an available `session_finish`. None of these rules introduce a tool outside the user-selected or child-allowed catalog. Notes and resource tools remain independently prunable and recoverable.
+
 ## Configuration
 
 Add a `pruning` block to `settings.json`; specify only the fields you want to override. Omitted fields, including nested options, keep their built-in defaults. For example, this enables shadow mode while leaving all other settings at their defaults:

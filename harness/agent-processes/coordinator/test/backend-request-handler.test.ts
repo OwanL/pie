@@ -30,6 +30,7 @@ import {
 } from '../live-pipeline-trace-runtime.js';
 import { readBackendRequestTracePhases } from '../../test/helpers/backend-live-pipeline-trace.js';
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { deliverSessionNote } from '../../workers/session-notes.js';
 
 class FakeTransitionClock {
   private nextId = 1;
@@ -750,6 +751,29 @@ test('lifecycle close returns the persisted create origin independently of its c
   assert.equal(calls.length, 1, 'a caller cannot populate or replace lifecycle-owned create identity');
 });
 
+test('session.releaseRuntime confirms only after the coordinator runtime release completes', async () => {
+  const harness = createHarness();
+  const calls: string[] = [];
+  let released = false;
+  harness.deps.releaseSessionRuntime = async (sessionPath) => {
+    calls.push(sessionPath);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    released = true;
+  };
+  const response = await handleBackendRequest(harness.deps, {
+    id: 'release-runtime', method: 'session.releaseRuntime',
+    params: { sessionPath: '/repo/ordinary.jsonl' },
+  });
+  assert.deepEqual(calls, ['/repo/ordinary.jsonl']);
+  assert.equal(released, true, 'RPC waits for process-release completion');
+  assert.deepEqual(response, { sessionPath: '/repo/ordinary.jsonl', released: true });
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'release-runtime-pending', method: 'session.releaseRuntime',
+    params: { sessionPath: '__pending__:1' },
+  }), /resolved session/);
+});
+
 test('session.duplicate reads a cold source cwd without promoting the source runtime', async () => {
   const harness = createHarness();
   const sourcePath = '/other-workspace/source.jsonl';
@@ -914,11 +938,74 @@ test('idle agent message.send attributes model input and retains the normal pref
 
   assert.equal(typeof result.requestId, 'string');
   assert.equal(preflightCalls, 1);
-  assert.ok(promptText.includes(sender.replyReference));
+  assert.ok(promptText.includes(sender.address!));
   assert.ok(promptText.endsWith('/looks-like-a-command'));
   assert.equal(harness.context.activeRequest?.extensionCommand, false,
     'coordinator-originated agent body is not interpreted as an extension command');
   assert.deepEqual(harness.context.activeRequest?.coordinatorAttribution, sender);
+});
+
+test('task assignments require an available session_finish capability before provider admission', async () => {
+  const sender = createSessionControlSender({ sessionId: 'task-requester', identityFallback: false }, 'Requester', {
+    sentAt: 10, expectReply: false, kind: 'assignment', taskId: 'task-capability-check', taskRevision: 1,
+  });
+  let assignmentProviderCalls = 0;
+  const withFinish = createHarness({
+    sessionOverrides: {
+      getActiveToolNames: () => ['read', 'session_finish'],
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+        assignmentProviderCalls += 1;
+        queueMicrotask(() => withFinish.context.activeRequest?.agentMessageDurability?.settle(true));
+      },
+    },
+  });
+  await handleBackendRequest(withFinish.deps, {
+    id: 'task-finish-present', method: 'message.send',
+    params: { sessionPath: withFinish.context.sessionPath, text: 'Do the assigned work.', inputs: [], localId: 'local:agent-session:task-present', coordinatorAttribution: sender },
+  });
+  assert.equal(assignmentProviderCalls, 1);
+
+  for (const [id, getActiveToolNames] of [
+    ['task-finish-absent', () => ['read']],
+    ['task-finish-capabilities-unknown', undefined],
+  ] as const) {
+    let providerCalls = 0;
+    const harness = createHarness({
+      sessionOverrides: {
+        ...(getActiveToolNames ? { getActiveToolNames } : {}),
+        prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+          // Model the SDK boundary: if the callback rejects, no provider turn starts.
+          options?.preflightResult?.(true);
+          providerCalls += 1;
+        },
+      },
+    });
+    const send = handleBackendRequest(harness.deps, {
+      id, method: 'message.send',
+      params: { sessionPath: harness.context.sessionPath, text: 'Do the assigned work.', inputs: [], localId: `local:agent-session:${id}`, coordinatorAttribution: sender },
+    });
+    await assert.rejects(send, (error: unknown) => (error as { code?: string }).code === 'MESSAGE_SEND_PRECOMMIT_FAILED');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(providerCalls, 0, `${id} must fail before the provider turn`);
+    const failure = harness.emitted.find((entry) => entry.event === 'preflight.failed')?.payload as { error?: string } | undefined;
+    assert.match(failure?.error ?? '', /session_finish is unavailable/u);
+    assert.equal(harness.context.activeRequest, undefined);
+  }
+
+  const ordinary = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+      },
+    },
+  });
+  await handleBackendRequest(ordinary.deps, {
+    id: 'ordinary-without-capability-snapshot', method: 'message.send',
+    params: { sessionPath: ordinary.context.sessionPath, text: 'An ordinary user message.', inputs: [] },
+  });
+  assert.equal(ordinary.context.activeRequest !== undefined, true,
+    'ordinary user prompts do not require the optional active-tool snapshot');
 });
 
 test('Stop settles an unflushed agent send without waiting for an SDK answer', async () => {
@@ -3556,7 +3643,7 @@ test('queued agent messages retain coordinator attribution without a pruning pre
   assert.equal(result.requestId, undefined);
   assert.equal(promptCalls, 0, 'queued delivery must not start a second idle pruning prepass');
   assert.equal(steerCalls.length, 1);
-  assert.ok(steerCalls[0]?.includes(sender.replyReference));
+  assert.ok(steerCalls[0]?.includes(sender.address!));
   assert.ok(steerCalls[0]?.endsWith('queued body'));
   assert.deepEqual(harness.context.queuedCoordinatorAttributions, [sender]);
 });
@@ -3602,7 +3689,7 @@ test('queued steering and follow-ups skip another pruning prepass for user and a
       const queuedCalls = isSteering ? steerCalls : followUpCalls;
       assert.equal(queuedCalls.length, 1);
       assert.ok(queuedCalls[0]?.endsWith('queued body'));
-      if (sender) assert.ok(queuedCalls[0]?.includes(sender.replyReference));
+      if (sender) assert.ok(queuedCalls[0]?.includes(sender.address!));
       else assert.equal(queuedCalls[0], 'queued body');
       assert.equal(steerCalls.length, isSteering ? 1 : 0);
       assert.equal(followUpCalls.length, isSteering ? 0 : 1);
@@ -3653,6 +3740,63 @@ test('queued message.send operations retain independent identities', async () =>
     });
     assert.equal((status as { state: string }).state, 'failed');
   }
+});
+
+test('message.replaceQueue refuses to clear a pending cross-session note queue', async () => {
+  let clearCalls = 0;
+  const harness = createHarness({
+    context: { queuedLocalIds: ['local-1'] },
+    sessionOverrides: {
+      isStreaming: true,
+      clearQueue: () => { clearCalls += 1; return { steering: [], followUp: [] }; },
+      sendCustomMessage: async () => undefined,
+    },
+  });
+  const sender = createSessionControlSender(
+    { sessionId: 'note-source', identityFallback: false }, 'Note source', { sentAt: 10, expectReply: false },
+  );
+  const note = await deliverSessionNote(harness.context, {
+    id: 'pending-note', body: 'The collaborator has information.', kind: 'note', sender,
+  });
+  assert.equal(note.status, 'queued');
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'replace-queue-with-pending-note', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [{ localId: 'local-1', text: 'edited', inputs: [] }],
+      fallbackMessages: [{ localId: 'local-1', text: 'original', inputs: [] }],
+    },
+  }), /SESSION_NOTE_DELIVERY_PENDING/u);
+  assert.equal(clearCalls, 0, 'guard rejects before clearing either queue');
+  assert.deepEqual(harness.context.queuedLocalIds, ['local-1']);
+});
+
+test('message.replaceQueue releases the note gate after a failed edit and fallback', async () => {
+  const harness = createHarness({
+    context: { queuedLocalIds: ['local-1'] },
+    sessionOverrides: {
+      isStreaming: true,
+      steer: async () => { throw new Error('queue append failed'); },
+      sendCustomMessage: async () => undefined,
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'replace-queue-double-failure', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [{ localId: 'local-1', text: 'edited', inputs: [] }],
+      fallbackMessages: [{ localId: 'local-1', text: 'original', inputs: [] }],
+    },
+  }) as { updated: boolean; queueCleared?: boolean };
+  assert.equal(result.updated, false);
+  assert.equal(result.queueCleared, true);
+
+  const sender = createSessionControlSender(
+    { sessionId: 'note-source', identityFallback: false }, 'Note source', { sentAt: 11, expectReply: false },
+  );
+  const note = await deliverSessionNote(harness.context, {
+    id: 'after-failed-edit', body: 'Retry can now be admitted.', kind: 'note', sender,
+  });
+  assert.equal(note.status, 'queued', 'the finally path releases the queue-edit gate');
 });
 
 test('message.replaceQueue clears and requeues edited messages in order with stable local ids', async () => {

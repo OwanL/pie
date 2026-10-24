@@ -235,6 +235,28 @@ test('a queued-edit delivery race closes the stale editor without duplicating or
   assert.equal(rows.find((message) => message.id === 'local:c1')?.status, 'completed');
 });
 
+test('a queued edit blocked by cross-session note delivery preserves the queued row and editor', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  out = reducer(out.state, sendResult('c1', true, true));
+  const editingState: ArchState = {
+    ...out.state,
+    transcript: {
+      ...out.state.transcript,
+      editingMessageIdBySession: { ...out.state.transcript.editingMessageIdBySession, [SESSION]: 'local:c1' },
+    },
+  };
+
+  out = reducer(editingState, {
+    kind: 'ReplaceQueueResult', corrId: 'eq-note', sessionPath: SESSION,
+    messageId: 'local:c1', ok: false, text: 'edited first', inputs: [],
+    composedText: 'edited first', error: 'SESSION_NOTE_DELIVERY_PENDING: waiting for note delivery',
+  });
+  assert.equal(out.state.transcript.editingMessageIdBySession[SESSION], 'local:c1');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.markdown, 'first');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.status, 'queued');
+  assert.match(out.state.settings.notice ?? '', /cross-session note is waiting/u);
+});
+
 // ─── ClearQueue command: remove queued messages + ClearQueueRpc ──────────────
 
 test('ClearQueue command: removes queued transcript messages, drops pending snapshots, emits ClearQueueRpc', () => {

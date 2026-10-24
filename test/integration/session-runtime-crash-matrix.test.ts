@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import test from 'node:test';
+import { publishTestLiveMembership, verifiedSessionRuntimeArgs, waitForSessionOpen } from './session-runtime-test-artifact.js';
 
 // The shared watchdog is JavaScript-only and intentionally has no production
 // TypeScript dependency. Keep the test seam typed locally at the call site.
@@ -236,7 +237,7 @@ async function createMatrixFixture(dir: string, providerPort: number): Promise<{
   const releasePath = path.join(dir, 'provider.release');
   const traceDir = path.join(dir, 'ownership-trace');
   await Promise.all([agentDir, workspaceA, workspaceB, sessionDir, traceDir].map((entry) => fs.mkdir(entry, { recursive: true })));
-  const fixturePath = repoPath('extension', 'test', 'fixtures', 'phase6-crash-matrix-extension.ts');
+  const fixturePath = repoPath('harness', 'agent-processes', 'workers', 'test', 'fixtures', 'phase6-crash-matrix-extension.ts');
   assert.ok(providerPort > 0, 'provider port must be supplied by the harness');
   await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({
     defaultProvider: 'phase-6-provider',
@@ -262,8 +263,13 @@ async function createMatrixFixture(dir: string, providerPort: number): Promise<{
     'phase-6-provider': { type: 'api_key', key: 'phase-6-matrix-test-key' },
   }, null, 2) + '\n');
   const header = (cwd: string, id: string) => JSON.stringify({ type: 'session', id, version: 3, cwd });
-  await fs.writeFile(sessionA, `${header(workspaceA, 'phase-6-a')}\n`);
-  await fs.writeFile(sessionB, `${header(workspaceB, 'phase-6-b')}\n`);
+  // Keep startup title hydration outside this crash test: these are initialized
+  // pre-existing sessions with durable assigned titles.
+  const sessionInfo = (id: string, name: string) => JSON.stringify({
+    type: 'session_info', id: `name-${id}`, parentId: 'user', name, timestamp: new Date().toISOString(),
+  });
+  await fs.writeFile(sessionA, `${header(workspaceA, 'phase-6-a')}\n${sessionInfo('phase-6-a', 'Phase 6 A')}\n`);
+  await fs.writeFile(sessionB, `${header(workspaceB, 'phase-6-b')}\n${sessionInfo('phase-6-b', 'Phase 6 B')}\n`);
   return { agentDir, workspaceA, workspaceB, sessionA, sessionB, pidMarker, descendantMarker, uiDialogMarker, uiResponseMarker, releasePath, traceDir };
 }
 
@@ -302,10 +308,15 @@ async function buildTestOwnedBackendArtifact(dir: string): Promise<string> {
   return backendPath;
 }
 
-function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatrixFixture>>, backendPath: string): BackendHarness {
-  const sdkPath = repoPath('application', 'hosts', 'vscode', 'node_modules', '@earendil-works', 'pi-coding-agent');
+function startBackend(
+  dir: string,
+  fixture: Awaited<ReturnType<typeof createMatrixFixture>>,
+  backendPath: string,
+  sdkArgs: string[],
+  dataDir: string,
+): BackendHarness {
   assert.ok(path.isAbsolute(backendPath));
-  const child = spawn(process.execPath, [backendPath, '--sdkPath', sdkPath, '--cwd', fixture.workspaceA], {
+  const child = spawn(process.execPath, [backendPath, ...sdkArgs], {
     cwd: fixture.workspaceA,
     env: {
       ...process.env,
@@ -315,6 +326,12 @@ function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatr
       PI_CODING_AGENT_AUTH_DIR: undefined,
       PI_CODING_AGENT_DIR: fixture.agentDir,
       PI_CODING_AGENT_SESSION_DIR: path.join(fixture.agentDir, 'sessions'),
+      PIE_DATA_DIR: dataDir,
+      PIE_CACHE_DIR: path.join(dataDir, 'cache'),
+      PIE_SESSION_SETTINGS_DIR: path.join(dataDir, 'state', 'session-settings'),
+      PIE_LEGACY_SESSION_SETTINGS_DIR: path.join(fixture.agentDir, 'session-reviews'),
+      PIE_REVIEWS_DIR: path.join(fixture.agentDir, 'session-reviews'),
+      PIE_TRIGGERS_DIR: path.join(fixture.agentDir, 'deferred-triggers'),
       PIE_P6_MATRIX_TARGET_CWD: fixture.workspaceA,
       PIE_P6_MATRIX_PID_MARKER: fixture.pidMarker,
       PIE_P6_MATRIX_DESCENDANT_MARKER: fixture.descendantMarker,
@@ -368,9 +385,18 @@ function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatr
           reject(new Error(`timed out waiting for ${method} response`));
         }, timeoutMs);
         timer.unref?.();
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+          clearTimeout(timer);
+          responses.delete(id);
+          if (settled) return;
+          settled = true;
+          reject(new Error(`backend exited before ${method} response (code=${code ?? 'null'}, signal=${signal ?? 'none'})`));
+        };
+        child.once('exit', onExit);
         responses.set(id, (response) => {
           clearTimeout(timer);
           responses.delete(id);
+          child.off('exit', onExit);
           if (!settled) {
             settled = true;
             resolve(response);
@@ -380,11 +406,27 @@ function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatr
       }), method, timeoutMs);
     },
     waitForEvent(event, timeoutMs = CONTROL_RESPONSE_DEADLINE_MS) {
-      return waitFor(new Promise<unknown>((resolve) => {
+      const eventPromise = new Promise<unknown>((resolve) => {
+        const onEvent = (payload: unknown) => {
+          const pending = events.get(event) ?? [];
+          const remaining = pending.filter((waiter) => waiter !== onEvent);
+          if (remaining.length === 0) events.delete(event);
+          else events.set(event, remaining);
+          resolve(payload);
+        };
         const waiters = events.get(event) ?? [];
-        waiters.push(resolve);
+        waiters.push(onEvent);
         events.set(event, waiters);
-      }), event, timeoutMs);
+      });
+      const exitPromise = new Promise<never>((_resolve, reject) => {
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => reject(
+          new Error(`backend exited before ${event} (code=${code ?? 'null'}, signal=${signal ?? 'none'})`),
+        );
+        if (child.exitCode !== null || child.signalCode !== null) onExit(child.exitCode, child.signalCode);
+        else child.once('exit', onExit);
+        void eventPromise.finally(() => child.off('exit', onExit));
+      });
+      return waitFor(Promise.race([eventPromise, exitPromise]), event, timeoutMs);
     },
     async close() {
       const capture = {
@@ -490,12 +532,17 @@ async function runCrashMatrix(): Promise<void> {
     provider = await startHoldingProvider(tempDir);
     fixture = await createMatrixFixture(tempDir, provider.port);
     assert.ok(fixture, 'matrix fixture must be created');
-    harness = startBackend(tempDir, fixture, backendPath);
+    const dataDir = path.join(fixture.agentDir, 'runtime-data');
+    const backendBuildId = (await fs.readFile(path.join(path.dirname(backendPath), 'pie-build-id.txt'), 'utf8')).trim();
+    const runtimeArgs = await verifiedSessionRuntimeArgs(fixture.workspaceA, dataDir, backendBuildId);
+    harness = startBackend(tempDir, fixture, backendPath, runtimeArgs.args, dataDir);
     await harness.waitForEvent('backend.ready', STARTUP_DEADLINE_MS);
+    await publishTestLiveMembership(harness.request, [fixture.sessionA, fixture.sessionB]);
+    await waitForSessionOpen(harness.request, fixture.sessionB, STARTUP_DEADLINE_MS, () => harness!.stderr);
 
     // Promote A and open a pending extension UI dialog inside its worker.
     const openedA = await harness.request('session.open', { sessionPath: fixture.sessionA, transcript: 'skip' });
-    assert.equal(openedA.ok, true, 'A must promote to a hot worker');
+    assert.equal(openedA.ok, true, `A must cold-open before its message starts a worker: ${JSON.stringify(openedA)}\nbackend stderr: ${harness.stderr}`);
     await fs.writeFile(fixture.uiDialogMarker, 'open\n');
     const sendA = harness.request('message.send', { sessionPath: fixture.sessionA, text: 'phase 6 matrix A', inputs: [] }, STARTUP_DEADLINE_MS);
     const dialogEvent = await harness.waitForEvent('extension_ui.request', MARKER_DEADLINE_MS) as { id?: unknown; sessionPath?: unknown };
@@ -510,9 +557,10 @@ async function runCrashMatrix(): Promise<void> {
     descendantPid = (JSON.parse(readFileSync(fixture.descendantMarker, 'utf8')) as { pid: number }).pid;
     assert.ok(isAlive(descendantPid), 'the fixture descendant must be alive before the kill');
 
-    // Promote B and verify coordinator controls while A is alive.
-    const openedB = await harness.request('session.open', { sessionPath: fixture.sessionB, transcript: 'skip' });
-    assert.equal(openedB.ok, true, 'B must promote to a hot worker');
+    // B was cold-opened before A blocked so startup title readiness could be
+    // established without activating A's blocking fixture extension. B's
+    // worker is created by its message.send below, after A is terminalized.
+    // Verify coordinator controls while A is alive.
     for (const [method, params] of [
       ['app.ping', undefined],
       ['settings.get', undefined],
@@ -586,6 +634,7 @@ async function runCrashMatrix(): Promise<void> {
     await fs.writeFile(fixture.releasePath, 'release\n');
     const sendBResult = await sendB;
     assert.equal(sendBResult.ok, true, "B's queued message must complete after A's lease is released");
+    await waitUntil(() => provider.arrivals.length >= 2, MARKER_DEADLINE_MS, 'B reaching the fake provider after A releases its lease');
     const providerArrivalCount = provider.arrivals.length;
     assert.equal(providerArrivalCount, 2, 'the provider must have served exactly A then B');
     assert.ok(provider.arrivals[1]!.atMs > killTimestamp, "B's provider request must arrive only after A's crash");
@@ -595,12 +644,12 @@ async function runCrashMatrix(): Promise<void> {
       "B's durable assistant entry after its lease is released",
     );
 
-    // Replacement: promote A again (old-process exit already confirmed) and
-    // run a fresh turn; it must append with the NEW worker generation and the
+    // Replacement: reopen A after the old worker exit is confirmed, then run
+    // a fresh turn; it must append with the NEW worker generation and the
     // old request must not be replayed.
     await fs.writeFile(fixture.pidMarker, ''); // stale marker content is overwritten by the new hook run
     const reopenedA = await harness.request('session.open', { sessionPath: fixture.sessionA, transcript: 'skip' });
-    assert.equal(reopenedA.ok, true, 'A must be promotable after confirmed exit');
+    assert.equal(reopenedA.ok, true, 'A must be reopenable after confirmed worker exit');
     const replacementSend = await harness.request('message.send', { sessionPath: fixture.sessionA, text: 'phase 6 replacement', inputs: [] }, STARTUP_DEADLINE_MS);
     assert.equal(replacementSend.ok, true, "A's replacement turn must complete");
     await waitForFile(fixture.pidMarker, MARKER_DEADLINE_MS);

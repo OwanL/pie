@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { WorkerJsonObject, WorkerJsonValue, WorkerSessionControlAction } from '../lib/rpc/worker-protocol.js';
 
-export type SessionControlMutation = Extract<WorkerSessionControlAction, 'create' | 'message' | 'settings.set' | 'close' | 'cleanup'>;
+export type SessionControlMutation = Extract<WorkerSessionControlAction, 'create' | 'message' | 'settings.set' | 'close' | 'cleanup' | 'note' | 'task.assign' | 'interrupt' | 'resources'>;
 interface Receipt {
   action: SessionControlMutation;
   fingerprint: string;

@@ -26,6 +26,7 @@ export const PIE_TOOLS: readonly PieToolEntry[] = [
   { name: 'request_capability', sourcePath: 'harness/tools/request-capability/index.ts', registration: { kind: 'extension', extensionId: 'skill-pruner', entryPath: 'extensions/skill-pruner/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'session_changes', sourcePath: 'harness/tools/session-changes/index.ts', registration: { kind: 'extension', extensionId: 'session-changes', entryPath: 'extensions/session-changes/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'session_control', sourcePath: 'harness/tools/session-control/index.ts', registration: { kind: 'backend' }, contexts: ['primary', 'inventory', 'subagent'] },
+  ...['session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources'].map(name => ({ name, sourcePath: 'harness/tools/session-control/collaboration.ts', registration: { kind: 'backend' as const }, contexts: ['primary', 'inventory'] as const })),
   { name: 'subagent', sourcePath: 'harness/tools/subagent/register.ts', registration: { kind: 'extension', extensionId: 'subagent', entryPath: 'extensions/subagent/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
 ];
 

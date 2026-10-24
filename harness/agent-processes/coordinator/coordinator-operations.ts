@@ -22,6 +22,7 @@ const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'session.preload',
   'session.lifecyclePrivacy',
   'session.lifecycleClose',
+  'session.releaseRuntime',
   'session.closeAcknowledgement',
   'session.settingsAcknowledgement',
   'session.liveMembership',

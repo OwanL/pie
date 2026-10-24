@@ -49,6 +49,8 @@ export interface SessionPathParams {
   sessionPath: string;
 }
 
+export type SessionReleaseRuntimeParams = SessionPathParams;
+
 export interface SessionCloseAcknowledgementParams {
   sessionPath: string;
   requestId: string;
@@ -261,6 +263,13 @@ export function validateSessionPath(method: string, params: unknown): SessionPat
   }
   const sessionPath = params['sessionPath'] as string;
   rejectPendingSessionPath(method, sessionPath);
+  return { sessionPath };
+}
+
+/** Ordinary tab close disposes a hot worker without deleting durable session
+ * data. Keep this distinct from `session.forget` so later reopen is valid. */
+export function validateSessionReleaseRuntime(params: unknown): SessionReleaseRuntimeParams {
+  const { sessionPath } = validateSessionPath('session.releaseRuntime', params);
   return { sessionPath };
 }
 

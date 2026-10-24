@@ -330,6 +330,15 @@ export interface SdkSession {
   navigateTree: (targetId: string, options?: SdkNavigateTreeOptions) => Promise<{ cancelled: boolean }>;
   reload: () => Promise<void>;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
+  /** Append a custom message without waking an idle session, or queue it at a
+   *  safe point in a running turn. This is used for cross-session notes/results;
+   *  unlike sendUserMessage it must not start an idle turn unless explicitly
+   *  requested. Optional for older SDK artifacts; callers fail closed when
+   *  they require this seam. */
+  sendCustomMessage?: (
+    message: { customType: string; content: string; display: boolean; details?: unknown },
+    options?: { triggerTurn?: boolean; deliverAs?: 'steer' | 'followUp' | 'nextTurn' },
+  ) => Promise<void>;
   /** Resume an interrupted turn without appending a new user message or running
    * the before_agent_start prompt preflight. Adapted by Pie's source policy
    * through the SDK's public continuation decision API. */

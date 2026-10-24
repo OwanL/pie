@@ -10,7 +10,8 @@ import { WORKER_IPC_VERSION } from '../../harness/agent-processes/lib/rpc/worker
 
 const EXPECTED_PIE_TOOLS = [
   'ask_user', 'bash', 'computer', 'wakeup_timer', 'playwright',
-  'request_capability', 'session_changes', 'session_control', 'subagent',
+  'request_capability', 'session_changes', 'session_control', 'session_send', 'session_assign',
+  'session_finish', 'session_wait', 'session_resources', 'subagent',
 ];
 
 test('catalog explicitly owns every baseline Pie tool and references real source/registration paths', async () => {
@@ -55,6 +56,8 @@ test('SDK discovery loads every catalog extension tool once from its stable path
       assert.equal(entry.sourcePath, 'harness/tools/request-capability/index.ts');
     } else if (entry.name === 'session_control') {
       assert.equal(entry.sourcePath, 'harness/tools/session-control/index.ts');
+    } else if (['session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources'].includes(entry.name)) {
+      assert.equal(entry.sourcePath, 'harness/tools/session-control/collaboration.ts');
     }
     assert.deepEqual(Object.keys(entry).sort(), ['contexts', 'name', 'registration', 'sourcePath']);
     assert.deepEqual(Object.keys(entry.registration).sort(), entry.registration.kind === 'extension'
@@ -150,7 +153,9 @@ test('SDK discovery loads every catalog extension tool once from its stable path
 
 test('inventory mirrors primary eligibility while children receive read-only session control', () => {
   assert.deepEqual(pieToolsForContext('inventory'), pieToolsForContext('primary'));
-  assert.deepEqual(unavailablePieToolNames('subagent'), ['wakeup_timer']);
+  assert.deepEqual(unavailablePieToolNames('subagent'), [
+    'wakeup_timer', 'session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources',
+  ]);
   const child = createBackendTools({ kind: 'subagent', requestSessionControl: async () => { throw new Error('unused'); } });
   assert.deepEqual(child.map(tool => tool.name), ['session_control']);
   assert.deepEqual(child[0].parameters.properties.action.enum, ['list', 'read']);

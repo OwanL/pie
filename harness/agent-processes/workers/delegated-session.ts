@@ -14,7 +14,7 @@ const consumedByRequest = new WeakMap<ActiveRequest, Set<string>>();
 
 export function delegatedRolePrompt(manager: Pick<SdkSessionManager, 'getSessionId' | 'getHeader' | 'getEntries'>): string {
   const creator = readAgentCreatedSessionCreator(manager);
-  return creator ? `\n\n## Delegated primary session\nThis independent primary session was created by session ${creator.sessionId}. When your creator requests a response, your final response is automatically handed back after execution settles; do not separately message your final response. Explicit messages are intermediate questions, decisions, or blockers and do not replace the final handoff unless sent with fulfills containing outstanding delivered input IDs, creator replyTo, and expectReply:false. That explicit final attempt durably suppresses automatic handoff for those IDs even if delivery fails or is unknown; do not retry it automatically. Give a concise readable outcome, evidence, verification, and remaining blockers. Settlement does not prove task success. A human may steer this session directly; follow their steering.\n` : '';
+  return creator ? `\n\n## Delegated primary session\nThis independent primary session was created by session ${creator.sessionId}. An authenticated assignment supplies its taskId and revision. Call session_finish once with the outcome, deliverable, evidence, verification, and blockers before ending that assignment. Results belong to the actual requester, whether your creator or another peer. Do not separately send the same final as a note. A plain note assigns no work and requests no acknowledgement. Ending a run without session_finish leaves its task awaiting-result; settlement does not prove task success. A human may steer this session directly; follow their steering without silently claiming the assigned task succeeded.\n` : '';
 }
 
 /** Called only after the durable, authenticated user delivery boundary. Never
@@ -25,8 +25,7 @@ export function consumeDelegatedInput(context: SessionContext, inputId: string, 
   const creator = readAgentCreatedSessionCreator(context.session.sessionManager);
   if (!active || !creator || !inputId || inputId.length > 256
     || sender.identity.sessionId !== creator.sessionId
-    || sender.identity.identityFallback !== creator.identityFallback
-    || sender.message?.expectReply !== true || sender.message.kind === 'completion') return;
+    || sender.identity.identityFallback !== creator.identityFallback) return;
   const manager = context.session.sessionManager;
   const childId = manager.getSessionId?.();
   if (manager.getEntries().some(entry => entry.type === 'custom' && entry.customType === DELEGATED_HANDOFF_CUSTOM_TYPE

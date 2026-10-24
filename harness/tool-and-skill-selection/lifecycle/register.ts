@@ -30,7 +30,12 @@ import type { PrepassInvocation, PrepassRunResult, PrepassUsage, SkillPruningRes
 import { buildReplacement, buildDecision, buildFeedbackMessage } from "../prepass/message-builders.ts";
 import { shouldSkipPruning, getSessionId, getSessionPath, getConfig } from "./pruning-lifecycle.ts";
 import { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } from "../../agent-instructions/skill-selection/skill-policy.ts";
-import { applyToolSelection, RECOVERY_TOOL_NAME } from "../../tools/selection/tool-policy.ts";
+import {
+	applyToolSelection,
+	assignmentPromptProtectedTools,
+	RECOVERY_TOOL_NAME,
+	sessionWorkflowProtectedTools,
+} from "../../tools/selection/tool-policy.ts";
 import { ASK_USER_TOOL_NAME } from "../../tools/catalog/tool-names.ts";
 import { isAutonomousModeEnabled } from "../settings/autonomous-mode.ts";
 import { isInSubagentContext, subagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.ts";
@@ -222,7 +227,12 @@ export default function register(pi: ExtensionAPI) {
 					// Reusing the selector preserves transitive dependencies as well as
 					// explicit and wake-turn protection, without touching active tools.
 					const selection = applyToolSelection(available,
-						[...previouslyPruned].filter((name) => !active.includes(name)), activeConfig, turnProtectedToolNames);
+						[...previouslyPruned].filter((name) => !active.includes(name)), activeConfig,
+						[...turnProtectedToolNames, ...sessionWorkflowProtectedTools(
+							available,
+							[...previouslyPruned].filter((name) => !active.includes(name)),
+							event.prompt,
+						)]);
 					const restored = selection.includedToolNames.filter((name) => previouslyPruned.has(name) && !active.includes(name));
 					if (restored.length > 0) setActiveTools([...active, ...restored]);
 					for (const name of selection.includedToolNames) previouslyPruned.delete(name);
@@ -369,6 +379,7 @@ export default function register(pi: ExtensionAPI) {
 				...(activeConfig.tools?.alwaysKeep ?? []),
 				RECOVERY_TOOL_NAME,
 				...turnProtectedToolNames,
+				...assignmentPromptProtectedTools(availableTools, event.prompt),
 				...(afterCompaction ? activeToolNames : []),
 			]);
 
@@ -461,7 +472,11 @@ export default function register(pi: ExtensionAPI) {
 					availableTools,
 					prunedTools,
 					activeConfig,
-					[...turnProtectedToolNames, ...(afterCompaction ? activeToolNames : [])],
+					[
+						...turnProtectedToolNames,
+						...sessionWorkflowProtectedTools(availableTools, prunedTools, event.prompt),
+						...(afterCompaction ? activeToolNames : []),
+					],
 				);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 

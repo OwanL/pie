@@ -302,6 +302,11 @@ export function handleReplaceQueueResult(state: ArchState, event: Extract<Event,
           draft.settings.noticeKind = 'edit-failed';
           draft.settings.noticeRaw = event.error;
           draft.settings.noticeSessionPath = event.sessionPath;
+        } else if (event.error?.includes('SESSION_NOTE_DELIVERY_PENDING')) {
+          draft.settings.notice = 'A cross-session note is waiting to enter this session. The queued message was not edited; wait for note delivery and try again.';
+          draft.settings.noticeKind = 'edit-failed';
+          draft.settings.noticeRaw = event.error;
+          draft.settings.noticeSessionPath = event.sessionPath;
         } else if (mapped) {
           draft.settings.notice = mapped.message;
           draft.settings.noticeKind = mapped.kind;

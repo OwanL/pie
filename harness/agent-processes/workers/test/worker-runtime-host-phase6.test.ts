@@ -33,6 +33,8 @@ import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { modelExchangeRef } from '../../../session-storage/transcripts/tool-model-exchange';
 import { LIVE_PIPELINE_LIMITS } from '../../lib/rpc/live-pipeline.js';
+import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { deliverSessionNote } from '../session-notes.js';
 
 const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');
 
@@ -41,6 +43,7 @@ interface WorkerRuntimeHostInternals {
   context?: SessionContext;
   currentLease?: { canonicalSessionPath: string };
   runtimeReady: boolean;
+  pendingCommands: number;
   agentDir: string;
   availableModels: () => unknown;
   openedPayload?: SessionOpenedPayload;
@@ -767,6 +770,121 @@ test('hot duplicate runs through the owning runtime replacement and suppresses i
     'later worker refreshes must not replace the source tab');
 });
 
+test('session notes use the control lane, drain before sends, and never start a turn', async () => {
+  const order: string[] = [];
+  let releaseFollowUp!: () => void;
+  const followUpGate = new Promise<void>(resolve => { releaseFollowUp = resolve; });
+  const note = {
+    id: 'mail-note-1', kind: 'note', body: 'Check the changed shared file.',
+    sender: createSessionControlSender({ sessionId: 'requester-session', identityFallback: false }, 'Requester', {
+      sentAt: 10, expectReply: false,
+    }),
+  };
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = '/sessions/notes-target.jsonl';
+  const session = {
+    isStreaming: false,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    model: { id: 'fixture-model', provider: 'fixture' },
+    sessionManager: { getSessionFile: () => sessionPath, getSessionId: () => 'target-session' },
+    prompt: async () => { order.push('prompt'); },
+    followUp: async () => { order.push('followUp'); await followUpGate; },
+    sendCustomMessage: async () => { order.push('note'); },
+  };
+  const context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath,
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest: { id: 'active-request', messageIndex: 1, aborted: false },
+  } as SessionContext;
+  internals.context = context;
+  internals.sdk = { VERSION: 'fixture' };
+  const drainRequests: unknown[] = [];
+  (host as unknown as { options: { server: { requestFrame(...args: unknown[]): Promise<unknown> } } }).options.server.requestFrame = async (...args) => {
+    drainRequests.push(args[0]);
+    order.push('drain');
+    await deliverSessionNote(context, note);
+    return { ok: true, result: { attempted: 1, retained: 0, issues: [] } };
+  };
+
+  const ordinary = host.command('message.send', {
+    params: { sessionPath, text: 'Continue with the review.', inputs: [], localId: 'local-review' },
+  }, 'ordinary-send');
+  await waitForAsyncEvent();
+  assert.deepEqual(order, ['drain', 'note', 'followUp'], 'mail is delivered before the ordinary command is dispatched');
+  assert.equal(drainRequests.length, 1);
+  assert.deepEqual(drainRequests[0], { kind: 'session.control', action: 'notes.drain', payload: {} });
+
+  const control = await host.command('message.note', {
+    params: { sessionPath, note: { ...note, id: 'direct-note' } },
+  }, 'direct-note') as Record<string, unknown>;
+  assert.equal(control.status, 'accepted');
+  assert.deepEqual(order, ['drain', 'note', 'followUp', 'note'],
+    'a note is persisted while the ordinary command remains held in the SDK FIFO');
+  assert.equal(internals.pendingCommands, 1, 'the control-lane note does not enter the ordinary command queue');
+  assert.equal(internals.runtimeReady, false, 'note delivery does not promote an idle worker runtime');
+  await assert.rejects(host.command('message.note', {
+    params: { sessionPath: '/sessions/other.jsonl', note },
+  }, 'wrong-target-note'), /no longer owns this worker/u);
+  assert.equal(order.includes('prompt'), false, 'notes never invoke prompt');
+
+  releaseFollowUp();
+  await ordinary;
+});
+
+test('session note drain issues are surfaced before the requested turn continues', async () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = '/sessions/note-drain-report.jsonl';
+  let issueReportedBeforeFollowUp = false;
+  const session = {
+    isStreaming: false,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    model: { id: 'fixture-model', provider: 'fixture' },
+    sessionManager: { getSessionFile: () => sessionPath, getSessionId: () => 'target-session' },
+    prompt: async () => undefined,
+    followUp: async () => {
+      issueReportedBeforeFollowUp = sent.some(frame => frame.event === 'operational-error');
+    },
+    sendCustomMessage: async () => undefined,
+  };
+  const context = {
+    runtime: {} as SessionContext['runtime'],
+    session: session as unknown as SessionContext['session'],
+    sessionPath,
+    unsubscribe: () => undefined,
+    busySeq: 0,
+    activeRequest: { id: 'active-request', messageIndex: 1, aborted: false },
+  } as SessionContext;
+  internals.context = context;
+  internals.sdk = { VERSION: 'fixture' };
+  (host as unknown as { options: { server: { requestFrame(...args: unknown[]): Promise<unknown> } } }).options.server.requestFrame = async () => ({
+    ok: true,
+    result: { attempted: 1, retained: 1, issues: [
+      { id: 'mail-1', status: 'rejected', retained: true, error: 'recipient queue full' },
+      { id: 'mail-2', status: 'unknown', retained: false, error: 'acknowledgement lost' },
+    ] },
+  });
+
+  await host.command('message.send', {
+    params: { sessionPath, text: 'Continue after checking retained notes.', inputs: [], localId: 'local-note-drain' },
+  }, 'note-drain-report');
+  assert.equal(issueReportedBeforeFollowUp, true);
+  const incident = sent.find(frame => frame.event === 'operational-error')?.payload as Record<string, unknown> | undefined;
+  assert.equal(incident?.code, 'SESSION_NOTE_DELIVERY');
+  assert.match(String(incident?.message), /1 remain queued and 1 have unknown delivery/u);
+  assert.equal(String(incident?.detail).includes('recipient queue full'), true);
+  assert.equal(String(incident?.detail).includes('Continue after checking retained notes.'), false,
+    'delivery diagnostics do not copy the requested prompt or note body');
+});
+
 test('priority interrupt marks the active request aborted', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
@@ -1143,6 +1261,7 @@ test('agent_settled refreshes session.opened from the current session and preser
   delete settledPayload.occurredAt;
   delete settledPayload.endedAt;
   assert.deepEqual(settledPayload, {
+    executionOutcome: 'failed',
     sessionPath,
     capabilities: {
       billableActivity: false,

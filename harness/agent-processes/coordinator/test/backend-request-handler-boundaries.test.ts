@@ -17,6 +17,7 @@ const EXPECTED_SESSION_ROUTES = [
   'session.preload',
   'session.lifecyclePrivacy',
   'session.lifecycleClose',
+  'session.releaseRuntime',
   'session.closeAcknowledgement',
   'session.settingsAcknowledgement',
   'session.liveMembership',

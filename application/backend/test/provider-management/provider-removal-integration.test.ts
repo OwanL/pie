@@ -14,7 +14,7 @@ test('real remove result reconciles terminal failure, transport uncertainty and 
   const forgotten: string[] = [];
   const service = createProviderManagementService({
     configFile: join(dir, 'providers.yaml'), modelCacheDir: join(dir, 'cache'),
-    auth: { definitions: () => [], hasSavedCredential: () => false,
+    auth: { definitions: () => [], listSavedCredentialIds: async () => [], hasSavedCredential: () => false,
       stageOAuthLogin: async () => { throw new Error('Unexpected login'); }, saveCredential: async () => {},
       removeCredential: async id => { revoked.push(id); if (revoked.length === 1) throw new Error('synthetic failure'); },
       getApiKey: async () => { throw new Error('Unexpected key lookup'); }, discoveryBaseUrl: async (_, url) => url },
@@ -40,6 +40,7 @@ test('real remove result reconciles terminal failure, transport uncertainty and 
     assert.equal(command({ type: 'confirm-remove' }).length, 0);
     const failed = await service.request(first.request);
     assert.equal(failed.status, 'error');
+    assert.equal(failed.snapshot.loaded, true);
     assert.deepEqual(failed.snapshot.providers.map(p => p.id), ['other']);
     assert.notEqual(failed.snapshot.configRevision, initial.snapshot.configRevision);
     // Simulate a lost response. Replaying must retain the original ID/revision.

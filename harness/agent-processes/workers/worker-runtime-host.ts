@@ -1,4 +1,5 @@
 import { claimExplicitFulfillment, delegatedRolePrompt } from './delegated-session.js';
+import { clearSessionNoteQueue, deliverSessionNote, observeSessionNoteEvent } from './session-notes.js';
 import { isSubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
 import { SUBAGENT_BUCKET_TOGGLES_ENV } from '../../tools/subagent/bucket-toggles.js';
 import * as fsSync from 'node:fs';
@@ -375,6 +376,15 @@ export class WorkerRuntimeHost {
   }
 
   command(operation: WorkerRuntimeOperation, payload: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
+    if (operation === 'message.note') {
+      const params = payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params) ? payload.params : payload;
+      if (!this.context || this.disposed || params.sessionPath !== this.context.sessionPath) return Promise.reject(new Error('Session note target no longer owns this worker.'));
+      const context = this.context;
+      return deliverSessionNote(context, params.note).then(async result => {
+        if (result.status === 'accepted' && result.delivery === 'appended' && this.context === context) await this.emitRefreshedSessionOpened(context.sessionPath);
+        return result;
+      });
+    }
     const snoozeParams = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params)) ? payload.params : payload;
     if (this.snoozeReservation && this.snoozeReservation.wakeAt <= Date.now()) this.snoozeReservation = undefined;
     if (operation === 'session.snoozeRelease') {
@@ -452,6 +462,13 @@ export class WorkerRuntimeHost {
     this.pendingCommands++;
     const owned = this.commandTail.then(async () => {
       if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
+      if (operation === 'message.send' || operation === 'message.continue') {
+        const drained = await this.options.server.requestFrame({ kind: 'session.control', action: 'notes.drain', payload: {} }, 'session.control.result', undefined, 30_000);
+        if (drained.ok && drained.result && typeof drained.result === 'object' && !Array.isArray(drained.result)) {
+          const issues = (drained.result as WorkerJsonObject).issues;
+          if (Array.isArray(issues) && issues.length > 0) this.reportSessionNoteDrainIssues(this.context, issues);
+        }
+      }
       const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
         ? payload.params
         : payload;
@@ -657,6 +674,7 @@ export class WorkerRuntimeHost {
     const interruptedExtensionCommand = context.pendingExtensionCommand;
     context.uiBridge?.cancelAll();
     context.session.clearQueue();
+    clearSessionNoteQueue(context);
     for (const [index, operationId] of (context.queuedOperationIds ?? []).entries()) {
       if (!operationId) continue;
       context.sendOperationLedger?.markFailed(
@@ -1011,7 +1029,9 @@ export class WorkerRuntimeHost {
           kind: 'primary',
           requestSessionControl: (body, signal) => {
             if (body.kind === 'session.control' && body.action === 'message') claimExplicitFulfillment(this.context, body.payload);
-            return this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal);
+            const timeout = body.kind === 'session.control' && (body.action === 'wait' || (body.action === 'resources' && body.payload.action === 'wait')) && typeof body.payload.timeoutMs === 'number'
+              ? Math.min(310_000, Math.max(120_000, body.payload.timeoutMs + 10_000)) : 120_000;
+            return this.options.server.requestFrame(body, 'session.control.result', undefined, timeout, signal);
           },
         }),
       }),
@@ -1374,6 +1394,7 @@ export class WorkerRuntimeHost {
   }
 
   private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
+    observeSessionNoteEvent(context, event);
     if (this.disposed || context.retired) return;
     // The adapter can re-register its tools between turns (config changes via
     // /mcp commands); registerTool auto-activates them, so re-apply the MCP
@@ -1609,6 +1630,41 @@ export class WorkerRuntimeHost {
       modelId: context.session.model?.id,
       provider: context.session.model?.provider,
     });
+  }
+
+  /** Report retained-mail dispatch failures before admitting the user's
+   * ordinary turn. The coordinator has already made the at-most-once decision:
+   * known pre-enqueue failures remain in its mailbox; unknown writes do not. */
+  private reportSessionNoteDrainIssues(context: SessionContext, rawIssues: unknown[]): void {
+    const issues = rawIssues.flatMap(value => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const row = value as Record<string, unknown>;
+      if (typeof row.id !== 'string' || typeof row.status !== 'string') return [];
+      return [{
+        id: row.id.slice(0, 128),
+        status: row.status.slice(0, 32),
+        retained: row.retained === true,
+        ...(typeof row.error === 'string' ? { error: row.error.slice(0, 512) } : {}),
+      }];
+    }).slice(0, 64);
+    if (issues.length === 0) return;
+    const identity = `session-note-drain:${this.options.owner.workerId}:${issues.map(issue => `${issue.id}:${issue.status}`).join(',')}`;
+    const retainedCount = issues.filter(issue => issue.retained).length;
+    const unknownCount = issues.filter(issue => issue.status === 'unknown').length;
+    this.emit('operational-error', createOperationalIncident({
+      incidentId: identity,
+      dedupeKey: identity,
+      code: 'SESSION_NOTE_DELIVERY',
+      message: `${issues.length} retained cross-session message${issues.length === 1 ? '' : 's'} could not be confirmed before this turn; ${retainedCount} remain queued and ${unknownCount} have unknown delivery with no automatic replay.`,
+      detail: JSON.stringify(issues).slice(0, 4_096),
+      sessionPath: context.sessionPath,
+      ...(context.activeRequest?.operationId ? { operationId: context.activeRequest.operationId } : {}),
+      ...(context.activeRequest?.id ? { requestId: context.activeRequest.id } : {}),
+      severity: 'warning',
+      certainty: unknownCount > 0 ? 'ambiguous' : 'definitive',
+      phase: 'recovery',
+      recovery: { retry: retainedCount > 0, showLogs: false },
+    }));
   }
 
   private emit(event: string, payload?: unknown): void {
@@ -1850,7 +1906,9 @@ export class WorkerRuntimeHost {
           kind: 'primary',
           requestSessionControl: (body, signal) => {
             if (body.kind === 'session.control' && body.action === 'message') claimExplicitFulfillment(this.context, body.payload);
-            return this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal);
+            const timeout = body.kind === 'session.control' && (body.action === 'wait' || (body.action === 'resources' && body.payload.action === 'wait')) && typeof body.payload.timeoutMs === 'number'
+              ? Math.min(310_000, Math.max(120_000, body.payload.timeoutMs + 10_000)) : 120_000;
+            return this.options.server.requestFrame(body, 'session.control.result', undefined, timeout, signal);
           },
         }),
       }),

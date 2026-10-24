@@ -1,4 +1,5 @@
 import type { ChatMessage, UserContentPart } from '../../lib/protocol/index.js';
+import { isAgentMessage } from './agent-message-metadata';
 import { getRenderableUserParts } from './parts';
 import type { TranscriptRow } from './virtual-list-rows';
 
@@ -15,6 +16,7 @@ export interface UserPromptEntry {
   message: ChatMessage;
   isQueued: boolean;
   isAutoResume: boolean;
+  isAgentMessage: boolean;
 }
 
 export interface UserPromptDetails {
@@ -74,7 +76,8 @@ export function buildUserPromptEntries(rows: readonly TranscriptRow[]): UserProm
       messageId: message.id,
       message,
       isQueued: message.status === 'queued',
-      isAutoResume: message.customType !== undefined,
+      isAutoResume: message.customType !== undefined && !isAgentMessage(message),
+      isAgentMessage: isAgentMessage(message),
     });
   }
   return entries;

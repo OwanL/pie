@@ -403,6 +403,8 @@ export interface DelegatedHandoff {
 }
 
 export interface AgentSettledPayload {
+  /** Execution outcome only; completed does not establish task completion. */
+  executionOutcome?: 'completed' | 'failed' | 'cancelled';
   handoff?: DelegatedHandoff;
   sessionPath: string;
   /** Backend-classified inert capability facts (no host operation overlay). */

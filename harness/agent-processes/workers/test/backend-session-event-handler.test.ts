@@ -2404,6 +2404,7 @@ test('sequenced production path emits only typed live envelopes with a durable t
     protocolVersion: 7,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-live',
+    operationId: 'agent-session:req-live',
     turnId: 'turn-live',
     attemptId: 'attempt-live',
     canonicalMessageId: 'req-live:1',
@@ -2419,7 +2420,7 @@ test('sequenced production path emits only typed live envelopes with a durable t
       },
     } as unknown as SessionContext['session'],
     activeRequest: {
-      id: 'req-live', messageIndex: 0, aborted: false,
+      id: 'req-live', operationId: 'agent-session:req-live', messageIndex: 0, aborted: false,
       turnBoundaryAt: Date.now() - 20,
       liveTurnAccumulator: accumulator,
     },
@@ -2441,6 +2442,8 @@ test('sequenced production path emits only typed live envelopes with a durable t
   assert.deepEqual(envelopes.map((entry) => [entry.seq, entry.kind]), [
     [1, 'turn.started'], [2, 'turn.phase'], [3, 'turn.phase'], [4, 'turn.text'], [5, 'turn.terminal'],
   ]);
+  assert.equal(envelopes[0]?.operationId, 'agent-session:req-live',
+    'the live semantic start carries the same operation identity used for coordinator task assignment');
   assert.equal(envelopes.at(-1)?.durableEntryId, 'entry-assistant');
   assert.equal(envelopes.at(-1)?.durableMessage.durableEntryId, 'entry-assistant');
   assert.equal(typeof envelopes.at(-1)?.durableMessage.turnLatencyMs, 'number');

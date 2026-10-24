@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { validateDetailFetch, validateDetailSubscribe, validateDetailUnsubscribe, validateLoadTranscriptPage, validateMessageSend, validateRuntimePrefsSet, validateSessionCreate, validateSessionDuplicate, validateSessionOpen, validateSettingsSet } from '../backend-rpc.js';
+import { validateDetailFetch, validateDetailSubscribe, validateDetailUnsubscribe, validateLoadTranscriptPage, validateMessageSend, validateRuntimePrefsSet, validateSessionCreate, validateSessionDuplicate, validateSessionOpen, validateSessionReleaseRuntime, validateSettingsSet } from '../backend-rpc.js';
 import { THINKING_LEVELS } from '../../../../model-providers/catalog/thinking-level.js';
 import { DEFAULT_SUBAGENT_MAX_INFLIGHT } from '../../../../../lib/concurrency-config.js';
+
+test('validateSessionReleaseRuntime accepts only resolved session paths', () => {
+  assert.deepEqual(validateSessionReleaseRuntime({ sessionPath: '/workspace/session.jsonl' }), {
+    sessionPath: '/workspace/session.jsonl',
+  });
+  assert.throws(() => validateSessionReleaseRuntime({}), /sessionPath/);
+  assert.throws(() => validateSessionReleaseRuntime({ sessionPath: '__pending__:1' }), /resolved session/);
+});
 
 test('validateMessageSend validates the per-send refresh hint', () => {
   const base = { sessionPath: '/workspace/session.jsonl', text: 'hello' };

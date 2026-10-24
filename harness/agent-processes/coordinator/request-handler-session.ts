@@ -21,6 +21,7 @@ import {
   validateSessionDuplicate,
   validateSessionOpen,
   validateSessionPath,
+  validateSessionReleaseRuntime,
   validateSessionViewed,
   validateSessionTitleGenerate,
   validateTruncateAfter,
@@ -517,6 +518,17 @@ async function handleSessionLifecycleClose(
   return { sessionPath: params.sessionPath, closed: true, ...(lifecycle ?? {}) };
 }
 
+async function handleSessionReleaseRuntime(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionReleaseRuntime(request.params);
+  markRequestValidated(deps);
+  if (!deps.releaseSessionRuntime) throw new BackendError('UNAVAILABLE', 'Session runtime release is unavailable.');
+  await deps.releaseSessionRuntime(params.sessionPath);
+  return { sessionPath: params.sessionPath, released: true };
+}
+
 async function handleSessionCloseAcknowledgement(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -831,6 +843,7 @@ export const SESSION_REQUEST_HANDLERS: Readonly<Record<string, RequestHandler>> 
   'session.preload': handleSessionPreload,
   'session.lifecyclePrivacy': handleSessionLifecyclePrivacy,
   'session.lifecycleClose': handleSessionLifecycleClose,
+  'session.releaseRuntime': handleSessionReleaseRuntime,
   'session.closeAcknowledgement': handleSessionCloseAcknowledgement,
   'session.settingsAcknowledgement': handleSessionControlSettingsAcknowledgement,
   'session.liveMembership': handleHostLiveMembership,

@@ -1,6 +1,7 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { pieToolsForContext } from '../../tools/catalog/index.js';
 import { createSessionControlTool, type SessionControlToolRequest } from '../../tools/session-control/index.js';
+import { createSessionCollaborationTools } from '../../tools/session-control/collaboration.js';
 
 export type BackendToolEnvironment =
   | { kind: 'primary'; requestSessionControl: SessionControlToolRequest }
@@ -12,15 +13,15 @@ export type BackendToolEnvironment =
  * and subagent eligibility checks never load backend dependencies.
  */
 export function createBackendTools(environment: BackendToolEnvironment): ToolDefinition[] {
-  return pieToolsForContext(environment.kind)
-    .filter((entry) => entry.registration.kind === 'backend')
-    .map((entry) => {
-      if (entry.name !== 'session_control') {
-        throw new Error(`No backend factory for catalog tool: ${entry.name}`);
-      }
-      const request: SessionControlToolRequest = environment.kind !== 'inventory'
+  const request: SessionControlToolRequest = environment.kind !== 'inventory'
         ? environment.requestSessionControl
         : async () => { throw new Error('Inventory tool definitions cannot execute session operations.'); };
-      return createSessionControlTool(request, { readOnly: environment.kind === 'subagent' });
-    });
+  const definitions = environment.kind === 'subagent'
+    ? [createSessionControlTool(request, { readOnly: true })]
+    : createSessionCollaborationTools(request);
+  const advertised = pieToolsForContext(environment.kind).filter(entry => entry.registration.kind === 'backend');
+  for (const entry of advertised) {
+    if (!definitions.some(tool => tool.name === entry.name)) throw new Error(`No backend factory for catalog tool: ${entry.name}`);
+  }
+  return definitions;
 }

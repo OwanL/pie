@@ -436,6 +436,7 @@ function handleLifecycleSessionEvent(
       }
       const capabilities = buildSessionCapabilities(context);
       deps.emit('agent.settled', {
+        executionOutcome: userInitiated ? 'cancelled' : pendingErrorTerminal || interruptedWithoutMessage ? 'failed' : 'completed',
         ...(handoff ? { handoff } : {}),
         sessionPath: context.sessionPath,
         capabilities,

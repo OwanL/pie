@@ -167,6 +167,50 @@ function customMessageMarkdown(content: unknown): string {
   return content == null ? '' : String(content);
 }
 
+const SESSION_NOTE_CUSTOM_TYPE = 'pie.session-note';
+
+interface SessionNoteDisplayDetails {
+  id: string;
+  kind: 'note' | 'result';
+  sender: SessionControlSender;
+  displayBody: string;
+  taskId?: string;
+  taskRevision?: number;
+}
+
+function sessionNoteDisplayDetails(value: unknown): SessionNoteDisplayDetails | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const details = value as Record<string, unknown>;
+  if (Object.keys(details).some((key) => !['id', 'kind', 'sender', 'task', 'displayBody'].includes(key))
+      || typeof details.id !== 'string' || !details.id.trim() || details.id.length > 256
+      || (details.kind !== 'note' && details.kind !== 'result')
+      || typeof details.displayBody !== 'string' || !details.displayBody.trim()
+      || Buffer.byteLength(details.displayBody, 'utf8') > (details.kind === 'note' ? 16 * 1024 : 32 * 1024)
+      || !isSessionControlSender(details.sender)
+      || details.sender.message?.expectReply !== false) return undefined;
+
+  let taskId: string | undefined;
+  let taskRevision: number | undefined;
+  if (details.task !== undefined) {
+    if (!details.task || typeof details.task !== 'object' || Array.isArray(details.task)) return undefined;
+    const task = details.task as Record<string, unknown>;
+    if (Object.keys(task).some((key) => !['id', 'revision'].includes(key))
+        || typeof task.id !== 'string' || !task.id.trim() || task.id.length > 256
+        || (task.revision !== undefined && (!Number.isSafeInteger(task.revision) || (task.revision as number) < 1))) return undefined;
+    taskId = task.id;
+    taskRevision = task.revision as number | undefined;
+  }
+
+  return {
+    id: details.id,
+    kind: details.kind,
+    sender: details.sender,
+    displayBody: details.displayBody,
+    ...(taskId ? { taskId } : {}),
+    ...(taskRevision !== undefined ? { taskRevision } : {}),
+  };
+}
+
 export function mapCustomMessage(
   messageId: string,
   message: {
@@ -179,6 +223,29 @@ export function mapCustomMessage(
 ): ChatMessage | null {
   if (message.display === false) {
     return null;
+  }
+
+  if (message.customType === SESSION_NOTE_CUSTOM_TYPE) {
+    const details = sessionNoteDisplayDetails(message.details);
+    if (details) {
+      return {
+        id: messageId,
+        role: 'user',
+        createdAt: new Date(message.timestamp ?? Date.now()).toISOString(),
+        markdown: details.displayBody,
+        status: 'completed',
+        sender: details.sender,
+        customType: AGENT_MESSAGE_CUSTOM_TYPE,
+        customDetails: {
+          id: details.id,
+          kind: details.kind,
+          sender: details.sender,
+          displayBody: details.displayBody,
+          ...(details.taskId ? { taskId: details.taskId } : {}),
+          ...(details.taskRevision !== undefined ? { taskRevision: details.taskRevision } : {}),
+        },
+      };
+    }
   }
 
   const markdown = customMessageMarkdown(message.content);

@@ -19,7 +19,15 @@ function idleBarrierFixture() {
   const worker = new WorkerRuntimeHost({
     owner: { coordinatorGeneration: 1, workerId: 'snooze-worker', workerGeneration: 1 },
     sdkRuntime: createSyntheticSourceTestSdkRuntime('/sdk'),
-    server: { sendDetailFrame: () => true, onDetailDrain: () => () => undefined },
+    server: {
+      sendDetailFrame: () => true,
+      onDetailDrain: () => () => undefined,
+      requestFrame: async (body: { kind: string; action: string }) => {
+        assert.equal(body.kind, 'session.control');
+        assert.equal(body.action, 'notes.drain');
+        return { ok: true, result: { attempted: 0, remaining: 0, issues: [] } };
+      },
+    },
   } as never);
   const workerInternals = worker as any;
   workerInternals.context = { sessionPath: '/a', session: { pendingMessageCount: 0 }, uiBridge: { hasPendingRequests: () => false } };

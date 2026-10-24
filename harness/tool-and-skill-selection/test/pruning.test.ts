@@ -19,7 +19,12 @@ installSdkResolverForTests();
 const require = createRequire(import.meta.url);
 const { shouldSkipPruning, clonePruningConfig } = require("../lifecycle/pruning-lifecycle.ts") as typeof import("../lifecycle/pruning-lifecycle.js");
 const { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } = require("../../agent-instructions/skill-selection/skill-policy.ts") as typeof import("../../agent-instructions/skill-selection/skill-policy.js");
-const { applyToolSelection } = require("../../tools/selection/tool-policy.ts") as typeof import("../../tools/selection/tool-policy.js");
+const {
+	applyToolSelection,
+	assignmentPromptProtectedTools,
+	sessionWorkflowProtectedTools,
+	SESSION_TASK_PROMPT_PREFIX,
+} = require("../../tools/selection/tool-policy.ts") as typeof import("../../tools/selection/tool-policy.js");
 const {
 	runPruningPrepass,
 	resolvePrepassBudgets,
@@ -422,6 +427,68 @@ test("applyToolSelection: a new decision may prune a previously recovered tool",
 	const r = applyToolSelection(allTools, ["web_search", "edit"], config({ tools: toolsConfig() }));
 	assert.ok(r.excludedToolNames.includes("web_search"));
 	assert.ok(r.excludedToolNames.includes("edit"));
+});
+
+test("session task prompt protects only an available finish tool", () => {
+	const tools = ["read", "session_finish"].map((name) => ({ name, description: name })) as ToolInfo[];
+	assert.deepEqual(assignmentPromptProtectedTools(tools, `${SESSION_TASK_PROMPT_PREFIX}task-1; revision: 1.`), ["session_finish"]);
+	assert.deepEqual(assignmentPromptProtectedTools(tools, "ordinary user prompt mentioning session_finish"), []);
+	assert.deepEqual(assignmentPromptProtectedTools([{ name: "read" } as ToolInfo], `${SESSION_TASK_PROMPT_PREFIX}spoofed`), []);
+});
+
+test("session control preserves assignment and wait while a requester path survives", () => {
+	const tools = ["session_control", "session_assign", "session_finish", "session_wait"].map((name) => ({ name, description: name })) as ToolInfo[];
+	const protectedTools = sessionWorkflowProtectedTools(tools, ["session_assign", "session_wait"], "ordinary task");
+	assert.deepEqual(protectedTools, ["session_assign", "session_wait"]);
+	const selected = applyToolSelection(tools, ["session_assign", "session_wait"], config({ tools: toolsConfig() }), protectedTools);
+	assert.ok(selected.includedToolNames.includes("session_control"));
+	assert.ok(selected.includedToolNames.includes("session_assign"));
+	assert.ok(selected.includedToolNames.includes("session_wait"));
+
+	const withoutRequesterPath = sessionWorkflowProtectedTools(tools, ["session_control", "session_assign", "session_wait"], "ordinary task");
+	assert.deepEqual(withoutRequesterPath, []);
+	assert.ok(applyToolSelection(tools, ["session_control", "session_assign", "session_wait"], config({ tools: toolsConfig() }), withoutRequesterPath)
+		.excludedToolNames.includes("session_wait"));
+});
+
+test("control does not resurrect assignment outside an available child or user-selected catalog", () => {
+	const available = ["read", "session_control", "session_wait"].map((name) => ({ name, description: name })) as ToolInfo[];
+	const protectedTools = sessionWorkflowProtectedTools(available, ["session_assign", "session_wait"], "ordinary task");
+	assert.deepEqual(protectedTools, ["session_wait"]);
+	const selected = applyToolSelection(available, ["session_wait"], config({ tools: toolsConfig() }), protectedTools);
+	assert.deepEqual(selected.includedToolNames, ["read", "session_control", "session_wait"]);
+	assert.ok(!selected.includedToolNames.includes("session_assign"));
+});
+
+test("workflow protection never restores names outside the available or user-selected tool set", () => {
+	const available = ["read", "session_control"].map((name) => ({ name, description: name })) as ToolInfo[];
+	const protectedTools = sessionWorkflowProtectedTools(available, ["session_control", "session_assign", "session_finish", "session_wait"], `${SESSION_TASK_PROMPT_PREFIX}task; revision: 1.`);
+	assert.deepEqual(protectedTools, []);
+	const selected = applyToolSelection(available, ["session_control"], config({ tools: toolsConfig() }), protectedTools);
+	assert.deepEqual(selected.includedToolNames, ["read"]);
+	assert.deepEqual(selected.excludedToolNames, ["session_control"]);
+});
+
+test("requester wait dependency survives explicit always-keep and transitive restoration", () => {
+	const tools = ["read", "session_control", "session_assign", "session_wait", "bash"].map((name) => ({ name, description: name })) as ToolInfo[];
+	const selected = applyToolSelection(tools, ["session_control", "session_assign", "session_wait", "bash"], config({
+		tools: toolsConfig({ alwaysKeep: ["session_control"], dependencies: { session_wait: ["bash"] } }),
+	}));
+	assert.ok(selected.includedToolNames.includes("session_control"));
+	assert.ok(selected.includedToolNames.includes("session_assign"));
+	assert.ok(selected.includedToolNames.includes("session_wait"));
+	assert.ok(selected.includedToolNames.includes("bash"), "dependencies of the restored waiter also survive");
+	const transitive = applyToolSelection(tools, ["session_assign", "session_control", "session_wait"], config({
+		tools: toolsConfig({ dependencies: { read: ["session_assign"] } }),
+	}));
+	assert.ok(transitive.includedToolNames.includes("session_assign"));
+	assert.ok(transitive.includedToolNames.includes("session_wait"));
+	const transitiveControl = applyToolSelection(tools, ["session_control", "session_assign", "session_wait"], config({
+		tools: toolsConfig({ dependencies: { read: ["session_control"] } }),
+	}));
+	assert.ok(transitiveControl.includedToolNames.includes("session_control"));
+	assert.ok(transitiveControl.includedToolNames.includes("session_assign"));
+	assert.ok(transitiveControl.includedToolNames.includes("session_wait"));
 });
 
 // ---------------------------------------------------------------------------

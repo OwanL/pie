@@ -212,7 +212,9 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     },
     createAgentSessionFromServices: async (options: any) => {
       backendTools = options.customTools;
-      assert.deepEqual(backendTools.map((tool) => tool.name), ['session_control']);
+      assert.deepEqual(backendTools.map((tool) => tool.name), [
+        'session_control', 'session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources',
+      ]);
       return { session };
     },
     createAgentSessionRuntime: async (factory: any, options: any) => {
@@ -262,7 +264,9 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.equal(promptCalls, 0, 'inventory never invokes the original AgentSession.prompt');
   assert.equal(turnDenied, true, 'extension-triggered turns are rejected before session_start');
   assert.equal(inventory.estimate.contextWindow, 200_000);
-  assert.deepEqual(builtPromptOptions.selectedTools, ['read', 'hidden_inventory', 'session_control']);
+  assert.deepEqual(builtPromptOptions.selectedTools, [
+    'read', 'hidden_inventory', 'session_control', 'session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources',
+  ]);
   const expectedPiePrompt = buildPieSystemPrompt(
     builtPromptOptions,
     systemPromptModule.buildSystemPrompt,
@@ -292,7 +296,11 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.match(promptsById.get('harness')?.text ?? '', /^You are a coding assistant operating inside Pie/);
   assert.match(inventory.systemPrompts.find((entry) => entry.title.endsWith('AGENTS.md'))?.text ?? '', /Project instructions\./);
   assert.match(promptsById.get('tools')?.text ?? '', /Inspect inactive inventory\./);
-  assert.match(promptsById.get('tools')?.text ?? '', /session_control/);
+  const toolInventoryPrompt = promptsById.get('tools')?.text ?? '';
+  for (const name of ['session_control', 'session_send', 'session_assign', 'session_finish', 'session_wait', 'session_resources']) {
+    assert.ok(builtPromptOptions.selectedTools.includes(name), `${name} is selected in the fresh inventory`);
+    assert.match(toolInventoryPrompt, new RegExp(name));
+  }
   assert.match(promptsById.get('tools')?.text ?? '', /"query": \{/);
   assert.match(promptsById.get('skills')?.text ?? '', /debugging/);
   assert.equal(promptsById.get('provider')?.summary, 'mock');

@@ -86,6 +86,7 @@ export type WorkerRuntimeOperation =
   | 'models.list'
   | 'liveTurn.checkpoint'
   | 'message.send'
+  | 'message.note'
   | 'operation.status'
   | 'message.continue'
   | 'message.compact'
@@ -501,7 +502,15 @@ export type WorkerSessionControlAction =
   | 'settings.set'
   | 'close'
   | 'cleanup'
-  | 'operation.status';
+  | 'operation.status'
+  | 'note'
+  | 'notes.drain'
+  | 'task.assign'
+  | 'task.finish'
+  | 'wait'
+  | 'wait.cancel'
+  | 'interrupt'
+  | 'resources';
 
 export interface WorkerSessionControlFrame extends WorkerFrameBase {
   kind: 'session.control';
@@ -560,6 +569,7 @@ export interface WorkerHeartbeatFrame extends WorkerFrameBase {
     lastDetailRevision: number;
     eventLoopDelayMs: number;
     lastDurableAppendId?: string;
+    memory?: { observedAt: number; rssBytes: number; heapUsedBytes: number; externalBytes: number };
   };
 }
 
@@ -977,7 +987,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.duplicateHot', 'session.snapshot',
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
-  'session.truncateAfter', 'session.title.generate', 'session.title.assign', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
+  'session.truncateAfter', 'session.title.generate', 'session.title.assign', 'models.list', 'liveTurn.checkpoint', 'message.send', 'message.note', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
   'settings.set', 'systemPromptToggles.set', 'session.managerFence', 'session.snoozeReserve', 'session.snoozeRelease',
 ]);
@@ -1442,7 +1452,8 @@ function validateSessionControl(value: Record<string, unknown>, requireSeq: bool
   if (value.action !== 'list' && value.action !== 'create' && value.action !== 'read'
       && value.action !== 'message' && value.action !== 'settings.get'
       && value.action !== 'settings.set' && value.action !== 'close'
-      && value.action !== 'cleanup' && value.action !== 'operation.status') {
+      && value.action !== 'cleanup' && value.action !== 'operation.status'
+      && !['note', 'notes.drain', 'task.assign', 'task.finish', 'wait', 'wait.cancel', 'interrupt', 'resources'].includes(String(value.action))) {
     return 'session.control.action is invalid.';
   }
   if (value.access !== undefined && value.access !== 'read-only') return 'session.control.access is invalid.';
@@ -1691,7 +1702,7 @@ function validateHeartbeat(value: Record<string, unknown>, requireSeq: boolean):
   if (!isRecord(value.heartbeat)) return 'heartbeat must be an object.';
   const nested = exactKeys(value.heartbeat,
     ['phase', 'lastEventSeq', 'lastDetailRevision', 'eventLoopDelayMs'],
-    ['activeRequestId', 'lastDurableAppendId']);
+    ['activeRequestId', 'lastDurableAppendId', 'memory']);
   if (nested) return `heartbeat ${nested}`;
   if (value.heartbeat.phase !== 'bootstrapping' && value.heartbeat.phase !== 'ready'
     && value.heartbeat.phase !== 'busy' && value.heartbeat.phase !== 'interrupting'
@@ -1701,6 +1712,12 @@ function validateHeartbeat(value: Record<string, unknown>, requireSeq: boolean):
   if (!isSafeNonNegativeInteger(value.heartbeat.lastDetailRevision)) return 'heartbeat.lastDetailRevision must be a non-negative safe integer.';
   if (!isSafeNonNegativeInteger(value.heartbeat.eventLoopDelayMs)) return 'heartbeat.eventLoopDelayMs must be a non-negative safe integer.';
   if (value.heartbeat.lastDurableAppendId !== undefined && !boundedString(value.heartbeat.lastDurableAppendId, MAX_ID_BYTES)) return 'heartbeat.lastDurableAppendId must be a bounded non-empty string.';
+  if (value.heartbeat.memory !== undefined) {
+    if (!isRecord(value.heartbeat.memory)) return 'heartbeat.memory must be an object.';
+    const memoryKeys = ['observedAt', 'rssBytes', 'heapUsedBytes', 'externalBytes'];
+    const extraMemory = exactKeys(value.heartbeat.memory, memoryKeys);
+    if (extraMemory || memoryKeys.some(key => !isSafeNonNegativeInteger(value.heartbeat.memory[key]))) return 'heartbeat.memory must contain non-negative safe integer measurements.';
+  }
   return undefined;
 }
 

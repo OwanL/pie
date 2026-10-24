@@ -4,6 +4,8 @@
 import type { Virtualizer } from '@tanstack/virtual-core';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
+import { AgentIcon } from '../session-tabs/icons';
+import { agentMessageMetadata } from './agent-message-metadata';
 import {
   readPromptMetrics,
   selectPromptFromElementMetrics,
@@ -251,7 +253,8 @@ export function UserPromptContextBar({
   }
 
   const hasMetadata = selectedDetails !== null && selected !== null
-    && (selectedDetails.imageCount > 0 || selected.isQueued || selected.isAutoResume);
+    && (selectedDetails.imageCount > 0 || selected.isQueued || selected.isAutoResume || selected.isAgentMessage);
+  const selectedAgentMetadata = selected?.isAgentMessage ? agentMessageMetadata(selected.message) : null;
 
   return (
     <section
@@ -273,6 +276,17 @@ export function UserPromptContextBar({
             )}
             {selected.isQueued && <span>Queued</span>}
             {selected.isAutoResume && <span>Auto-resume</span>}
+            {selected.isAgentMessage && (
+              <>
+                <span class="inline-flex items-center gap-1"><AgentIcon compact />Agent</span>
+                {selectedAgentMetadata?.senderLabel && <span class="transcript-header-summary-subtle">· {selectedAgentMetadata.senderLabel}</span>}
+                {selectedAgentMetadata?.cue && <span
+                  class="transcript-header-summary-subtle"
+                  title={selectedAgentMetadata.cue === 'Task' && typeof selectedAgentMetadata.taskRevision === 'number'
+                    ? `Task assignment · revision ${selectedAgentMetadata.taskRevision}` : undefined}
+                >· {selectedAgentMetadata.cue}</span>}
+              </>
+            )}
           </div>
         )}
         {selectedDetails && <button

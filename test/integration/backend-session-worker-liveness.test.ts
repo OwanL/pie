@@ -10,6 +10,7 @@ import readline from "node:readline";
 import test from "node:test";
 
 import type { LivePipelineTraceRecord } from "../../lib/structured-logging/live-pipeline-trace.js";
+import { publishTestLiveMembership, verifiedSessionRuntimeArgs, waitForSessionOpen } from "./session-runtime-test-artifact.js";
 
 const CLOCK_BASIS = "wall-clock-iso-milliseconds" as const;
 type ClockBasis = typeof CLOCK_BASIS;
@@ -401,7 +402,7 @@ async function createFixture(dir: string, phase: Scenario, providerPort: number)
   const traceKey = `${TRACE_KEY_PREFIX}:${runId}`;
   const runIdHash = traceRunIdHash(runId, traceKey);
   await Promise.all([agentDir, workspaceA, workspaceB, sessionDir].map((entry) => fs.mkdir(entry, { recursive: true })));
-  const fixturePath = repoPath("extension", "test", "fixtures", "blocking-liveness-extension.ts");
+  const fixturePath = repoPath("harness", "agent-processes", "test", "fixtures", "blocking-liveness-extension.ts");
   assert.ok(providerPort > 0, "provider port must be supplied by the harness");
   await fs.writeFile(path.join(agentDir, "settings.json"), JSON.stringify({
     defaultProvider: "phase-0-provider",
@@ -423,10 +424,18 @@ async function createFixture(dir: string, phase: Scenario, providerPort: number)
       },
     },
   }, null, 2));
-  await fs.writeFile(path.join(agentDir, "auth.json"), "{}\n");
+  await fs.writeFile(path.join(agentDir, "auth.json"), JSON.stringify({
+    "phase-0-provider": { type: "api_key", key: "phase-0-loopback-test-key" },
+  }, null, 2) + "\n");
   const header = (cwd: string, id: string) => JSON.stringify({ type: "session", id, version: 3, cwd });
-  await fs.writeFile(sessionA, `${header(workspaceA, "phase-0-a")}\n`);
-  await fs.writeFile(sessionB, `${header(workspaceB, "phase-0-b")}\n`);
+  // The runtime-liveness scenarios exercise blocked workers, not untitled
+  // startup-title hydration. Give each pre-existing fixture its normal durable
+  // title record before the host restores its membership.
+  const sessionInfo = (id: string, name: string) => JSON.stringify({
+    type: "session_info", id: `name-${id}`, parentId: "user", name, timestamp: new Date().toISOString(),
+  });
+  await fs.writeFile(sessionA, `${header(workspaceA, "phase-0-a")}\n${sessionInfo("phase-0-a", "Phase 0 A")}\n`);
+  await fs.writeFile(sessionB, `${header(workspaceB, "phase-0-b")}\n${sessionInfo("phase-0-b", "Phase 0 B")}\n`);
   return { agentDir, workspaceA, workspaceB, sessionA, sessionB, entered, release, continued, traceDir, timelinePath, runId, traceKey, runIdHash };
 }
 
@@ -475,15 +484,23 @@ function startBackend(
   fixture: Awaited<ReturnType<typeof createFixture>>,
   phase: Scenario,
   backendPath: string,
+  sdkArgs: string[],
+  dataDir: string,
 ): BackendHarness {
-  const sdkPath = repoPath("application", "hosts", "vscode", "node_modules", "@earendil-works", "pi-coding-agent");
   assert.ok(path.isAbsolute(backendPath));
-  const child = spawn(process.execPath, [backendPath, "--sdkPath", sdkPath, "--cwd", fixture.workspaceA], {
+  const child = spawn(process.execPath, [backendPath, ...sdkArgs], {
     cwd: fixture.workspaceA,
     env: {
       ...process.env,
+      PI_CODING_AGENT_AUTH_DIR: undefined,
       PI_CODING_AGENT_DIR: fixture.agentDir,
       PI_CODING_AGENT_SESSION_DIR: path.join(fixture.agentDir, "sessions"),
+      PIE_DATA_DIR: dataDir,
+      PIE_CACHE_DIR: path.join(dataDir, "cache"),
+      PIE_SESSION_SETTINGS_DIR: path.join(dataDir, "state", "session-settings"),
+      PIE_LEGACY_SESSION_SETTINGS_DIR: path.join(fixture.agentDir, "session-reviews"),
+      PIE_REVIEWS_DIR: path.join(fixture.agentDir, "session-reviews"),
+      PIE_TRIGGERS_DIR: path.join(fixture.agentDir, "deferred-triggers"),
       PIE_BLOCKING_LIVENESS_PHASE: phase,
       PIE_BLOCKING_LIVENESS_RUN_ID: fixture.runId,
       PIE_BLOCKING_LIVENESS_ENTERED: fixture.entered,
@@ -544,9 +561,18 @@ function startBackend(
           reject(new Error(`timed out waiting for ${method} response`));
         }, timeoutMs);
         timer.unref?.();
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+          clearTimeout(timer);
+          responses.delete(id);
+          if (settled) return;
+          settled = true;
+          reject(new Error(`backend exited before ${method} response (code=${code ?? "null"}, signal=${signal ?? "none"})`));
+        };
+        child.once("exit", onExit);
         responses.set(id, (response) => {
           clearTimeout(timer);
           responses.delete(id);
+          child.off("exit", onExit);
           onReceipt?.(response);
           if (!settled) {
             settled = true;
@@ -557,11 +583,27 @@ function startBackend(
       }), method, timeoutMs);
     },
     waitForEvent(event, timeoutMs = CONTROL_RESPONSE_DEADLINE_MS) {
-      return waitFor(new Promise<unknown>((resolve) => {
+      const eventPromise = new Promise<unknown>((resolve) => {
+        const onEvent = (payload: unknown) => {
+          const pending = events.get(event) ?? [];
+          const remaining = pending.filter((waiter) => waiter !== onEvent);
+          if (remaining.length === 0) events.delete(event);
+          else events.set(event, remaining);
+          resolve(payload);
+        };
         const waiters = events.get(event) ?? [];
-        waiters.push(resolve);
+        waiters.push(onEvent);
         events.set(event, waiters);
-      }), event, timeoutMs);
+      });
+      const exitPromise = new Promise<never>((_resolve, reject) => {
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => reject(
+          new Error(`backend exited before ${event} (code=${code ?? "null"}, signal=${signal ?? "none"})`),
+        );
+        if (child.exitCode !== null || child.signalCode !== null) onExit(child.exitCode, child.signalCode);
+        else child.once("exit", onExit);
+        void eventPromise.finally(() => child.off("exit", onExit));
+      });
+      return waitFor(Promise.race([eventPromise, exitPromise]), event, timeoutMs);
     },
     async close(onCaptured) {
       // Capture the complete ancestry before sending EOF or a signal. Waiting
@@ -1230,9 +1272,19 @@ async function runBlockingScenario(phase: Scenario): Promise<void> {
     const backendPath = await buildTestOwnedBackendArtifact(tempDir);
     fixture = await createFixture(tempDir, phase, provider.port);
     timeline = createTimeline(fixture.runId, phase);
-    harness = startBackend(tempDir, fixture, phase, backendPath);
+    const dataDir = path.join(fixture.agentDir, "runtime-data");
+    const backendBuildId = (await fs.readFile(path.join(path.dirname(backendPath), "pie-build-id.txt"), "utf8")).trim();
+    const runtimeArgs = await verifiedSessionRuntimeArgs(fixture.workspaceA, dataDir, backendBuildId);
+    harness = startBackend(tempDir, fixture, phase, backendPath, runtimeArgs.args, dataDir);
     timeline.mark("process.spawned", { processRole: "backend", pid: harness.child.pid, phase });
     await harness.waitForEvent("backend.ready", STARTUP_DEADLINE_MS);
+    await publishTestLiveMembership(harness.request, [fixture.sessionA, fixture.sessionB]);
+    if (phase === "execution-hook") {
+      // This hook runs only at turn start, so B can warm namespace readiness
+      // without entering A's blocking phase. The factory fixture is different:
+      // it blocks unconditionally on worker creation and must remain cold here.
+      await waitForSessionOpen(harness.request, fixture.sessionB, STARTUP_DEADLINE_MS, () => harness!.stderr);
+    }
     timeline.mark("process.ready", { processRole: "backend", pid: harness.child.pid, phase });
     trigger = harness.request("message.send", { sessionPath: fixture.sessionA, text: "phase 0 liveness", inputs: [] }, STARTUP_DEADLINE_MS);
     void trigger.catch(() => undefined);

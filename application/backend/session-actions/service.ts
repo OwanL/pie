@@ -578,6 +578,13 @@ export class SessionService implements HostDisposable {
     backendGeneration?: number,
   ): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
+    if (!privacyMode) {
+      // The reducer calls close cleanup only after active work has stopped
+      // (and, for self-close, after the tool response handoff). Release the
+      // isolated runtime before acknowledging ordinary close, while keeping
+      // the durable session available for a later fresh-generation reopen.
+      await this.backend.request('session.releaseRuntime', { sessionPath });
+    }
     let deletionMayHaveCommitted = false;
     const preservePrivateDeletionEvidence = (error: unknown): Error => {
       const preserved = error instanceof Error ? error : new Error(toErrorMessage(error));

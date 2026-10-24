@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
+
 const SESSION_ID_MAX_BYTES = 512;
 const TITLE_MAX_BYTES = 512;
 export const SESSION_REPLY_REFERENCE_MAX_BYTES = 768;
 const SESSION_REPLY_REFERENCE_PREFIX = 'pie-reply:v1:';
+const SESSION_ADDRESS_PREFIX = 'pie-session:v1:';
 
 export interface SessionControlSenderIdentity {
   sessionId: string;
@@ -13,7 +16,9 @@ export interface SessionControlMessage {
   sentAt: number;
   deliveredAt?: number;
   expectReply: boolean;
-  kind?: 'completion';
+  kind?: 'completion' | 'assignment';
+  taskId?: string;
+  taskRevision?: number;
 }
 
 export interface SessionControlSender {
@@ -22,6 +27,8 @@ export interface SessionControlSender {
   title?: string;
   /** Bounded identity-only reply address. It is not a secret or an operation token. */
   replyReference: string;
+  /** Compact current address. Optional only for previously persisted sender metadata. */
+  address?: string;
   message?: SessionControlMessage;
 }
 
@@ -53,6 +60,15 @@ export function createSessionReplyReference(identity: SessionControlSenderIdenti
   return reference;
 }
 
+/** Compact public address for current model-facing guidance. Resolution still
+ * checks live coordinator membership; this value is an identity handle only. */
+export function createSessionAddress(identity: SessionControlSenderIdentity): string {
+  createSessionReplyReference(identity);
+  const canonical = JSON.stringify([identity.sessionId, identity.identityFallback]);
+  const digest = createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 16);
+  return `${SESSION_ADDRESS_PREFIX}${digest}`;
+}
+
 /** Build sender attribution from coordinator-resolved identity and title data. */
 export function createSessionControlSender(
   identity: SessionControlSenderIdentity,
@@ -67,6 +83,7 @@ export function createSessionControlSender(
     identity: { sessionId: identity.sessionId, identityFallback: identity.identityFallback },
     ...(title ? { title } : {}),
     replyReference: createSessionReplyReference(identity),
+    address: createSessionAddress(identity),
     ...(message ? { message } : {}),
   };
 }
@@ -95,19 +112,24 @@ export function parseSessionReplyReference(value: unknown): SessionControlSender
 export function isSessionControlSender(value: unknown): value is SessionControlSender {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const sender = value as Record<string, unknown>;
-  if (Object.keys(sender).some((key) => key !== 'identity' && key !== 'title' && key !== 'replyReference' && key !== 'message')) return false;
+  if (Object.keys(sender).some((key) => key !== 'identity' && key !== 'title' && key !== 'replyReference' && key !== 'address' && key !== 'message')) return false;
   if (!isIdentity(sender.identity) || typeof sender.replyReference !== 'string'
       || sender.replyReference !== createSessionReplyReference(sender.identity)) return false;
+  if (sender.address !== undefined
+      && (typeof sender.address !== 'string' || sender.address !== createSessionAddress(sender.identity))) return false;
   if (sender.title !== undefined
       && (typeof sender.title !== 'string' || !boundedUtf8(sender.title, TITLE_MAX_BYTES))) return false;
   if (sender.message !== undefined) {
     const m = sender.message as Record<string, unknown>;
     if (!m || typeof m !== 'object' || Array.isArray(m)
-        || Object.keys(m).some((key) => !['sentAt', 'deliveredAt', 'expectReply', 'kind'].includes(key))
+        || Object.keys(m).some((key) => !['sentAt', 'deliveredAt', 'expectReply', 'kind', 'taskId', 'taskRevision'].includes(key))
         || !validTimestamp(m.sentAt) || (m.deliveredAt !== undefined && !validTimestamp(m.deliveredAt))
         || typeof m.expectReply !== 'boolean'
-        || (m.kind !== undefined && m.kind !== 'completion')
-        || (m.kind === 'completion' && m.expectReply)) return false;
+        || (m.kind !== undefined && m.kind !== 'completion' && m.kind !== 'assignment')
+        || (m.kind === 'completion' && m.expectReply)
+        || (m.kind === 'assignment' && (m.expectReply !== false || typeof m.taskId !== 'string' || !boundedUtf8(m.taskId, 128)
+          || !Number.isSafeInteger(m.taskRevision) || (m.taskRevision as number) < 1))
+        || (m.kind !== 'assignment' && (m.taskId !== undefined || m.taskRevision !== undefined))) return false;
   }
   return true;
 }
@@ -125,7 +147,12 @@ export function stampSessionControlDelivery(sender: SessionControlSender, delive
 /** Return the exact display-removable prefix for validated coordinator sender metadata.
  * A transcript may remove this prefix only when the persisted sender validates. */
 export function sessionControlPromptPrefix(sender: unknown): string | undefined {
+  return buildSessionControlPromptPrefix(sender, false);
+}
+
+function buildSessionControlPromptPrefix(sender: unknown, historical: boolean): string | undefined {
   if (!isSessionControlSender(sender)) return undefined;
+  const address = historical ? sender.replyReference : sender.address ?? sender.replyReference;
   const sourceIdentity = JSON.stringify(sender.identity.sessionId);
   const identityQualifier = sender.identity.identityFallback ? ' (identity fallback)' : '';
   const sourceTitle = sender.title
@@ -133,9 +160,14 @@ export function sessionControlPromptPrefix(sender: unknown): string | undefined 
     : '; unnamed session';
   if (sender.message) {
     const m = sender.message;
-    return `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply reference: ${sender.replyReference}. Sent at: ${m.sentAt}; delivered at: ${m.deliveredAt ?? 'pending'}; expectReply: ${m.expectReply}${m.kind ? `; kind: ${m.kind}` : ''}.]\n\n`;
+    if (m.kind === 'assignment') {
+      return `[Pie session task: ${m.taskId}; revision: ${m.taskRevision}. Authenticated requester identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Requester address: ${address}. Assigned at: ${m.sentAt}; delivered at: ${m.deliveredAt ?? 'pending'}.]\n\n`;
+    }
+    return `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. ${historical ? 'Reply reference' : 'Reply address'}: ${address}. Sent at: ${m.sentAt}; delivered at: ${m.deliveredAt ?? 'pending'}; expectReply: ${m.expectReply}${m.kind ? `; kind: ${m.kind}` : ''}${m.taskId ? `; taskId: ${m.taskId}; taskRevision: ${m.taskRevision}` : ''}.]\n\n`;
   }
-  return `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply reference: ${sender.replyReference}. Use this exact reference as message.replyTo if replying.]\n\n`;
+  return historical
+    ? `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply reference: ${address}. Use this exact reference as message.replyTo if replying.]\n\n`
+    : `[Pie cross-session sender identity: ${sourceIdentity}${identityQualifier}${sourceTitle}. Reply address: ${address}. Use this exact address as the target if replying.]\n\n`;
 }
 
 /** Embed coordinator-authenticated sender context in the durable model input.
@@ -148,18 +180,37 @@ export function formatSessionControlPrompt(text: string, sender: SessionControlS
 
 export function sessionControlPromptSuffix(sender: unknown): string | undefined {
   if (!isSessionControlSender(sender) || !sender.message) return undefined;
+  if (sender.message.kind === 'assignment') {
+    return `\n\n[Pie assignment: taskId=${sender.message.taskId}; revision=${sender.message.taskRevision}. This assignment belongs to the authenticated requester above, independently of who created this session. Before ending, use session_finish with this taskId, revision, outcome (completed, failed, blocked, or cancelled), and result including verification. Do not also send the same final as a note. If you end without session_finish, the task is awaiting-result, never assumed successful.]`;
+  }
   const guidance = sender.message.kind === 'completion'
     ? 'Informational completion; no acknowledgement requested.'
     : sender.message.expectReply
-      ? `If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(sender.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.`
+      ? `If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final as a note. Otherwise send an informational reply with session_send using {"target":${JSON.stringify(sender.address ?? sender.replyReference)},"message":"your reply"}. If the sender needs new work, use session_assign with that same target. Ordinary assistant output is not delivered for other cross-session requests.`
       : 'No acknowledgement requested for this message; it does not cancel an outstanding task or completion handoff.';
   return `\n\n[Pie cross-session reply guidance: ${guidance}]`;
 }
 
+/** The pre-collaboration-tool envelope is recognized only for removing exact
+ * authenticated legacy transcript decoration. It is never emitted to models. */
+function legacySessionControlPromptSuffix(sender: unknown): string | undefined {
+  if (!isSessionControlSender(sender) || !sender.message || sender.message.kind === 'assignment'
+      || sender.message.kind === 'completion' || !sender.message.expectReply) return undefined;
+  return `\n\n[Pie cross-session reply guidance: If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(sender.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.]`;
+}
+
 /** Exact authenticated envelope removal, never inferred from body text. */
 export function stripSessionControlPrompt(text: string, sender: unknown): string | undefined {
-  const prefix = sessionControlPromptPrefix(sender);
-  const suffix = sessionControlPromptSuffix(sender) ?? '';
+  const currentPrefix = sessionControlPromptPrefix(sender);
+  const historicalPrefix = buildSessionControlPromptPrefix(sender, true);
+  const currentSuffix = sessionControlPromptSuffix(sender) ?? '';
+  const legacySuffix = legacySessionControlPromptSuffix(sender) ?? '';
+  const prefix = currentPrefix && text.startsWith(currentPrefix)
+    ? currentPrefix
+    : historicalPrefix && text.startsWith(historicalPrefix) ? historicalPrefix : currentPrefix;
+  const suffix = currentSuffix && text.endsWith(currentSuffix)
+    ? currentSuffix
+    : legacySuffix && text.endsWith(legacySuffix) ? legacySuffix : currentSuffix;
   if (!prefix || !text.startsWith(prefix) || (suffix && !text.endsWith(suffix))
       || text.length < prefix.length + suffix.length) return undefined;
   return text.slice(prefix.length, suffix ? -suffix.length : undefined);

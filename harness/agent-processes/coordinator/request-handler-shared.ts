@@ -217,6 +217,9 @@ export interface BackendRequestHandlerDeps {
     operationId: string,
     privacyMode: boolean,
   ): Promise<{ rootSessionId: string; pendingCreateOperationId?: string } | void>;
+  /** Stop and confirm the isolated runtime for an ordinary host-owned close,
+   *  preserving the durable session so a later open can promote a fresh worker. */
+  releaseSessionRuntime?(sessionPath: string): Promise<void>;
   /** Typed host close bridge acknowledgement for the agent `session_control`
    *  close action. Resolves or fails the coordinator's waiting close request;
    *  unknown or late request IDs are tolerated, never treated as success. */

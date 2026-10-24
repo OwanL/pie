@@ -9,7 +9,7 @@ guidance remain owned by each implementation.
 
 ## Layout
 
-All nine Pie-owned tool implementations live under this responsibility
+The nine Pie-owned tool responsibility areas live under this responsibility
 tree:
 
 - [`ask-user/`](ask-user/) — `ask_user`
@@ -19,7 +19,8 @@ tree:
 - [`playwright/`](playwright/) — `playwright`
 - [`request-capability/`](request-capability/) — `request_capability`
 - [`session-changes/`](session-changes/) — `session_changes`
-- [`session-control/`](session-control/) — `session_control`
+- [`session-control/`](session-control/) — `session_control`, `session_send`,
+  `session_assign`, `session_finish`, `session_wait`, `session_resources`
 - [`subagent/`](subagent/) — `subagent`
 
 `request_capability` is a deliberately stateless implementation. Pruning
@@ -30,13 +31,17 @@ and reach the tool through injected ports. The retained
 canonical selector modules, so there is exactly one lifecycle state and no
 import cycle.
 
-`session_control` remains backend-registered: its worker transport is injected
+The session-control family remains backend-registered: its worker transport is injected
 by the backend, while session management and IPC stay backend-owned. The
 backend factory [`harness/agent-processes/coordinator/backend-tools.ts`](../../harness/agent-processes/coordinator/backend-tools.ts) assembles
 backend-dependent definitions for primary runtimes and initial-context
 inventory. Inventory has identical schemas/guidance but no operational
 transport. In-memory subagents get read-only `session_control` discovery and
-transcript access, but not `wakeup_timer`; session mutations remain primary-only. The owner-routed
+transcript access, but not `wakeup_timer` or the primary collaboration tools.
+Primary collaboration separates non-waking notes, explicit assignments, committed
+results, event waits, and cooperative resource reservations. See the
+[session-control contract](../../docs/contracts/AGENT-SESSION-CONTROL.md).
+Session mutations remain primary-only. The owner-routed
 test is under [`session-control/test/`](session-control/test/), and the
 cross-owner catalog/SDK integration gate is under [`test/integration/`](../../test/integration/).
 

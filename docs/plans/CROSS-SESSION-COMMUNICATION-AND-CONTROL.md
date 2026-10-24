@@ -1,6 +1,6 @@
 # Cross-session communication and control
 
-Working research and redesign proposal — revised 2026-10-24. No production changes or live failure injection. Proposed operations below are **not available APIs**.
+Historical investigation and design context — 2026-10-24. For the current protocol decision, source prototype, and validation gates, see [Session coordination v2](SESSION-COORDINATION-V2.md). This investigation's proposed operations are historical and are not the current API contract.
 
 ## Recommendation
 

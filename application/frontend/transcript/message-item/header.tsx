@@ -5,6 +5,7 @@ import type { ComponentChildren } from 'preact';
 
 import type { ChatMessage } from '../../../lib/protocol/index.js';
 import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
+import { agentMessageMetadata } from '../agent-message-metadata';
 import { AgentIcon } from '../../session-tabs/icons';
 import {
   assistantReplyMeta,
@@ -62,6 +63,7 @@ interface MessageItemHeaderProps {
    *  when the message is host-injected rather than typed. */
   customType?: string;
   sender?: ChatMessage['sender'];
+  customDetails?: ChatMessage['customDetails'];
 }
 
 export function MessageItemHeader({
@@ -74,7 +76,14 @@ export function MessageItemHeader({
   actions,
   customType,
   sender,
+  customDetails,
 }: MessageItemHeaderProps) {
+  const agentMetadata = agentMessageMetadata({ customType, sender, customDetails });
+  const cue = agentMetadata?.cue;
+  const taskRevision = agentMetadata?.taskRevision;
+  const taskTooltip = cue === 'Task' && typeof taskRevision === 'number'
+    ? `Task assignment · revision ${taskRevision}`
+    : undefined;
   // Agent-originated session messages keep the user-role bubble but carry an
   // explicit bot cue. Other host-injected messages retain their Auto-resume tag.
   const userLabel = role !== 'user'
@@ -83,7 +92,8 @@ export function MessageItemHeader({
       ? (
         <span class="inline-flex items-center gap-1">
           <AgentIcon compact />Agent
-          {sender && <span class="transcript-header-summary-subtle">· {sender.title ?? 'Unnamed session'}</span>}
+          {agentMetadata?.senderLabel && <span class="transcript-header-summary-subtle">· {agentMetadata.senderLabel}</span>}
+          {cue && <span class="transcript-header-summary-subtle">· {cue}</span>}
         </span>
       )
       : customType !== undefined ? 'Auto-resume' : null;
@@ -96,7 +106,7 @@ export function MessageItemHeader({
       timestamp={requestTime?.compactText ?? null}
       timestampTitle={requestTime?.title}
       timestampDateTime={requestCreatedAt}
-      title={assistantMetaTooltip ?? undefined}
+      title={taskTooltip ?? assistantMetaTooltip ?? undefined}
       actions={actions}
       align={role === 'user' ? 'end' : 'start'}
       className={role === 'assistant' ? 'message-assistant-header' : undefined}

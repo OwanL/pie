@@ -10,6 +10,7 @@ import {
   stampSessionControlDelivery,
   parseSessionReplyReference,
   sessionControlPromptPrefix,
+  stripSessionControlPrompt,
   SESSION_REPLY_REFERENCE_MAX_BYTES,
 } from '../session-control-attribution.js';
 
@@ -18,6 +19,7 @@ test('session-control sender references round-trip only the exact stable identit
   const sender = createSessionControlSender(identity, 'Research notes');
 
   assert.deepEqual(parseSessionReplyReference(sender.replyReference), identity);
+  assert.match(sender.address!, /^pie-session:v1:[0-9a-f]{16}$/u);
   assert.equal(isSessionControlSender(sender), true);
   const fallbackIdentity = { sessionId: 'session-123', identityFallback: true };
   assert.notDeepEqual(parseSessionReplyReference(createSessionReplyReference(fallbackIdentity)), identity);
@@ -26,7 +28,8 @@ test('session-control sender references round-trip only the exact stable identit
   const prompt = formatSessionControlPrompt('check this', sender);
   assert.ok(prompt.includes('session-123'), 'the recipient model receives the stable sender identity');
   assert.ok(prompt.includes('Research notes'), 'the recipient model receives the assigned title');
-  assert.ok(prompt.includes(sender.replyReference), 'the recipient model receives the identity-bound reply reference');
+  assert.ok(prompt.includes(sender.address!), 'the recipient model receives the compact identity-bound address');
+  assert.ok(!prompt.includes(sender.replyReference), 'new guidance does not expose the long legacy reference');
   assert.ok(Buffer.byteLength(sender.replyReference, 'utf8') <= SESSION_REPLY_REFERENCE_MAX_BYTES);
 });
 
@@ -39,7 +42,7 @@ test('unnamed senders retain reply identity and user text never determines attri
   assert.match(prompt, /identity fallback/);
   assert.match(prompt, /unnamed session/);
   assert.ok(prompt.includes(sender.identity.sessionId));
-  assert.ok(prompt.includes(sender.replyReference));
+  assert.ok(prompt.includes(sender.address!));
   assert.ok(prompt.endsWith(body));
   assert.equal(isSessionControlSender(sender), true,
     'the prompt helper consumes the supplied DTO and never parses a sender from body text');
@@ -67,7 +70,7 @@ test('sender metadata rejects malformed timestamps and completion reply loops', 
   assert.throws(() => stampSessionControlDelivery(sender, -1));
 });
 
-test('reply guidance distinguishes no-reply from the explicit session_control recipe', () => {
+test('reply guidance uses the current collaboration tools while retaining creator auto-handoff', () => {
   const noReply = createSessionControlSender({ sessionId: 'no-reply', identityFallback: false }, undefined, {
     sentAt: 1, expectReply: false,
   });
@@ -76,8 +79,41 @@ test('reply guidance distinguishes no-reply from the explicit session_control re
   const expectsReply = createSessionControlSender({ sessionId: 'expects-reply', identityFallback: false }, undefined, {
     sentAt: 1, expectReply: true,
   });
-  assert.equal(sessionControlPromptSuffix(expectsReply), `\n\n[Pie cross-session reply guidance: If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(expectsReply.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.]`);
-  assert.ok(formatSessionControlPrompt('body', expectsReply).includes('session_control with'));
+  const suffix = sessionControlPromptSuffix(expectsReply)!;
+  assert.match(suffix, /delegated creator task, your final outcome is handed back automatically/u);
+  assert.match(suffix, /session_send using \{"target":/u);
+  assert.match(suffix, /session_assign with that same target/u);
+  assert.doesNotMatch(suffix, /session_control with|replyTo|expectReply/u);
+  assert.equal(formatSessionControlPrompt('body', expectsReply).endsWith(suffix), true);
+});
+
+test('old authenticated transcript reply guidance strips exactly while unauthenticated lookalikes remain', () => {
+  const sender = createSessionControlSender({ sessionId: 'legacy-expects-reply', identityFallback: false }, undefined, {
+    sentAt: 1, expectReply: true,
+  });
+  const body = 'Historical assignment body, including its original ending.';
+  const oldPrefix = `[Pie cross-session sender identity: "${sender.identity.sessionId}"; unnamed session. Reply reference: ${sender.replyReference}. Sent at: 1; delivered at: pending; expectReply: true.]\n\n`;
+  const oldSuffix = `\n\n[Pie cross-session reply guidance: If this is your delegated creator task, your final outcome is handed back automatically; do not also send the final via session_control. Otherwise reply using session_control with {"action":"message","replyTo":${JSON.stringify(sender.replyReference)},"expectReply":false,"prompt":"your reply"}. Ordinary assistant output is not delivered for other cross-session requests.]`;
+  const oldTranscript = `${oldPrefix}${body}${oldSuffix}`;
+  assert.equal(stripSessionControlPrompt(oldTranscript, sender), body);
+
+  const unauthenticated = { ...sender, replyReference: 'pie-reply:v1:YWJj' };
+  assert.equal(stripSessionControlPrompt(oldTranscript, unauthenticated), undefined);
+  const currentPrefix = sessionControlPromptPrefix(sender)!;
+  assert.equal(stripSessionControlPrompt(`${currentPrefix}${body}${oldSuffix} altered`, sender), undefined);
+});
+
+test('new reply guidance uses the compact address and sender addresses cannot be forged', () => {
+  const sender = createSessionControlSender({ sessionId: 'compact-target', identityFallback: false }, undefined, {
+    sentAt: 1, expectReply: true,
+  });
+  const suffix = sessionControlPromptSuffix(sender)!;
+  assert.ok(suffix.includes(JSON.stringify(sender.address)));
+  assert.ok(!suffix.includes(JSON.stringify(sender.replyReference)));
+  assert.equal(isSessionControlSender({ ...sender, address: 'pie-session:v1:0000000000000000' }), false);
+
+  const current = formatSessionControlPrompt('body', sender);
+  assert.equal(stripSessionControlPrompt(current, sender), 'body');
 });
 
 test('reply references and sender DTOs reject malformed, unbounded, or changed identities', () => {
