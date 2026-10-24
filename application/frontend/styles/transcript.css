@@ -335,7 +335,7 @@
   position: absolute;
   inset-inline: 0;
   bottom: 0;
-  height: 16px;
+  height: 8px;
   background: linear-gradient(to bottom, transparent, var(--panel-surface));
   pointer-events: none;
   z-index: 4;
