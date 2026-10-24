@@ -4,6 +4,7 @@
  */
 import { Window } from 'happy-dom';
 import { setTimeout as nativeSetTimeout, clearTimeout as nativeClearTimeout } from 'node:timers';
+import { installDomAssertionDiagnostics } from './dom-assertions';
 
 let installed = false;
 
@@ -35,6 +36,7 @@ export function installDom(): void {
   installed = true;
 
   const window = new Window({ url: 'http://localhost' });
+  installDomAssertionDiagnostics((value): value is Node => value instanceof window.Node);
 
   // Install core DOM globals
   const globals = [

@@ -29,6 +29,28 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const testEnvironmentPreload = pathToFileURL(path.join(repoRoot, 'scripts', 'verification', 'test-environment.mjs')).href;
 
+test('runner heap defaults cover both loaders and preserve explicit heap settings', () => {
+  const heapFlags = args => args.filter(arg => /^--max[-_]old[-_]space[-_]size(?:=|$)/u.test(arg));
+  for (const loaderMode of ['compatibility-cjs', 'retained-esm']) {
+    const prepare = (nodeFlags = [], NODE_OPTIONS = '', startupArgs = ['--import', testEnvironmentPreload]) => {
+      const invocation = prepareNodeTestInvocation([], { loaderMode, startupArgs, nodeFlags, env: { NODE_OPTIONS } });
+      try { return invocation.args; } finally { invocation.dispose(); }
+    };
+    assert.deepEqual(heapFlags(prepare()), ['--max-old-space-size=1024']);
+    for (const spelling of ['--max-old-space-size', '--max_old_space_size']) {
+      for (const flags of [[`${spelling}=512`], [spelling, '512']]) {
+        assert.deepEqual(heapFlags(prepare(flags)), [flags[0]]);
+        assert.deepEqual(heapFlags(prepare([], flags.join(' '))), []);
+      }
+      assert.deepEqual(heapFlags(prepare([], `--trace-warnings "${spelling}=512"`)), []);
+    }
+    if (loaderMode === 'retained-esm') {
+      assert.deepEqual(heapFlags(prepare([], '', ['--max_old_space_size=768', '--import', testEnvironmentPreload])), ['--max_old_space_size=768']);
+    }
+  }
+  assert.deepEqual(heapFlags(buildNodeArgs('/tmp/runner.json', [], 4, {})), ['--max-old-space-size=1024']);
+});
+
 test('coverage entries require internal exact owner approval, never public options', t => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-covered-entry-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -275,9 +297,9 @@ test('CLI separates selectors and forwards Node test flags after --', () => {
   assert.equal(createRunnerTsconfigOverlay(repoRoot), undefined, 'default tests need no tsconfig overlay');
   const args = buildNodeArgs('/tmp/runner.json', [
     '--test-name-pattern=worker', '--test-reporter=spec', '--test-concurrency=2', '--experimental-test-module-mocks',
-  ]);
+  ], 4, {});
   assert.deepEqual(args, [
-    '--import', testEnvironmentPreload, '--import', 'tsx', '--experimental-test-module-mocks',
+    '--max-old-space-size=1024', '--import', testEnvironmentPreload, '--import', 'tsx', '--experimental-test-module-mocks',
     path.join(repoRoot, 'scripts', 'verification', 'test-node-runner.mjs'), '/tmp/runner.json',
   ]);
   assert.deepEqual(parseNodeTestFlags(['--test-name-pattern', 'worker', '--test-reporter', 'dot', '--test-concurrency=2']), {
@@ -942,6 +964,7 @@ test('native sibling test files receive separate process fixtures and preserve u
       '  const directories = [env.HOME, env.USERPROFILE, env.APPDATA, env.LOCALAPPDATA, env.XDG_CONFIG_HOME, env.XDG_DATA_HOME, env.XDG_CACHE_HOME, env.PI_CONFIG_DIR, env.PI_CODING_AGENT_AUTH_DIR, env.PI_CODING_AGENT_DIR, env.PI_CODING_AGENT_SESSION_DIR, env.PIE_DATA_DIR, env.PIE_CACHE_DIR];',
       '  assert.ok(directories.every((directory) => directory.startsWith(pidRoot + path.sep)));',
       "  assert.ok(process.execArgv.includes('--experimental-test-module-mocks'), 'module-mock flag reaches the isolated test process');",
+      "  assert.ok(process.execArgv.includes('--max-old-space-size=1024'), 'default heap cap reaches the isolated test process');",
       "  writeFileSync(path.join(env.PIE_DATA_DIR, 'state.txt'), String(process.pid));",
       `  writeFileSync(path.join(env.PIE_TEST_FIXTURE_ROOT, 'observations', '${label}.json'), JSON.stringify({ pid: process.pid, data: env.PIE_DATA_DIR, home: env.HOME }));`,
       '});',
@@ -953,7 +976,7 @@ test('native sibling test files receive separate process fixtures and preserve u
   try {
     const { runNodeTests } = await import('../test-node.mjs');
     const result = await runNodeTests([path.join(sourceRoot, 'first.test.mjs'), path.join(sourceRoot, 'second.test.mjs')], {
-      env: fixture.env,
+      env: { ...fixture.env, NODE_OPTIONS: '' },
       nodeFlags: [
         '--test-name-pattern=uses a child-PID fixture', '--test-reporter=spec', '--test-concurrency=2',
         '--experimental-test-module-mocks', '--experimental-test-coverage', '--test-coverage-lines=0',

@@ -235,6 +235,8 @@ Native TypeScript coverage (including artifact fixtures) is refused before launc
 
 Test and typecheck children default to a 20-minute timeout. Windows native SDK verification uses kernel Job teardown; other routes retain their process-tree watchdog. Override the deadline with `PIE_TEST_PROCESS_TIMEOUT_MS`; set `0` only to disable it explicitly.
 
+Native test processes default to a 1024 MiB V8 old-space limit (not a total-memory limit); override with `NODE_OPTIONS` or a forwarded `--max-old-space-size` flag when needed. DOM tests installed through `installDom()` keep native reference-comparison semantics but report bounded node summaries on failure, rather than recursively formatting the entire DOM/component graph.
+
 Native Pi workspace readers block setup/rebuild until confirmed teardown. Windows native SDK verification uses keeper/Job containment; uncertain teardown retains unknown state, not universal crash recovery. The [canonical gate](lib/development-runtime/lifetime.mjs) owns authorization and lifetime rules. Inspect denied-operation registrations read-only with `proto run node -- scripts/development/inspect-workspace.mjs harness/pi` (or an isolated Pi workspace root). Inspection is not lifetime proof or recovery authorization: never reclaim by PID/age or delete gate state.
 
 ### Build and run Pie from source

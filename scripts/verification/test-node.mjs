@@ -369,10 +369,20 @@ export function createNodeTestEntries(files, directory) {
   return { files: entries, sourceFileByEntry };
 }
 
+function defaultHeapArgs(processFlags, env) {
+  // Node accepts hyphens/underscores and either inline or separate values.
+  // Do not mask NODE_OPTIONS: a CLI default would take precedence over it.
+  const heapOption = /^--max[-_]old[-_]space[-_]size(?:=|$)/u;
+  const environmentHeapOption = /(?:^|\s|")--max[-_]old[-_]space[-_]size(?:=|\s|"|$)/u;
+  return processFlags.some(flag => heapOption.test(flag)) || environmentHeapOption.test(env.NODE_OPTIONS ?? '')
+    ? [] : ['--max-old-space-size=1024'];
+}
+
 /** Build a bounded Node invocation; discovered test paths stay in a temp config file. */
-export function buildNodeArgs(configPath, nodeFlags = [], concurrency = DEFAULT_TEST_CONCURRENCY) {
+export function buildNodeArgs(configPath, nodeFlags = [], concurrency = DEFAULT_TEST_CONCURRENCY, env = process.env) {
   const { processFlags } = parseNodeTestFlags(nodeFlags, concurrency);
   return [
+    ...defaultHeapArgs(processFlags, env),
     '--import', TEST_ENVIRONMENT_PRELOAD,
     '--import', 'tsx',
     ...processFlags,
@@ -413,7 +423,7 @@ export function createTestEnvironment(source = process.env, { fixtureRoot } = {}
 
 /** Shared config, entries and argument generation for both lifetime drivers. */
 export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoot, waitForOwnership = true,
-  loaderMode = 'compatibility-cjs', isolation = 'process', startupArgs } = {}) {
+  loaderMode = 'compatibility-cjs', isolation = 'process', startupArgs, env = process.env } = {}) {
   if (!['compatibility-cjs', 'retained-esm'].includes(loaderMode)) throw new Error(`Unknown test loader mode: ${loaderMode}`);
   if (loaderMode === 'retained-esm' && !startupArgs?.length) throw new Error('Retained ESM mode requires the owner-pinned tsx startup.');
   if (!['process', 'none'].includes(isolation) || (isolation === 'none' && loaderMode !== 'retained-esm')) {
@@ -446,8 +456,8 @@ export function prepareNodeTestInvocation(files, { nodeFlags = [], cwd = repoRoo
     configRoot, configPath, args: loaderMode === 'retained-esm'
       // With isolation none, Node registers tests in this process: its global
       // harness reads CLI flags (run() options alone do not apply name filters).
-      ? [...startupArgs, ...(isolation === 'none' ? nodeFlags.filter(flag => flag !== '--test') : parsedFlags.processFlags), RUNNER_MODULE, configPath]
-      : buildNodeArgs(configPath, nodeFlags),
+      ? [...defaultHeapArgs([...startupArgs, ...parsedFlags.processFlags], env), ...startupArgs, ...(isolation === 'none' ? nodeFlags.filter(flag => flag !== '--test') : parsedFlags.processFlags), RUNNER_MODULE, configPath]
+      : buildNodeArgs(configPath, nodeFlags, DEFAULT_TEST_CONCURRENCY, env),
     dispose() { rmSync(configRoot, { recursive: true, force: true }); },
   };
 }
@@ -471,7 +481,7 @@ export function runNodeTests(files, {
   writeTeardownDiagnosticImpl = writeFileSync,
   timeoutMs = resolveChildProcessTimeoutMs(),
 } = {}) {
-  const { configRoot, configPath, args } = prepareNodeTestInvocation(files, { nodeFlags, cwd });
+  const { configRoot, configPath, args } = prepareNodeTestInvocation(files, { nodeFlags, cwd, env });
   return new Promise((resolve, reject) => {
     const teardownDiagnosticPath = path.join(configRoot, 'teardown.json');
     let child;
