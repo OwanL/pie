@@ -945,8 +945,8 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
   }, [open, searching, effectiveTab, expandedExt, expandedProvider]);
 
   // The portaled popup has stable category-independent height. Position and
-  // height share one measurement on scroll/resize: prefer above the trigger,
-  // but use below when it fits more, always inside the viewport margins.
+  // height share one measurement on scroll/resize. Prefer below the header
+  // trigger, falling back above only when it offers more usable space.
   useLayoutEffect(() => {
     if (!open) return;
     const trigger = triggerRef.current;
@@ -966,7 +966,7 @@ export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServe
       const belowStart = Math.max(pad, Math.min(viewportHeight - pad, rect.bottom + gap));
       const above = Math.max(0, aboveEnd - pad);
       const below = Math.max(0, viewportHeight - pad - belowStart);
-      const useAbove = above >= SETTINGS_MENU_HEIGHT || above >= below;
+      const useAbove = below < SETTINGS_MENU_HEIGHT && above > below;
       const available = useAbove ? above : below;
       const height = Math.min(SETTINGS_MENU_HEIGHT, available);
       menu.style.left = `${left}px`;

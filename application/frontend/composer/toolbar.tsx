@@ -25,7 +25,6 @@ import type {
   SessionCostIndicatorState,
 } from '../session-tabs/token-usage';
 import { SessionCostTooltip } from '../analytics/session-cost-tooltip';
-import { ComposerSettingsMenu } from '../settings/settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
 import { SubagentBucketMenu } from './subagent-bucket-menu';
 import { getAutonomousModeForSession, setAutonomousModeForSession } from '../shell/chat-prefs';
@@ -149,34 +148,22 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   commandsAvailable = true,
   prefs,
   pruningSettings,
-  pruningCatalog,
-  pruningResult,
   pruningRefreshPending = false,
   busy = false,
   onSetPruningRefreshPending,
-  toolResultPruningSettings,
-  sessionTitlesSettings,
-  providerGateStats,
   providerManagement,
   privacyMode = false,
   browserServer,
   onSetPrefs,
-  mcpServers,
   mcpServersStatus,
-  mcpPendingApply,
   mcpSessionServers,
   mcpSessionPendingApply,
   onMcpListRequested,
-  onMcpSetServerEnabled,
   onMcpSetServerEnabledForSession,
   onSetPrivacyMode,
   onSetBrowserServerLanEnabled,
   onSetBrowserServerEnabled,
   onSetSystemPromptToggles,
-  onSetPruningSettings,
-  onSetToolResultPruningSettings,
-  onSetSessionTitlesSettings,
-  availableExtensions,
   availableModels,
   availableModelsStatus,
   onRetryModelCatalog,
@@ -320,7 +307,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   );
 
   const toolbarItems: ComposerToolbarItem[] = [
-    { key: 'settings', kind: 'control', overflowOnly: true, shortLabel: 'Settings', content: (<ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} providerManagement={providerManagement} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />) },
     ...(deferredTriggerControl ? [{ key: 'deferred-triggers', kind: 'control' as const, overflowOnly: true, content: deferredTriggerControl }] : []),
     ...(globalIndicators ? [{ key: 'global-costs', kind: 'global' as const, content: globalIndicators }] : []),
     {

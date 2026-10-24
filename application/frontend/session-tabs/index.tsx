@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import type { ComponentChildren } from 'preact';
 
 import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionCatalogProgress, SessionSummary } from '../../lib/protocol/index.js';
 import { derivePinnedItems, findPinnedGroupIndex } from '../../lib/session-tabs/tab-behavior.js';
@@ -19,6 +20,7 @@ import { getSnoozeBlockedReason, type SnoozeDuration, type SnoozedSession } from
 import { SnoozedSessionsAction } from './snoozed-sessions-menu';
 
 interface SessionTabsProps {
+  settingsAction?: ComponentChildren;
   sessions: SessionSummary[];
   snoozedSessions?: SnoozedSession[];
   sessionCapabilitiesBySession?: Record<string, import('../../lib/protocol/index.js').SessionCapabilities>;
@@ -145,6 +147,7 @@ function areSessionTabsPropsEqual(
     && previous.onMove === next.onMove
     && previous.onMovePinnedItem === next.onMovePinnedItem
     && previous.onNew === next.onNew
+    && previous.settingsAction === next.settingsAction
     && previous.onDuplicate === next.onDuplicate
     && previous.onRetryCreate === next.onRetryCreate
     && previous.onTogglePin === next.onTogglePin
@@ -171,6 +174,7 @@ function areSessionTabsPropsEqual(
 }
 
 function SessionTabsView({
+  settingsAction,
   sessions,
   snoozedSessions = [],
   sessionCapabilitiesBySession,
@@ -657,6 +661,7 @@ function SessionTabsView({
             <span aria-hidden="true">Indexing…</span>
           </span>
         )}
+        {settingsAction}
         <button
           ref={newSessionRef}
           class="session-tabs-new"

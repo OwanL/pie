@@ -28,6 +28,7 @@ import { InlineConfirmDialog } from '../notifications/inline-confirm-dialog';
 import { ConnectionBanner } from './connection-banner';
 import { LocalFileOpenFeedbackView, useLocalFileOpenFeedback } from './local-file-open-feedback';
 import type { ClientTransport } from '../transport/client-transport';
+import { SessionSettings } from '../settings/session-settings';
 import { useSnoozeCommands } from '../session-tabs/use-snooze-commands';
 
 export interface AppBodyProps {
@@ -213,6 +214,41 @@ export function AppBody({ adapter }: AppBodyProps) {
     () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
     [viewState.sessions],
   );
+  const settingsAction = useMemo(() => <SessionSettings
+    commandsAvailable={connectionState === 'connected'}
+    activeSession={viewState.activeSession}
+    modelSettings={viewState.modelSettings}
+    prefs={viewState.prefs}
+    mcpServers={viewState.mcpServers}
+    mcpServersStatus={viewState.mcpServersStatus}
+    mcpPendingApply={viewState.mcpPendingApply}
+    pruningSettings={viewState.pruningSettings}
+    pruningCatalog={viewState.pruningCatalog}
+    pruningResult={viewState.pruningResult}
+    toolResultPruningSettings={viewState.toolResultPruningSettings}
+    sessionTitlesSettings={viewState.sessionTitlesSettings}
+    availableExtensions={viewState.availableExtensions}
+    availableModels={viewState.availableModels}
+    providerGateStats={viewState.aggregateStats.providerGate}
+    providerManagement={providerManagement}
+    onModelChange={handlers.handleModelChange}
+    onSetPrefs={handlers.handleSetPrefs}
+    onMcpListRequested={handlers.handleMcpListRequested}
+    onMcpSetServerEnabled={handlers.handleMcpSetServerEnabled}
+    onSetPruningSettings={handlers.handleSetPruningSettings}
+    onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
+    onSetSessionTitlesSettings={handlers.handleSetSessionTitlesSettings}
+  />, [
+    connectionState, viewState.activeSession, viewState.modelSettings, viewState.prefs,
+    viewState.mcpServers, viewState.mcpServersStatus, viewState.mcpPendingApply,
+    viewState.pruningSettings, viewState.pruningCatalog, viewState.pruningResult,
+    viewState.toolResultPruningSettings, viewState.sessionTitlesSettings,
+    viewState.availableExtensions, viewState.availableModels, viewState.aggregateStats.providerGate,
+    providerManagement, handlers.handleModelChange, handlers.handleSetPrefs,
+    handlers.handleMcpListRequested, handlers.handleMcpSetServerEnabled,
+    handlers.handleSetPruningSettings, handlers.handleSetToolResultPruningSettings,
+    handlers.handleSetSessionTitlesSettings,
+  ]);
   const appCommitSurface = derived.panelSurface === 'loading' || derived.needsSessionRecovery
     ? 'loading'
     : !derived.hasActiveTabs
@@ -262,6 +298,7 @@ export function AppBody({ adapter }: AppBodyProps) {
 
       {derived.showSessionChrome && (
         <SessionTabs
+          settingsAction={settingsAction}
           sessions={viewState.sessions}
           snoozedSessions={viewState.snoozedSessions}
           sessionCapabilitiesBySession={viewState.sessionCapabilitiesBySession}

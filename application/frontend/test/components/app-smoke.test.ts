@@ -143,6 +143,26 @@ afterEach(() => {
   container.remove();
 });
 
+for (const empty of [false, true]) {
+  test(`App exposes Settings immediately before New session (${empty ? 'no tabs' : 'active tab'})`, () => {
+    const adapter = makeAdapter();
+    adapter.initialState = sessionViewState(empty ? { openTabPaths: [], activeSession: null, sessions: [] } : {});
+    act(() => render(h(App, { adapter }), container));
+    const buttons = container.querySelectorAll<HTMLButtonElement>('button[aria-label="Settings"]');
+    assert.equal(buttons.length, 1);
+    const settings = buttons[0]!;
+    const action = settings.closest('.toolbar-settings');
+    assert.equal(action?.parentElement?.className, 'session-tabs-actions');
+    assert.equal(action?.nextElementSibling?.getAttribute('aria-label'), 'New session');
+    assert.ok(container.querySelector('.composer-toolbar button[aria-label="Settings"]') === null);
+    act(() => settings.click());
+    assert.ok(document.querySelector('[role="dialog"][aria-label="Settings"]'));
+    act(() => document.querySelector<HTMLButtonElement>('button[aria-label="Close settings"]')!.click());
+    assert.ok(document.querySelector('[role="dialog"][aria-label="Settings"]') === null);
+    assert.ok(document.activeElement === settings);
+  });
+}
+
 test('App keeps a fixed answer surface for a subagent question when its transcript card is stale', () => {
   const adapter = makeAdapter();
   const request: ExtensionUIRequestPayload = {
