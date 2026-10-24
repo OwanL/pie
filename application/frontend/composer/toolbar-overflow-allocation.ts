@@ -1,6 +1,8 @@
 export interface ComposerOverflowItemWidth {
   key: string;
-  kind: 'control' | 'indicator';
+  kind: 'control' | 'indicator' | 'global';
+  /** Always belongs to More, regardless of available width. */
+  overflowOnly?: boolean;
   width: number;
   /**
    * Explicit removal priority. Lower values move the item behind the trigger
@@ -16,7 +18,7 @@ export interface ComposerOverflowItemWidth {
 export interface ComposerToolbarAllocationInput {
   /** Width of the composer bottom bar, including its outer gaps. */
   availableWidth: number;
-  /** Intrinsic, uncompressed width of the always-visible Settings/Model/Reasoning group. */
+  /** Intrinsic, uncompressed width of the always-visible Model/Reasoning group. */
   pinnedNaturalWidth: number;
   /**
    * Natural, uncompressed width of the model picker inside the pinned group;
@@ -86,13 +88,17 @@ export function allocateComposerToolbar({
   const requiredWidth = (visibleKeys: ReadonlySet<string>, modelBudget: number): number => {
     const visibleControls = normalizedItems.filter((item) => item.kind === 'control' && visibleKeys.has(item.key));
     const visibleIndicators = normalizedItems.filter((item) => item.kind === 'indicator' && visibleKeys.has(item.key));
+    const visibleGlobals = normalizedItems.filter((item) => item.kind === 'global' && visibleKeys.has(item.key));
     const hasIndicators = visibleIndicators.length > 0;
     const hasOverflow = visibleKeys.size < normalizedItems.length;
 
     let width = Math.max(0, pinnedNaturalWidth - modelNaturalWidth)
       + Math.max(0, modelBudget)
       + Math.max(0, actionsWidth)
-      + (hasIndicators ? Math.max(0, sectionGap) * 2 : Math.max(0, sectionGap));
+      + Math.max(0, sectionGap) * (1 + Number(hasIndicators) + Number(visibleGlobals.length > 0));
+    for (const [index, item] of visibleGlobals.entries()) {
+      width += (index === 0 ? 0 : Math.max(0, indicatorGap)) + item.width;
+    }
     for (const item of visibleControls) width += Math.max(0, controlGap) + item.width;
     if (hasOverflow) width += Math.max(0, controlGap) + Math.max(0, overflowTriggerWidth);
     for (const [index, item] of visibleIndicators.entries()) {
@@ -118,30 +124,31 @@ export function allocateComposerToolbar({
     .filter((item) => keys.has(item.key))
     .map((item) => item.key);
 
-  const visibleKeys = new Set(normalizedItems.map((item) => item.key));
+  const visibleKeys = new Set(normalizedItems.filter((item) => !item.overflowOnly).map((item) => item.key));
   if (fits(visibleKeys)) {
     return { visibleItemKeys: visibleInPresentationOrder(visibleKeys), modelWidthBudget: budgetFor(visibleKeys) };
   }
 
   const overriddenItems = normalizedItems
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.removalPriority !== undefined)
+    .filter(({ item }) => !item.overflowOnly && item.removalPriority !== undefined)
     .sort((a, b) => (a.item.removalPriority ?? 0) - (b.item.removalPriority ?? 0) || b.index - a.index)
     .map(({ item }) => item);
   const isOverridden = (item: (typeof normalizedItems)[number]): boolean => item.removalPriority !== undefined;
   // The former leading-prefix allocator removed controls from the end of their
   // row sequence. Preserve that direction within secondary controls.
   const controlsToRemove = normalizedItems
-    .filter((item) => item.kind === 'control' && !isOverridden(item))
+    .filter((item) => item.kind === 'control' && !item.overflowOnly && !isOverridden(item))
     .reverse();
   const indicatorsToRemove = normalizedItems
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.kind === 'indicator' && !isOverridden(item))
+    .filter(({ item }) => item.kind === 'indicator' && !item.overflowOnly && !isOverridden(item))
     .sort((a, b) => (INDICATOR_REMOVAL_PRIORITY[a.item.key] ?? 0)
       - (INDICATOR_REMOVAL_PRIORITY[b.item.key] ?? 0) || b.index - a.index)
     .map(({ item }) => item);
 
-  for (const item of [...overriddenItems, ...controlsToRemove, ...indicatorsToRemove]) {
+  const globalsToRemove = normalizedItems.filter((item) => item.kind === 'global' && !item.overflowOnly && !isOverridden(item));
+  for (const item of [...overriddenItems, ...controlsToRemove, ...globalsToRemove, ...indicatorsToRemove]) {
     visibleKeys.delete(item.key);
     if (fits(visibleKeys)) {
       return { visibleItemKeys: visibleInPresentationOrder(visibleKeys), modelWidthBudget: budgetFor(visibleKeys) };

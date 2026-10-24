@@ -1,32 +1,16 @@
-/* ── Aggregate stats strip ────────────────────────────────────────────────── */
-/* Thin status strip anchored at the bottom of the panel (below the composer).
-   Focused on recent (today / this-week) + current (live / open) activity.
-   Per-provider breakdowns and all-time context live in each segment's scoped
-   custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
-   chips. Wide panels keep a single thin line; all panels retain only complete metrics in strict priority order.
-   Custom tooltips are used
-   instead of native `title` because the strip re-renders ~7×/sec during
-   streaming — native `title` tooltips close on every re-render and flicker. Host-owned: a pure projection of ViewState.aggregateStats
-   (STATE_CONTRACT § Webview-Local State). */
-
+/* Intrinsic cost pair, without a footer surface or reserved numeric columns. */
 .aggregate-strip {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 5px;
-  height: 20px;
-  padding: 0 8px;
-  border-top: 1px solid var(--panel-border-subtle);
-  background: var(--panel-surface);
+  gap: 6px;
   font-family: var(--panel-font-mono);
-  font-size: 9.5px;
+  font-size: 10px;
   line-height: 1;
   letter-spacing: 0.01em;
-  color: color-mix(in srgb, var(--panel-foreground) 58%, var(--panel-muted));
+  color: var(--panel-muted);
   white-space: nowrap;
   position: relative;
-  min-width: 0;
-  overflow: hidden;
   user-select: none;
 }
 
@@ -88,7 +72,8 @@
 }
 
 .aggregate-strip-cost {
-  color: color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-muted));
+  color: inherit;
+  text-decoration: none;
   font-variant-numeric: tabular-nums;
 }
 
@@ -196,9 +181,5 @@
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   border-radius: var(--panel-radius-sm);
-  transition: background var(--panel-transition-fast), color var(--panel-transition-fast);
-}
-
-.aggregate-strip-deferred:hover {
-  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+  transition: color var(--panel-transition-fast);
 }

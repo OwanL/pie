@@ -5,6 +5,7 @@ import type { BrowserServerViewState, ChatPrefs, ExtensionInfo, LastCompactionSu
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from './thinking-level-options.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
+import type { ComponentChildren } from 'preact';
 import { useMemo, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
@@ -78,6 +79,8 @@ interface ComposerToolbarStatus {
 }
 
 interface ComposerToolbarProps {
+  globalIndicators?: ComponentChildren;
+  deferredTriggerControl?: ComponentChildren;
   sessionPath: string | null;
   canCompact: boolean;
   /** False while transport/backend lifecycle work makes mutations unsafe. */
@@ -139,6 +142,8 @@ interface ComposerToolbarProps {
 }
 
 export const ComposerToolbar = memo(function ComposerToolbar({
+  globalIndicators,
+  deferredTriggerControl,
   sessionPath,
   canCompact,
   commandsAvailable = true,
@@ -266,7 +271,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         : '. Applies to your next idle, nonempty send, not an empty continuation.');
   const pinnedControls = (
     <>
-      <ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} providerManagement={providerManagement} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
       {filteredModels.length > 0 ? (
         <ModelPicker
           label={selectedModelLabel}
@@ -316,6 +320,9 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   );
 
   const toolbarItems: ComposerToolbarItem[] = [
+    { key: 'settings', kind: 'control', overflowOnly: true, shortLabel: 'Settings', content: (<ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} providerManagement={providerManagement} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />) },
+    ...(deferredTriggerControl ? [{ key: 'deferred-triggers', kind: 'control' as const, overflowOnly: true, content: deferredTriggerControl }] : []),
+    ...(globalIndicators ? [{ key: 'global-costs', kind: 'global' as const, content: globalIndicators }] : []),
     {
       key: 'subagent-providers',
       kind: 'control',
@@ -332,18 +339,21 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     },
     {
       key: 'subagent-buckets',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Buckets',
       content: <SubagentBucketMenu sessionPath={sessionPath} prefs={prefs} onSetPrefs={onSetPrefs} />,
     },
     {
       key: 'system-prompts',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Prompts',
       content: <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />,
     },
     {
       key: 'mcp',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'MCP',
       content: <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />,
@@ -361,6 +371,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     },
     {
       key: 'autonomous-mode',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Autonomous',
       content: (
@@ -385,6 +396,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     },
     {
       key: 'privacy-mode',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Privacy',
       content: (
@@ -406,6 +418,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     },
     {
       key: 'browser-network',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Browser',
       content: (
@@ -419,6 +432,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     },
     {
       key: 'pruning-refresh',
+      overflowOnly: true,
       kind: 'control',
       shortLabel: 'Refresh',
       content: (

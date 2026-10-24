@@ -54,7 +54,7 @@ interface SessionTabsProps {
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   /** Delivery-target session paths with a pending deferred trigger. Tabs in
    *  this set have their close × greyed out with an explanatory tooltip (the
-   *  trigger must be cancelled first, from the status strip). */
+   *  trigger must be cancelled first, from More composer options). */
   deferredSessionPaths: string[];
   /** Session paths whose pending deferred trigger includes a timer. */
   deferredTimerSessionPaths: string[];

@@ -1,6 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import type { ComponentChildren } from 'preact';
+
 import { memo } from 'preact/compat';
 import { useCallback, useMemo, useRef } from 'preact/hooks';
 
@@ -50,9 +52,11 @@ import {
   useComposerHeightSync,
 } from '../composer/hooks';
 export { SessionTabs } from '../session-tabs';
-export { AggregateStatsStrip } from '../analytics/aggregate-stats-strip';
+export { AggregateStatsStrip, DeferredTriggersIndicator } from '../analytics/aggregate-stats-strip';
 
 interface ComposerProps {
+  globalIndicators?: ComponentChildren;
+  deferredTriggerControl?: ComponentChildren;
   dictation?: DictationView;
   busy: boolean;
   capabilities?: SessionCapabilities;
@@ -155,6 +159,8 @@ interface ComposerProps {
 }
 
 function ComposerView({
+  globalIndicators,
+  deferredTriggerControl,
   dictation,
   busy,
   capabilities,
@@ -475,6 +481,8 @@ function ComposerView({
         />
         <div class="composer-bottom-bar">
           <ComposerToolbar
+            globalIndicators={globalIndicators}
+            deferredTriggerControl={deferredTriggerControl}
             sessionPath={sessionPath}
             canCompact={capabilities?.canCompact === true}
             commandsAvailable={commandsAvailable}

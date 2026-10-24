@@ -117,8 +117,6 @@ test('StackedAreaChart line mode draws one unstroked-stack line per series on a 
 test('AggregateStatsStrip renders a placeholder while not ready', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: EMPTY_AGGREGATE_STATS,
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
   }));
   assert.match(html, /aggregate-strip--placeholder/);
   assert.doesNotMatch(html, /tok\/s/, 'aggregate strip has no speed indicator');
@@ -127,8 +125,6 @@ test('AggregateStatsStrip renders a placeholder while not ready', () => {
 test('AggregateStatsStrip with ready zero stats omits the last-run segment', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: { ...EMPTY_AGGREGATE_STATS, ready: true },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
   }));
   assert.doesNotMatch(html, /aggregate-strip--placeholder/, 'ready state drops the placeholder class');
   assert.doesNotMatch(html, /tok\/s/, 'aggregate strip has no speed indicator');

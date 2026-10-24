@@ -10,7 +10,7 @@ import type { ProviderSetupPreviewProps } from '../../lib/protocol/provider-setu
 import { ContextMenu, type ContextMenuState } from '../lib/components/context-menu';
 import { NoticeBanner } from '../notifications/notice-banner';
 import { SessionTabs } from './ui';
-import { AggregateStatsStrip } from './ui';
+import { AggregateStatsStrip, DeferredTriggersIndicator } from '../analytics/aggregate-stats-strip';
 import { DeferredTriggersMenu } from '../analytics/aggregate-stats-strip/deferred-triggers-menu';
 import { NoticeContext } from '../lib/hooks/notice-context';
 import { AskUserContext, selectFixedPromptRequest } from '../lib/hooks/ask-user-context';
@@ -187,13 +187,13 @@ export function AppBody({ adapter }: AppBodyProps) {
   }, [derived.activeSessionPath]);
   // Clear the deferred-triggers popup when its source or data disappears. The
   // menu's own `onClose` (click-outside/Escape/resize) sets state to null, but
-  // host state can remove the trigger or hide its status-strip source without
+  // host state can remove the trigger or hide the composer without
   // calling onClose — without this, stale coordinates could re-open it later.
   useEffect(() => {
-    if (viewState.deferredTriggers.length === 0 || !derived.showSessionChrome || viewState.prefs.hideStatusStrip) {
+    if (viewState.deferredTriggers.length === 0 || !derived.showSessionChrome) {
       setDeferredMenu(null);
     }
-  }, [derived.showSessionChrome, viewState.deferredTriggers.length, viewState.prefs.hideStatusStrip]);
+  }, [derived.showSessionChrome, viewState.deferredTriggers.length]);
   // While an interrupt is in-flight, suppress the transcript's busy-driven
   // typing indicator within one frame (the host clears `busy` only after the
   // abort completes). The transcript components are unchanged — only the
@@ -335,6 +335,8 @@ export function AppBody({ adapter }: AppBodyProps) {
       />
 
       <BottomSection
+        globalIndicators={derived.showSessionChrome && !viewState.prefs.hideStatusStrip ? <AggregateStatsStrip stats={viewState.aggregateStats} /> : null}
+        deferredTriggerControl={viewState.deferredTriggers.length > 0 ? <DeferredTriggersIndicator deferredTriggers={viewState.deferredTriggers} onOpenDeferredMenu={(x, y, triggerEl) => setDeferredMenu({ x, y, triggerEl })} /> : null}
         hostInstanceId={hostInstanceId}
         hasActiveTabs={derived.hasActiveTabs}
         needsSessionRecovery={derived.needsSessionRecovery}
@@ -394,14 +396,6 @@ export function AppBody({ adapter }: AppBodyProps) {
         handlers={handlers}
       />
 
-      {derived.showSessionChrome && !viewState.prefs.hideStatusStrip && (
-        <AggregateStatsStrip
-          stats={viewState.aggregateStats}
-          snoozedSessionCount={viewState.snoozedSessions?.length ?? 0}
-          deferredTriggers={viewState.deferredTriggers}
-          onOpenDeferredMenu={(x, y, triggerEl) => setDeferredMenu({ x, y, triggerEl })}
-        />
-      )}
       {deferredMenu && viewState.deferredTriggers.length > 0 && (
         <DeferredTriggersMenu
           triggers={viewState.deferredTriggers}

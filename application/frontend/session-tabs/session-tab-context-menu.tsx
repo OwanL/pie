@@ -257,7 +257,7 @@ export function SessionTabContextMenu({
         role="menuitem"
         type="button"
         disabled={hasDeferredTriggers}
-        title={hasDeferredTriggers ? 'Pending deferred trigger(s) — cancel from the status bar first.' : undefined}
+        title={hasDeferredTriggers ? 'Pending wakeup timers — cancel from More composer options first.' : undefined}
         onClick={() => onContextAction('close', tabContextMenu.tabPath)}
       >
         Close tab

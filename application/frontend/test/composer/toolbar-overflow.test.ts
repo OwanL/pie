@@ -15,6 +15,8 @@ import {
   EMPTY_PROVIDER_GATE_STATS,
   type ModelInfo,
 } from '../../../lib/protocol/index.js';
+import { DeferredTriggersIndicator } from '../../analytics/aggregate-stats-strip';
+import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 import { ComposerActions } from '../../composer/actions';
 import { ComposerToolbar } from '../../composer/toolbar';
 import { SkillPrunerSettings } from '../../settings/settings-menu-skill-pruner';
@@ -51,6 +53,7 @@ let overflowTriggerWidth = 26;
 let modelNaturalWidth = 0;
 /** Test-only override for the pinned group beyond the legacy long-model value. */
 let pinnedNaturalWidth = 0;
+let globalWidth = 100;
 let originalRect: typeof HTMLElement.prototype.getBoundingClientRect;
 let originalObserver: unknown;
 let gapStyles: HTMLStyleElement;
@@ -75,6 +78,10 @@ function installLayout(): void {
         return rect(Math.min(140, Math.max(28, 16 + text.length * 6)));
       }
       if (key === 'run-status') return rect(42);
+      if (key === 'global-costs') {
+        const panelCapped = this.closest('.composer-toolbar-overflow-popover') && this.style.maxWidth !== 'none';
+        return rect(panelCapped ? Math.min(globalWidth, 260) : globalWidth);
+      }
       return rect(24);
     }
     if (this.classList.contains('model-picker')) return rect(modelNaturalWidth);
@@ -93,7 +100,8 @@ function cleanupLayout(): void {
 }
 
 beforeEach(() => {
-  rowWidth = 506; // Nine 24px controls plus their 2px gaps, including Buckets.
+  globalWidth = 100;
+  rowWidth = 506;
   longModel = false;
   overflowTriggerWidth = 26;
   modelNaturalWidth = 0;
@@ -239,7 +247,7 @@ test('refresh follows browser network access at the end of the toolbar controls'
   assert.ok(refresh.closest('.composer-controls'));
   assert.equal(refresh.previousElementSibling?.getAttribute('data-toolbar-item'), 'browser-network');
   assert.equal(refresh.nextElementSibling, null);
-  assert.equal(container.querySelector('.composer-pinned-controls .pruning-refresh-trigger'), null);
+  assert.equal(!!container.querySelector('.composer-pinned-controls .pruning-refresh-trigger'), false);
 });
 
 test('refresh overflows at narrow widths and toggles only from host state, even while busy', () => {
@@ -466,18 +474,18 @@ test('coarse-pointer allocation reserves the measured 44px trigger in item and m
   }), { visibleItemKeys: [], modelWidthBudget: 42 }, 'below the reserve band the label yields to whatever remains');
 });
 
-test('measures the trigger before overflow exists and observes CSS width changes for both budgets', () => {
+test('measures the trigger independently and observes CSS width changes for both budgets', () => {
   overflowTriggerWidth = 44;
   modelNaturalWidth = 120;
   longModel = true;
   rowWidth = 900;
   mount();
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true);
   const probe = container.querySelector<HTMLElement>('[data-composer-overflow-measurement]');
-  assert.ok(probe, 'the absent trigger has an offscreen measurement probe');
+  assert.ok(probe, 'the trigger has an offscreen measurement probe');
   assert.equal(probe.getAttribute('aria-hidden'), 'true');
   assert.equal(probe.tabIndex, -1);
-  assert.ok(TestResizeObserver.instances.some((observer) => observer.targets.has(probe)), 'CSS trigger sizing is observed even before overflow');
+  assert.ok(TestResizeObserver.instances.some((observer) => observer.targets.has(probe)), 'CSS trigger sizing is observed independently of allocation');
 
   rowWidth = 320;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
@@ -502,7 +510,7 @@ test('measures the trigger before overflow exists and observes CSS width changes
   assert.equal(pinned?.style.getPropertyValue('--composer-model-picker-max-width'), '64px', 'desktop CSS restores the 26px width budget');
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'wide layout still shows every item without a live More button');
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true, 'wide layout retains permanent overflow controls');
 });
 
 test('selected model tooltip identifies the provider-qualified model and display label', async () => {
@@ -600,7 +608,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   rowWidth = 265;
   mount();
   const pinned = container.querySelector('.composer-pinned-controls');
-  assert.ok(pinned?.querySelector('[aria-label="Settings"]'), container.innerHTML);
+  assert.ok(!pinned?.querySelector('[aria-label="Settings"]'));
   assert.ok(pinned?.querySelector('[aria-label="Model"]'));
   assert.ok(pinned?.querySelector('[aria-label="Reasoning level"]'));
 
@@ -608,7 +616,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   const hiddenKeys = Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]'))
     .map((element) => element.dataset.toolbarItem);
   assert.deepEqual(hiddenKeys, [
-    'subagent-providers', 'subagent-buckets', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
+    'settings', 'subagent-providers', 'subagent-buckets', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
     'run-status',
   ]);
   assert.equal(container.querySelectorAll('[data-toolbar-item="autonomous-mode"]').length, 1, 'moved controls are mounted once');
@@ -618,21 +626,21 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   mount();
   // Compare presence, not the DOM node: a failed node-vs-null assertion can
   // exhaust the heap formatting the cyclic DOM/Preact graph instead of reporting.
-  assert.ok(!container.querySelector('.composer-controls > .composer-overflow-trigger'), 'the initial labels fit at the starting row width');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'More exists for permanent overflow controls');
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'the overflow trigger disappears when every item fits');
-  assert.equal(container.querySelector('.composer-toolbar-overflow-popover'), null);
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true, 'More remains for permanent overflow controls');
+  assert.ok(container.querySelector('.composer-toolbar-overflow-popover'));
   assert.equal(container.querySelectorAll('.composer-indicators [data-toolbar-item]').length, 2);
 
   rowWidth = 506;
   const longTime = 'A very long live duration label that changes its measured width';
   rerender(props({ workingTimeIndicator: { label: longTime, ariaLabel: 'Working time', tooltip: 'Working time' } }));
-  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'the longer dynamic indicator creates overflow at the same row width');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'More remains available as indicator widths change');
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
-    ['mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
+    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
   );
 
   rowWidth = 900;
@@ -642,7 +650,7 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   rerender(props({
     availableModels: [{ ...model, name: 'A model label long enough to consume the remaining composer width' }],
   }));
-  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'a long selected-model label reduces the measured space available to secondary items');
+  assert.ok(container.querySelector('.composer-controls > .composer-overflow-trigger'), 'More remains available with a long model label');
 });
 
 test('overflow child focus dismisses only the child until focus leaves More', () => {
@@ -663,7 +671,7 @@ test('overflow child focus dismisses only the child until focus leaves More', ()
   assert.ok(sibling);
   act(() => sibling.focus());
   assert.equal(document.activeElement, sibling);
-  assert.equal(popover.querySelector('.subagent-bucket-dropdown'), null);
+  assert.equal(!!popover.querySelector('.subagent-bucket-dropdown'), false);
   assert.equal(popover.getAttribute('aria-hidden'), 'false');
   click(trigger);
   const outside = document.createElement('button');
@@ -672,7 +680,7 @@ test('overflow child focus dismisses only the child until focus leaves More', ()
     act(() => outside.focus());
     assert.equal(document.activeElement, outside);
     assert.equal(popover.getAttribute('aria-hidden'), 'true');
-    assert.equal(popover.querySelector('.subagent-bucket-dropdown'), null);
+    assert.equal(!!popover.querySelector('.subagent-bucket-dropdown'), false);
   } finally { outside.remove(); }
 });
 
@@ -702,7 +710,7 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
   act(() => {
     browserPopover!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   });
-  assert.equal(document.body.querySelector('.browser-server-popover'), null, 'Escape first dismisses the nested portal');
+  assert.equal(!!document.body.querySelector('.browser-server-popover'), false, 'Escape first dismisses the nested portal');
   assert.equal(container.querySelector('.composer-toolbar-overflow-popover')?.getAttribute('aria-hidden'), 'false', 'the parent overflow remains open after nested Escape');
   act(() => {
     popover.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -723,8 +731,8 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
   click(resizingPopover.querySelector('[aria-label="Browser network access"]'));
   rowWidth = 900;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null, 'growing the row moves children out and removes the trigger');
-  assert.equal(document.body.querySelector('.browser-server-popover'), null, 'a remounted child cleans up its nested portal');
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true, 'growing the row retains More for permanent overflow controls');
+  assert.equal(!!document.body.querySelector('.browser-server-popover'), false, 'a remounted child cleans up its nested portal');
 
   // Reopen and prove the portaled switch honors host disconnection even though
   // it is outside the disabled fieldset in the DOM.
@@ -763,19 +771,19 @@ test('disconnection closes a portaled model picker and disables pinned menu trig
   rowWidth = 265;
   const toolbarProps = props();
   mount(toolbarProps);
-  click(container.querySelector('.composer-pinned-controls [aria-label="Settings"]'));
+  click(openOverflow().querySelector('[aria-label="Settings"]'));
   assert.ok(document.body.querySelector('.toolbar-settings-menu'), 'settings render in their existing portal');
   rerender({ ...toolbarProps, commandsAvailable: false });
-  assert.equal(document.body.querySelector('.toolbar-settings-menu'), null, 'the settings portal closes before it can bypass fieldset disabled state');
+  assert.equal(!!document.body.querySelector('.toolbar-settings-menu'), false, 'the settings portal closes before it can bypass fieldset disabled state');
 
   rerender(toolbarProps);
   click(container.querySelector('.composer-pinned-controls .model-picker-trigger'));
   assert.ok(document.body.querySelector('.model-picker-dropdown'), 'model options open in their existing portal');
   rerender({ ...toolbarProps, commandsAvailable: false });
-  assert.equal(document.body.querySelector('.model-picker-dropdown'), null, 'a portaled model chooser cannot remain interactive outside the disabled fieldset');
+  assert.equal(!!document.body.querySelector('.model-picker-dropdown'), false, 'a portaled model chooser cannot remain interactive outside the disabled fieldset');
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls .model-picker-trigger')?.disabled, true);
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Reasoning level"]')?.disabled, true);
-  assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Settings"]')?.disabled, true);
+  assert.equal(container.querySelector<HTMLButtonElement>('[aria-label="Settings"]')?.disabled, true);
 });
 
 
@@ -796,7 +804,7 @@ test('keyboard opening focuses the first control and Escape restores More', () =
 });
 
 // Realistic narrow-row ladder measured from the pinned group (270 = the 180px
-// model cap plus 90px of Settings/Reasoning): the label compacting to its
+// model cap plus 90px of pinned controls): the label compacting to its
 // reserved floor keeps useful metrics in the row far longer, and only a row
 // with nothing left squeezes the label below the floor. Widths with retained
 // controls include the new Buckets control's 24px width plus its 2px gap.
@@ -808,19 +816,19 @@ test('narrow rows compact the model label, then yield items, and only an empty r
   const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls')!;
   assert.equal(
     pinned.style.getPropertyValue('--composer-model-picker-max-width'),
-    '108px',
-    'even a row with no overflow charges the compact label with the retained indicators',
+    '180px',
+    'a wide row leaves the model at its natural cap',
   );
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true);
 
   rowWidth = 456;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.equal(pinned.style.getPropertyValue('--composer-model-picker-max-width'), '100px', 'the label compacts past its natural width before any item hides');
+  assert.equal(pinned.style.getPropertyValue('--composer-model-picker-max-width'), '152px', 'the label compacts past its natural width before any item hides');
   assert.deepEqual(
     Array.from(container.querySelectorAll<HTMLElement>('.composer-toolbar-overflow-popover [data-toolbar-item]'))
       .map((element) => element.dataset.toolbarItem),
-    ['compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
-    'five controls hide while the duration metric stays visible',
+    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
+    'permanent overflow controls stay hidden while duration remains visible',
   );
   assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="working-time"]'), 'the duration metric is retained, not hidden behind the model label');
 
@@ -833,7 +841,7 @@ test('narrow rows compact the model label, then yield items, and only an empty r
   rowWidth = 240;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   assert.equal(pinned.style.getPropertyValue('--composer-model-picker-max-width'), '64px', 'only a row with no secondary item left yields the label below its reserve');
-  assert.equal(container.querySelector('.composer-indicators'), null);
+  assert.equal(!!container.querySelector('.composer-indicators'), false);
   assert.ok(container.querySelector('.composer-toolbar-overflow-popover [data-toolbar-item="working-time"]'));
 });
 
@@ -866,12 +874,12 @@ test('repeated measurement converges instead of oscillating between allocations'
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
   rowWidth = 456;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.deepEqual(snapshot(), { ...stable, budget: '100px', rowKeys: stable.rowKeys, hiddenKeys: stable.hiddenKeys });
+  assert.deepEqual(snapshot(), { ...stable, budget: '152px', rowKeys: stable.rowKeys, hiddenKeys: stable.hiddenKeys });
   assert.deepEqual(at340(), narrow);
   rowWidth = 566;
   act(() => { TestResizeObserver.instances.forEach((observer) => observer.trigger()); });
-  assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="run-status"]'), 'growing the row returns every item');
-  assert.equal(container.querySelector('.composer-controls > .composer-overflow-trigger'), null);
+  assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="run-status"]'), 'growing the row returns transient indicators');
+  assert.equal(!!container.querySelector('.composer-controls > .composer-overflow-trigger'), true);
 });
 
 // The fixture state matches the real unavailable-cost source: a bare em dash
@@ -880,7 +888,7 @@ test('repeated measurement converges instead of oscillating between allocations'
 test('the bare unknown-cost dash moves into More at a width where a valued cost chip stays in the row', () => {
   modelNaturalWidth = 180;
   pinnedNaturalWidth = 270;
-  rowWidth = 446;
+  rowWidth = 420;
   const unknownProps = props({ sessionCostIndicator: unknownSessionCost() });
   mount(unknownProps);
   const pinned = container.querySelector<HTMLElement>('.composer-pinned-controls')!;
@@ -888,21 +896,21 @@ test('the bare unknown-cost dash moves into More at a width where a valued cost 
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
-    ['mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh', 'session-cost'],
+    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh', 'session-cost'],
     'the bare dash yields ahead of the built-in control order',
   );
   const costChip = popover.querySelector<HTMLElement>('[data-toolbar-item="session-cost"] [role="img"]')!;
   assert.equal(costChip!.textContent, '—', 'unavailable cost keeps its bare dash, never a fabricated zero');
   assert.equal(costChip!.getAttribute('aria-label'), 'Session cost unavailable; cumulative usage coverage is unknown.');
   assert.equal(popover.querySelector('[data-toolbar-item="session-cost"] .composer-toolbar-item-label')?.textContent, 'Cost');
-  assert.equal(container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), null, 'Cost is shown only after the indicator overflows');
+  assert.equal(!!container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), false, 'Cost is shown only after the indicator overflows');
   assert.equal(container.querySelectorAll('[data-toolbar-item="session-cost"]').length, 1, 'the tooltip-bearing indicator remains mounted once');
   assert.ok(costChip!.closest('.pie-tooltip-trigger'), 'the overflowed dash keeps its tooltip wrapper');
 
   rerender({ ...unknownProps, sessionCostIndicator: { ...unknownSessionCost(), label: '$3.42', ariaLabel: 'Estimated session cost $3.42.' } });
   const rowChip = container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] [role="img"]');
   assert.ok(rowChip, 'a valued cost chip keeps its built-in priority and stays in the row');
-  assert.equal(container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), null, 'the in-row cost indicator has no extra label');
+  assert.equal(!!container.querySelector('.composer-indicators [data-toolbar-item="session-cost"] .composer-toolbar-item-label'), false, 'the in-row cost indicator has no extra label');
   assert.match(rowChip!.textContent ?? '', /3\.42/);
   assert.equal(
     container.querySelector<HTMLElement>('.composer-pinned-controls')!.style.getPropertyValue('--composer-model-picker-max-width'),
@@ -924,6 +932,7 @@ test('overflowed controls show short action names beside their icons while the r
     assert.equal(label?.getAttribute('aria-hidden'), 'true', `${item.dataset.toolbarItem} keeps a single accessible name`);
   });
   assert.deepEqual(labelsByItem, {
+    settings: 'Settings',
     'subagent-providers': 'Subagents',
     'subagent-buckets': 'Buckets',
     'system-prompts': 'Prompts',
@@ -946,4 +955,119 @@ test('overflowed controls show short action names beside their icons while the r
     'trigger accessible names are unchanged',
   );
   assert.equal(container.querySelectorAll('[data-toolbar-item="mcp"]').length, 1, 'labeled rows are not a second mounting of the item');
+});
+
+
+test('global pair is an intrinsic measured section and permanent controls never return to the row', () => {
+  rowWidth = 900;
+  const toolbarProps = props({ globalIndicators: h('span', null, '$12.34 $56.78') });
+  mount(toolbarProps);
+  const global = container.querySelector('.composer-global-indicators')!;
+  assert.equal(global.previousElementSibling?.className, 'composer-controls');
+  assert.equal(global.nextElementSibling?.className, 'composer-indicators');
+  assert.ok(global.querySelector('[data-toolbar-item="global-costs"]'));
+  assert.deepEqual(Array.from(container.querySelectorAll('.composer-controls > [data-toolbar-item]'))
+    .map((element) => element.getAttribute('data-toolbar-item')), ['subagent-providers', 'compact-context']);
+  const permanent = ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'];
+  const hidden = () => Array.from(container.querySelectorAll('.composer-toolbar-overflow-popover > [data-toolbar-item]'))
+    .map((element) => element.getAttribute('data-toolbar-item'));
+  assert.deepEqual(hidden(), permanent);
+  globalWidth = 800;
+  act(() => TestResizeObserver.instances.forEach((observer) => observer.trigger()));
+  assert.ok(!container.querySelector('.composer-global-indicators'));
+  assert.ok(hidden().includes('global-costs'), 'growing the measured pair moves it intact to More');
+  assert.equal(container.querySelectorAll('[data-toolbar-item="global-costs"]').length, 1);
+  for (let pass = 0; pass < 3; pass += 1) {
+    act(() => TestResizeObserver.instances.forEach((observer) => observer.trigger()));
+    assert.ok(!container.querySelector('.composer-global-indicators'), 'panel width caps do not falsely return a wide pair to the row');
+  }
+  globalWidth = 100;
+  act(() => TestResizeObserver.instances.forEach((observer) => observer.trigger()));
+  assert.ok(container.querySelector('.composer-global-indicators'));
+  assert.deepEqual(hidden(), permanent);
+});
+
+test('overflow-only items reserve More even when their widths are zero and all other items fit', () => {
+  assert.deepEqual(allocateComposerToolbar({
+    availableWidth: 200, pinnedNaturalWidth: 50, modelNaturalWidth: 0, actionsWidth: 20,
+    controlGap: 2, indicatorGap: 2, sectionGap: 4, overflowTriggerWidth: 26,
+    items: [
+      { key: 'settings', kind: 'control', width: 0, overflowOnly: true },
+      { key: 'global-costs', kind: 'global', width: 100 },
+    ],
+  }), { visibleItemKeys: [], modelWidthBudget: 0 });
+});
+
+test('centre allocation charges all section gaps and only the permanent trigger width', () => {
+  const input = {
+    availableWidth: 200, pinnedNaturalWidth: 50, modelNaturalWidth: 0, actionsWidth: 20,
+    controlGap: 2, indicatorGap: 3, sectionGap: 4, overflowTriggerWidth: 26,
+    items: [
+      { key: 'settings', kind: 'control' as const, width: 1000, overflowOnly: true },
+      { key: 'global-costs', kind: 'global' as const, width: 60 },
+      { key: 'context-window', kind: 'indicator' as const, width: 30 },
+    ],
+  };
+  // 50 + 20 + 28 (More and its gap) + 60 + 30 + 12 (three section gaps).
+  assert.deepEqual(allocateComposerToolbar(input).visibleItemKeys, ['global-costs', 'context-window']);
+  assert.deepEqual(allocateComposerToolbar({ ...input, availableWidth: 199 }).visibleItemKeys, ['context-window']);
+  assert.deepEqual(allocateComposerToolbar({ ...input, availableWidth: 135 }).visibleItemKeys, []);
+});
+
+test('settings portal focus and first Escape remain inside More', () => {
+  mount();
+  const popover = openOverflow();
+  const trigger = popover.querySelector<HTMLButtonElement>('[aria-label="Settings"]')!;
+  click(trigger);
+  const settings = document.querySelector<HTMLElement>('.toolbar-settings-menu')!;
+  assert.ok(settings);
+  const button = settings.querySelector<HTMLButtonElement>('button:not(:disabled)')!;
+  act(() => button.focus());
+  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  act(() => { button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+  assert.ok(!document.querySelector('.toolbar-settings-menu'));
+  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  assert.equal(document.activeElement, trigger);
+});
+
+test('deferred cancel portal survives overflow ownership and restores its trigger on Escape', () => {
+  const menuContainer = document.createElement('div');
+  document.body.appendChild(menuContainer);
+  const triggers = [{ id: 'timer-1', sessionPath: '/session/test.jsonl', registeredAt: new Date().toISOString(),
+    note: 'Wait', triggers: [{ kind: 'timer' as const, ms: 1000 }], deliveryState: 'pending' as const }];
+  const cancelled: string[] = [];
+  try {
+    mount(props({ deferredTriggerControl: h(DeferredTriggersIndicator, {
+      deferredTriggers: triggers,
+      onOpenDeferredMenu: (x, y, triggerEl) => render(h(DeferredTriggersMenu, {
+        triggers, sessionByPath: new Map(), x, y, triggerEl,
+        onCancel: (_session, id) => cancelled.push(id),
+        onClose: () => render(null, menuContainer),
+      }), menuContainer),
+    }) }));
+    const popover = openOverflow();
+    const trigger = popover.querySelector<HTMLButtonElement>('.aggregate-strip-deferred')!;
+    click(trigger);
+    const cancel = menuContainer.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+    assert.ok(cancel);
+    act(() => cancel.focus());
+    assert.equal(popover.getAttribute('aria-hidden'), 'false');
+    click(cancel);
+    assert.deepEqual(cancelled, ['timer-1']);
+    act(() => { cancel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    assert.ok(!menuContainer.querySelector('.deferred-triggers-menu'));
+    assert.equal(popover.getAttribute('aria-hidden'), 'false');
+    assert.equal(document.activeElement, trigger);
+    click(trigger);
+    rowWidth = 220;
+    act(() => TestResizeObserver.instances.forEach((observer) => observer.trigger()));
+    assert.equal(popover.getAttribute('aria-hidden'), 'true');
+    const survivingCancel = menuContainer.querySelector('[role="menuitem"]');
+    assert.ok(survivingCancel, 'AppBody-owned cancellation outlives the parent allocation');
+    click(survivingCancel);
+    assert.deepEqual(cancelled, ['timer-1', 'timer-1']);
+  } finally {
+    act(() => render(null, menuContainer));
+    menuContainer.remove();
+  }
 });

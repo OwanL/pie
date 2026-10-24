@@ -79,7 +79,7 @@ test('deferred-target close button stays focusable, exposes the block reason, an
 
   assert.equal(close.disabled, false, 'hard-disabled would remove it from the tab order');
   assert.equal(close.getAttribute('aria-disabled'), 'true', 'disabled state is announced');
-  const reason = 'Pending deferred trigger(s) — cancel from the status bar first.';
+  const reason = 'Pending wakeup timers — cancel from More composer options first.';
   assert.equal(close.getAttribute('aria-description'), reason, 'concise reason exposed as the accessible description');
   assert.equal(close.getAttribute('title'), reason, 'native tooltip survives for pointer users');
   assert.equal(close.getAttribute('aria-label'), 'Close Alpha', 'base label keeps the action discoverable');

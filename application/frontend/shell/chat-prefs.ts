@@ -79,7 +79,7 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
     items: [
       {
         key: 'hideStatusStrip',
-        label: 'Hide bottom usage strip',
+        label: 'Hide global costs',
       },
       {
         key: 'hideSessionCost',

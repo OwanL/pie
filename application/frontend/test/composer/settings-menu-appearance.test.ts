@@ -55,7 +55,7 @@ test('AppearanceSection groups controls semantically and owns status/usage visib
   ]) {
     assert.match(html, new RegExp(heading));
   }
-  assert.match(html, /Hide bottom usage strip/);
+  assert.match(html, /Hide global costs/);
   assert.match(html, /Hide session cost/);
 });
 

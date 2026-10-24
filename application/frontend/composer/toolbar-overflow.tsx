@@ -9,7 +9,8 @@ import { allocateComposerToolbar } from './toolbar-overflow-allocation';
 
 export interface ComposerToolbarItem {
   key: string;
-  kind: 'control' | 'indicator';
+  kind: 'control' | 'indicator' | 'global';
+  overflowOnly?: boolean;
   /** Short visible name shown in the overflow panel only. The row keeps its
    *  existing presentation and accessible names remain those of the item. */
   shortLabel?: string;
@@ -47,6 +48,20 @@ function readGap(element: HTMLElement | null, property: 'columnGap' | 'gap', fal
   return Number.isFinite(value) ? value : fallback;
 }
 
+/** Overflow labels/padding are presentation only, never part of the row budget. */
+function readItemWidth(element: HTMLElement | undefined): number {
+  if (!element?.closest('.composer-toolbar-overflow-popover')) return readWidth(element);
+  // The panel caps each wrapper to its own width. That cap must not turn a
+  // wide hidden item into a falsely small row candidate on the next pass.
+  const maxWidth = element.style.maxWidth;
+  element.style.maxWidth = 'none';
+  const width = element.querySelector(':scope > .composer-toolbar-item-label')
+    ? readWidth(element.firstElementChild as HTMLElement) || readWidth(element)
+    : readWidth(element);
+  element.style.maxWidth = maxWidth;
+  return width;
+}
+
 function isOverflowPortalTarget(target: EventTarget | null, popover: HTMLElement | null): boolean {
   if (!(target instanceof Node)) return false;
   if (popover?.contains(target)) return true;
@@ -56,6 +71,22 @@ function isOverflowPortalTarget(target: EventTarget | null, popover: HTMLElement
   // overflow-owned nested layer as inside while its trigger is open.
   if (popover?.querySelector('.browser-server-trigger[aria-expanded="true"]')
     && element.closest('.browser-server-popover')) return true;
+  // Settings is a body portal. Only claim it (and its nested model/help
+  // portals) while this overflow's Settings trigger owns the open surface.
+  if (popover?.querySelector('.toolbar-settings-trigger[aria-expanded="true"]')) {
+    const settings = document.querySelector('.toolbar-settings-menu');
+    if (settings?.contains(target)) return true;
+    if (settings?.querySelector('.model-picker-trigger[aria-expanded="true"]')
+      && element.closest('.model-picker-dropdown')) return true;
+    const help = element.closest('.pie-tooltip-host');
+    if (help?.id && Array.from(settings?.querySelectorAll('[aria-describedby]') ?? [])
+      .some((trigger) => trigger.getAttribute('aria-describedby')?.split(/\s+/).includes(help.id))) return true;
+  }
+  // The AppBody-owned menu focuses its first item before its passive ARIA
+  // effect marks the trigger expanded. Its unique toolbar action establishes
+  // ownership already during that first focus event.
+  if (popover?.querySelector('[data-toolbar-item="deferred-triggers"]')
+    && element.closest('.deferred-triggers-menu')) return true;
   // Tooltip hosts also live under document.body. Tooltip stamps the host with
   // the id of its owning overflow panel; unrelated tooltips remain outside.
   const tooltip = element.closest<HTMLElement>('.pie-tooltip-host');
@@ -64,7 +95,9 @@ function isOverflowPortalTarget(target: EventTarget | null, popover: HTMLElement
 }
 
 function hasOpenNestedLayer(popover: HTMLElement | null): boolean {
-  return !!popover?.querySelector('[aria-expanded="true"]');
+  return !!popover?.querySelector('[aria-expanded="true"]')
+    || !!(popover?.querySelector('[data-toolbar-item="deferred-triggers"]')
+      && document.querySelector('.deferred-triggers-menu'));
 }
 
 /** Responsive composer row. Each toolbar component is rendered once, either in
@@ -107,12 +140,13 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
 
     const itemWidths = itemsRef.current.map((item) => {
       const element = itemElementsRef.current.get(item.key);
-      const measured = readWidth(element);
+      const measured = readItemWidth(element);
       if (element) itemWidthsRef.current.set(item.key, measured);
       return {
         key: item.key,
         kind: item.kind,
         width: element ? measured : itemWidthsRef.current.get(item.key) || 0,
+        overflowOnly: item.overflowOnly,
         ...(item.removalPriority === undefined ? {} : { removalPriority: item.removalPriority }),
       };
     });
@@ -161,7 +195,7 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
       attachedElement = element;
       if (!element) return;
       itemElementsRef.current.set(key, element);
-      const width = readWidth(element);
+      const width = readItemWidth(element);
       if (width > 0) itemWidthsRef.current.set(key, width);
       observerRef.current?.observe(element);
     };
@@ -243,11 +277,12 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
   const visibleItemKeys = allocation.visibleItemKeys === null
     ? null
     : new Set(allocation.visibleItemKeys);
-  const isVisible = (item: ComposerToolbarItem) => visibleItemKeys === null || visibleItemKeys.has(item.key);
+  const isVisible = (item: ComposerToolbarItem) => !item.overflowOnly && (visibleItemKeys === null || visibleItemKeys.has(item.key));
   const controlItems = items.filter((item) => item.kind === 'control');
   const indicatorItems = items.filter((item) => item.kind === 'indicator');
   const visibleControls = controlItems.filter(isVisible);
   const visibleIndicators = indicatorItems.filter(isVisible);
+  const visibleGlobals = items.filter((item) => item.kind === 'global' && isVisible(item));
   const hiddenItems = items.filter((item) => !isVisible(item));
   const hiddenKeySignature = hiddenItems.map((item) => item.key).join('\u0000');
   const previousHiddenKeySignature = useRef(hiddenKeySignature);
@@ -387,6 +422,11 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
           </div>
         )}
       </div>
+      {visibleGlobals.length > 0 && (
+        <div class="composer-global-indicators">
+          {visibleGlobals.map((item) => renderItem(item))}
+        </div>
+      )}
       {visibleIndicators.length > 0 && (
         <div ref={indicatorsRef} class="composer-indicators">
           {visibleIndicators.map((item) => renderItem(item))}

@@ -1,6 +1,8 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import type { ComponentChildren } from 'preact';
+
 import { memo } from 'preact/compat';
 import type { DictationView } from '../../lib/protocol/dictation.js';
 import type {
@@ -16,6 +18,8 @@ import type { AppHandlers } from '../shell/use-app-handlers';
 import { activeCanonicalRootSessionId } from '../session-tabs/token-usage';
 
 export interface BottomSectionProps {
+  globalIndicators?: ComponentChildren;
+  deferredTriggerControl?: ComponentChildren;
   hasActiveTabs: boolean;
   needsSessionRecovery: boolean;
   pendingExtensionUIRequest: ViewState['pendingExtensionUIRequest'];
@@ -80,6 +84,8 @@ export interface BottomSectionProps {
 }
 
 export const BottomSection = memo(function BottomSection({
+  globalIndicators,
+  deferredTriggerControl,
   hasActiveTabs,
   needsSessionRecovery,
   pendingExtensionUIRequest,
@@ -146,6 +152,8 @@ export const BottomSection = memo(function BottomSection({
         />
       )}
       <Composer
+        globalIndicators={globalIndicators}
+        deferredTriggerControl={deferredTriggerControl}
         sessionPath={activeSessionPath}
         resolvedPendingPath={resolvedPendingPath}
         hostInstanceId={hostInstanceId}

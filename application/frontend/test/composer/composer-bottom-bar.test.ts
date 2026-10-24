@@ -135,12 +135,13 @@ test('composer controls render in the agreed bottom-bar order', () => {
   }));
 
   assertOrdered(html, [
-    'aria-label="Settings"',
     'aria-label="Model"',
     'aria-label="Reasoning level"',
     'aria-label="Subagent providers:',
-    'aria-label="Toggle system prompts"',
     'aria-label="Compact context',
+    'aria-label="More composer options"',
+    'aria-label="Settings"',
+    'aria-label="Toggle system prompts"',
     'aria-label="Enable autonomous mode',
     'class="composer-indicators"',
   ]);

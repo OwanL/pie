@@ -143,7 +143,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.match(chatText, /Notification sounds/);
   assert.match(chatText, /Sound volume/);
   assert.match(chatText, /Diagnostics/);
-  assert.doesNotMatch(chatText, /Hide bottom usage strip/);
+  assert.doesNotMatch(chatText, /Hide global costs/);
   assert.doesNotMatch(chatText, /History compaction/);
 
   // Context owns history-compaction behavior, not its model assignment.
@@ -170,7 +170,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   assert.match(body.textContent!, /Theme & colors/);
   assert.match(body.textContent!, /Corner radius/);
   assert.match(body.textContent!, /Status & usage/);
-  assert.match(body.textContent!, /Hide bottom usage strip/);
+  assert.match(body.textContent!, /Hide global costs/);
   assert.doesNotMatch(body.textContent!, /History compaction/);
 });
 

@@ -8,18 +8,15 @@ import { h, render } from 'preact';
 import { useState } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 
-import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
 import type { DeferredTriggerView } from '../../../lib/protocol/index.js';
-import { AggregateStatsStrip } from '../../analytics/aggregate-stats-strip';
+import { DeferredTriggersIndicator } from '../../analytics/aggregate-stats-strip';
 import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 
 let container: HTMLElement;
 let originalRect: typeof HTMLElement.prototype.getBoundingClientRect;
 
 beforeEach(() => {
-  // The strip relies on layout measurement (MeasuredRow): the test DOM has no
-  // stylesheet, so stub the row to an ample width like the sibling strip tests
-  // do — every item becomes genuinely interactive and inspectable.
+  // Supply anchor geometry for the menu in the stylesheet-free test DOM.
   originalRect = HTMLElement.prototype.getBoundingClientRect;
   HTMLElement.prototype.getBoundingClientRect = function () {
     return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
@@ -46,14 +43,13 @@ const pending: DeferredTriggerView = {
   wakeupMode: true,
 };
 
-test('strip click opens wakeup menu and foreign-target cancel emits creator path and id', () => {
+test('wakeup action opens menu and foreign-target cancel emits creator path and id', () => {
   const cancellations: [string, string][] = [];
   function Fixture() {
     const [menu, setMenu] = useState<{ x: number; y: number; triggerEl: HTMLElement } | null>(null);
     const [triggers, setTriggers] = useState([pending]);
     return h('div', {},
-      h(AggregateStatsStrip, {
-        stats: EMPTY_AGGREGATE_STATS,
+      h(DeferredTriggersIndicator, {
         deferredTriggers: triggers,
         onOpenDeferredMenu: (x, y, triggerEl) => setMenu({ x, y, triggerEl }),
       }),
@@ -88,9 +84,8 @@ test('strip click opens wakeup menu and foreign-target cancel emits creator path
   assert.equal(container.querySelector('.aggregate-strip-deferred'), null);
 });
 
-test('strip tooltip refreshes after memoized snapshots change wakeup mode or timer start', async () => {
-  const mount = (trigger: DeferredTriggerView) => act(() => render(h(AggregateStatsStrip, {
-    stats: EMPTY_AGGREGATE_STATS,
+test('wakeup tooltip refreshes when snapshots change wakeup mode or timer start', async () => {
+  const mount = (trigger: DeferredTriggerView) => act(() => render(h(DeferredTriggersIndicator, {
     deferredTriggers: [trigger],
     onOpenDeferredMenu: () => undefined,
   }), container));

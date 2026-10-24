@@ -109,6 +109,7 @@
 }
 
 .composer-controls,
+.composer-global-indicators,
 .composer-indicators,
 .composer-actions {
   display: flex;
@@ -145,7 +146,7 @@
 }
 
 /* Keep the selected model in the pinned group but let only its text label
-   yield width before the always-visible settings/reasoning controls do. */
+   yield width before the always-visible reasoning controls do. */
 .composer-pinned-controls .model-picker {
   flex: 0 0 auto;
   width: max-content;
@@ -212,8 +213,17 @@
   padding-inline: 6px;
 }
 
+.composer-global-indicators {
+  flex: 1 0 auto;
+  justify-content: center;
+}
+
+.composer-bottom-bar:has(.composer-global-indicators) > .composer-controls {
+  flex: 1 0 auto;
+}
+
 .composer-indicators {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   margin-left: auto;
   justify-content: flex-end;
 }

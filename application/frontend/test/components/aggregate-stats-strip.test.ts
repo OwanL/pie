@@ -7,29 +7,14 @@ import { act } from 'preact/test-utils';
 import { installDom } from '../helpers/dom';
 installDom();
 
-function renderToString<P>(node: VNode<P>): string {
-  if ((node.type as unknown) !== AggregateStatsStrip) return rawRenderToString(node);
-  const original = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function () {
-    return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
-  };
-  const root = document.createElement('div');
-  document.body.appendChild(root);
-  try {
-    act(() => render(node, root));
-    return root.innerHTML;
-  } finally {
-    act(() => render(null, root));
-    root.remove();
-    HTMLElement.prototype.getBoundingClientRect = original;
-  }
-}
+function renderToString<P>(node: VNode<P>): string { return rawRenderToString(node); }
 
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
 import type { DeferredTriggerView } from '../../../lib/protocol/index.js';
 import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 import {
   AggregateStatsStrip,
+  DeferredTriggersIndicator,
   ProviderLegend,
   aggregateStatsSignature,
   todayCostTooltipNode,
@@ -133,183 +118,52 @@ test('deferred trigger menu renders command predicates and bounds diagnostics', 
   assert.ok(html.length < 5_000, 'command diagnostics should not dump unbounded output');
 });
 
-test('aggregate stats strip retains all three counts including zeros in order', () => {
-  for (const count of [0, 3]) {
-    const html = renderToString(h(AggregateStatsStrip, {
-      stats: { ...EMPTY_AGGREGATE_STATS, ready: true, runningSessionCount: count, openTabCount: count },
-      snoozedSessionCount: count,
-      deferredTriggers: [], onOpenDeferredMenu: () => {},
-    }));
-    const counts = html.slice(html.indexOf('data-stat="open"'));
-    assert.ok(counts.indexOf(count + ' open') < counts.indexOf(count + ' working'));
-    assert.ok(counts.indexOf(count + ' working') < counts.indexOf(count + ' snoozed'));
-    assert.doesNotMatch(html, /aggregate-strip-active-dot/);
-  }
+test('cost pair is intrinsic, label-free, focusable, and never drops either value', () => {
+  const html = renderToString(h(AggregateStatsStrip, { stats: { ...EMPTY_AGGREGATE_STATS, ready: true, todayCost: 0.0123, weekCost: 123456.78 } }));
+  const root = document.createElement('div'); root.innerHTML = html;
+  assert.equal(root.textContent, '$0.0123$123456.78');
+  assert.deepEqual([...root.querySelectorAll('[data-stat]')].map((el) => el.getAttribute('data-stat')), ['today', 'week']);
+  assert.equal(root.querySelectorAll('[tabindex="0"][aria-label]').length, 2);
+  assert.match(html, /Today's estimated token cost \$0\.0123/);
+  assert.match(html, /Estimated token cost this week \$123456\.78/);
+  assert.doesNotMatch(root.textContent!, /measure|open|working|snoozed|provider|tokens|runs|sessions/i);
 });
 
-test('aggregate stats strip omits the character indicator while retaining session counts and productivity details', () => {
-  const html = renderToString(h(AggregateStatsStrip, {
-    stats: {
-      ...EMPTY_AGGREGATE_STATS,
-      ready: true,
-      todayRunCount: 2,
-      todayProductivity: {
-        ...EMPTY_AGGREGATE_STATS.todayProductivity,
-        adjustedUserInputChars: 1_450,
-        knownUserInputCharSampleCount: 3,
-        expectedUserInputCharSampleCount: 3,
-        cappedUserInputCharSampleCount: 1,
-        userInputCharCap: 800,
-      },
-      openTabCount: 4,
-    },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
-  }));
-  assert.doesNotMatch(html, /aggregate-strip-user-input| chars<\/span>/);
-  assert.match(html, /data-stat="open".*4 open.*data-stat="working".*0 working.*data-stat="snoozed".*0 snoozed/);
-  const productivityTooltip = renderToString(userInputTooltipNode({
-    ...EMPTY_AGGREGATE_STATS,
-    ready: true,
-    todayProductivity: {
-      ...EMPTY_AGGREGATE_STATS.todayProductivity,
-      adjustedUserInputChars: 1_450,
-      knownUserInputCharSampleCount: 3,
-      expectedUserInputCharSampleCount: 3,
-      cappedUserInputCharSampleCount: 1,
-      userInputCharCap: 800,
-    },
-  }));
-  assert.match(productivityTooltip, /1\.4k chars/);
-});
-
-test('aggregate strip uses one measured priority row and inert measurement copies', () => {
-  const html = renderToString(h(AggregateStatsStrip, {
-    stats: { ...EMPTY_AGGREGATE_STATS, ready: true }, deferredTriggers: [], onOpenDeferredMenu: () => {},
-  }));
-  const keys = [...html.matchAll(/data-stat="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(keys, ['today', 'week', 'input', 'output', 'open', 'working', 'snoozed']);
-  assert.doesNotMatch(html, /status-cluster|fade-left|fade-right/);
-  const measurements = html.slice(html.indexOf('class="aggregate-strip-measurements"'));
-  assert.doesNotMatch(measurements, /tabindex|<button|pie-tooltip| id=/);
-});
-
-test('provider concurrency hides idle and unlimited capacity, including queued or paused providers', () => {
-  const html = renderToString(h(AggregateStatsStrip, {
-    stats: {
-      ...EMPTY_AGGREGATE_STATS,
-      ready: true,
-      providerGate: {
-        enabled: true,
-        providers: [0, 2, Infinity].flatMap((limit) => [0, 1].map((active) => ({
-          provider: `provider-${limit}-${active}`, activeRequests: active, queuedRequests: 3,
-          maxConcurrentRequests: limit, afterburnSeconds: 0, paused: true,
-          pausedUntilMs: 0, strikeCount: 0,
-        }))),
-      },
-    },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
-  }));
-
-  assert.match(html, /1\/2/);
-  assert.match(html, /provider-2-1/);
-  assert.doesNotMatch(html, /provider-0-|provider-Infinity-|provider-2-0|∞|0\/2/);
-});
-
-test('provider segment and its separator disappear when no capacity is visible or the gate is disabled', () => {
-  for (const enabled of [true, false]) {
-    const html = renderToString(h(AggregateStatsStrip, {
-      stats: {
-        ...EMPTY_AGGREGATE_STATS,
-        ready: true,
-        providerGate: {
-          enabled,
-          providers: [{
-            provider: 'idle', activeRequests: enabled ? 0 : 1, queuedRequests: 2,
-            maxConcurrentRequests: 2, afterburnSeconds: 0, paused: true,
-            pausedUntilMs: 0, strikeCount: 1,
-          }, {
-            provider: 'unlimited', activeRequests: 5, queuedRequests: 0,
-            maxConcurrentRequests: 0, afterburnSeconds: 0, paused: false,
-            pausedUntilMs: 0, strikeCount: 0,
-          }],
-        },
-      },
-      deferredTriggers: [],
-      onOpenDeferredMenu: () => {},
-    }));
-    assert.doesNotMatch(html, /aggregate-strip-providers|Provider concurrency:/);
-    assert.equal((html.match(/class="aggregate-strip-sep"/g) ?? []).length, 0);
-  }
-});
-
-test('aggregate informational rich-tooltip triggers are keyboard-focusable and labelled', () => {
-  const html = renderToString(h(AggregateStatsStrip, {
-    stats: {
-      ...EMPTY_AGGREGATE_STATS,
-      ready: true,
-      todayCost: 1.25,
-      weekCost: 4.5,
-      todayInputTokens: 120,
-      todayOutputTokens: 340,
-      runningSessionCount: 1,
-      openTabCount: 2,
-      lastRun: {
-        cost: 0.5,
-        durationMs: 2_000,
-        startedAt: '2026-01-01T00:00:00.000Z',
-        endedAt: '2026-01-01T00:00:02.000Z',
-        modelId: 'model',
-        provider: 'provider',
-        inputTokens: 10,
-        outputTokens: 20,
-        turnSeries: [],
-      },
-      providerGate: {
-        enabled: true,
-        providers: [{
-          provider: 'provider', activeRequests: 1, queuedRequests: 0,
-          maxConcurrentRequests: 2, afterburnSeconds: 0, paused: false,
-          pausedUntilMs: 0, strikeCount: 0,
-        }],
-      },
-    },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
-  }));
-
-  const segmentTags = [...html.matchAll(/<span[^>]*class="[^"]*aggregate-strip-seg[^"]*"[^>]*>/g)].map((match) => match[0]);
-  const focusableSegments = segmentTags.filter((tag) => tag.includes('tabindex="0"') && tag.includes('aria-label="'));
-  assert.equal(focusableSegments.length, 8, 'independent cost, token, status, and provider items are focusable');
-  for (const tag of focusableSegments) assert.ok(tag.length > 80, 'each segment has a meaningful label');
-  assert.match(html, /Today's estimated token cost/);
-  assert.match(html, /Estimated token cost this week/);
-  assert.match(html, /Today's input tokens:/);
-  assert.match(html, /Today's output tokens:/);
-  assert.doesNotMatch(html, /Latest completed run|\blast\b/);
-  assert.match(html, />tdy /);
-  assert.doesNotMatch(html, />today /);
-  assert.match(html, /Provider concurrency:/);
-  assert.doesNotMatch(html, /Today's adjusted user input|character-volume details/);
-  assert.match(html, /Focus for 14-day work trend/);
-});
-
-test('compact token values sit beside their arrows without reserved numeric columns', () => {
-  for (const tokens of [0, 1200, 3_000_000]) {
-    const html = renderToString(h(AggregateStatsStrip, {
-      stats: { ...EMPTY_AGGREGATE_STATS, ready: true, todayInputTokens: tokens, todayOutputTokens: tokens },
-      deferredTriggers: [],
-      onOpenDeferredMenu: () => {},
-    }));
-    const root = document.createElement('div');
-    root.innerHTML = html;
-    for (const kind of ['input', 'output']) {
-      const value = root.querySelector(`[data-stat="${kind}"] .aggregate-strip-num`) as HTMLElement;
-      assert.ok(value, `${kind} retains its numeric value`);
-      assert.equal(value.style.minWidth, '', `${kind} must not push short values away from the arrow`);
+test('daily and weekly anchors open their rich cost details by keyboard focus', async () => {
+  const root = document.createElement('div');
+  document.body.appendChild(root);
+  try {
+    act(() => render(h(AggregateStatsStrip, { stats: { ...EMPTY_AGGREGATE_STATS, ready: true } }), root));
+    for (const key of ['today', 'week']) {
+      const anchor = root.querySelector<HTMLElement>(`[data-stat="${key}"] [tabindex]`)!;
+      await act(async () => {
+        anchor.focus();
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
+      });
+      const region = document.getElementById(anchor.getAttribute('aria-describedby')!);
+      assert.ok(region, `${key} opens its cost tooltip`);
+      assert.equal(region.getAttribute('role'), 'region');
+      assert.match(region.textContent!, /cost/i);
+      act(() => anchor.blur());
     }
+  } finally {
+    act(() => render(null, root));
+    root.remove();
   }
+});
+
+test('deferred indicator is empty without timers and forwards the cancel-menu click', () => {
+  assert.equal(renderToString(h(DeferredTriggersIndicator, { deferredTriggers: [], onOpenDeferredMenu: () => {} })), '');
+  const root = document.createElement('div'); document.body.appendChild(root);
+  const trigger: DeferredTriggerView = { id: 'timer', sessionPath: '/session', triggers: [{ kind: 'timer', ms: 1000 }], note: 'resume', registeredAt: '2026-09-03T10:00:00.000Z', deliveryState: 'pending' };
+  let call: unknown[] = [];
+  try {
+    act(() => render(h(DeferredTriggersIndicator, { deferredTriggers: [trigger], onOpenDeferredMenu: (...args) => { call = args; } }), root));
+    const button = root.querySelector('button')!;
+    assert.match(button.getAttribute('aria-label')!, /1 pending wakeup timer.*cancel menu/);
+    act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 12, clientY: 34 })); });
+    assert.deepEqual(call, [12, 34, button]);
+  } finally { act(() => render(null, root)); root.remove(); }
 });
 
 test("independent token popovers open on their anchor's series and retain the toggle", () => {
@@ -318,69 +172,6 @@ test("independent token popovers open on their anchor's series and retain the to
     const html = renderToString(tokensTooltipNode(stats, kind));
     assert.match(html, new RegExp(`aria-pressed="true">${kind === 'input' ? 'Input' : 'Output'}`));
     assert.match(html, /Token chart series/);
-  }
-});
-
-test("token popovers persist each anchor's explicit toggle across reopen without cross-anchor bleed", async () => {
-  const stats = { ...EMPTY_AGGREGATE_STATS, ready: true, todayInputTokens: 100, todayOutputTokens: 200 };
-  const originalRect = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function () {
-    return { width: this.classList.contains('aggregate-strip-metrics') ? 10000 : 80 } as DOMRect;
-  };
-  const root = document.createElement('div');
-  document.body.appendChild(root);
-  try {
-    act(() => render(h(AggregateStatsStrip, {
-      stats,
-      deferredTriggers: [],
-      onOpenDeferredMenu: () => {},
-    }), root));
-    const openAnchor = async (key: string) => {
-      const seg = root.querySelector<HTMLElement>(`[data-stat="${key}"] [tabindex]`);
-      assert.ok(seg, `anchor ${key} renders an interactive trigger`);
-      await act(async () => {
-        seg.focus();
-        await new Promise((resolve) => window.setTimeout(resolve, 400));
-      });
-      const region = document.getElementById(seg.getAttribute('aria-describedby')!);
-      assert.ok(region, `anchor ${key} opens its rich token tooltip`);
-      return region;
-    };
-    const closePopover = (seg: HTMLElement) => {
-      act(() => { seg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-      act(() => seg.blur());
-    };
-    const selected = (region: HTMLElement) =>
-      region.querySelector<HTMLButtonElement>('[role="group"] button[aria-pressed="true"]')?.textContent;
-    const toggleButton = (region: HTMLElement, label: string) =>
-      [...region.querySelectorAll<HTMLButtonElement>('[role="group"] button')]
-        .find((button) => button.textContent === label);
-
-    // Fresh selection: clicking an anchor naturally presents its own series.
-    const inputSeg = root.querySelector<HTMLElement>('[data-stat="input"] [tabindex]')!;
-    const outputSeg = root.querySelector<HTMLElement>('[data-stat="output"] [tabindex]')!;
-    assert.equal(selected(await openAnchor('input')), 'Input');
-    closePopover(inputSeg);
-    assert.equal(selected(await openAnchor('output')), 'Output');
-    closePopover(outputSeg);
-
-    // Explicit toggles persist per anchor across reopen.
-    const inputRegion = await openAnchor('input');
-    act(() => toggleButton(inputRegion, 'Output')!.click());
-    assert.equal(selected(inputRegion), 'Output', 'the toggle applies within the open popover');
-    closePopover(inputSeg);
-    const outputRegion = await openAnchor('output');
-    act(() => toggleButton(outputRegion, 'Input')!.click());
-    assert.equal(selected(outputRegion), 'Input');
-    closePopover(outputSeg);
-    assert.equal(selected(await openAnchor('input')), 'Output', 'the input anchor replays its own explicit toggle');
-    closePopover(inputSeg);
-    assert.equal(selected(await openAnchor('output')), 'Input', 'the output anchor replays its own explicit toggle');
-    closePopover(outputSeg);
-  } finally {
-    act(() => render(null, root));
-    root.remove();
-    HTMLElement.prototype.getBoundingClientRect = originalRect;
   }
 });
 
@@ -429,7 +220,7 @@ test('daily and weekly cost tooltips omit routine scope rows and retain graphs a
   assert.match(weekHtml, /model-a/);
 });
 
-test('aggregate strip keeps cost and token segments clean while provenance detail stays accessible', () => {
+test('cost pair stays clean while cost and standalone token tooltip provenance remains accessible', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -452,8 +243,6 @@ test('aggregate strip keeps cost and token segments clean while provenance detai
   };
   const html = renderToString(h(AggregateStatsStrip, {
     stats,
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
   }));
 
   // Weak visible suffixes are gone from the strip's cost and token segments.
@@ -461,7 +250,7 @@ test('aggregate strip keeps cost and token segments clean while provenance detai
   assert.doesNotMatch(html, /~[\s<]/);
   // The detail stays in the accessible labels — unknown is never a silent zero.
   assert.match(html, /Estimated token cost this week \$4\.50; incomplete billing provenance/);
-  assert.match(html, /known subtotal with incomplete invocation usage/);
+  assert.match(html, /Today's estimated token cost \$1\.25; incomplete billing provenance/);
 
   const todayTooltip = renderToString(todayCostTooltipNode(stats));
   assert.match(todayTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\) today/);

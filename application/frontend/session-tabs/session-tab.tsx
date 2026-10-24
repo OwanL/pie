@@ -33,7 +33,7 @@ export interface SessionTabProps {
   isDropTarget: boolean;
   /** True when this session is the delivery target of a pending deferred
    *  trigger — disables the close × with an explanatory tooltip (the trigger
-   *  must be cancelled first, from the status strip). */
+   *  must be cancelled first, from More composer options). */
   hasDeferredTriggers: boolean;
   /** True when a pending deferred trigger includes a timer. */
   hasDeferredTimer: boolean;
@@ -98,8 +98,8 @@ export const SessionTabPresentation = memo(function SessionTabPresentation({
   const title = getSessionTabTooltip(agentCreated, statusTitle) ?? statusTitle;
 
   // A pending deferred trigger blocks closing its delivery target until it is
-  // cancelled from the status strip, preventing the trigger from being orphaned.
-  const deferredBlockTitle = 'Pending deferred trigger(s) — cancel from the status bar first.';
+  // cancelled from More composer options, preventing the trigger from being orphaned.
+  const deferredBlockTitle = 'Pending wakeup timers — cancel from More composer options first.';
 
   const classBits = ['session-tab'];
   if (isActive) classBits.push('active');
