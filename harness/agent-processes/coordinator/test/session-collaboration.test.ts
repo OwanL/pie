@@ -926,6 +926,45 @@ test('mailbox byte admission counts retained routing envelopes as well as note b
   coordinator.dispose();
 });
 
+test('mailbox byte limits distinguish each recipient from the aggregate retained mail', async () => {
+  const caller = { owner: 'caller', address: 'reply:caller' };
+  const recipient = (path: string) => ({ owner: path, address: `reply:${path}` });
+  const coordinator = new SessionCollaborationCoordinator({
+    participant: path => path === paths.a ? caller : recipient(path),
+    resolve: path => ({ path, participant: recipient(path) }),
+    sender: () => ({ address: caller.address } as never),
+    busy: () => false,
+    assignment: async () => ({ status: 'accepted' }),
+    note: () => undefined,
+    workerMemory: () => ({ workers: [], total: 0, truncated: false }),
+  }, { noteAdmission: new SessionNoteAdmission({ pairBurst: 100, recipientBurst: 100 }) });
+  let sequence = 0;
+  const send = (target: string) => execute(coordinator, 'note', {
+    target, message: `${sequence++}:`.padEnd(16 * 1024, 'x'),
+  });
+  try {
+    for (let index = 0; index < 15; index++) await send('recipient-0');
+    await assert.rejects(send('recipient-0'), /Mailbox capacity/u);
+    // A full recipient must not spend another recipient's local allowance.
+    for (let owner = 1; owner < 16; owner++) {
+      for (let index = 0; index < 15; index++) {
+        assert.equal((await send(`recipient-${owner}`)).delivery, 'mailbox');
+      }
+    }
+    let admitted = 0;
+    for (; admitted < 15; admitted++) {
+      try { await send('recipient-16'); }
+      catch (error) { assert.match(String(error), /Mailbox capacity/u); break; }
+    }
+    assert.ok(admitted > 0 && admitted < 15, 'aggregate bytes reject before this recipient reaches its local byte limit');
+    await assert.rejects(send('fresh-recipient'), /Mailbox capacity/u);
+    const retained = await execute(coordinator, 'notes.drain', {}, 'recipient-16');
+    assert.equal(retained.retained, admitted, 'aggregate rejection preserves already admitted mail');
+  } finally {
+    coordinator.dispose();
+  }
+});
+
 test('resource reservations have acquire/start/renew/release lifecycle and host status facts', async () => {
   const { coordinator } = setup();
   const status = await execute(coordinator, 'resources', { action: 'status' });

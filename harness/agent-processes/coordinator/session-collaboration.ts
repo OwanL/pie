@@ -346,12 +346,14 @@ export class SessionCollaborationCoordinator {
   private enqueue(mail: Mail): void {
     const inbox = this.mailboxes.get(mail.owner) ?? [];
     const size = Buffer.byteLength(JSON.stringify(mail), 'utf8');
-    const inboxBytes = inbox.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item), 'utf8'), 0);
+    let inboxBytes = 0;
     let totalBytes = 0;
     let totalItems = 0;
-    for (const retained of this.mailboxes.values()) for (const item of retained) {
+    for (const [owner, retained] of this.mailboxes) for (const item of retained) {
       totalItems++;
-      totalBytes += Buffer.byteLength(JSON.stringify(item), 'utf8');
+      const itemBytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
+      totalBytes += itemBytes;
+      if (owner === mail.owner) inboxBytes += itemBytes;
     }
     if (inbox.length >= 64 || totalItems >= 4096 || inboxBytes + size > 256 * 1024 || totalBytes + size > 4 * 1024 * 1024) throw new Error('Mailbox capacity is occupied; note was not admitted.');
     inbox.push(mail);
