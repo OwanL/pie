@@ -47,6 +47,7 @@ import { CommittedToolLeaf } from './commit-registry';
 import { subagentDisplayCosts, type SubagentDisplayCost } from './subagent-cost';
 import type { TokenPricingResolver } from '../session-tabs/token-usage';
 import { SubagentTaskPreview } from './subagent-task-preview';
+import { SubagentPreviewMarkdown } from './subagent-preview-markdown';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -983,14 +984,14 @@ function SubagentSingleBlock({
                 </div>
               )}
               <div class="subagent-current-output">
-                {compactActivity ? <span class="subagent-current-text">{compactActivity.label ? compactActivity.output : compactActivity.text}</span>
+                {compactActivity ? compactActivity.label
+                  ? <span class="subagent-current-text">{compactActivity.output}</span>
+                  : <SubagentPreviewMarkdown class="subagent-current-text" text={compactActivity.text} />
                   : activity && <span class="subagent-current-text subagent-activity" title={activity.diagnostic}>{activity.label === 'Responding' ? 'Waiting for output' : activity.label}{activity.detail ? ' · ' + activity.detail : ''}</span>}
               </div>
             </div>
           )}
-          {settledExcerpt && <div class="subagent-outcome">{settledExcerpt.split(/((?:\r?\n)[\t ]*\r?\n(?:[\t ]*\r?\n)*)/).map((part, index) =>
-            index % 2 ? part : part && <p>{part}</p>,
-          )}</div>}
+          {settledExcerpt && <SubagentPreviewMarkdown class="subagent-outcome" text={settledExcerpt} />}
         </div>
       )}
       {renderBody && (

@@ -894,9 +894,19 @@
 }
 .subagent-current-tool { font: 11.5px/18px var(--panel-font-mono, Consolas, monospace); }
 .subagent-current-reasoning { font-style: italic; }
-.subagent-outcome { line-height: 1.5; white-space: normal; }
-.subagent-outcome > p { white-space: pre-wrap; margin: 0; }
-.subagent-outcome > p:not(:last-child) { margin-bottom: 6px; }
+.subagent-outcome { line-height: 1.5; white-space: normal; max-height: 6em; }
+/* Compact Markdown shares the existing row budgets, not transcript typography.
+   Explicit resets also keep Tailwind's heading/list defaults out of previews. */
+.subagent-preview-markdown { white-space: normal; overflow-wrap: anywhere; }
+.subagent-preview-markdown :is(p, pre, ul, ol, blockquote) { margin: 0; }
+.subagent-preview-markdown :is(p, pre, li, blockquote) { font-size: inherit; line-height: inherit; }
+.subagent-preview-markdown strong { font-weight: 600; }
+.subagent-preview-markdown ul { list-style-type: disc; padding-left: 1.25em; }
+.subagent-preview-markdown ol { list-style-type: decimal; padding-left: 1.5em; }
+.subagent-preview-markdown blockquote { padding-left: 0.75em; border-left: 2px solid var(--panel-border); }
+.subagent-preview-markdown code { font-family: var(--panel-font-mono); font-size: 0.95em; background: var(--panel-code-surface); border-radius: 2px; padding: 0 2px; }
+.subagent-preview-markdown pre { white-space: pre-wrap; }
+.subagent-preview-markdown pre code { padding: 0; background: none; }
 
 .subagent-task-trigger { display: block; min-width: 0; }
 .subagent-task:focus-visible,

@@ -222,6 +222,69 @@ test.describe('bounded live subagent preview', () => {
     subagent: { eligible: true, pricing: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } },
   }] } });
 
+  test('renders compact markdown in live previews and settled outcomes without changing transcript or tool text', async ({ page, isolatedHost }, info) => {
+    await page.setViewportSize({ width: 420, height: 900 });
+    await page.goto('/');
+    const item = page.locator('.tool-call-subagent');
+    const liveMarkdown = '# **Reasoning label**\nA *careful* `scope`\nNext line\n- **Caller** remains independent\n- Shared refresh is separate';
+    let seq = 0;
+    const publish = (patch: Partial<SubagentSingleResult>) => {
+      isolatedHost.publishState(state([{ ...child, ...patch }], ++seq));
+    };
+
+    publish({ activityPhase: 'streaming', streamingReasoning: liveMarkdown });
+    const currentText = item.locator('.subagent-current-text');
+    const preview = item.locator('.subagent-current-text.subagent-preview-markdown');
+    await expect(preview).toBeVisible();
+    await expect(preview.locator('p > strong')).toContainText('Reasoning label');
+    await expect(preview.locator('em')).toContainText('careful');
+    await expect(preview.locator('code')).toContainText('scope');
+    await expect(preview.locator('li')).toHaveCount(2);
+    await expect(preview.locator('h1,h2,h3,h4,h5,h6')).toHaveCount(0);
+    expect(await item.locator('.subagent-current').evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBe(72);
+    await expect(preview.locator('br')).toHaveCount(1);
+    await page.screenshot({ path: info.outputPath('compact-live-markdown.png') });
+
+    const replyMarkdown = '## **Reply label**\nUse `pnpm test`\n- **Passed**\n- *No leaks*';
+    publish({ streamingReasoning: undefined, streamingText: replyMarkdown });
+    await expect(currentText.locator('p > strong')).toContainText('Reply label');
+    await expect(currentText.locator('code')).toHaveText('pnpm test');
+
+    const literalCommand = 'echo **not markdown**';
+    const literalOutput = '**still literal**\n- not a rendered list';
+    const toolCall = { role: 'assistant', content: [{ type: 'toolCall', id: 'markdown-literal', name: 'bash', arguments: { command: literalCommand },
+      result: { content: [{ type: 'text', text: literalOutput }] },
+    }] };
+    publish({ activityPhase: 'running_tool', streamingText: undefined, runningTools: ['bash'], messages: [toolCall] });
+    await expect(item.locator('.subagent-current-input')).toHaveText(literalCommand);
+    await expect(item.locator('.subagent-current-output')).toHaveText(literalOutput);
+    await expect(item.locator('.subagent-current-input strong, .subagent-current-output strong, .subagent-current-output li')).toHaveCount(0);
+
+    const outcomeMarkdown = '# **Outcome label**\nA *compact* `answer`\n- **Shared work**\n- Independent callers';
+    publish({ exitCode: 0, activityPhase: 'completed', completedAt: NOW, runningTools: [], messages: [
+      { role: 'assistant', content: outcomeMarkdown, timestamp: NOW },
+    ], finalOutput: outcomeMarkdown });
+    const outcomePreview = item.locator('.subagent-outcome.subagent-preview-markdown');
+    await expect(outcomePreview.locator('p > strong')).toContainText('Outcome label');
+    await expect(outcomePreview.locator('em')).toContainText('compact');
+    await expect(outcomePreview.locator('code')).toContainText('answer');
+    await expect(outcomePreview.locator('li')).toHaveCount(2);
+    await expect(outcomePreview.locator('h1,h2,h3,h4,h5,h6')).toHaveCount(0);
+    const outcomeFitsFourLines = await outcomePreview.evaluate((element) => {
+      const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+      return element.getBoundingClientRect().height <= lineHeight * 4 + 1;
+    });
+    expect(outcomeFitsFourLines).toBe(true);
+
+    for (const width of [320, 420]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectContained(item);
+      await page.screenshot({ path: info.outputPath(`compact-outcome-${width}.png`) });
+    }
+    await header(item).click();
+    await expect(item.locator('.subagent-messages h1')).toContainText('Outcome label');
+  });
+
   test('keeps a dense header and stable live viewport while exposing commands, output and cost', async ({ page, isolatedHost }, info) => {
     await page.clock.setFixedTime(NOW);
     await page.setViewportSize({ width: 420, height: 900 });
