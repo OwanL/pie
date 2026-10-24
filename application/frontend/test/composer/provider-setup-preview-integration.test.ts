@@ -58,7 +58,7 @@ for (const injected of [false, true]) test(`Provider management tab is ${injecte
     const providersTab = document.querySelector<HTMLButtonElement>('[data-tab=providers]');
     assert.equal(!!providersTab, injected);
     if (providersTab) act(() => providersTab.click());
-    assert.equal(document.querySelector('dialog.provider-setup-preview[open]'), null);
+    assert.ok(document.querySelector('dialog.provider-setup-preview[open]') === null);
     assert.equal(!!document.querySelector('.provider-setup-preview-home'), injected);
     assert.equal(!!Array.from(document.querySelectorAll('button')).find(node => node.textContent === 'Add provider'), injected);
     assert.equal(commands.length, 0);
@@ -80,7 +80,7 @@ for (const injected of [false, true]) test(`Provider management tab is ${injecte
       const homeAdd = Array.from(document.querySelectorAll('button')).find(node => node.textContent === 'Add provider')!;
       homeAdd.focus();
       act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-      assert.equal(document.querySelector('[role=dialog][aria-label=Settings]'), null, 'home Escape closes real Settings parent');
+      assert.ok(document.querySelector('[role=dialog][aria-label=Settings]') === null, 'home Escape closes real Settings parent');
     }
   } finally { act(() => render(null, container)); container.remove(); }
 });
@@ -190,7 +190,7 @@ test('guided manage → choose → connect → done, back and close; private key
     }
     click(/^Add another provider$/); assert.equal(controller.snapshot().flow.screen, 'choose');
     click(/^Close$/); assert.equal(controller.snapshot().flow.open, false);
-    assert.equal(document.querySelector('dialog.provider-setup-preview[open]'), null);
+    assert.ok(document.querySelector('dialog.provider-setup-preview[open]') === null);
   });
 });
 

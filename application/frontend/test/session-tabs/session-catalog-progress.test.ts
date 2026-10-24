@@ -65,7 +65,7 @@ test('session tabs expose progressive history indexing without blocking actions'
     assert.equal((container.querySelector('.session-tabs-new') as HTMLButtonElement).disabled, false);
 
     act(() => render(h(SessionTabs, props({ complete: true, processed: 1_158, total: 1_158 })), container));
-    assert.equal(container.querySelector('.session-tabs-indexing'), null, 'the final catalog event clears the status');
+    assert.ok(container.querySelector('.session-tabs-indexing') === null, 'the final catalog event clears the status');
   } finally {
     act(() => render(null, container));
     container.remove();

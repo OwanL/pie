@@ -53,11 +53,11 @@ test('Settings suspension preserves host OAuth/save ownership but clears detache
     const cancelled = lastEffects.flatMap(effect => effect.kind === 'ProviderManagementRpc' && effect.request.type === 'cancel' ? [effect.request] : []).at(0);
     assert.equal(cancelled?.targetOperationId, 'login');
     push(2, 'login');
-    assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
+    assert.ok(document.querySelector('.provider-setup-preview-auth') === null);
     click('.toolbar-settings-trigger');
     assert.ok(document.querySelector('.provider-setup-preview-home'));
-    assert.equal(document.querySelector('.provider-setup-preview-auth input'), null);
-    assert.equal(document.activeElement, document.querySelector('.toolbar-settings-search-input'));
+    assert.ok(document.querySelector('.provider-setup-preview-auth input') === null);
+    assert.ok(document.activeElement === document.querySelector('.toolbar-settings-search-input'));
     command({ type: 'add' }); command({ type: 'choose', kind: 'openai' });
     state = reducer(state, { kind: 'Command', cmd: { kind: 'ProviderManagementConnect', generation: 1, operationId: 'login2', corrId: 'login2', method: 'oauth' } }).state;
     push(3, 'login2');
@@ -69,7 +69,7 @@ test('Settings suspension preserves host OAuth/save ownership but clears detache
     assert.equal(state.providerManagement.authOperationId, null);
     assert.equal(state.providerManagement.flow.screen, 'manage');
     command({ type: 'choose', kind: 'openai' });
-    push(4, 'login2'); assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
+    push(4, 'login2'); assert.ok(document.querySelector('.provider-setup-preview-auth') === null);
     command({ type: 'manual-model-add', id: 'manual' });
     command({ type: 'model-preference', id: 'manual', field: 'visible', value: 'no' });
     command({ type: 'refresh', id: 'openai' });
@@ -115,7 +115,7 @@ test('Settings X closing a models screen resets unsaved preferences like Back; n
     assert.equal(state.providerManagement.status, 'idle');
     click('.toolbar-settings-trigger'); click('[data-tab=providers]');
     assert.ok(document.querySelector('.provider-setup-preview-home'));
-    assert.equal(document.querySelector('.provider-setup-preview-models-page'), null);
+    assert.ok(document.querySelector('.provider-setup-preview-models-page') === null);
     // Back from the models screen resets identically, and neither path saves.
     openModels(); prefer('no');
     const edited = () => state.providerManagement.draft;

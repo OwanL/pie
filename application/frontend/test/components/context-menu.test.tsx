@@ -196,17 +196,17 @@ test('shared menu navigation wraps and skips disabled items', () => {
   act(() => render(h(PrimitiveMenu, { onClose: () => {} }), container));
 
   const items = container.querySelectorAll<HTMLButtonElement>('.context-menu-item');
-  assert.equal(document.activeElement, items[0], 'first enabled item receives initial focus');
+  assert.ok(document.activeElement === items[0], 'first enabled item receives initial focus');
   keydown('ArrowDown');
-  assert.equal(document.activeElement, items[2], 'disabled items are skipped');
+  assert.ok(document.activeElement === items[2], 'disabled items are skipped');
   keydown('ArrowDown');
-  assert.equal(document.activeElement, items[0], 'down navigation wraps');
+  assert.ok(document.activeElement === items[0], 'down navigation wraps');
   keydown('ArrowUp');
-  assert.equal(document.activeElement, items[2], 'up navigation wraps');
+  assert.ok(document.activeElement === items[2], 'up navigation wraps');
   keydown('Home');
-  assert.equal(document.activeElement, items[0]);
+  assert.ok(document.activeElement === items[0]);
   keydown('End');
-  assert.equal(document.activeElement, items[2]);
+  assert.ok(document.activeElement === items[2]);
 
   act(() => render(null, container));
   container.remove();
@@ -221,15 +221,15 @@ test('nested menu Home and End navigation stays within the focused owning menu',
 
   childSecond.focus();
   keydown('Home');
-  assert.equal(document.activeElement, childFirst, 'Home starts at the child menu beginning');
+  assert.ok(document.activeElement === childFirst, 'Home starts at the child menu beginning');
   keydown('End');
-  assert.equal(document.activeElement, childSecond, 'End stops at the child menu end');
+  assert.ok(document.activeElement === childSecond, 'End stops at the child menu end');
 
   parentSecond.focus();
   keydown('Home');
-  assert.equal(document.activeElement, parentFirst, 'parent Home ignores descendant child items');
+  assert.ok(document.activeElement === parentFirst, 'parent Home ignores descendant child items');
   keydown('End');
-  assert.equal(document.activeElement, parentSecond, 'parent End ignores descendant child items');
+  assert.ok(document.activeElement === parentSecond, 'parent End ignores descendant child items');
 
   act(() => render(null, container));
   container.remove();
@@ -243,7 +243,7 @@ test('shared menu repairs focus when a focused item is removed', () => {
   last.focus();
 
   act(() => render(h(PrimitiveMenu, { onClose: () => {}, refocusKey: 'second', showLast: false }), container));
-  assert.equal(document.activeElement, container.querySelector('.context-menu-item'));
+  assert.ok(document.activeElement === container.querySelector('.context-menu-item'));
 
   act(() => render(null, container));
   container.remove();
@@ -289,11 +289,11 @@ test('menu trigger ARIA and focus restore use the explicit trigger', () => {
   act(() => render(h(PrimitiveMenu, { triggerEl: trigger, onClose: () => {} }), container));
   assert.equal(trigger.getAttribute('aria-haspopup'), 'menu');
   assert.equal(trigger.getAttribute('aria-expanded'), 'true');
-  assert.notEqual(document.activeElement, trigger);
+  assert.ok(document.activeElement !== trigger);
 
   act(() => render(null, container));
   assert.equal(trigger.getAttribute('aria-expanded'), 'false');
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
 
   trigger.remove();
   container.remove();

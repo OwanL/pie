@@ -85,7 +85,7 @@ test('lazy subagents render a lightweight collapsed preview and load detail only
   assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
   assert.match(container.textContent ?? '', /preview-model/);
   assert.ok(container.querySelector('.subagent-live-preview'));
-  assert.equal(container.querySelector('.subagent-outcome'), null);
+  assert.ok(container.querySelector('.subagent-outcome') === null);
   assert.doesNotMatch(container.textContent ?? '', /short retained preview/,
     'settled cards must not misrepresent stale streaming activity as a genuine answer');
   assert.ok(container.querySelector('.subagent-task'));
@@ -125,13 +125,13 @@ test('parallel subagent transcript controls expand independently and preserve se
   const toggles = cards.map((card) => card.querySelector('.subagent-header') as HTMLButtonElement);
   assert.deepEqual(toggles.map((toggle) => toggle.getAttribute('aria-expanded')), ['false', 'false']);
   assert.match(cards[0].textContent ?? '', /Evidence collected\./);
-  assert.equal(cards[1].querySelector('.subagent-outcome'), null);
+  assert.ok(cards[1].querySelector('.subagent-outcome') === null);
   await act(async () => toggles[0].click());
   assert.deepEqual(toggles.map((toggle) => toggle.getAttribute('aria-expanded')), ['true', 'false']);
   assert.match(cards[0].querySelector('.subagent-messages')?.textContent ?? '', /Gather evidence/);
   assert.match(cards[0].querySelector('.subagent-messages')?.textContent ?? '', /Evidence collected\./,
     'opening the transcript must successfully render its Markdown, not leave a partial failed render');
-  assert.equal(cards[0].querySelector('.subagent-settled-preview'), null);
+  assert.ok(cards[0].querySelector('.subagent-settled-preview') === null);
   assert.ok(cards[1].querySelector('.subagent-live-preview'));
   const secondToggle = container.querySelectorAll<HTMLButtonElement>('.subagent-header')[1];
   await act(async () => secondToggle.click());

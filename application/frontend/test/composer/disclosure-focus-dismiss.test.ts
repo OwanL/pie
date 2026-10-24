@@ -31,7 +31,7 @@ for (const [name, disclosure] of Object.entries(disclosures)) {
       const popup = () => container.querySelector('[role="dialog"]');
       const focus = (element: HTMLElement) => {
         act(() => element.focus());
-        assert.equal(document.activeElement, element);
+        assert.ok(document.activeElement === element);
       };
       const open = () => {
         focus(trigger);
@@ -51,18 +51,18 @@ for (const [name, disclosure] of Object.entries(disclosures)) {
       act(() => { void window.dispatchEvent(new Event('blur')); });
       assert.ok(popup(), 'null focus and window blur are not concrete destinations');
       focus(container.querySelector<HTMLButtonElement>('#before')!);
-      assert.equal(popup(), null);
+      assert.ok(popup() === null);
       open();
       focus(popup()!.querySelector<HTMLButtonElement>('[role="checkbox"]')!);
       const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
       act(() => { void document.activeElement!.dispatchEvent(tab); });
       assert.equal(tab.defaultPrevented, false);
       focus(container.querySelector<HTMLButtonElement>('#after')!);
-      assert.equal(popup(), null);
+      assert.ok(popup() === null);
       open();
       act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-      assert.equal(popup(), null);
-      assert.equal(document.activeElement, trigger, 'existing Escape focus ownership is preserved');
+      assert.ok(popup() === null);
+      assert.ok(document.activeElement === trigger, 'existing Escape focus ownership is preserved');
     } finally {
       act(() => render(null, container));
       container.remove();

@@ -57,10 +57,10 @@ test('session tabs omit the actions button and retain new session and context me
 
   try {
     act(() => render(h(SessionTabs, props), container));
-    assert.equal(container.querySelector('[aria-label="Open session history"]'), null);
-    assert.equal(container.querySelector('[role="dialog"][aria-label="Session history"]'), null);
+    assert.ok(container.querySelector('[aria-label="Open session history"]') === null);
+    assert.ok(container.querySelector('[role="dialog"][aria-label="Session history"]') === null);
     assert.ok(container.querySelector('[aria-label="New session"]'));
-    assert.equal(container.querySelector('[aria-label="Open session actions"]'), null,
+    assert.ok(container.querySelector('[aria-label="Open session actions"]') === null,
       'session tabs do not render the removed ellipsis actions button');
 
     const tab = container.querySelector<HTMLElement>('.session-tab[data-tab-path="/sessions/open"]');

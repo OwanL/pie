@@ -30,11 +30,11 @@ for (const owner of ['composer', 'inline-editor']) {
       assert.deepEqual(buttons().map(button => button.getAttribute('aria-label')), ['Remove one.txt', 'Remove two.txt', 'Remove three.txt']);
       buttons()[1].focus();
       act(() => buttons()[1].click());
-      assert.equal(document.activeElement, buttons()[1]);
+      assert.ok(document.activeElement === buttons()[1]);
       act(() => buttons()[1].click());
-      assert.equal(document.activeElement, buttons()[0]);
+      assert.ok(document.activeElement === buttons()[0]);
       act(() => buttons()[0].click());
-      assert.equal(document.activeElement, container.querySelector('[aria-label="Owner"]'));
+      assert.ok(document.activeElement === container.querySelector('[aria-label="Owner"]'));
     } finally {
       act(() => render(null, container));
       container.remove();
@@ -54,7 +54,7 @@ test('removing an unfocused attachment does not steal focus', () => {
     const textarea = container.querySelector('textarea')!;
     textarea.focus();
     act(() => container.querySelector('button')!.click());
-    assert.equal(document.activeElement, textarea);
+    assert.ok(document.activeElement === textarea);
   } finally {
     act(() => render(null, container));
     container.remove();

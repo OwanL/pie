@@ -315,7 +315,7 @@ for (const scenario of [
       assert.equal(host.style.top, `${scenario.initialTop}px`);
       assert.ok(host.style.getPropertyValue('--pie-tooltip-available-height'), 'text trigger opts into anchor clearance');
       assert.equal(trigger.getAttribute('aria-describedby'), `existing-description ${host.id}`);
-      assert.equal(observed, host.querySelector('.tool-call-raw-inspector'));
+      assert.ok(observed === host.querySelector('.tool-call-raw-inspector'));
       assert.ok(notifyResize, 'raw inspector observes async content growth');
       assert.match(host.textContent ?? '', /Loading captured model exchange/);
       const request = messages[0];
@@ -398,8 +398,8 @@ test('refresh and retry keep one focused control mounted across capture states',
   assert.equal(control.disabled, false, 'native disabled would drop keyboard focus');
   const settle = (value: unknown) => act(() => receiveLazyDetailResult({ sessionPath: '/fixture', key: request.ref.key, status: 'loaded', value, sizeBytes: 100 }));
   const checkFocus = () => {
-    assert.equal(inspector.querySelector('.tool-call-raw-refresh'), control);
-    assert.equal(document.activeElement, control);
+    assert.ok(inspector.querySelector('.tool-call-raw-refresh') === control);
+    assert.ok(document.activeElement === control);
     assert.notEqual(host.style.display, 'none');
     assert.equal(control.isConnected, true);
   };
@@ -410,7 +410,7 @@ test('refresh and retry keep one focused control mounted across capture states',
   settle({ produced: { name: 'edit', arguments: {} } });
   checkFocus();
   assert.equal(control.textContent, 'Refresh');
-  assert.notEqual(inspector.querySelector('.tool-call-raw-copy'), control);
+  assert.ok(inspector.querySelector('.tool-call-raw-copy') !== control);
   act(() => control.click());
   checkFocus();
   assert.equal(control.getAttribute('aria-disabled'), 'true');
@@ -422,7 +422,7 @@ test('refresh and retry keep one focused control mounted across capture states',
   act(() => receiveLazyDetailResult({ sessionPath: '/fixture', key: request.ref.key, status: 'failure', message: 'FAILED' }));
   checkFocus();
   assert.equal(control.textContent, 'Retry');
-  assert.equal(inspector.querySelector('.tool-call-raw-copy'), null);
+  assert.ok(inspector.querySelector('.tool-call-raw-copy') === null);
   act(() => control.click());
   checkFocus();
   assert.equal(messages.length, 4);

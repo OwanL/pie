@@ -110,7 +110,7 @@ test('input prompt: typed value submits on Enter, IME composition guards submit 
   });
 
   const input = container.querySelector<HTMLInputElement>('.ext-prompt-input')!;
-  assert.equal(document.activeElement, input, 'input prompt opens with the field focused');
+  assert.ok(document.activeElement === input, 'input prompt opens with the field focused');
 
   act(() => {
     input.value = '  spaced name  ';
@@ -135,7 +135,7 @@ test('select custom answer: Enter submits only with text and only outside compos
     }), container);
   });
 
-  assert.equal(document.activeElement, container.querySelector('.ext-prompt-option'), 'roving focus starts on the first option');
+  assert.ok(document.activeElement === container.querySelector('.ext-prompt-option'), 'roving focus starts on the first option');
 
   const custom = Array.from(container.querySelectorAll<HTMLButtonElement>('.ext-prompt-option'))
     .find((el) => el.classList.contains('custom'))!;
@@ -168,11 +168,11 @@ test('select option arrows and Home/End are choice keys guarded from composition
   const listbox = document.querySelector('.ext-prompt-options')!;
   key(listbox, { key: 'ArrowDown', isComposing: true });
   key(listbox, { key: 'ArrowDown', keyCode: 229 });
-  assert.equal(document.activeElement, options[0], 'composed arrow keys must not move roving focus');
+  assert.ok(document.activeElement === options[0], 'composed arrow keys must not move roving focus');
   key(listbox, { key: 'ArrowDown' });
-  assert.equal(document.activeElement, options[1], 'plain arrow keys move roving focus');
+  assert.ok(document.activeElement === options[1], 'plain arrow keys move roving focus');
   key(listbox, { key: 'Home', isComposing: true });
-  assert.equal(document.activeElement, options[1], 'composed Home must not re-home');
+  assert.ok(document.activeElement === options[1], 'composed Home must not re-home');
 });
 
 test('same-method replacement resets state and focus and answers the new request only', () => {
@@ -204,10 +204,10 @@ test('same-method replacement resets state and focus and answers the new request
     }), container);
   });
 
-  assert.equal(container.querySelector('.ext-prompt-custom-row'), null, 'custom-input mode must not leak into the replacement');
+  assert.ok(container.querySelector('.ext-prompt-custom-row') === null, 'custom-input mode must not leak into the replacement');
   const options = container.querySelectorAll('.ext-prompt-option');
   assert.equal(options.length, 2, 'one option plus Custom');
-  assert.equal(document.activeElement, options[0], 'roving focus restarts on the first option of the replacement');
+  assert.ok(document.activeElement === options[0], 'roving focus restarts on the first option of the replacement');
 
   const prompt = document.querySelector('.ext-prompt')!;
   key(prompt, { key: 'Escape' });
@@ -236,7 +236,7 @@ test('same-method replacement resets state and focus and answers the new request
   const inputB = container.querySelector<HTMLInputElement>('.ext-prompt-input')!;
   assert.ok(inputB);
   assert.equal(inputB!.value, '', 'typed draft must not survive same-method replacement');
-  assert.equal(document.activeElement, inputB, 'replacement input takes focus again');
+  assert.ok(document.activeElement === inputB, 'replacement input takes focus again');
   act(() => {
     container.querySelector<HTMLButtonElement>('.ext-prompt-btn.primary')!.click();
   });

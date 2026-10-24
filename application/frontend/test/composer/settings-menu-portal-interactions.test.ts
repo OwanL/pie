@@ -83,9 +83,9 @@ test('Tab wraps at outer settings boundaries without affecting ordinary interior
     return event;
   };
   assert.equal(press(last).defaultPrevented, true);
-  assert.equal(document.activeElement, first);
+  assert.ok(document.activeElement === first);
   assert.equal(press(first, true).defaultPrevented, true);
-  assert.equal(document.activeElement, last);
+  assert.ok(document.activeElement === last);
   assert.equal(press(controls[1]).defaultPrevented, false);
 });
 
@@ -153,7 +153,7 @@ test('Escape closes only the ModelPicker, leaving the settings menu open', () =>
 
   // Simulate the post-rAF focus that useFocusOnOpen moves into the dropdown.
   act(() => { dropdown.focus(); });
-  assert.equal(document.activeElement, dropdown, 'dropdown should hold focus');
+  assert.ok(document.activeElement === dropdown, 'dropdown should hold focus');
 
   act(() => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));

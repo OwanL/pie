@@ -58,8 +58,8 @@ test('rapid toggles preserve intent through delayed/coalesced echoes and session
     draw(a, { ...DEFAULT_CHAT_PREFS, ...calls.at(-1) });
     assert.deepEqual(rows().map(row => row.getAttribute('aria-checked')), ['true', 'true', 'true']);
     act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-    assert.equal(container.querySelector('[role="dialog"]'), null);
-    assert.equal(document.activeElement, trigger);
+    assert.ok(container.querySelector('[role="dialog"]') === null);
+    assert.ok(document.activeElement === trigger);
     draw(b, { ...DEFAULT_CHAT_PREFS, ...calls[1] });
     click(container.querySelector('button')!);
     assert.deepEqual(rows().map(row => row.getAttribute('aria-checked')), ['true', 'true', 'true']);
@@ -67,8 +67,8 @@ test('rapid toggles preserve intent through delayed/coalesced echoes and session
     click(rows()[0]);
     assert.deepEqual(Object.keys(calls.at(-1)!.subagentBucketTogglesBySession!), [b]);
     act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
-    assert.equal(container.querySelector('[role="dialog"]'), null);
+    assert.ok(container.querySelector('[role="dialog"]') === null);
     draw(null, DEFAULT_CHAT_PREFS);
-    assert.equal(container.querySelector('button'), null);
+    assert.ok(container.querySelector('button') === null);
   } finally { act(() => render(null, container)); container.remove(); }
 });

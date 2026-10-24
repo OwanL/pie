@@ -452,7 +452,7 @@ test('the section stays hidden while the first prompt is on screen', () => {
     metrics,
     scrollElement: makeScrollElement(metrics),
   });
-  assert.equal(section, null);
+  assert.ok(section === null);
 
   render(null, container);
   container.remove();
@@ -470,7 +470,7 @@ test('empty sessions render no bar', () => {
     scrollOffset: 0,
     scrollElement: makeScrollElement(metrics),
   });
-  assert.equal(section, null, 'an empty session must not reserve the bar');
+  assert.ok(section === null, 'an empty session must not reserve the bar');
 
   render(null, container);
   container.remove();
@@ -492,7 +492,7 @@ test('sessions with no preceding loaded prompt render no bar', () => {
     scrollOffset: 0,
     scrollElement: makeScrollElement(metrics),
   });
-  assert.equal(idle, null, 'no prompt governs a window whose prompt is still below the boundary');
+  assert.ok(idle === null, 'no prompt governs a window whose prompt is still below the boundary');
 
   const detached = renderBar(container, {
     rows,
@@ -501,7 +501,7 @@ test('sessions with no preceding loaded prompt render no bar', () => {
     scrollOffset: null,
     scrollElement: null,
   });
-  assert.equal(detached, null, 'no owner and no fallback signal still renders nothing');
+  assert.ok(detached === null, 'no owner and no fallback signal still renders nothing');
 
   render(null, container);
   container.remove();
@@ -548,7 +548,7 @@ test('initial positioning keeps the bar reserved but hidden while a prompt exist
     hidden: true,
     scrollElement: makeScrollElement(metrics),
   });
-  assert.equal(emptyHidden, null, 'positioning without a prompt must not reserve the bar');
+  assert.ok(emptyHidden === null, 'positioning without a prompt must not reserve the bar');
 
   render(null, container);
   container.remove();

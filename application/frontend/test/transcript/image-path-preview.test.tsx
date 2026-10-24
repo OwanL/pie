@@ -140,7 +140,7 @@ function readyFocusedPreview(): HTMLImageElement {
   const image = host.querySelector<HTMLImageElement>('.image-path-preview img');
   assert.ok(image);
   act(() => image.focus());
-  assert.equal(document.activeElement, image);
+  assert.ok(document.activeElement === image);
   return image;
 }
 
@@ -148,7 +148,7 @@ test('Escape returns actual preview focus to its connected transcript anchor', (
   const image = readyFocusedPreview();
   act(() => { image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.equal(host.querySelector('.image-path-preview'), null);
-  assert.equal(document.activeElement, anchor);
+  assert.ok(document.activeElement === anchor);
   act(() => { timers.fireOptionalByDelay(350); });
   assert.equal(host.querySelector('.image-path-preview'), null);
   assert.equal(posts.filter(post => post.type === 'requestImagePreview').length, 1);
@@ -168,7 +168,7 @@ test('pointer preview Escape does not take focus from another control', () => {
   startPointerPreview();
   act(() => { other.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.equal(host.querySelector('.image-path-preview'), null);
-  assert.equal(document.activeElement, other);
+  assert.ok(document.activeElement === other);
 });
 
 test('session dismissal does not take focus from another control', () => {
@@ -179,7 +179,7 @@ test('session dismissal does not take focus from another control', () => {
   act(() => render(<ImagePathPreview rootRef={rootRef} sessionPath="/sessions/b.jsonl"
     workingDirectory="/workspace" postMessage={message => { posts.push(message); }} />, renderTarget));
   assert.equal(host.querySelector('.image-path-preview'), null);
-  assert.equal(document.activeElement, other);
+  assert.ok(document.activeElement === other);
 });
 
 test('real preview Enter retires preview; first Escape closes real PhotoSwipe and returns transcript focus', async () => {

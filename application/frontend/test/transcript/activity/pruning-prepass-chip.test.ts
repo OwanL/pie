@@ -88,7 +88,7 @@ test('Brief F: no bottom prepass chip while phase is idle', () => {
     render(h(App, { adapter }), container);
   });
 
-  assert.equal(container.querySelector('.prepass-status-chip'), null, 'no bottom chip while idle');
+  assert.ok(container.querySelector('.prepass-status-chip') === null, 'no bottom chip while idle');
 });
 
 test('Brief F: running prepass does not render a bottom status chip', () => {
@@ -99,7 +99,7 @@ test('Brief F: running prepass does not render a bottom status chip', () => {
     render(h(App, { adapter }), container);
   });
 
-  assert.equal(container.querySelector('.prepass-status-chip'), null, 'bottom chip removed even while running');
+  assert.ok(container.querySelector('.prepass-status-chip') === null, 'bottom chip removed even while running');
 });
 
 test('Brief F: agent-reply pruning chip renders a pending state with Cancel', () => {
@@ -157,5 +157,5 @@ test('Brief F: completed pruning result chip still renders without Cancel', () =
   });
 
   assert.ok(container.querySelector('.panel-chip-pruning'));
-  assert.equal(container.querySelector('[aria-label="Cancel pruning prepass"]'), null, 'no Cancel on completed result chip');
+  assert.ok(container.querySelector('[aria-label="Cancel pruning prepass"]') === null, 'no Cancel on completed result chip');
 });

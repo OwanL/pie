@@ -46,7 +46,7 @@ test('expiry after every tab was hidden preserves deliberate host no-selection w
   // The host restores the only tab in the background, without selecting it.
   update(snapshot({ activeSessionPath: null, openTabPaths: [first], sessions: [{ path: first, name: 'Restored' } as ViewState['sessions'][number]] }));
   assert.deepEqual(posted, []);
-  assert.equal(document.activeElement, manage);
+  assert.ok(document.activeElement === manage);
   assert.equal(derived().activeSessionPath, null);
   assert.equal(derived().needsSessionRecovery, false);
   assert.equal(derived().panelSurface, 'empty', 'do not spin on an intentionally unselected transcript');

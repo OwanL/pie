@@ -35,9 +35,9 @@ test('raw inspection lives on the left tool icon, beside rather than inside the 
   const icon = header.querySelector('[aria-label="Inspect read model exchange"]')!;
   assert.ok(icon.querySelector('svg'), 'inspection uses the tool icon');
   assert.equal(icon.closest('.tool-call-header')?.firstElementChild?.contains(icon), true);
-  assert.equal(header.children[1], toggle);
-  assert.equal(toggle.querySelector('button, [role="button"]'), null);
-  assert.equal(header.querySelector('.tool-call-actions .tool-call-raw-action'), null);
+  assert.ok(header.children[1] === toggle);
+  assert.ok(toggle.querySelector('button, [role="button"]') === null);
+  assert.ok(header.querySelector('.tool-call-actions .tool-call-raw-action') === null);
   assert.equal(header.querySelectorAll('[aria-label="Inspect read model exchange"]').length, 1);
   assert.ok(header.querySelector('.tool-call-actions [aria-label="Open file /repo/a.ts"]'));
 });
@@ -66,9 +66,9 @@ test('only present metadata and file actions render; empty completed calls reser
     'tool-call-duration', 'status-chip status-chip-failed has-error-detail',
   ]);
   assert.ok(rows[2].querySelector('.tool-call-actions [aria-label="Open file /repo/a.ts"]'));
-  assert.equal(rows[3].querySelector('.tool-call-header-meta'), null);
-  assert.equal(rows[3].querySelector('.tool-call-actions'), null);
-  assert.equal(rows[3].querySelector('.tool-call-context, .tool-call-activity, .tool-call-state-column'), null);
+  assert.ok(rows[3].querySelector('.tool-call-header-meta') === null);
+  assert.ok(rows[3].querySelector('.tool-call-actions') === null);
+  assert.ok(rows[3].querySelector('.tool-call-context, .tool-call-activity, .tool-call-state-column') === null);
 });
 
 test('file actions precede metadata so they cannot reserve space after the visible trailing item', () => {
@@ -80,11 +80,11 @@ test('file actions precede metadata so they cannot reserve space after the visib
       }), container));
       const header = container.querySelector('.tool-call-header')!;
       const metadata = header.querySelector('.tool-call-header-meta')!;
-      assert.equal(header.lastElementChild, metadata);
-      assert.equal(metadata.nextElementSibling, null, 'no hidden action after duration or activity');
+      assert.ok(header.lastElementChild === metadata);
+      assert.ok(metadata.nextElementSibling === null, 'no hidden action after duration or activity');
       const actions = header.querySelector('.tool-call-actions');
-      if (summaryPath) assert.equal(actions?.nextElementSibling, metadata);
-      else assert.equal(actions, null, 'no empty action slot');
+      if (summaryPath) assert.ok(actions?.nextElementSibling === metadata);
+      else assert.ok(actions === null, 'no empty action slot');
     }
   }
 });
@@ -98,9 +98,9 @@ test('pending markers and running wheel render directly in metadata without stal
     const meta = container.querySelector('.tool-call-header-meta')!;
     if (status === 'completed') {
       assert.equal(meta.querySelector('.tool-call-duration')?.textContent, '1.3s');
-      assert.equal(meta.querySelector('[role="img"]'), null, 'no completion check');
+      assert.ok(meta.querySelector('[role="img"]') === null, 'no completion check');
     } else {
-      assert.equal(meta.querySelector('.tool-call-duration'), null);
+      assert.ok(meta.querySelector('.tool-call-duration') === null);
       assert.equal(meta.querySelectorAll('[role="img"]').length, 1);
       assert.equal(meta.querySelector('[role="img"]')?.getAttribute('aria-label'), status === 'running' ? 'Running' : status === 'ready' ? 'Ready' : 'Drafting');
     }
@@ -127,7 +127,7 @@ test('rightmost metadata follows failure, activity, duration, pruning, then size
     }), container));
     const header = container.querySelector('.tool-call-header')!;
     const meta = header.querySelector('.tool-call-header-meta')!;
-    assert.equal(header.lastElementChild, meta);
+    assert.ok(header.lastElementChild === meta);
     assert.ok(meta.lastElementChild?.matches(rightmost), `${status} with duration ${durationMs}: ${rightmost} wins`);
   }
   act(() => render(h(ToolCallHeader, {
@@ -155,7 +155,7 @@ test('failure remains rightmost alongside execution time, and keeps its accessib
   assert.equal(failure.tabIndex, 0);
   assert.equal(failure.title, `Read denied · Tool execution time: ${duration}`);
   assert.equal(failure.getAttribute('aria-label'), 'Copy tool-call error detail');
-  assert.equal(meta.querySelector('.tool-call-size, .tool-result-pruning-badge'), null);
+  assert.ok(meta.querySelector('.tool-call-size, .tool-result-pruning-badge') === null);
 });
 
 test('pruning icon exposes its accessible savings label', () => {
@@ -177,7 +177,7 @@ test('completed collapsed reads render one contiguous escaped, bounded preview a
   paint({ ...base, result: `${start}\n${'middle\n'.repeat(1000)}${end}` });
   const preview = container.querySelector('.tool-call-read-preview')!;
   assert.equal(preview.getAttribute('aria-hidden'), 'true');
-  assert.equal(preview.querySelector('img, script'), null);
+  assert.ok(preview.querySelector('img, script') === null);
   assert.equal(preview.children.length, 0, 'no separately flexed start/end fragments');
   assert.equal(preview.previousElementSibling?.className, 'tool-call-primary-summary');
   const [first, last] = (preview.textContent ?? '').split(' … ');
@@ -198,10 +198,10 @@ test('snippets appear only for completed reads with direct text and disappear wh
     base, { ...base, result: { content: [{ type: 'image', mimeType: 'image/png', data: 'BINARY' }] } },
   ]) {
     paint(call);
-    assert.equal(container.querySelector('.tool-call-read-preview'), null, `${call.name}/${call.status}`);
+    assert.ok(container.querySelector('.tool-call-read-preview') === null, `${call.name}/${call.status}`);
   }
   paint({ ...base, result: 'output' }, true);
-  assert.equal(container.querySelector('.tool-call-read-preview'), null);
+  assert.ok(container.querySelector('.tool-call-read-preview') === null);
 });
 
 test('missing lazy direct result does not fetch or invent a collapsed snippet, including after expansion loads detail', () => {
@@ -212,15 +212,15 @@ test('missing lazy direct result does not fetch or invent a collapsed snippet, i
     toolCallId: base.id, sizeBytes: 100000, summary: 'not output', available: true,
   } };
   act(() => render(h(ToolCallCard, { toolCall: call, workingDirectory: '/repo', onOpenFile: noop, onContextMenu: noop }), container));
-  assert.equal(container.querySelector('.tool-call-read-preview'), null);
+  assert.ok(container.querySelector('.tool-call-read-preview') === null);
   assert.equal(messages.length, 0);
   const toggle = container.querySelector('.tool-call-toggle') as HTMLButtonElement;
   act(() => toggle.click());
   assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1);
   act(() => receiveLazyDetailResult({ sessionPath: '/fixture', key: 'header-read', status: 'loaded', value: 'FULL OUTPUT', sizeBytes: 11 }));
-  assert.equal(container.querySelector('.tool-call-read-preview'), null, 'expanded details never duplicate output in the header');
+  assert.ok(container.querySelector('.tool-call-read-preview') === null, 'expanded details never duplicate output in the header');
   act(() => toggle.click());
-  assert.equal(container.querySelector('.tool-call-read-preview'), null, 'a cached lazy result is not a directly present result');
+  assert.ok(container.querySelector('.tool-call-read-preview') === null, 'a cached lazy result is not a directly present result');
 });
 
 test('CSS keeps the header and optional metadata in flex flow, shows failure on narrow rows, and preserves inspection icons', async () => {

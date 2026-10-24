@@ -90,7 +90,7 @@ test('session-title model assignment exposes provider-qualified model and thinki
   const thinkingSelect = container.querySelector('[aria-label="Session title thinking level"]') as HTMLSelectElement;
   assert.equal(thinkingSelect.value, 'off');
   assert.ok(thinkingSelect.querySelector('option[value="low"]'));
-  assert.equal(thinkingSelect.querySelector('option[value="high"]'), null);
+  assert.ok(thinkingSelect.querySelector('option[value="high"]') === null);
   render(null, container);
 });
 

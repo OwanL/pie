@@ -254,11 +254,11 @@ test('session switch tears the PhotoSwipe instance down instantly and restores f
     openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Chart', source: inlineSource() });
   });
   const instance = FakePswp.instances.at(-1)!;
-  assert.notEqual(document.activeElement, before, 'PhotoSwipe owns the focus while open');
+  assert.ok(document.activeElement !== before, 'PhotoSwipe owns the focus while open');
   await act(async () => { receive()({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/a' } }); });
   await act(async () => { receive()({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/b' } }); });
   assert.equal(instance.destroyed, true, 'session switch destroys the instance without waiting for an animation');
-  assert.equal(document.activeElement, before, 'focus returns to the previously focused element');
+  assert.ok(document.activeElement === before, 'focus returns to the previously focused element');
   // A subsequent real PhotoSwipe close animation must not destroy it early.
   await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Second', source: inlineSource() }); });
   await flush();
@@ -343,7 +343,7 @@ test('inline clicks open the viewer, SVG stays view-only, and probe failures use
   const opened = FakePswp.instances.at(-1)!;
   assert.deepEqual(opened.options.dataSource[0].src, thumbnail.src);
   await act(async () => { opened.close(); });
-  assert.equal(document.activeElement, thumbnail, 'click trigger regains focus after library removal');
+  assert.ok(document.activeElement === thumbnail, 'click trigger regains focus after library removal');
   await act(async () => { clearImageViewer(); });
   await act(async () => { opened.emit('destroy'); });
   thumbnail.src = 'data:image/svg+xml;base64,PHN2Zy8+';
@@ -357,7 +357,7 @@ test('inline clicks open the viewer, SVG stays view-only, and probe failures use
   await act(async () => { (svgInstance.elements['pie-image-copy'] as HTMLButtonElement).click(); });
   assert.equal(sent.length, 0, 'SVG never requests native actions');
   await act(async () => { svgInstance.close(); });
-  assert.equal(document.activeElement, thumbnail, 'keyboard trigger regains focus');
+  assert.ok(document.activeElement === thumbnail, 'keyboard trigger regains focus');
 
   await act(async () => {
     openImageViewer({ src: 'data:image/png;base64,broken', alt: 'Broken cached image', source: null });

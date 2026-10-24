@@ -215,7 +215,7 @@ test('settled outcome preserves exact paragraph separators without parsing prose
   const outcome = container.querySelector('.subagent-outcome')!;
   assert.equal(outcome.textContent, answer);
   assert.equal(outcome.querySelectorAll('p').length, 3);
-  assert.equal(outcome.querySelector('strong'), null);
+  assert.ok(outcome.querySelector('strong') === null);
 });
 
 test('compact current input retains raw content without stale output or duplicate expanded preview', () => {
@@ -233,7 +233,7 @@ test('compact current input retains raw content without stale output or duplicat
   assert.doesNotMatch(container.querySelector('.subagent-live-preview')?.textContent ?? '', /Old output|old.ts/);
   assert.equal(container.querySelectorAll('.subagent-task').length, 1);
   act(() => container.querySelector<HTMLElement>('.subagent-header')!.click());
-  assert.equal(container.querySelector('.subagent-live-preview'), null);
+  assert.ok(container.querySelector('.subagent-live-preview') === null);
   assert.match(container.querySelector('.subagent-messages')?.textContent ?? '', /One task/);
 });
 
@@ -245,7 +245,7 @@ test('parallel progress uses child lifecycle without changing independent disclo
     { agent: 'active', task: 'active', exitCode: -1, streamingText: 'Working', messages: [] },
   ] } } };
   mount(call, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-parallel-progress'), null);
+  assert.ok(container.querySelector('.subagent-parallel-progress') === null);
   assert.match(container.textContent ?? '', /No access|No answer text available/);
   act(() => container.querySelector<HTMLButtonElement>('.subagent-header')!.click());
   assert.deepEqual(Array.from(container.querySelectorAll('.subagent-header')).map((header) => header.getAttribute('aria-expanded')), ['true', 'false', 'false', 'false']);
@@ -348,9 +348,9 @@ test('header context keeps known zero while detailed usage stays out of the head
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
   assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '0/200k');
   assert.equal(container.querySelector('.subagent-inline-context')?.getAttribute('title'), 'Context tokens used / context window');
-  assert.equal(container.querySelector('.subagent-inline-tokens'), null);
-  assert.equal(container.querySelector('.subagent-inline-cache'), null);
-  assert.equal(container.querySelector('.subagent-inline-turns'), null);
+  assert.ok(container.querySelector('.subagent-inline-tokens') === null);
+  assert.ok(container.querySelector('.subagent-inline-cache') === null);
+  assert.ok(container.querySelector('.subagent-inline-turns') === null);
   assert.equal(container.querySelector('.subagent-model-qualified')?.textContent, 'provider/worker-model');
   const trigger = container.querySelector('.subagent-model-details-trigger');
   assert.equal(trigger?.getAttribute('tabindex'), '0');
@@ -375,7 +375,7 @@ test('header metrics remain grouped without status or activity decoration', () =
   assert.equal(metrics.querySelector('.subagent-inline-context')?.textContent, '1.5k/200k');
   assert.equal(metrics.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
   assert.equal(metrics.querySelector('.subagent-telemetry-elapsed')?.textContent, '0:02');
-  for (const selector of ['.subagent-activity', '.subagent-activity-dot', '.status-chip']) assert.equal(header.querySelector(selector), null);
+  for (const selector of ['.subagent-activity', '.subagent-activity-dot', '.status-chip']) assert.ok(header.querySelector(selector) === null);
 });
 
 test('model interactions stay inside the single-row header while header Enter expands', async () => {
@@ -403,9 +403,9 @@ test('responsive inline usage omits unknown and invalid values without inventing
   child.usage = { input: -1, output: Infinity, contextTokens: 10, cacheRead: 0, cacheWrite: -2, turns: 0 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
   assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '10/—', 'zero is not a usable context-window capacity');
-  assert.equal(container.querySelector('.subagent-inline-tokens'), null);
-  assert.equal(container.querySelector('.subagent-inline-cache'), null);
-  assert.equal(container.querySelector('.subagent-inline-turns'), null);
+  assert.ok(container.querySelector('.subagent-inline-tokens') === null);
+  assert.ok(container.querySelector('.subagent-inline-cache') === null);
+  assert.ok(container.querySelector('.subagent-inline-turns') === null);
 });
 
 test('completed legacy subagent keeps model, elapsed and cost inline while recovery and reasoning stay in the tooltip', async () => {
@@ -414,11 +414,11 @@ test('completed legacy subagent keeps model, elapsed and cost inline while recov
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
   assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /^0:02$/);
-  assert.equal(container.querySelector('.subagent-footer'), null);
+  assert.ok(container.querySelector('.subagent-footer') === null);
   assert.match(header.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.equal(header.querySelector('.subagent-reasoning-label'), null);
+  assert.ok(header.querySelector('.subagent-reasoning-label') === null);
   assert.equal(header.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
-  assert.equal(header.querySelector('.subagent-telemetry-recovered'), null);
+  assert.ok(header.querySelector('.subagent-telemetry-recovered') === null);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -465,9 +465,9 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
   assert.ok(header?.querySelector('.subagent-telemetry-elapsed'), 'live elapsed time should remain visible');
-  assert.equal(container.querySelector('.subagent-footer'), null);
+  assert.ok(container.querySelector('.subagent-footer') === null);
   assert.match(header?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.equal(header?.querySelector('.subagent-reasoning-label'), null);
+  assert.ok(header?.querySelector('.subagent-reasoning-label') === null);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -560,7 +560,7 @@ function captureRequests(): WebviewToHostMessage[] {
 function assertCapturedInspector(host: HTMLElement) {
   assert.equal(host.getAttribute('role'), 'region', 'same raw inspector surface as tool icons');
   assert.ok(host.querySelector('.tool-call-raw-inspector'));
-  assert.equal(host.querySelector('.subagent-model-details-tooltip'), null);
+  assert.ok(host.querySelector('.subagent-model-details-tooltip') === null);
   assert.match(host.textContent ?? '', /Model produced/);
   assert.match(host.textContent ?? '', /Model received/);
   assert.doesNotMatch(host.textContent ?? '', /Usage & performance|Delegated task|Exact inherited parent context|Latest generation|worker-model|inspect telemetry|Keep telemetry visible|Context1\.5k|Output300 tok/);
@@ -682,7 +682,7 @@ test('agent-name raw inspection retains focus and dismissal without toggling the
   assert.equal(name.tabIndex, 0);
   const host = await openDetailsTooltip(name, 'focus');
   settleCapture(messages, toolCall, host);
-  assert.equal(document.activeElement, name);
+  assert.ok(document.activeElement === name);
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
   assert.equal(header.getAttribute('aria-expanded'), 'false', 'focus alone does not expand');
@@ -692,7 +692,7 @@ test('agent-name raw inspection retains focus and dismissal without toggling the
     act(() => { name.dispatchEvent(event); });
     assert.equal(header.getAttribute('aria-expanded'), 'false');
     assert.equal(host.style.display, 'none', 'activation dismisses inspection');
-    assert.equal(document.activeElement, name);
+    assert.ok(document.activeElement === name);
     assert.equal(event.defaultPrevented, true);
   }
   for (const expanded of ['true', 'false']) {
@@ -847,8 +847,8 @@ test('subagent with provider-reported cost renders only the two-decimal USD amou
   const cost = container.querySelector<HTMLElement>('.subagent-telemetry-cost');
   assert.ok(cost, 'reported cost evidence stays visible in the header');
   assert.ok(cost.closest('.subagent-header'));
-  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-cost'), cost);
-  assert.equal(cost.closest('[aria-hidden="true"]'), null, 'cost must not depend on header-fit measurement');
+  assert.ok(container.querySelector('.subagent-header .subagent-telemetry-cost') === cost);
+  assert.ok(cost.closest('[aria-hidden="true"]') === null, 'cost must not depend on header-fit measurement');
   assert.equal(cost.textContent, '$0.64');
 
   const host = await openModelTooltip();
@@ -882,7 +882,7 @@ test('recovery detail stays out of the header when no cost is available', () => 
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
 
   assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '—');
-  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-recovered'), null);
+  assert.ok(container.querySelector('.subagent-header .subagent-telemetry-recovered') === null);
 });
 
 test('parallel child costs stay separate instead of repeating the group total', () => {
@@ -1008,7 +1008,7 @@ test('nested subagent: depth-1 body is a bounded scroll region, nested body flow
   assert.equal(scrolls[0].getAttribute('aria-label'), 'worker subagent transcript');
   assert.equal(scrolls[0].getAttribute('tabindex'), '0');
   act(() => (scrolls[0] as HTMLElement).focus());
-  assert.equal(document.activeElement, scrolls[0]);
+  assert.ok(document.activeElement === scrolls[0]);
   for (const attribute of ['role', 'aria-label', 'tabindex']) {
     assert.equal(scrolls[1].getAttribute(attribute), null);
   }
@@ -1064,6 +1064,6 @@ test('role icons preserve full accessible inspector names and stable unknown met
     assert.equal(cells?.children.length, 3);
     assert.equal(cells?.children[0]?.textContent, '—/—');
     assert.equal(cells?.children[2]?.textContent, '—');
-    assert.equal(container.querySelector('.subagent-header .status-chip'), null);
+    assert.ok(container.querySelector('.subagent-header .status-chip') === null);
   }
 });

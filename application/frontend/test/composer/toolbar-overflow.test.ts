@@ -246,7 +246,7 @@ test('refresh follows browser network access at the end of the toolbar controls'
   assert.ok(refresh);
   assert.ok(refresh.closest('.composer-controls'));
   assert.equal(refresh.previousElementSibling?.getAttribute('data-toolbar-item'), 'browser-network');
-  assert.equal(refresh.nextElementSibling, null);
+  assert.ok(refresh.nextElementSibling === null);
   assert.equal(!!container.querySelector('.composer-pinned-controls .pruning-refresh-trigger'), false);
 });
 
@@ -670,7 +670,7 @@ test('overflow child focus dismisses only the child until focus leaves More', ()
   const sibling = popover.querySelector<HTMLButtonElement>('[aria-label="Browser network access"]');
   assert.ok(sibling);
   act(() => sibling.focus());
-  assert.equal(document.activeElement, sibling);
+  assert.ok(document.activeElement === sibling);
   assert.equal(!!popover.querySelector('.subagent-bucket-dropdown'), false);
   assert.equal(popover.getAttribute('aria-hidden'), 'false');
   click(trigger);
@@ -678,7 +678,7 @@ test('overflow child focus dismisses only the child until focus leaves More', ()
   document.body.appendChild(outside);
   try {
     act(() => outside.focus());
-    assert.equal(document.activeElement, outside);
+    assert.ok(document.activeElement === outside);
     assert.equal(popover.getAttribute('aria-hidden'), 'true');
     assert.equal(!!popover.querySelector('.subagent-bucket-dropdown'), false);
   } finally { outside.remove(); }
@@ -764,7 +764,7 @@ test('disconnected toolbar leaves the overflow trigger and status indicators out
   assert.equal(disabledControl?.disabled, true, 'overflowed commands remain grouped under native disabled fieldsets');
   const indicator = popover.querySelector<HTMLElement>('[data-toolbar-item-kind="indicator"] [role="status"], [data-toolbar-item-kind="indicator"] [role="img"]');
   assert.ok(indicator, 'an overflowed status indicator remains present');
-  assert.equal(indicator?.closest('fieldset:disabled'), null, 'status indicators are not disabled with commands');
+  assert.ok(indicator?.closest('fieldset:disabled') === null, 'status indicators are not disabled with commands');
 });
 
 test('disconnection closes a portaled model picker and disables pinned menu triggers', () => {
@@ -796,11 +796,11 @@ test('keyboard opening focuses the first control and Escape restores More', () =
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
   });
   const popover = container.querySelector<HTMLElement>('.composer-toolbar-overflow-popover')!;
-  assert.equal(document.activeElement, popover.querySelector('button:not(:disabled)'));
+  assert.ok(document.activeElement === popover.querySelector('button:not(:disabled)'));
   act(() => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
   click(trigger);
-  assert.equal(document.activeElement, trigger, 'pointer opening does not move focus');
+  assert.ok(document.activeElement === trigger, 'pointer opening does not move focus');
 });
 
 // Realistic narrow-row ladder measured from the pinned group (270 = the 180px
@@ -944,11 +944,7 @@ test('overflowed controls show short action names beside their icons while the r
     'pruning-refresh': 'Refresh',
   });
   assert.ok(popover.querySelector('[data-toolbar-item-kind="indicator"]'), 'this width also overflows an indicator');
-  assert.equal(
-    popover.querySelector<HTMLElement>('[data-toolbar-item-kind="indicator"] .composer-toolbar-item-label'),
-    null,
-    'indicators already carry their own text label',
-  );
+  assert.ok(popover.querySelector<HTMLElement>('[data-toolbar-item-kind="indicator"] .composer-toolbar-item-label') === null, 'indicators already carry their own text label');
   assert.equal(
     popover.querySelector<HTMLButtonElement>('[data-toolbar-item="pruning-refresh"] button')?.getAttribute('aria-label'),
     'Refresh capabilities',
@@ -1027,7 +1023,7 @@ test('settings portal focus and first Escape remain inside More', () => {
   act(() => { button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.ok(!document.querySelector('.toolbar-settings-menu'));
   assert.equal(popover.getAttribute('aria-hidden'), 'false');
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
 });
 
 test('deferred cancel portal survives overflow ownership and restores its trigger on Escape', () => {
@@ -1057,7 +1053,7 @@ test('deferred cancel portal survives overflow ownership and restores its trigge
     act(() => { cancel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     assert.ok(!menuContainer.querySelector('.deferred-triggers-menu'));
     assert.equal(popover.getAttribute('aria-hidden'), 'false');
-    assert.equal(document.activeElement, trigger);
+    assert.ok(document.activeElement === trigger);
     click(trigger);
     rowWidth = 220;
     act(() => TestResizeObserver.instances.forEach((observer) => observer.trigger()));

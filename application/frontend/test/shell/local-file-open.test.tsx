@@ -231,13 +231,13 @@ test('the feedback view renders transient messages and nothing when unset', () =
   document.body.appendChild(container);
   try {
     render(<LocalFileOpenFeedbackView feedback={null} />, container);
-    assert.equal(document.getElementById('pie-local-file-open-feedback'), null);
+    assert.ok(document.getElementById('pie-local-file-open-feedback') === null);
     render(<LocalFileOpenFeedbackView feedback={{ kind: 'error', message: 'boom' }} />, container);
     const element = document.getElementById('pie-local-file-open-feedback');
     assert.match(element?.textContent ?? '', /boom/u);
     assert.equal(element?.getAttribute('role'), 'status');
     render(<LocalFileOpenFeedbackView feedback={null} />, container);
-    assert.equal(document.getElementById('pie-local-file-open-feedback'), null, 'feedback vanishes');
+    assert.ok(document.getElementById('pie-local-file-open-feedback') === null, 'feedback vanishes');
   } finally {
     container.remove();
   }

@@ -21,7 +21,7 @@ for (const [volume, label] of [[0, 'Off'], [35, '35%']] as const) {
       const range = controls.querySelector<HTMLInputElement>('input[type="range"]')!;
       const value = controls.querySelector('.toolbar-settings-control-value')!;
       const preview = controls.querySelector<HTMLButtonElement>('button')!;
-      assert.equal(range.nextElementSibling, value);
+      assert.ok(range.nextElementSibling === value);
       assert.equal(value.textContent, label);
       assert.equal(range.getAttribute('aria-valuetext'), label);
       assert.equal(preview.disabled, volume === 0);

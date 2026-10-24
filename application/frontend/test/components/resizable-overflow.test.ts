@@ -66,16 +66,16 @@ test('scroll cue is opt-in, outside code, and absent for short results', () => {
   mockOverflow(pre, 100, 240);
   mockWidth(pre, 100, 200);
   renderPre(h('code', null, 'short'), hintText);
-  assert.equal(hint(), null);
+  assert.ok(hint() === null);
   mockWidth(pre, 500, 200);
   renderPre(h('code', null, 'wide'));
-  assert.equal(hint(), null, 'other viewers do not opt in');
+  assert.ok(hint() === null, 'other viewers do not opt in');
   renderPre(h('code', null, 'wide'), hintText);
   assert.equal(hint()?.textContent, hintText);
-  assert.equal(pre.querySelector('.resizable-scroll-hint'), null);
+  assert.ok(pre.querySelector('.resizable-scroll-hint') === null);
   assert.equal(handles().length, 0, 'horizontal overflow does not alter shared vertical resizing');
   renderPre(h('code', null, 'wide'));
-  assert.equal(hint(), null, 'removing opt-in removes cue');
+  assert.ok(hint() === null, 'removing opt-in removes cue');
 });
 
 test('cue updates on vertical resize-to-fit and reset, independent of persistent handles', () => {
@@ -89,7 +89,7 @@ test('cue updates on vertical resize-to-fit and reset, independent of persistent
     container.querySelector('.resize-handle-bottom')!
       .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
   });
-  assert.equal(hint(), null, 'user height fitting content removes cue');
+  assert.ok(hint() === null, 'user height fitting content removes cue');
   assert.equal(handles().length, 2, 'handles remain available after resize');
   mockOverflow(pre, 600, 240);
   act(() => { container.querySelector('.resize-handle-bottom')!.dispatchEvent(new MouseEvent('dblclick')); });
@@ -110,13 +110,13 @@ test('cue remeasures width on observer/window resize and cleans up observers', (
   try {
     renderPre(h('code', null, 'wide'), hintText);
     const pre = scrollEl()!;
-    assert.equal(observed, pre);
+    assert.ok(observed === pre);
     mockWidth(pre, 500, 200);
     act(() => { notify!(); });
     assert.ok(hint());
     mockWidth(pre, 500, 600);
     act(() => { window.dispatchEvent(new Event('resize')); });
-    assert.equal(hint(), null, 'orientation width fitting content removes cue');
+    assert.ok(hint() === null, 'orientation width fitting content removes cue');
     mockWidth(pre, 500, 200);
     act(() => { window.dispatchEvent(new Event('resize')); });
     assert.ok(hint());
@@ -153,7 +153,7 @@ test('hides resize handles when content fits naturally (no overflow)', () => {
   mockOverflow(pre!, 100, 240);
   // Re-render so the hook's layout effect re-measures with the mocked metrics.
   renderPre(h('code', null, 'single line'));
-  assert.deepEqual(handles(), [], 'no resize handles when content fits');
+  assert.equal(handles().length, 0, 'no resize handles when content fits');
 });
 
 test('shows resize handles when content overflows the visible area', () => {
@@ -240,7 +240,7 @@ test('overflow region accepts its content-specific purpose without resetting scr
   mockOverflow(pre, 600, 240);
   pre.scrollTop = 72;
   act(() => render(h(ResizablePre, { scrollLabel: 'File content', children: 'updated content' }), container));
-  assert.equal(scrollEl(), pre);
+  assert.ok(scrollEl() === pre);
   assert.equal(pre.getAttribute('aria-label'), 'File content');
   assert.equal(pre.scrollTop, 72);
 });

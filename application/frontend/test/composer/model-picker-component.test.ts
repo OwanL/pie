@@ -41,7 +41,7 @@ test('host tombstones filter stale picker entries and retain unavailable selecte
     }) }), container));
     assert.match(container.textContent!, /test\/old · Unavailable \(removed provider\)/);
     act(() => (container.querySelector('.model-picker-trigger') as HTMLButtonElement).click());
-    assert.equal(document.querySelector('[role=option]'), null);
+    assert.ok(document.querySelector('[role=option]') === null);
   } finally { act(() => render(null, container)); container.remove(); }
 });
 

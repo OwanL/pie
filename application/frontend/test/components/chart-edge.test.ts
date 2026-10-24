@@ -51,7 +51,7 @@ test('Sparkline with all-zero values renders without NaN geometry', () => {
   const polyline = container.querySelector('polyline')!;
   assert.ok(polyline);
   assert.doesNotMatch(polyline.getAttribute('points') ?? '', /NaN|Infinity/, 'zero values must not produce NaN coordinates');
-  assert.equal(container.querySelector('.sparkline--empty'), null, 'non-empty data is not the empty state');
+  assert.ok(container.querySelector('.sparkline--empty') === null, 'non-empty data is not the empty state');
 });
 
 test('Sparkline with a single zero value renders a marker without NaN', () => {
@@ -67,7 +67,7 @@ test('StackedAreaChart renders a single cumulative point without crashing', () =
   ];
   render(h(StackedAreaChart, { points: single, mode: 'cumulative', formatY: fmt, formatX: fmtX }), container);
   assert.ok(container.querySelector('svg'), 'single-point chart still renders an svg');
-  assert.equal(container.querySelector('.chart-empty'), null, 'a point with a positive value is not the empty state');
+  assert.ok(container.querySelector('.chart-empty') === null, 'a point with a positive value is not the empty state');
   // No NaN leaked into path geometry.
   const d = container.querySelector('path')?.getAttribute('d') ?? '';
   assert.doesNotMatch(d, /NaN|Infinity/, 'single-point path must not contain NaN');
@@ -84,7 +84,7 @@ test('StackedAreaChart with all-zero point totals renders no area paths and no N
   render(h(StackedAreaChart, { points: allZero, mode: 'cumulative', formatY: fmt, formatX: fmtX }), container);
   assert.ok(container.querySelector('svg'), 'all-zero data still renders the svg shell');
   assert.equal(container.querySelectorAll('path').length, 0, 'no area paths for all-zero contributions');
-  assert.equal(container.querySelector('.chart-empty'), null, 'all-zero is not the points-length-zero empty state');
+  assert.ok(container.querySelector('.chart-empty') === null, 'all-zero is not the points-length-zero empty state');
 });
 
 test('StackedAreaChart line mode draws one unstroked-stack line per series on a shared scale', () => {

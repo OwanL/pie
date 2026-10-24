@@ -34,12 +34,12 @@ test('management tab integrates inline navigation, Escape, tab switching and Set
     assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /Friendly provider/);
     assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /2 models · add model IDs manually/);
     assert.match(document.querySelector('[role=tabpanel]')!.textContent!, /Disabled/);
-    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.querySelector('dialog') === null);
     for (const label of ['Edit', 'Settings', 'Remove', 'Add provider']) act(() => Array.from(document.querySelectorAll<HTMLButtonElement>('.provider-setup-preview-home button')).find(button => button.textContent === label)!.click());
     assert.deepEqual(commands.map(command => command.type), ['edit', 'models', 'remove', 'add']);
     view.flow = { open: true, screen: 'choose' }; update();
     const page = document.querySelector('.provider-setup-preview-inline')!;
-    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.querySelector('dialog') === null);
     assert.ok(document.querySelector('[role=tabpanel]')!.contains(page));
     act(() => { page.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
     assert.ok(document.querySelector('.toolbar-settings-menu'));
@@ -57,13 +57,13 @@ test('management tab integrates inline navigation, Escape, tab switching and Set
     // leaving its capture-phase Escape listener behind.
     const count = commands.length;
     click('[data-tab=chat]');
-    assert.equal(document.querySelector('.provider-setup-preview-inline'), null);
+    assert.ok(document.querySelector('.provider-setup-preview-inline') === null);
     assert.ok(document.querySelector('.toolbar-settings-menu'));
     assert.equal(commands.length, count);
     click('[data-tab=providers]');
     assert.ok(document.querySelector('.provider-setup-preview-inline'));
     click('.toolbar-settings-close');
-    assert.equal(document.querySelector('.toolbar-settings-menu'), null);
+    assert.ok(document.querySelector('.toolbar-settings-menu') === null);
     // Closing Settings now follows the surface's safe close lifecycle: the
     // active subflow is closed, so its unsaved draft is reset (no secrets).
     assert.equal(commands.at(-1)?.type, 'close');
@@ -81,6 +81,6 @@ test('management tab integrates inline navigation, Escape, tab switching and Set
     view.flow = { open: false, screen: 'manage' }; update();
     assert.equal(document.activeElement?.textContent, 'Edit');
     escape();
-    assert.equal(document.querySelector('.toolbar-settings-menu'), null);
+    assert.ok(document.querySelector('.toolbar-settings-menu') === null);
   } finally { act(() => render(null, container)); container.remove(); }
 });

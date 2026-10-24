@@ -69,7 +69,7 @@ test('shows the complete unedited prompt in a labelled rich region and cleans up
   assert.equal(trigger().textContent, task);
   assert.equal(trigger().tabIndex, 0);
   assert.equal(trigger().getAttribute('aria-label'), 'Task for scout');
-  assert.equal(container.querySelector('button'), null);
+  assert.ok(container.querySelector('button') === null);
   await open();
   assert.equal(host().getAttribute('role'), 'region');
   assert.equal(host().getAttribute('aria-label'), 'Task for scout');
@@ -80,9 +80,9 @@ test('shows the complete unedited prompt in a labelled rich region and cleans up
   assert.equal(popover.querySelectorAll('[tabindex]').length, 1, 'only the raw text is a keyboard scroll surface');
   assert.ok(host().style.getPropertyValue('--pie-tooltip-available-height'));
   act(() => render(null, container));
-  assert.equal(document.querySelector('.pie-tooltip-host'), null);
+  assert.ok(document.querySelector('.pie-tooltip-host') === null);
   await flush();
-  assert.equal(document.querySelector('.pie-tooltip-host'), null);
+  assert.ok(document.querySelector('.pie-tooltip-host') === null);
 });
 
 test('focus opens, Tab enters the scroll surface, and Escape returns to the excerpt', async () => {
@@ -92,13 +92,13 @@ test('focus opens, Tab enters the scroll surface, and Escape returns to the exce
   dispatch(trigger(), tab);
   const scrollRegion = host().querySelector('.subagent-task-tooltip') as HTMLElement;
   assert.equal(scrollRegion.tabIndex, 0);
-  assert.equal(document.activeElement, scrollRegion);
+  assert.ok(document.activeElement === scrollRegion);
   assert.equal(tab.defaultPrevented, true);
   const end = new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true });
   dispatch(scrollRegion, end);
   assert.equal(end.defaultPrevented, false, 'native scrolling keys remain available');
   dispatch(scrollRegion, new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  assert.equal(document.activeElement, trigger());
+  assert.ok(document.activeElement === trigger());
   assert.equal(host().style.display, 'none');
   await flush();
   assert.equal(host().style.display, 'none');

@@ -119,11 +119,11 @@ test('seven rendered rows show full inline markdown even with autoExpand disable
   assert.equal(body.querySelector('strong')?.textContent, 'short');
   assert.equal(body.querySelectorAll('p').length, 2);
   assert.match(body.textContent ?? '', /Another paragraph\./);
-  assert.equal(host.querySelector('.collapsible-header, .resize-handle, .collapsible-close-footer'), null);
+  assert.ok(host.querySelector('.collapsible-header, .resize-handle, .collapsible-close-footer') === null);
   assert.equal(requests.length, 0);
   mount({ autoExpand: true });
   assert.ok(host.querySelector('.reasoning-inline .reasoning-scroll'));
-  assert.equal(host.querySelector('.collapsible-header, .resize-handle, .collapsible-close-footer'), null);
+  assert.ok(host.querySelector('.collapsible-header, .resize-handle, .collapsible-close-footer') === null);
 });
 
 test('eight rendered rows collapse to an icon and an unbounded normalized preview without a label', () => {
@@ -132,11 +132,11 @@ test('eight rendered rows collapse to an icon and an unbounded normalized previe
   mount({ text });
   assert.equal(header().getAttribute('aria-expanded'), 'false');
   assert.ok(header().querySelector('.reasoning-icon'));
-  assert.equal(header().querySelector('.transcript-header-label'), null);
+  assert.ok(header().querySelector('.transcript-header-label') === null);
   const expected = `First ${'more words '.repeat(25)}the final words`;
   assert.equal(reasoningPreview(text), expected);
   assert.equal(header().querySelector('.reasoning-preview')?.textContent, expected);
-  assert.equal(host.querySelector('.reasoning-inline'), null);
+  assert.ok(host.querySelector('.reasoning-inline') === null);
 });
 
 test('width-driven wrapping is measured by the inline ResizeObserver and overflow stays latched', () => {
@@ -150,7 +150,7 @@ test('width-driven wrapping is measured by the inline ResizeObserver and overflo
   rows = () => 1;
   mount({ text: 'Now short' });
   assert.equal(header().getAttribute('aria-expanded'), 'false');
-  assert.equal(host.querySelector('.reasoning-inline'), null);
+  assert.ok(host.querySelector('.reasoning-inline') === null);
   assert.ok(watching.every((observer) => !observer.targets.has(body)), 'inline observer is disconnected after overflow');
 });
 
@@ -194,7 +194,7 @@ test('a compact lazy summary stays collapsible and fetches detail only on expans
   };
   mount({ text: detailRef.summary, detailRef });
   assert.equal(header().getAttribute('aria-expanded'), 'false');
-  assert.equal(host.querySelector('.reasoning-inline'), null);
+  assert.ok(host.querySelector('.reasoning-inline') === null);
   assert.equal(requests.length, 0, 'short compact summary must not auto-fetch');
   toggle();
   assert.equal(requests.length, 1);

@@ -127,7 +127,7 @@ test('viewport resize refreshes marker positions via the ResizeObserver', () => 
   const scrollElement = { clientHeight: 800 } as unknown as HTMLDivElement;
   act(() => { render(h(MessageRail, railProps({ scrollRef: { current: scrollElement } })), container); });
   assert.ok(StubResizeObserver.last, 'rail observes the scroll element');
-  assert.equal(StubResizeObserver.last!.element, scrollElement);
+  assert.ok(StubResizeObserver.last!.element === scrollElement);
 
   (scrollElement as unknown as { clientHeight: number }).clientHeight = 400;
   act(() => { StubResizeObserver.last!.callback([]); });
@@ -140,8 +140,8 @@ test('rail uses one tab stop with arrow navigation', () => {
   const buttons = container.querySelectorAll<HTMLButtonElement>('button');
   assert.deepEqual(Array.from(buttons, (button) => button.tabIndex), [0, -1]);
   act(() => { buttons[0].focus(); buttons[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
-  assert.equal(document.activeElement, buttons[1]);
+  assert.ok(document.activeElement === buttons[1]);
   assert.deepEqual(Array.from(buttons, (button) => button.tabIndex), [-1, 0]);
   act(() => { buttons[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })); });
-  assert.equal(document.activeElement, buttons[0]);
+  assert.ok(document.activeElement === buttons[0]);
 });

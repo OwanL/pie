@@ -128,14 +128,14 @@ test('headers and side close targets retain native keyboard-focusable button sem
   mount([prompt()]);
   const group = button(groupSelector);
   group.focus();
-  assert.equal(document.activeElement, group);
+  assert.ok(document.activeElement === group);
   assert.equal(group.tagName, 'BUTTON');
   assert.equal(group.type, 'button');
   assert.equal(group.tabIndex, 0);
   click(group); // Native activation; happy-dom does not synthesize Enter/Space clicks.
   const card = button(cardSelector);
   card.focus();
-  assert.equal(document.activeElement, card);
+  assert.ok(document.activeElement === card);
   assert.equal(card.type, 'button');
   assert.equal(card.tabIndex, 0);
   click(card);
@@ -146,7 +146,7 @@ test('headers and side close targets retain native keyboard-focusable button sem
   }
   const gutter = button('.system-prompt-card .collapsible-gutter');
   gutter.focus();
-  assert.equal(document.activeElement, gutter);
+  assert.ok(document.activeElement === gutter);
   assert.equal(gutter.type, 'button');
   assert.equal(gutter.tabIndex, 0);
   click(gutter);

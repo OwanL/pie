@@ -51,14 +51,14 @@ test('history compaction keeps provenance expanded, summary lazy, and header com
     assert.match(header.textContent ?? '', /Overflow.*100 → 50.*50%/);
     assert.doesNotMatch(header.textContent ?? '', /model-long|provider|medium|4\.2s/);
     assert.match(header.getAttribute('title') ?? '', /model-long.*medium.*provider.*4\.2s/);
-    assert.equal(container.querySelector('.compaction-summary-provenance'), null);
-    assert.equal(container.querySelector('strong'), null);
+    assert.ok(container.querySelector('.compaction-summary-provenance') === null);
+    assert.ok(container.querySelector('strong') === null);
     const button = container.querySelector('button')!;
     act(() => button.click());
     assert.equal(button.getAttribute('aria-expanded'), 'true');
     assert.match(container.querySelector('.compaction-summary-provenance')?.textContent ?? '', /model-long.*medium.*provider.*4\.2s/);
     assert.equal(container.querySelector('strong')?.textContent, 'Preserved');
-    assert.equal(container.querySelector('.collapsible-close-footer'), null);
+    assert.ok(container.querySelector('.collapsible-close-footer') === null);
     assert.ok(container.querySelector('.collapsible-gutter'), 'side close affordance remains available');
     act(() => button.click());
     assert.equal(button.getAttribute('aria-expanded'), 'false');
@@ -81,7 +81,7 @@ test('history compaction missing metrics stay truthful, never invented', () => {
     container.innerHTML = html;
     assert.ok(container.querySelector('.compaction-summary-header')?.textContent?.includes(expected));
     assert.doesNotMatch(container.textContent ?? '', /%|hidden body/);
-    if (!details) assert.equal(container.querySelector('.compaction-summary-meta'), null);
+    if (!details) assert.ok(container.querySelector('.compaction-summary-meta') === null);
   }
 });
 
@@ -91,7 +91,7 @@ test('composer edge fade stays fixed, short and transparent to input', () => {
   assert.ok(fade);
   assert.match(fade, /position: absolute/);
   assert.match(fade, /bottom: 0/);
-  assert.match(fade, /height: 16px/);
+  assert.match(fade, /height: 8px/);
   assert.match(fade, /linear-gradient\(to bottom, transparent, var\(--panel-surface\)\)/);
   assert.match(fade, /pointer-events: none/);
   assert.match(fade, /z-index: 4/);

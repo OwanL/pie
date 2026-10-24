@@ -39,7 +39,7 @@ test('extension controls expose keyboard-accessible contextual help', async () =
   assert.equal(bashHelp.length, 4);
   const shellHelp = bashHelp.find((button) => button.getAttribute('aria-label') === 'About Shell path')!;
   shellHelp.focus();
-  assert.equal(document.activeElement, shellHelp);
+  assert.ok(document.activeElement === shellHelp);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 180)); });
   const shellTooltip = document.getElementById(shellHelp.getAttribute('aria-describedby') ?? '');
   assert.match(shellTooltip?.textContent ?? '', /both the warm pool and the fallback/);
@@ -48,7 +48,7 @@ test('extension controls expose keyboard-accessible contextual help', async () =
   const askHelp = container.querySelector<HTMLButtonElement>('.toolbar-settings-help-button');
   assert.ok(askHelp);
   askHelp.focus();
-  assert.equal(document.activeElement, askHelp);
+  assert.ok(document.activeElement === askHelp);
   assert.equal(askHelp.getAttribute('aria-label'), 'About Include for subagents');
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 180)); });
   const askTooltip = document.getElementById(askHelp.getAttribute('aria-describedby') ?? '');

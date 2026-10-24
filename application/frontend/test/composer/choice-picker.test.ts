@@ -41,16 +41,16 @@ test('ChoicePicker replaces the native select with a themed portaled listbox', (
 
   const trigger = container.querySelector<HTMLButtonElement>('.choice-picker-trigger');
   assert.ok(trigger);
-  assert.equal(container.querySelector('select'), null);
+  assert.ok(container.querySelector('select') === null);
   assert.equal(trigger.getAttribute('aria-expanded'), 'false');
 
   act(() => { trigger.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
   const dropdown = document.querySelector('.choice-picker-dropdown');
   assert.ok(dropdown);
-  assert.equal(dropdown!.closest('.choice-picker'), null, 'listbox is portaled out of toolbar overflow');
+  assert.ok(dropdown!.closest('.choice-picker') === null, 'listbox is portaled out of toolbar overflow');
   assert.equal(dropdown!.querySelector('[aria-selected="true"]')?.textContent?.includes('High'), true);
-  assert.equal(dropdown!.querySelector('.picker-popover-count'), null, 'option count is redundant in a fixed reasoning list');
-  assert.equal(dropdown!.querySelector('.choice-picker-description'), null, 'reasoning levels need no explanatory snippets');
+  assert.ok(dropdown!.querySelector('.picker-popover-count') === null, 'option count is redundant in a fixed reasoning list');
+  assert.ok(dropdown!.querySelector('.choice-picker-description') === null, 'reasoning levels need no explanatory snippets');
 });
 
 test('ChoicePicker clamps its portaled listbox inside very narrow viewports', () => {
@@ -104,7 +104,7 @@ test('ChoicePicker applies a choice immediately and closes', () => {
 
   assert.deepEqual(calls, ['high']);
   assert.equal(currentDropdown!.isConnected, false);
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
 });
 
 test('Tab closes the portaled listbox and advances to the next toolbar control', async () => {
@@ -131,5 +131,5 @@ test('Tab closes the portaled listbox and advances to the next toolbar control',
   });
 
   assert.equal(dropdown.isConnected, false);
-  assert.equal(document.activeElement, container.querySelector('#after-picker'));
+  assert.ok(document.activeElement === container.querySelector('#after-picker'));
 });

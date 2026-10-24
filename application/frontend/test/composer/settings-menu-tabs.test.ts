@@ -107,11 +107,11 @@ test('close and reopen retain category and search and restore trigger focus', ()
     search.dispatchEvent(new Event('input', { bubbles: true }));
   });
   act(() => { click(menu.querySelector('.toolbar-settings-close')); });
-  assert.equal(document.activeElement, container.querySelector('.toolbar-settings-trigger'));
+  assert.ok(document.activeElement === container.querySelector('.toolbar-settings-trigger'));
   menu = openMenu();
   assert.equal(menu.querySelector<HTMLInputElement>('.toolbar-settings-search-input')!.value, 'compaction');
   assert.ok(menu.querySelector('[data-tab="context"].active'));
-  assert.equal(document.activeElement, menu.querySelector('.toolbar-settings-search-input'));
+  assert.ok(document.activeElement === menu.querySelector('.toolbar-settings-search-input'));
 });
 
 function openMenu() {
@@ -344,8 +344,8 @@ test('two rapid Escape presses clear search then close settings', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 
-  assert.equal(document.body.querySelector('.toolbar-settings-menu'), null);
-  assert.equal(document.activeElement, container.querySelector('.toolbar-settings-trigger'));
+  assert.ok(document.body.querySelector('.toolbar-settings-menu') === null);
+  assert.ok(document.activeElement === container.querySelector('.toolbar-settings-trigger'));
 });
 
 // Bash settings now live under the Warm Bash extension in the Extensions tab
@@ -430,7 +430,7 @@ test('search keeps category navigation and groups results across categories', ()
 
   assert.ok(menu.querySelector('.toolbar-settings-tabs'), 'category navigation should persist while searching');
   assert.ok(menu.querySelector('[role="tab"][data-tab="models"]'));
-  assert.equal(menu.querySelector('select[aria-label="Settings category"]'), null);
+  assert.ok(menu.querySelector('select[aria-label="Settings category"]') === null);
   const region = menu.querySelector('[role="region"][aria-label="Settings search results"]');
   assert.ok(region, 'search is a named region, not an unlabelled tabpanel');
   assert.equal(region.getAttribute('aria-labelledby'), null);
@@ -507,7 +507,7 @@ test('clearing search restores focus after the clear button unmounts', () => {
   const clear = menu.querySelector('.toolbar-settings-search-clear') as HTMLButtonElement;
   clear.focus();
   act(() => { click(clear); });
-  assert.equal(document.activeElement, input);
+  assert.ok(document.activeElement === input);
 });
 
 test('search jumps focus the exact destination after commit and deduplicates same-category toggles', () => {
@@ -519,12 +519,12 @@ test('search jumps focus the exact destination after commit and deduplicates sam
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   const result = menu.querySelector('.toolbar-settings-search-result-jump') as HTMLButtonElement;
-  assert.equal(result.querySelector('.toolbar-settings-search-result-context'), null, 'do not repeat the category as source context');
+  assert.ok(result.querySelector('.toolbar-settings-search-result-context') === null, 'do not repeat the category as source context');
   result.focus();
   act(() => { click(result); });
-  assert.equal(document.activeElement, menu.querySelector('input[aria-label="Corner radius"]'));
+  assert.ok(document.activeElement === menu.querySelector('input[aria-label="Corner radius"]'));
   assert.equal(menu.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim(), 'Appearance');
-  assert.equal(menu.querySelector('.toolbar-settings-category-heading'), null, 'do not repeat navigation as a content heading');
+  assert.ok(menu.querySelector('.toolbar-settings-category-heading') === null, 'do not repeat navigation as a content heading');
 
   act(() => {
     input.value = 'proactive automatic compaction';
@@ -622,15 +622,15 @@ test('a jump whose source disappears restores search focus instead of another Th
     click(prepass);
     mount([]);
   });
-  assert.equal(menu.querySelector('[data-settings-section="pruning prepass"]'), null);
-  assert.equal(document.activeElement, input);
+  assert.ok(menu.querySelector('[data-settings-section="pruning prepass"]') === null);
+  assert.ok(document.activeElement === input);
 });
 
 test('visible category tabs and arrow navigation leave search', async () => {
   mount();
   const menu = openMenu();
   const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
-  assert.equal(menu.querySelector('.toolbar-settings-category-select'), null);
+  assert.ok(menu.querySelector('.toolbar-settings-category-select') === null);
   assert.deepEqual(Array.from(menu.querySelectorAll('[role="tab"]')).map((tab) => tab.getAttribute('data-tab')), ['chat', 'models', 'context', 'appearance', 'mcp']);
   act(() => {
     input.value = 'radius';
@@ -646,7 +646,7 @@ test('visible category tabs and arrow navigation leave search', async () => {
     contextTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   });
   await act(async () => { await new Promise((resolve) => window.requestAnimationFrame(resolve)); });
-  assert.equal(document.activeElement, menu.querySelector('[data-tab="appearance"]'));
+  assert.ok(document.activeElement === menu.querySelector('[data-tab="appearance"]'));
   assert.equal(menu.querySelector('[role="tab"][aria-selected="true"]')?.getAttribute('data-tab'), 'appearance');
 });
 
@@ -708,10 +708,10 @@ test('search arrow keys move native result focus and Enter retains button activa
   });
   const results = Array.from(menu.querySelectorAll<HTMLElement>('.toolbar-settings-search-result'));
   act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })); });
-  assert.equal(document.activeElement, results[0]);
+  assert.ok(document.activeElement === results[0]);
   assert.ok(results[0].matches('button'), 'real focus announces the native result name');
   act(() => { results[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); });
-  assert.equal(document.activeElement, results.at(-1));
+  assert.ok(document.activeElement === results.at(-1));
   const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
   act(() => { input.focus(); input.dispatchEvent(tab); });
   assert.equal(tab.defaultPrevented, false, 'search does not intercept ordinary Tab');
@@ -729,7 +729,7 @@ test('category click clears search without stealing category focus and Server co
   const category = menu.querySelector<HTMLElement>('[data-tab="models"]')!;
   act(() => { category.focus(); click(category); });
   assert.equal(input.value, '');
-  assert.equal(document.activeElement, category);
+  assert.ok(document.activeElement === category);
 });
 
 test('compound labels focus keep pickers, bucket add controls, defaults and drop tools', () => {
@@ -748,7 +748,7 @@ test('compound labels focus keep pickers, bucket add controls, defaults and drop
     const result = menu.querySelector('.toolbar-settings-search-result-jump');
     assert.ok(result, label);
     act(() => click(result));
-    assert.notEqual(document.activeElement, input, label);
+    assert.ok(document.activeElement !== input, label);
     if (label.startsWith('Omitted')) assert.equal(document.activeElement?.getAttribute('aria-label'), label);
     if (label.endsWith('bucket models')) assert.ok(document.activeElement?.closest('.toolbar-settings-keep-picker-wrap'), label);
     if (label === 'Drop tools for subagents') assert.equal(document.activeElement?.getAttribute('aria-label'), 'Add a tool name to drop for subagents');

@@ -148,7 +148,7 @@ test('reading a dropped image explains the temporary send block and clears when 
   assert.equal(sends, 0, 'neither click nor Enter dispatches while the image is being read');
   assert.equal(added.length, 0);
   await act(async () => { resolve(new Uint8Array([1]).buffer); await new Promise(done => setTimeout(done, 0)); });
-  assert.equal(container.querySelector('.composer-send-progress'), null);
+  assert.ok(container.querySelector('.composer-send-progress') === null);
   assert.equal(added.length, 1, 'the completed image is accepted');
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-action-submit')!.disabled, false);
   act(() => container.querySelector<HTMLButtonElement>('.composer-action-submit')!.click());
@@ -179,13 +179,13 @@ test('stop and reconciliation show transient progress without allowing dispatch'
 test('ordinary busy work has no duplicate guidance banner and automatic retry is explicit', () => {
   const props = makeProps('/sessions/current.jsonl');
   act(() => render(h(Composer, props), container));
-  assert.equal(container.querySelector('.composer-send-progress'), null);
+  assert.ok(container.querySelector('.composer-send-progress') === null);
   props.retryStatus = { attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: 'Temporary error' };
   act(() => render(h(Composer, { ...props }), container));
   assert.match(container.querySelector('.composer-retry-label')!.textContent!, /Automatic retry 1 of 3/);
 });
 
-test('one click clears queued messages directly for the explicit session path without a dialog', () => {
+test('one click clears queued messages directly for the explicit session path without opening a dialog', () => {
   act(() => { render(h(Composer, makeProps('/sessions/current.jsonl')), container); });
 
   const clearButton = container.querySelector<HTMLButtonElement>('[data-action="clear-queue"]');
@@ -193,5 +193,6 @@ test('one click clears queued messages directly for the explicit session path wi
   act(() => { clearButton.click(); });
 
   assert.deepEqual(posted, [{ type: 'clearQueue', sessionPath: '/sessions/current.jsonl' }]);
-  assert.equal(container.querySelector('[role="dialog"]'), null, 'clearing does not require confirmation');
+  // More keeps its closed, aria-hidden dialog mounted; clearing must not open one.
+  assert.ok(container.querySelector('[role="dialog"]:not([aria-hidden="true"])') === null, 'clearing does not require confirmation');
 });

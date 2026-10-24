@@ -192,7 +192,7 @@ test('expanded diagnostics show counts once, quiet metadata, full tags and neste
   assert.equal(raw.textContent, 'Diagnostics');
   assert.equal(reasoning.getAttribute('aria-expanded'), 'false');
   assert.equal(raw.getAttribute('aria-expanded'), 'false');
-  assert.equal(container.querySelector('pre'), null);
+  assert.ok(container.querySelector('pre') === null);
   act(() => reasoning.click());
   assert.match(container.textContent ?? '', /Keep the relevant catalog\./);
   act(() => raw.click());

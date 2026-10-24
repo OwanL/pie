@@ -155,7 +155,7 @@ test('provider expand controls reference stable, unique mounted sections only', 
 
     act(() => openai.click());
     assert.equal(openai.hasAttribute('aria-controls'), false);
-    assert.equal(document.getElementById(openaiId), null);
+    assert.ok(document.getElementById(openaiId) === null);
     act(() => openai.click());
     assert.equal(openai.getAttribute('aria-controls'), openaiId, 'reopening preserves the controls id');
     act(() => anthropic.click());

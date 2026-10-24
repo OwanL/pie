@@ -183,7 +183,7 @@ test('real composer confines sample-reactive recording edge to input and toolbar
   paint({ ...recording, audioLevel: 0 });
   const shell = root.querySelector('.composer-shell')!;
   const edge = shell.querySelector('.dictation-edge')!;
-  assert.equal(edge.parentElement, shell);
+  assert.ok(edge.parentElement === shell);
   assert.equal(edge.getAttribute('aria-hidden'), 'true');
   assert.ok(shell.querySelector('textarea'));
   assert.ok(shell.querySelector('.composer-bottom-bar'));
@@ -202,15 +202,15 @@ test('real composer confines sample-reactive recording edge to input and toolbar
   assert.equal((edge as HTMLElement).style.getPropertyValue('--dictation-angle'), '130deg');
   for (const phase of ['preparing', 'finalizing', 'error', 'idle'] as const) {
     paint({ ...recording, phase });
-    assert.equal(root.querySelector('.dictation-edge'), null);
+    assert.ok(root.querySelector('.dictation-edge') === null);
   }
   for (const dictation of [undefined, { ...recording, available: false }, { ...recording, sessionPath: '/other' }]) {
     paint(dictation);
-    assert.equal(root.querySelector('.dictation-edge'), null);
+    assert.ok(root.querySelector('.dictation-edge') === null);
   }
   for (const overrides of [{ commandsAvailable: false }, { activeSessionPath: null }, { hasActiveTabs: false }, { needsSessionRecovery: true }]) {
     paint(recording, overrides);
-    assert.equal(root.querySelector('.dictation-edge'), null);
+    assert.ok(root.querySelector('.dictation-edge') === null);
   }
   render(null, root);
 });

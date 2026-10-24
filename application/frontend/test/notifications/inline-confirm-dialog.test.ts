@@ -46,7 +46,7 @@ test('Cancel takes initial focus and the dialog is named by its message', () => 
   assert.ok(dialog);
   assert.equal(dialog!.getAttribute('aria-modal'), 'true');
   const cancel = container.querySelector<HTMLButtonElement>('[data-inline-confirm-cancel]')!;
-  assert.equal(document.activeElement, cancel, 'initial focus must land on Cancel');
+  assert.ok(document.activeElement === cancel, 'initial focus must land on Cancel');
 
   const messageId = dialog!.getAttribute('aria-labelledby');
   assert.ok(messageId);
@@ -90,17 +90,17 @@ test('Tab wraps inside the dialog so focus cannot escape', () => {
 
   const cancel = container.querySelector<HTMLButtonElement>('[data-inline-confirm-cancel]')!;
   const ok = container.querySelector<HTMLButtonElement>('[data-inline-confirm-ok]')!;
-  assert.equal(document.activeElement, cancel);
+  assert.ok(document.activeElement === cancel);
 
   // Tab from the last control wraps to the first.
   act(() => { ok.focus(); });
   const forward = key(ok, { key: 'Tab' });
   assert.equal(forward.defaultPrevented, true, 'trap owns the edge-crossing Tab');
-  assert.equal(document.activeElement, cancel, 'Tab from the choice button wraps back to Cancel');
+  assert.ok(document.activeElement === cancel, 'Tab from the choice button wraps back to Cancel');
   // Shift+Tab from the first control wraps to the last.
   const backward = key(cancel, { key: 'Tab', shiftKey: true });
   assert.equal(backward.defaultPrevented, true);
-  assert.equal(document.activeElement, ok, 'Shift+Tab from Cancel wraps to the choice button');
+  assert.ok(document.activeElement === ok, 'Shift+Tab from Cancel wraps to the choice button');
 });
 
 test('focus returns to the previously focused element on unmount', () => {
@@ -111,9 +111,9 @@ test('focus returns to the previously focused element on unmount', () => {
     act(() => {
       render(h(InlineConfirmDialog, { confirm: baseConfirm, onRespond: () => undefined }), container);
     });
-    assert.notEqual(document.activeElement, outside, 'dialog must own focus while open');
+    assert.ok(document.activeElement !== outside, 'dialog must own focus while open');
     act(() => { render(null, container); });
-    assert.equal(document.activeElement, outside, 'unmount must restore prior focus');
+    assert.ok(document.activeElement === outside, 'unmount must restore prior focus');
   } finally {
     outside.remove();
   }

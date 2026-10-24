@@ -58,7 +58,7 @@ for (const id of ['openai', 'anthropic']) test(`${id}: API key private submit, h
   assert.equal(host.connections.length, 2);
   host.reply({ status: 'saved', flow: { ...host.view().flow!, screen: 'done' }, draft: { ...host.view().draft!, credentialSource: 'saved' } });
   assert.match(document.body.textContent!, /provider settings have been saved/); host.click('Close');
-  host.reply({ flow: { ...host.view().flow!, open: false } }); assert.equal(document.querySelector('dialog'), null);
+  host.reply({ flow: { ...host.view().flow!, open: false } }); assert.ok(document.querySelector('dialog') === null);
   host.reply({ flow: { ...host.view().flow!, open: true, screen: 'connect' } });
   assert.equal(document.querySelector<HTMLInputElement>('input[type=password]')!.value, '');
   host.click('Save existing'); assert.deepEqual(host.commands.at(-1), { type: 'save' });
@@ -78,9 +78,9 @@ for (const id of ['anthropic', 'github-copilot']) test(`${id}: OAuth browser/dev
   assert.equal(document.querySelector<HTMLInputElement>('.provider-setup-preview-auth input')!.value, '');
   host.click('Cancel'); assert.deepEqual(host.commands.at(-1), { type: 'cancel' });
   host.reply({ status: 'error', auth: undefined, authBrowser: undefined, message: 'Sign-in failed.' });
-  assert.match(document.querySelector('[role=alert]')!.textContent!, /Sign-in failed/); assert.equal(document.querySelector('a'), null);
+  assert.match(document.querySelector('[role=alert]')!.textContent!, /Sign-in failed/); assert.ok(document.querySelector('a') === null);
   host.reply({ status: 'connecting', auth: { kind: 'progress', operationId: 'new', message: 'Waiting' }, authBrowser: { operationId: 'old', url: 'https://example.test/stale' } });
-  assert.equal(document.querySelector('a'), null);
+  assert.ok(document.querySelector('a') === null);
   act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
   assert.deepEqual(host.commands.at(-1), { type: 'cancel' });
 }));

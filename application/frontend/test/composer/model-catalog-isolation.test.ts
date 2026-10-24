@@ -82,7 +82,7 @@ test('failed catalog discovery renders an interactive retry affordance, not load
     const retry = container.querySelector<HTMLButtonElement>('[aria-label="Retry loading the model catalog"]');
     assert.ok(retry, 'the failed catalog must offer a retry affordance');
     assert.match(retry.textContent ?? '', /Models unavailable — Retry/u);
-    assert.equal(container.querySelector('[aria-label="Model"]'), null);
+    assert.ok(container.querySelector('[aria-label="Model"]') === null);
     act(() => retry!.click());
     assert.equal(retries, 1);
 
@@ -91,7 +91,7 @@ test('failed catalog discovery renders an interactive retry affordance, not load
       availableModels: models, onRetryModelCatalog: () => { retries += 1; },
     }), container));
     assert.ok(container.querySelector('[aria-label="Model"]'));
-    assert.equal(container.querySelector('[aria-label="Retry loading the model catalog"]'), null);
+    assert.ok(container.querySelector('[aria-label="Retry loading the model catalog"]') === null);
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -124,7 +124,7 @@ test('loading existing catalog keeps concise label and selectable models, with m
     assert.deepEqual(changes, ['other', 'other', 'other']);
     act(() => render(catalog('loading', 'astra', { availableModels: models, commandsAvailable: false }), container));
     assert.equal(container.querySelector<HTMLButtonElement>('[aria-label="Model"]')!.disabled, true);
-    assert.equal(document.querySelector('[role="listbox"]'), null);
+    assert.ok(document.querySelector('[role="listbox"]') === null);
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -138,7 +138,7 @@ test('empty loading catalog retains only the matching concise label, never stale
     act(() => render(catalog('authoritative', 'astra', { availableModels: models }), container));
     act(() => render(catalog('loading', 'astra'), container));
     assert.equal(container.querySelector('.panel-chip-label')!.textContent, 'GPT-6 Astra');
-    assert.equal(container.querySelector('[aria-label="Model"]'), null);
+    assert.ok(container.querySelector('[aria-label="Model"]') === null);
     act(() => render(catalog('loading', 'astra', { selectedProvider: 'different-provider' }), container));
     assert.equal(container.querySelector('.panel-chip-label')!.textContent, 'astra');
     act(() => render(catalog('loading'), container));
@@ -159,7 +159,7 @@ test('empty loading catalog does not retain a label across sessions with the sam
     assert.equal(container.querySelector('[aria-label="Model"]')!.textContent, 'GPT-6 Astra');
     act(() => render(catalog('loading', 'astra', { sessionPath: '/sessions/second.jsonl' }), container));
     assert.equal(container.querySelector('.panel-chip-label')!.textContent, 'astra');
-    assert.equal(container.querySelector('[aria-label="Model"]'), null);
+    assert.ok(container.querySelector('[aria-label="Model"]') === null);
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -181,7 +181,7 @@ test('empty loading catalog retains label for the provider resolved from the sel
       selectedProvider: undefined,
     }), container));
     assert.equal(container.querySelector('.panel-chip-label')!.textContent, 'GPT-6 Astra');
-    assert.equal(container.querySelector('[aria-label="Model"]'), null);
+    assert.ok(container.querySelector('[aria-label="Model"]') === null);
   } finally {
     act(() => render(null, container));
     container.remove();

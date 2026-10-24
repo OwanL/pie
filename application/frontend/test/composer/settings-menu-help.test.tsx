@@ -49,7 +49,7 @@ test('first Escape dismisses help and second Escape closes settings', async () =
   assert.equal(help.getAttribute('aria-describedby'), null);
   act(() => { help.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
   assert.equal(document.querySelector('.toolbar-settings-menu'), null);
-  assert.equal(document.activeElement, target.querySelector('.toolbar-settings-trigger'));
+  assert.ok(document.activeElement === target.querySelector('.toolbar-settings-trigger'));
 });
 test('interacting with owned help keeps settings open, outside click still dismisses it', async () => {
   const { tooltip } = await showHelp();

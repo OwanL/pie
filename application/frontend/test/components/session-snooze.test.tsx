@@ -58,20 +58,20 @@ test('snooze cascading menu supports arrow navigation and one-layer Escape', () 
   }), container));
   act(() => button(container, 'Snooze…').focus());
   press('ArrowRight');
-  assert.equal(document.activeElement, button(document.body, '4 hours'));
+  assert.ok(document.activeElement === button(document.body, '4 hours'));
   press('ArrowDown');
   press('ArrowUp');
-  assert.equal(document.activeElement, button(document.body, '4 hours'));
+  assert.ok(document.activeElement === button(document.body, '4 hours'));
   press('End');
-  assert.equal(document.activeElement, button(document.body, 'Until Monday morning'));
+  assert.ok(document.activeElement === button(document.body, 'Until Monday morning'));
   press('Escape');
-  assert.equal(document.activeElement, button(container, 'Snooze…'));
+  assert.ok(document.activeElement === button(container, 'Snooze…'));
   act(() => button(container, 'Snooze…').click());
   press('ArrowLeft');
-  assert.equal(document.activeElement, button(container, 'Snooze…'));
+  assert.ok(document.activeElement === button(container, 'Snooze…'));
   act(() => button(container, 'Snooze…').click());
   press('Escape');
-  assert.equal(document.activeElement, button(container, 'Snooze…'));
+  assert.ok(document.activeElement === button(container, 'Snooze…'));
   assert.equal(closed, 0);
   press('Escape');
   assert.equal(closed, 1);
@@ -97,7 +97,7 @@ test('submenu mouseleave respects focus and pointer presence before delayed dism
 
     act(() => { document.body.tabIndex = -1; document.body.focus(); });
     await act(async () => { await waitForDismissal(); });
-    assert.equal(submenu(), null, 'focus and pointer both outside eventually dismiss the submenu');
+    assert.ok(submenu() === null, 'focus and pointer both outside eventually dismiss the submenu');
 
     act(() => { trigger.dispatchEvent(new MouseEvent('mouseenter')); trigger.dispatchEvent(new MouseEvent('mouseleave')); });
     const child = submenu();
@@ -108,7 +108,7 @@ test('submenu mouseleave respects focus and pointer presence before delayed dism
     assert.ok(submenu(), 'pointer inside submenu keeps it open despite outside focus');
     act(() => { child!.dispatchEvent(new MouseEvent('mouseleave')); });
     await act(async () => { await waitForDismissal(); });
-    assert.equal(submenu(), null, 'submenu closes after both focus and pointer leave');
+    assert.ok(submenu() === null, 'submenu closes after both focus and pointer leave');
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -124,18 +124,18 @@ test('hover-open submenu leaves parent keyboard navigation available', () => fix
   const trigger = button(container, 'Snooze…');
   act(() => { trigger.focus(); trigger.dispatchEvent(new MouseEvent('mouseenter')); });
   assert.ok(document.body.querySelector('[aria-label="Snooze A quiet session"]'));
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
   press('ArrowDown');
-  assert.equal(document.activeElement, button(container, 'Close tab'));
+  assert.ok(document.activeElement === button(container, 'Close tab'));
   press('ArrowUp');
-  assert.equal(document.activeElement, trigger);
+  assert.ok(document.activeElement === trigger);
   press('Home');
-  assert.equal(document.activeElement, button(container, 'Copy session path'));
+  assert.ok(document.activeElement === button(container, 'Copy session path'));
   press('End');
-  assert.equal(document.activeElement, button(container, 'Close tab'));
+  assert.ok(document.activeElement === button(container, 'Close tab'));
   act(() => trigger.focus());
   press('ArrowRight');
-  assert.equal(document.activeElement, button(document.body, '4 hours'));
+  assert.ok(document.activeElement === button(document.body, '4 hours'));
 }));
 
 const tabsProps: ComponentProps<typeof SessionTabs> = {
@@ -250,13 +250,13 @@ test('manage and restore early remain accessible with every tab snoozed; members
   assert.equal(manage.getAttribute('aria-expanded'), 'true');
   const restore = container.querySelector<HTMLButtonElement>('[aria-label="Restore early: A quiet session"]');
   assert.ok(restore);
-  assert.equal(document.activeElement, restore);
+  assert.ok(document.activeElement === restore);
   assert.equal(container.querySelector('time')?.getAttribute('datetime'), new Date(snoozed[0].wakeAt).toISOString());
   act(() => restore.click());
   assert.deepEqual(posted, [{ type: 'restoreSnoozedSession', sessionPath: path }]);
   assert.ok(container.querySelector('[aria-label="Restore early: A quiet session"]'), 'no optimistic local removal');
   press('Escape');
-  assert.equal(document.activeElement, manage);
+  assert.ok(document.activeElement === manage);
   act(() => render(h(Harness, { sessions: [] }), container));
   assert.equal(container.querySelector('[aria-label="Manage snoozed sessions"]'), null);
 }));
@@ -293,13 +293,13 @@ test('host restoration focuses adjacent manager rows, then stable New session wi
   act(() => row('Middle').focus());
   act(() => row('Middle').click());
   publish([snoozed[0], snoozed[2]]);
-  assert.equal(document.activeElement, row('Last'));
+  assert.ok(document.activeElement === row('Last'));
   act(() => row('Last').click());
   publish([snoozed[0]]);
-  assert.equal(document.activeElement, row('First'));
+  assert.ok(document.activeElement === row('First'));
   act(() => row('First').click());
   publish([]);
-  assert.equal(document.activeElement, container.querySelector('[aria-label="New session"]'));
+  assert.ok(document.activeElement === container.querySelector('[aria-label="New session"]'));
   assert.equal(container.querySelector('[role="menu"]'), null);
   assert.equal(selected, 0);
   assert.deepEqual(restored, [snoozed[1].path, snoozed[2].path, snoozed[0].path]);
@@ -365,14 +365,14 @@ test('right-click opens a per-entry menu focused on Restore; Close uses the clos
   const buttons = entryItems(container);
   const close = buttons.find((item) => item.textContent?.trim() === 'Close');
   assert.ok(close, 'Close item present with a close-session callback');
-  assert.equal(document.activeElement, buttons[0], 'Restore receives initial focus');
+  assert.ok(document.activeElement === buttons[0], 'Restore receives initial focus');
   assert.equal(controls.posted.length, 0);
   act(() => close!.click());
   assert.deepEqual(controls.closedPaths, ['/s/B.jsonl']);
   assert.equal(controls.posted.length, 0, 'close posts no snooze commands');
   assert.equal(container.querySelector('[role="menu"][aria-label="Beta snoozed session actions"]'), null);
   assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
-  assert.equal(document.activeElement, snoozedRow(container, 'Beta'), 'focus returns to the row');
+  assert.ok(document.activeElement === snoozedRow(container, 'Beta'), 'focus returns to the row');
 }));
 
 test('entry menu Restore mirrors left-click restore while the manager stays open',
@@ -384,7 +384,7 @@ test('entry menu Restore mirrors left-click restore while the manager stays open
   assert.deepEqual(controls.closedPaths, []);
   assert.ok(snoozedRow(container, 'Beta'), 'no optimistic local removal; membership stays host-owned');
   assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
-  assert.equal(document.activeElement, snoozedRow(container, 'Beta'));
+  assert.ok(document.activeElement === snoozedRow(container, 'Beta'));
 }));
 
 test('Escape dismisses the entry menu, then the manager, one layer at a time',
@@ -396,10 +396,10 @@ test('Escape dismisses the entry menu, then the manager, one layer at a time',
   press('Escape');
   assert.equal(container.querySelector('[role="menu"][aria-label="Beta snoozed session actions"]'), null);
   assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'), 'manager stays open');
-  assert.equal(document.activeElement, row, 'focus returns to the row');
+  assert.ok(document.activeElement === row, 'focus returns to the row');
   press('Escape');
   assert.equal(container.querySelector('[aria-label="Snoozed sessions"]'), null);
-  assert.equal(document.activeElement, container.querySelector('[aria-label="Manage snoozed sessions"]'));
+  assert.ok(document.activeElement === container.querySelector('[aria-label="Manage snoozed sessions"]'));
 }));
 
 test('entry menu navigation and outside clicks keep layered dismissal intact',
@@ -407,7 +407,7 @@ test('entry menu navigation and outside clicks keep layered dismissal intact',
   mountSnoozedManager(container);
   openEntryViaRightClick(container, 'Beta');
   press('ArrowDown');
-  assert.equal(document.activeElement, entryItems(container)[1], 'Close reachable by arrow');
+  assert.ok(document.activeElement === entryItems(container)[1], 'Close reachable by arrow');
   act(() => { entryMenu(container).querySelector('button')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
   assert.ok(entryMenu(container), 'mousedown inside the entry menu keeps both layers open');
   assert.ok(container.querySelector('[aria-label="Snoozed sessions"]'));
@@ -433,9 +433,9 @@ test('left-click restore and keyboard context-menu dismissal coexist', () => fix
   })); });
   const menu = container.querySelector<HTMLDivElement>('[role="menu"][aria-label="Alpha snoozed session actions"]');
   assert.ok(menu, 'keyboard context menu opens the entry menu for Alpha');
-  assert.equal(document.activeElement, menu.querySelector('button'));
+  assert.ok(document.activeElement === menu.querySelector('button'));
   press('Escape');
-  assert.equal(document.activeElement, snoozedRow(container, 'Alpha'));
+  assert.ok(document.activeElement === snoozedRow(container, 'Alpha'));
   press('ContextMenu');
   assert.ok(container.querySelector('[aria-label="Alpha snoozed session actions"]'));
 }));
@@ -451,7 +451,7 @@ test('host membership updates dismiss removed entry actions and focus the neighb
   openEntryViaRightClick(container, 'Beta');
   publish([snoozedEntries[0]]);
   assert.equal(container.querySelector('[aria-label="Beta snoozed session actions"]'), null);
-  assert.equal(document.activeElement, snoozedRow(container, 'Alpha'));
+  assert.ok(document.activeElement === snoozedRow(container, 'Alpha'));
   openEntryViaRightClick(container, 'Alpha');
   publish([snoozedEntries[0]], false);
   assert.equal(container.querySelector('[aria-label="Alpha snoozed session actions"]'), null);
@@ -461,5 +461,5 @@ test('host membership updates dismiss removed entry actions and focus the neighb
   act(() => backendDownRow.click());
   assert.deepEqual(restored, [], 'a backend-not-ready row must not restore');
   publish([]);
-  assert.equal(document.activeElement, container.querySelector('[aria-label="New session"]'));
+  assert.ok(document.activeElement === container.querySelector('[aria-label="New session"]'));
 }));

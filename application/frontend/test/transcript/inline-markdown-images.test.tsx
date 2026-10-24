@@ -56,7 +56,7 @@ afterEach(() => {
 test('Windows markdown hydrates the actual placeholder with bounded targeted data and alt/title', async () => {
   const source = '![Chart & details](C:/workspace/chart.png "A & title")';
   root.innerHTML = await markdown(source);
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   mount();
   assert.equal(requests.length, 1);
   assert.equal(requests[0].path, 'C:/workspace/chart.png');
@@ -70,7 +70,7 @@ test('Windows markdown hydrates the actual placeholder with bounded targeted dat
   assert.equal(root.querySelector('.inline-markdown-image-fallback')?.hasAttribute('hidden'), true);
   assert.doesNotMatch(await markdown(source), /data:image|<img/);
   image?.dispatchEvent(new dom.window.Event('error'));
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   assert.match(root.textContent ?? '', /Chart & details/);
   await mutations();
   assert.equal(requests.length, 1);
@@ -128,7 +128,7 @@ test('missing files, wrong-session and malformed replies stay readable without r
     status: 'ready', data: { mimeType: 'image/svg+xml', dataUrl: 'data:image/svg+xml;base64,AAAA' },
   }));
   await mutations();
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   assert.match(root.textContent ?? '', /missing.*other.*malformed/);
   assert.equal(requests.length, 3);
 });
@@ -139,14 +139,14 @@ test('session and cwd changes erase ready bytes and reject old replies', async (
   const old = [...requests];
   reply(old[0]);
   mount('/sessions/b', 'D:/new');
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   assert.equal(requests[2].path, 'D:/new/chart.png');
   reply(old[1]);
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   reply(requests[2]);
   assert.ok(root.querySelector('img'));
   mount('/sessions/b', 'E:/changed');
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   assert.equal(requests[4].path, 'E:/changed/chart.png');
 });
 
@@ -158,20 +158,20 @@ test('unmount, row removal and disconnect discard stale replies and reset ready 
   assert.ok(root.querySelector('img'));
   const beforeClear = requests.length;
   act(() => clearImagePreviewRequests());
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   reply(old[1]);
   await mutations();
   assert.equal(requests.length, beforeClear);
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   act(() => render(null, target));
   reply(requests.at(-1)!);
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   root.innerHTML = await markdown('![new](new.png)');
   mount();
   const removedRequest = requests.at(-1)!;
   root.replaceChildren();
   reply(removedRequest);
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
 });
 
 test('mounted queue and ready byte owners are bounded; only two requests run concurrently', async () => {
@@ -239,7 +239,7 @@ test('timeout releases capacity, ignores late bytes and does not retry a missing
     act(() => first[1]());
     assert.equal(requests.length, 3);
     reply(old);
-    assert.equal(root.querySelector('img'), null);
+    assert.ok(root.querySelector('img') === null);
     for (let i = 1; i < 8; i++) {
       const next = [...timers][0];
       assert.ok(next);
@@ -267,7 +267,7 @@ test('a refused transport request stays fallback-only and releases its subscript
   assert.equal(requests.length, 1);
   reply(requests[0]);
   await mutations();
-  assert.equal(root.querySelector('img'), null);
+  assert.ok(root.querySelector('img') === null);
   assert.equal(requests.length, 1);
 });
 

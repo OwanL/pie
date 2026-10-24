@@ -21,9 +21,9 @@ function click(text: string) { act(() => button(text).click()); }
 test('closed by default; caller controls all stages and dialog restores focus', () => {
   const ui = mount();
   try {
-    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.querySelector('dialog') === null);
     button('Manage providers').focus(); click('Manage providers');
-    assert.deepEqual(ui.commands, [{ type: 'open' }]); assert.equal(document.querySelector('dialog'), null);
+    assert.deepEqual(ui.commands, [{ type: 'open' }]); assert.ok(document.querySelector('dialog') === null);
     ui.view.flow = { open: true, screen: 'manage' }; ui.update();
     assert.ok(document.querySelector('dialog[open]')); assert.match(document.body.textContent!, /OpenAI API.*1 model/s);
     click('Add provider'); assert.equal(ui.commands.at(-1)?.type, 'add');
@@ -32,7 +32,7 @@ test('closed by default; caller controls all stages and dialog restores focus', 
     click('Back'); assert.equal(ui.commands.at(-1)?.type, 'back');
     act(() => { document.querySelector('dialog')!.dispatchEvent(new Event('cancel', { cancelable: true })); });
     assert.equal(ui.commands.at(-1)?.type, 'close'); assert.ok(document.querySelector('dialog'));
-    ui.view.flow.open = false; ui.update(); assert.equal(document.activeElement, button('Manage providers'));
+    ui.view.flow.open = false; ui.update(); assert.ok(document.activeElement === button('Manage providers'));
   } finally { ui.cleanup(); }
 });
 test('document Escape stays owned across done, choose, and connect transitions', () => {
@@ -48,7 +48,7 @@ test('document Escape stays owned across done, choose, and connect transitions',
     assert.ok(document.querySelector('dialog')!.contains(document.activeElement));
     const choose = button('ChatGPT'); choose.focus(); click('ChatGPT');
     view.flow.screen = 'connect'; view.flow.kind = 'chatgpt'; ui.update();
-    assert.notEqual(document.activeElement, choose);
+    assert.ok(document.activeElement !== choose);
     assert.ok(document.querySelector('dialog')!.contains(document.activeElement));
     const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
     document.dispatchEvent(event);
@@ -98,7 +98,7 @@ test('API secret uses only private callback, clears input, never shows technical
 test('connection actions require callback; sign in is mocked and done only closes', () => {
   const view = fixture(); view.flow = { open: true, screen: 'connect', kind: 'copilot' }; const extra: Partial<ProviderSetupPreviewProps> = {}; const ui = mount(view, extra);
   try {
-    assert.equal(button('Sign in').disabled, true); assert.equal(document.querySelector('input[type=password]'), null);
+    assert.equal(button('Sign in').disabled, true); assert.ok(document.querySelector('input[type=password]') === null);
     const requests: unknown[] = []; extra.onConnect = request => { requests.push(request); }; ui.update();
     act(() => { document.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true })); });
     assert.deepEqual(requests, [{ method: 'signin' }]);
@@ -136,8 +136,8 @@ test('Ollama is an explicit choice with controlled daemon URL and keyless local 
       view.draft = { ...view.draft!, id: 'ollama', baseUrl: 'http://localhost:11434/v1', api: 'openai-completions', credentialSource: 'none' }; ui.update();
       assert.match(document.body.textContent!, /Connect Ollama/);
       assert.match(document.body.textContent!, /Ollama Cloud.*ollama signin/s);
-      assert.equal(document.querySelector('input[type=password]'), null);
-      assert.equal(document.querySelector('select'), null);
+      assert.ok(document.querySelector('input[type=password]') === null);
+      assert.ok(document.querySelector('select') === null);
       const url = document.querySelector<HTMLInputElement>('input[type=url]')!;
       assert.equal(url.value, 'http://localhost:11434/v1'); assert.equal(url.required, true);
       act(() => { url.value = 'http://daemon.example:11434/v1'; url.dispatchEvent(new Event('input', { bubbles: true })); });
@@ -170,7 +170,7 @@ test('dynamic management capabilities, saved credentials and private auth respon
     click('Dynamic provider'); assert.deepEqual(ui.commands.at(-1), { type: 'choose', kind: 'custom', definitionId: 'dynamic' });
     assert.doesNotMatch(document.querySelector('dialog')!.textContent!, /Demo|ChatGPT/);
     view.flow = { open: true, screen: 'connect', kind: 'custom', definitionId: 'dynamic', connectionMethod: 'oauth' }; ui.update();
-    assert.equal(document.querySelector('input[type=password]'), null); assert.equal(document.querySelector('input[type=url]'), null);
+    assert.ok(document.querySelector('input[type=password]') === null); assert.ok(document.querySelector('input[type=url]') === null);
     act(() => { document.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true })); });
     assert.deepEqual(connections, [{ method: 'signin' }]);
     view.flow.connectionMethod = 'api-key'; view.draft!.credentialSource = 'saved'; ui.update(); click('Save existing'); assert.equal(ui.commands.at(-1)?.type, 'save');
@@ -178,7 +178,7 @@ test('dynamic management capabilities, saved credentials and private auth respon
     const input = document.querySelector<HTMLInputElement>('.provider-setup-preview-auth input')!; input.value = 'private-code';
     act(() => { input.closest('form')!.dispatchEvent(new Event('submit', { cancelable: true })); });
     assert.deepEqual(responses, [{ operationId: 'operation', promptId: 'prompt', value: 'private-code' }]); assert.equal(input.value, ''); assert.doesNotMatch(JSON.stringify(ui.commands), /private-code/);
-    view.auth = { kind: 'device', operationId: 'operation', url: 'javascript:alert(1)', code: 'DEVICE' }; ui.update(); assert.equal(document.querySelector('.provider-setup-preview-auth a'), null); assert.match(document.body.textContent!, /DEVICE/);
+    view.auth = { kind: 'device', operationId: 'operation', url: 'javascript:alert(1)', code: 'DEVICE' }; ui.update(); assert.ok(document.querySelector('.provider-setup-preview-auth a') === null); assert.match(document.body.textContent!, /DEVICE/);
     view.auth = { kind: 'browser', operationId: 'operation', url: 'https://example.test' }; ui.update(); assert.equal(document.querySelector('a')!.getAttribute('href'), 'https://example.test');
     view.status = 'saved'; view.auth = undefined; view.flow.screen = 'done'; ui.update(); assert.match(document.body.textContent!, /Provider saved/); assert.doesNotMatch(document.body.textContent!, /ready.*chat|Demo/i); click('Add another provider'); assert.equal(ui.commands.at(-1)?.type, 'add');
   } finally { ui.cleanup(); }
@@ -202,10 +202,10 @@ test('browser link and manual code coexist with operation-scoped context and saf
     assert.deepEqual(responses, [{ operationId: 'operation', promptId: 'manual-code', value: 'synthetic-code' }]);
     assert.equal(input.value, ''); assert.deepEqual(ui.commands, []);
     view.authBrowser.operationId = 'old-operation'; ui.update();
-    assert.equal(section.querySelector('a'), null); assert.doesNotMatch(section.textContent!, /Finish browser/);
+    assert.ok(section.querySelector('a') === null); assert.doesNotMatch(section.textContent!, /Finish browser/);
     view.authBrowser.operationId = 'operation';
     for (const url of ['javascript:alert(1)', 'data:text/html,unsafe', 'not a URL']) {
-      view.authBrowser.url = url; ui.update(); assert.equal(section.querySelector('a'), null); assert.ok(section.querySelector('input'));
+      view.authBrowser.url = url; ui.update(); assert.ok(section.querySelector('a') === null); assert.ok(section.querySelector('input'));
     }
     view.authBrowser.url = 'https://example.test/signin';
     view.auth = { kind: 'select', operationId: 'operation', promptId: 'choice', message: 'Choose account', options: [{ id: 'account', label: 'Account' }] }; ui.update();
@@ -216,7 +216,7 @@ test('browser link and manual code coexist with operation-scoped context and saf
     assert.equal(section.querySelectorAll('a').length, 1); assert.equal(section.textContent!.split('Legacy instructions').length, 2);
     view.auth = { kind: 'device', operationId: 'operation', url: 'https://example.test/signin', code: 'DEVICE-CODE' }; ui.update();
     assert.equal(section.querySelectorAll('a').length, 1); assert.equal(section.textContent!.split('DEVICE-CODE').length, 2);
-    view.auth = undefined; ui.update(); assert.equal(document.querySelector('.provider-setup-preview-auth'), null);
+    view.auth = undefined; ui.update(); assert.ok(document.querySelector('.provider-setup-preview-auth') === null);
   } finally { ui.cleanup(); }
 });
 test('legacy settings overlay hides unsupported inventory actions while saving existing model preferences', () => {
@@ -264,7 +264,7 @@ test('models are separate, inherit remains unset, save is controlled and saving 
     assert.deepEqual(ui.commands, [{ type: 'model-preference', id: 'technical-id', field: 'visible', value: 'yes' }, { type: 'save' }]);
     assert.match(document.body.textContent!, /Only new chats pick up these changes/); assert.match(document.body.textContent!, /new chats/);
     view.status = 'saved'; ui.update(); assert.equal(document.querySelector('[role="status"]')?.textContent, 'Settings saved.');
-    view.status = 'idle'; ui.update(); assert.equal(document.querySelector('[role="status"]'), null, 'the confirmation clears when reducer status returns to idle after edits');
+    view.status = 'idle'; ui.update(); assert.ok(document.querySelector('[role="status"]') === null, 'the confirmation clears when reducer status returns to idle after edits');
     view.draft!.models = []; ui.update(); assert.match(document.body.textContent!, /No models available/); assert.match(document.body.textContent!, /Listed models may still be unavailable/);
     view.status = 'saving'; ui.update(); assert.ok(Array.from(document.querySelectorAll('button, select')).every(node => (node as HTMLButtonElement).disabled));
     act(() => { document.querySelector('dialog')!.dispatchEvent(new Event('cancel', { cancelable: true })); });

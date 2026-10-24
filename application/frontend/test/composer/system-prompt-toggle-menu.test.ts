@@ -292,7 +292,7 @@ test('Escape closes the dropdown and returns focus to the trigger', () => {
   });
 
   assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'dropdown closes on Escape');
-  assert.equal(document.activeElement, trigger, 'focus returns to the trigger');
+  assert.ok(document.activeElement === trigger, 'focus returns to the trigger');
 });
 
 test('keeps the trigger visible across the N -> 0 entries transition', () => {

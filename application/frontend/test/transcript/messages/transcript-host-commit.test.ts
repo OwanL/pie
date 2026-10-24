@@ -264,7 +264,7 @@ test('commit registry preserves mounted leaf evidence across revision-only targe
     }), root);
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.equal(maps.at(-1), firstMap, 'an unchanged mounted DOM leaf map must survive a snapshot revision');
+    assert.ok(maps.at(-1) === firstMap, 'an unchanged mounted DOM leaf map must survive a snapshot revision');
     assert.equal(maps.at(-1)?.size, 2);
   } finally {
     render(null, root);
@@ -752,8 +752,8 @@ test('streaming text preserves reverse cross-body selections beyond 1500ms and t
 
     assert.equal(bodies[0]?.textContent?.trim(), 'original left');
     assert.equal(bodies[1]?.textContent?.trim(), 'original right');
-    assert.equal(selection.anchorNode, rightText, 'the backward selection anchor remains mounted');
-    assert.equal(selection.focusNode, leftText, 'the backward selection focus remains mounted');
+    assert.ok(selection.anchorNode === rightText, 'the backward selection anchor remains mounted');
+    assert.ok(selection.focusNode === leftText, 'the backward selection focus remains mounted');
 
     selection.removeAllRanges();
     await timers.advanceBy(200);
@@ -828,7 +828,7 @@ test('reasoning text and streaming cursor wait for selection, then commit the la
     selection.removeAllRanges();
     await timers.advanceBy(200);
     assert.equal(body.textContent?.trim(), 'latest terminal reasoning');
-    assert.equal(body.querySelector('.reasoning-stream-cursor'), null);
+    assert.ok(body.querySelector('.reasoning-stream-cursor') === null);
     assert.equal((reasoningLeaf as { text?: string } | undefined)?.text, 'latest terminal reasoning');
 
     const latestReasoningText = firstTextNode(body);
@@ -935,9 +935,9 @@ test('switching session props preserves the transcript host and surface while co
     const secondSurface = root.querySelector('.transcript-surface');
     const secondView = root.querySelector('.transcript-virtual-wrap');
 
-    assert.equal(secondHost, firstHost, 'the transcript host must stay mounted across session switches');
-    assert.equal(secondSurface, firstSurface, 'the transcript surface must stay mounted across session switches');
-    assert.notEqual(secondView, firstView, 'the session-owned transcript view must reset its virtualizer at the new tab bottom');
+    assert.ok(secondHost === firstHost, 'the transcript host must stay mounted across session switches');
+    assert.ok(secondSurface === firstSurface, 'the transcript surface must stay mounted across session switches');
+    assert.ok(secondView !== firstView, 'the session-owned transcript view must reset its virtualizer at the new tab bottom');
     assert.equal(secondSurface?.getAttribute('data-session-path'), '/session/b');
     assert.match(root.textContent ?? '', /Session B content/);
     assert.doesNotMatch(root.textContent ?? '', /Session A content/);

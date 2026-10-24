@@ -91,7 +91,7 @@ test('deferred-target close button stays focusable, exposes the block reason, an
   });
   assert.deepEqual(closedPaths, [], 'a blocked close must not close (pointer activation)');
   assert.deepEqual(clickedPaths, [], 'a blocked close must not fall through to the parent tab click');
-  assert.equal(document.activeElement, close, 'guarding activation preserves focus');
+  assert.ok(document.activeElement === close, 'guarding activation preserves focus');
 });
 
 test('close button without deferred triggers remains enabled and closes', () => {

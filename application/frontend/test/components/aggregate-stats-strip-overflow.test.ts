@@ -52,7 +52,7 @@ test('standalone measured row shrinks, restores, remeasures, and keeps measureme
     width = 1000;
     act(() => notify());
     assert.deepEqual(keys(), ['today', 'week', 'input']);
-    assert.equal(root.querySelector('[data-stat="today"] [tabindex]'), today);
+    assert.ok(root.querySelector('[data-stat="today"] [tabindex]') === today);
     width = 0;
     act(() => notify());
     assert.equal(keys().length, 3, 'transient hidden width does not clear the row');
@@ -90,10 +90,10 @@ test('intrinsic cost pair retains both anchors at zero width and through large-v
     const today = root.querySelector('[data-stat="today"] [tabindex]');
     draw(true, 123456789.12);
     assert.deepEqual(keys(), ['today', 'week']);
-    assert.equal(root.querySelector('[data-stat="today"] [tabindex]'), today);
+    assert.ok(root.querySelector('[data-stat="today"] [tabindex]') === today);
     assert.match(root.textContent!, /\$123456789\.12/);
-    assert.equal(root.querySelector('[data-measure-stat]'), null);
-    assert.equal(root.querySelector('[inert]'), null);
+    assert.ok(root.querySelector('[data-measure-stat]') === null);
+    assert.ok(root.querySelector('[inert]') === null);
   } finally {
     act(() => render(null, root));
     root.remove();

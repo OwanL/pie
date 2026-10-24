@@ -92,7 +92,7 @@ test('a pinned group renders a single chip with data-pinned-item-group and a 2×
     // 2 members → 2 avatar tiles in the grid.
     assert.equal(chip!.querySelectorAll('.pinned-tab-group-tile:not(.pinned-tab-group-plus)').length, 2);
     // No dropdown yet.
-    assert.equal(queryDropdown(), null);
+    assert.ok(queryDropdown() === null);
   } finally {
     unmount();
     restore();
@@ -273,7 +273,7 @@ test('an open dropdown closes when its group fully dissolves (no surviving group
     // The group dissolves entirely (both members become standalone).
     props = { ...props, pinnedTabGroups: [] };
     act(() => render(h(SessionTabs, props), container));
-    assert.equal(queryDropdown(), null, 'dropdown closes when the group dissolves');
+    assert.ok(queryDropdown() === null, 'dropdown closes when the group dissolves');
   } finally {
     unmount();
     restore();
@@ -295,7 +295,7 @@ test('Escape closes an open group dropdown', () => {
     act(() => { chipButton!.dispatchEvent(new window.Event('click', { bubbles: true })); });
     assert.ok(queryDropdown());
     act(() => { window.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-    assert.equal(queryDropdown(), null, 'Escape closes the dropdown');
+    assert.ok(queryDropdown() === null, 'Escape closes the dropdown');
   } finally {
     unmount();
     restore();
@@ -382,10 +382,10 @@ test('Escape on a keyboard-opened dropdown restores chip focus', () => {
     });
     assert.ok(queryDropdown());
     const member = document.body.querySelector<HTMLElement>('.pinned-tab-group-member');
-    assert.equal(document.activeElement, member, 'focus is on a member row before Escape');
+    assert.ok(document.activeElement === member, 'focus is on a member row before Escape');
     act(() => { member!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
-    assert.equal(queryDropdown(), null, 'Escape closes the dropdown');
-    assert.equal(document.activeElement, chipButton, 'Escape restores focus to the group chip');
+    assert.ok(queryDropdown() === null, 'Escape closes the dropdown');
+    assert.ok(document.activeElement === chipButton, 'Escape restores focus to the group chip');
   } finally {
     unmount();
     restore();
@@ -409,7 +409,7 @@ test('pointer opening keeps focus on the chip (no focus transfer)', () => {
       chipButton!.click();
     });
     assert.ok(queryDropdown(), 'pointer click opens the dropdown');
-    assert.equal(document.activeElement, chipButton, 'pointer opening leaves focus on the chip');
+    assert.ok(document.activeElement === chipButton, 'pointer opening leaves focus on the chip');
   } finally {
     unmount();
     restore();
@@ -464,7 +464,7 @@ test('right-clicking a dropdown member opens the full session menu with its grou
     const member = document.body.querySelector<HTMLButtonElement>('.pinned-tab-group-member');
     assert.ok(member);
     act(() => { member!.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 12 })); });
-    assert.equal(queryDropdown(), null, 'opening member menu closes the dropdown');
+    assert.ok(queryDropdown() === null, 'opening member menu closes the dropdown');
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu);
     const menuText = menu!.textContent ?? '';
@@ -514,7 +514,7 @@ test('a grouped dropdown member exposes Close tab and closes that session', () =
     assert.ok(close, 'the session context menu includes Close tab');
     act(() => { close!.click(); });
     assert.equal(closedPath, '/b');
-    assert.equal(container.querySelector('.session-tab-context-menu'), null, 'the menu closes after the action');
+    assert.ok(container.querySelector('.session-tab-context-menu') === null, 'the menu closes after the action');
   } finally {
     unmount();
     restore();
@@ -663,13 +663,13 @@ test('Shift+F10 on a dropdown member closes the dropdown and opens its member me
     const member = document.body.querySelector<HTMLElement>('.pinned-tab-group-member');
     assert.ok(member);
     act(() => { member!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); });
-    assert.equal(queryDropdown(), null, 'opening the member menu closes the dropdown (same as right-click)');
+    assert.ok(queryDropdown() === null, 'opening the member menu closes the dropdown (same as right-click)');
     const menu = container.querySelector('.session-tab-context-menu');
     assert.ok(menu, 'the keyboard request opens the member menu');
     assert.match(menu!.textContent ?? '', /Remove from group/);
     act(() => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
-    assert.equal(container.querySelector('.session-tab-context-menu'), null);
-    assert.equal(document.activeElement, chipButton, 'closing returns focus to the still-mounted group chip');
+    assert.ok(container.querySelector('.session-tab-context-menu') === null);
+    assert.ok(document.activeElement === chipButton, 'closing returns focus to the still-mounted group chip');
   } finally {
     unmount();
     restore();
@@ -718,7 +718,7 @@ test('the open dropdown portals to document.body outside the strip mask', () => 
   try {
     act(() => container.querySelector<HTMLButtonElement>('.pinned-tab-group-main')!.click());
     const dropdown = queryDropdown() as HTMLElement;
-    assert.equal(dropdown.parentElement, document.body, 'dropdown is a direct body child');
+    assert.ok(dropdown.parentElement === document.body, 'dropdown is a direct body child');
     const strip = container.querySelector<HTMLElement>('.session-tabs-strip');
     assert.ok(strip, 'the masked strip renders');
     assert.ok(!strip!.contains(dropdown), 'dropdown is not painted inside the masked/scrollable strip');

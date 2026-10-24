@@ -54,7 +54,7 @@ test('compaction button shows a live compacting state with a spinner', () => {
   assert.equal(button.getAttribute('aria-busy'), 'true');
   assert.ok(button.classList.contains('compacting'), 'compacting class drives the accent styling');
   assert.ok(container.querySelector('.compaction-trigger-spinner'), 'spinner replaces the icon while compacting');
-  assert.equal(container.querySelector('svg'), null, 'icon is hidden while compacting');
+  assert.ok(container.querySelector('svg') === null, 'icon is hidden while compacting');
   act(() => button.click());
   assert.equal(calls, 0);
 });

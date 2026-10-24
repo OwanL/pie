@@ -153,7 +153,7 @@ test('cloned snapshots, status, selection and creation changes respect per-tab r
     current = cloneHostSnapshot(current);
     current.sessions[2] = { ...current.sessions[2], creationState: undefined };
     publish();
-    assert.equal(container.querySelector('.session-tab-retry'), null);
+    assert.ok(container.querySelector('.session-tab-retry') === null);
     current = { ...cloneHostSnapshot(current),
       unreadFinishedSessionPaths: ['/sessions/c'],
       deferredSessionPaths: ['/sessions/c'], deferredTimerSessionPaths: ['/sessions/c'],

@@ -187,7 +187,7 @@ test('ToolCallItem memo does not block ask-user context updates inside subagent 
   };
 
   mountWithRequests({});
-  assert.equal(container.querySelector('.pending-ask-user'), null);
+  assert.ok(container.querySelector('.pending-ask-user') === null);
   mountWithRequests({
     request: {
       id: 'request',

@@ -359,7 +359,7 @@ test('richRole region keeps interactive rich content out of tooltip semantics', 
     await act(async () => {
       trigger().dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }));
     });
-    assert.equal(document.activeElement, inner, 'Tab from the trigger enters the rich surface');
+    assert.ok(document.activeElement === inner, 'Tab from the trigger enters the rich surface');
   } finally {
     restoreTimers();
   }
@@ -395,7 +395,7 @@ test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', asyn
       flushTimers();
     });
     assert.equal(host().style.display, 'none');
-    assert.equal(host().querySelector('.rich-body'), null, 'subtree should unmount on hide');
+    assert.ok(host().querySelector('.rich-body') === null, 'subtree should unmount on hide');
   } finally {
     restoreTimers();
   }
@@ -524,7 +524,7 @@ for (const focusedSide of ['trigger', 'host'] as const) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     });
     assert.equal(host.style.display, 'block');
-    assert.equal(document.activeElement, focused, 'pointer exit must not move keyboard focus');
+    assert.ok(document.activeElement === focused, 'pointer exit must not move keyboard focus');
     const outside = container.querySelector('.outside') as HTMLButtonElement;
     await act(async () => {
       // DOM harnesses do not implement native Tab traversal; emulate its
@@ -532,7 +532,7 @@ for (const focusedSide of ['trigger', 'host'] as const) {
       focused.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
       outside.focus();
     });
-    assert.equal(document.activeElement, outside, 'leaving the inspector must not restore or trap focus');
+    assert.ok(document.activeElement === outside, 'leaving the inspector must not restore or trap focus');
     assert.equal(host.style.display, 'none');
   });
 }
@@ -549,9 +549,9 @@ test(`inspectors return focus to ${triggerTag} on Escape without reopening the r
     const host = document.querySelector('.pie-tooltip-host') as HTMLElement;
     await act(async () => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true })); });
     const copy = host.querySelector('button')!;
-    assert.equal(document.activeElement, copy);
+    assert.ok(document.activeElement === copy);
     await act(async () => { copy.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
-    assert.equal(document.activeElement, trigger);
+    assert.ok(document.activeElement === trigger);
     assert.equal(host.style.display, 'none');
     await act(async () => flushTimers());
     assert.equal(host.style.display, 'none');

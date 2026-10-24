@@ -42,17 +42,17 @@ test('inline subpages stay in owner and scope Escape; home focus returns', () =>
     update();
     const add = container.querySelector('button')!; add.focus(); act(() => add.click());
     view.flow = { open: true, screen: 'choose' }; update();
-    assert.equal(document.querySelector('dialog'), null);
+    assert.ok(document.querySelector('dialog') === null);
     assert.ok(container.querySelector('.provider-setup-preview-inline')?.contains(document.activeElement));
     assert.equal(Array.from(container.querySelectorAll('button')).some(node => node.textContent === 'Close'), false);
     escape(); assert.equal(commands.at(-1)?.type, 'back'); assert.equal(escapes, 0);
     outside.focus(); escape(); assert.equal(escapes, 1);
     view.flow.screen = 'manage'; update();
-    assert.equal(document.activeElement, container.querySelector('button'));
+    assert.ok(document.activeElement === container.querySelector('button'));
     escape(); assert.equal(escapes, 2);
     for (const screen of ['connect', 'models', 'done'] as const) {
       view.flow = { open: true, screen, kind: 'openai' }; update();
-      assert.equal(document.querySelector('dialog'), null);
+      assert.ok(document.querySelector('dialog') === null);
       assert.ok(container.querySelector('.provider-setup-preview-inline'));
     }
   } finally { document.removeEventListener('keydown', parent); act(() => render(null, container)); container.remove(); outside.remove(); }

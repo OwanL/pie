@@ -53,8 +53,8 @@ test('MessageItemShell keeps the edited marker after exiting edit mode (persiste
 
 test('MessageItemShell never claims the edited marker before editing', () => {
   act(() => { render(h(MessageItemShell, shellProps(false)), container); });
-  assert.equal(container.querySelector('[data-edited="true"]'), null);
-  assert.equal(container.querySelector('[data-editing="true"]'), null);
+  assert.ok(container.querySelector('[data-edited="true"]') === null);
+  assert.ok(container.querySelector('[data-editing="true"]') === null);
 });
 
 let container: HTMLElement;
@@ -294,9 +294,9 @@ test('InlineEditor retains batch read errors after a later success and clears on
   });
   assert.match(container.querySelector('[role="status"]')?.textContent ?? '', /Cannot attach image\.gif/);
   act(() => { paste(Promise.resolve(new ArrayBuffer(1))); });
-  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.ok(container.querySelector('[role="status"]') === null);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.ok(container.querySelector('[role="status"]') === null);
 });
 
 for (const moved of [false, true]) {
@@ -315,6 +315,6 @@ for (const moved of [false, true]) {
     if (moved) outside.focus();
     act(() => render(null, shell));
     await Promise.resolve();
-    assert.equal(document.activeElement, moved ? outside : shell);
+    assert.ok(document.activeElement === (moved ? outside : shell));
   });
 }

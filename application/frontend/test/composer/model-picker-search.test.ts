@@ -188,7 +188,7 @@ test('a query with no matches shows an empty state and no rows', () => {
   assert.match(empty!.textContent ?? '', /No models match/);
 
   keydown(input, 'Tab');
-  assert.equal(document.querySelector('.model-picker-dropdown'), null, 'Tab should close an empty result list');
+  assert.ok(document.querySelector('.model-picker-dropdown') === null, 'Tab should close an empty result list');
 });
 
 test('Enter selects the top filtered match', () => {
@@ -323,7 +323,7 @@ for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty']
     const activeId = input.getAttribute('aria-activedescendant');
     if (scenario === 'remove active' || scenario === 'empty') {
       assert.equal(activeId, null);
-      assert.equal(dropdown.querySelector('.model-picker-row-active'), null);
+      assert.ok(dropdown.querySelector('.model-picker-row-active') === null);
       keydown(input, 'Enter');
       assert.deepEqual(commits, []);
       assert.equal(dropdown.isConnected, true);
@@ -335,7 +335,7 @@ for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty']
     } else {
       assert.ok(activeId);
       const active = document.getElementById(activeId);
-      assert.equal(active, dropdown.querySelector('.model-picker-row-active'));
+      assert.ok(active === dropdown.querySelector('.model-picker-row-active'));
       assert.match(active?.getAttribute('aria-label') ?? '', /anthropic\/claude-opus/);
       keydown(input, 'Enter');
       assert.deepEqual(commits, ['anthropic/claude-opus']);

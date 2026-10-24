@@ -162,7 +162,9 @@ test('deferred indicator is empty without timers and forwards the cancel-menu cl
     const button = root.querySelector('button')!;
     assert.match(button.getAttribute('aria-label')!, /1 pending wakeup timer.*cancel menu/);
     act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 12, clientY: 34 })); });
-    assert.deepEqual(call, [12, 34, button]);
+    assert.equal(call.length, 3);
+    assert.deepEqual(call.slice(0, 2), [12, 34]);
+    assert.ok(call[2] === button);
   } finally { act(() => render(null, root)); root.remove(); }
 });
 

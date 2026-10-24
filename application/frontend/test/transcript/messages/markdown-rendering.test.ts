@@ -251,7 +251,7 @@ test('ordinary prose detection leaves existing links and code unchanged', async 
   assert.equal(document.querySelectorAll('code.file-path-link[data-pie-file-path="README.md"]').length, 1);
   assert.equal(document.querySelectorAll('a.file-path-link[data-pie-file-path="README.md"]').length, 1);
   assert.equal(document.querySelectorAll('a[href^="https://example.com"] [data-pie-file-path]').length, 0);
-  assert.equal(document.querySelector('pre')?.querySelector('[data-pie-file-path]'), null);
+  assert.ok(document.querySelector('pre')?.querySelector('[data-pie-file-path]') === null);
 });
 
 test('ordinary prose path candidates reject domains and leave trailing punctuation outside references', () => {

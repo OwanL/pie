@@ -68,7 +68,7 @@ test('wakeup action opens menu and foreign-target cancel emits creator path and 
   const trigger = container.querySelector<HTMLButtonElement>('.aggregate-strip-deferred');
   assert.ok(trigger);
   assert.match(trigger.getAttribute('aria-label')!, /1 pending wakeup timer/);
-  assert.equal(container.querySelector('[role="menu"]'), null);
+  assert.ok(container.querySelector('[role="menu"]') === null);
   act(() => trigger.click());
   const menu = container.querySelector('[role="menu"]');
   assert.ok(menu, 'strip click opens the real menu component');
@@ -80,8 +80,8 @@ test('wakeup action opens menu and foreign-target cancel emits creator path and 
   assert.ok(cancel);
   act(() => cancel.click());
   assert.deepEqual(cancellations, [[pending.sessionPath, pending.id]], 'cancel addresses owner, not target');
-  assert.equal(container.querySelector('[role="menu"]'), null);
-  assert.equal(container.querySelector('.aggregate-strip-deferred'), null);
+  assert.ok(container.querySelector('[role="menu"]') === null);
+  assert.ok(container.querySelector('.aggregate-strip-deferred') === null);
 });
 
 test('wakeup tooltip refreshes when snapshots change wakeup mode or timer start', async () => {

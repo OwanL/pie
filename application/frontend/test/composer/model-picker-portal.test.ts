@@ -90,9 +90,5 @@ test('ModelPicker dropdown is portaled to document.body, escaping its wrapper ov
     document.body.contains(dropdown),
     'dropdown should be attached to the document',
   );
-  assert.equal(
-    dropdown!.closest('.model-picker'),
-    null,
-    'dropdown must be portaled out of .model-picker so an overflow ancestor cannot clip it',
-  );
+  assert.ok(dropdown!.closest('.model-picker') === null, 'dropdown must be portaled out of .model-picker so an overflow ancestor cannot clip it');
 });

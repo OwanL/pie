@@ -341,12 +341,12 @@ test('session focus triggers preserve tablist focus and normal autofocus', () =>
   try {
     draw('/a');
     const textarea = container.querySelector('textarea');
-    assert.equal(document.activeElement, textarea);
+    assert.ok(document.activeElement === textarea);
     tab.focus();
     draw('/b');
-    assert.equal(document.activeElement, tab);
+    assert.ok(document.activeElement === tab);
     textarea!.focus();
     draw('/c');
-    assert.equal(document.activeElement, textarea);
+    assert.ok(document.activeElement === textarea);
   } finally { tabs.remove(); }
 });

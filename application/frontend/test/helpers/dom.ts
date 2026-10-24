@@ -1,10 +1,11 @@
 /**
  * DOM environment helper for extension webview tests.
  * Installs happy-dom globals so Preact components can mount.
+ * Assert DOM presence/identity with boolean expressions (e.g. assert.ok(node ===
+ * null)), not assert.equal(node, null): Node's failure diff walks the DOM graph.
  */
 import { Window } from 'happy-dom';
 import { setTimeout as nativeSetTimeout, clearTimeout as nativeClearTimeout } from 'node:timers';
-import { installDomAssertionDiagnostics } from './dom-assertions';
 
 let installed = false;
 
@@ -36,7 +37,6 @@ export function installDom(): void {
   installed = true;
 
   const window = new Window({ url: 'http://localhost' });
-  installDomAssertionDiagnostics((value): value is Node => value instanceof window.Node);
 
   // Install core DOM globals
   const globals = [

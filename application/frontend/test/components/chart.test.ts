@@ -74,7 +74,7 @@ test('StackedAreaChart hover crosshair + per-model box appears on mousemove', ()
     container,
   );
   const svg = container.querySelector('svg')!;
-  assert.equal(container.querySelector('.chart-hover'), null, 'no hover box before mousemove');
+  assert.ok(container.querySelector('.chart-hover') === null, 'no hover box before mousemove');
   act(() => {
     svg.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 10 }));
   });

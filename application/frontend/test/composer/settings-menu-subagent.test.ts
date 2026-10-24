@@ -27,7 +27,7 @@ async function focusedTooltip(container: HTMLElement, label: string): Promise<st
   const hostId = trigger!.getAttribute('aria-describedby')?.split(' ').at(-1);
   const host = hostId ? document.getElementById(hostId) : null;
   assert.ok(host, `focused ${label} help appears`);
-  assert.equal(host.querySelector('.toolbar-settings-help-button'), null, 'help must expose copy directly, not another tooltip trigger');
+  assert.ok(host.querySelector('.toolbar-settings-help-button') === null, 'help must expose copy directly, not another tooltip trigger');
   return host.textContent ?? '';
 }
 
@@ -104,7 +104,7 @@ test('SubagentSection groups common controls under accessible content headings',
       const controls = [...group.querySelectorAll('[role="checkbox"], input[type="text"], input[type="range"]')];
       assert.equal(controls.length, expectedControlCounts[index], `${names[index]} control count`);
       for (const control of controls) {
-        assert.equal(control.closest('.toolbar-settings-content-group'), group, `${control.getAttribute('aria-label') ?? control.textContent?.trim()} belongs to ${names[index]}`);
+        assert.ok(control.closest('.toolbar-settings-content-group') === group, `${control.getAttribute('aria-label') ?? control.textContent?.trim()} belongs to ${names[index]}`);
       }
     }
     assert.ok(groups[0].textContent?.includes('Default providers'));
@@ -113,7 +113,7 @@ test('SubagentSection groups common controls under accessible content headings',
     assert.deepEqual([...groups[3].querySelectorAll('input[type="range"]')].map((control) => control.getAttribute('aria-label')), [
       'Subagent nesting levels', 'Max subagent sessions across the nested tree', 'Max concurrent root subagent trees',
     ]);
-    assert.equal(container.querySelector('details, [aria-expanded]'), null, 'common controls are not hidden in an accordion');
+    assert.ok(container.querySelector('details, [aria-expanded]') === null, 'common controls are not hidden in an accordion');
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -454,7 +454,7 @@ test('SubagentSection selects a default reasoning level and adds with one click'
 
     const chooseModel = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
     assert.ok(chooseModel);
-    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null, 'no add row before picking a model');
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null, 'no add row before picking a model');
 
     act(() => { chooseModel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     const modelRow = [...document.querySelectorAll('.model-picker-row')]
@@ -529,15 +529,15 @@ test('pending bucket add cancels when its provider is disabled and restores only
       container.querySelector('.toolbar-settings-bucket-add-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     assert.equal(calls.length, 0);
-    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null);
     const trigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
-    assert.equal(document.activeElement, trigger);
+    assert.ok(document.activeElement === trigger);
     pick('GPT-5');
     act(() => rerender({ ...emptyBucketPrefs(), providerToggles: { anthropic: false, openai: false } }));
     const disabledTrigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement;
     assert.equal(disabledTrigger.disabled, true);
-    assert.notEqual(document.activeElement, disabledTrigger);
-    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.ok(document.activeElement !== disabledTrigger);
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null);
     assert.equal(calls.length, 0);
   });
 });
@@ -572,7 +572,7 @@ for (const spec of ['sonnet', 'anthropic/sonnet']) {
         container.querySelector('.toolbar-settings-bucket-add-btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
       assert.equal(calls.length, 0);
-      assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+      assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null);
     });
   });
 }
@@ -613,7 +613,7 @@ test('SubagentSection can cancel the pending model with the cancel button', () =
     assert.ok(cancel);
     act(() => { cancel!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null);
     assert.equal(calls.length, 0, 'cancelling should not emit a pref change');
   } finally {
     act(() => render(null, container));
@@ -861,7 +861,7 @@ test('SubagentSection handles keyboard focus and Enter/Escape in the add row', (
     assert.ok(addRow);
     act(() => { addRow!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     assert.equal(calls.length, beforeCount, 'Escape should not emit a pref change');
-    assert.equal(container.querySelector('.toolbar-settings-bucket-add-row'), null);
+    assert.ok(container.querySelector('.toolbar-settings-bucket-add-row') === null);
     // Focus returns to the picker trigger.
     const trigger = container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement | null;
     assert.ok(document.activeElement === trigger, 'focus should return to the picker trigger after cancel');

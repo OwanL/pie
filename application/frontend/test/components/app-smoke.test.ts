@@ -208,9 +208,8 @@ test('App does not keep the transcript loader for a loaded empty session', () =>
     render(h(App, { adapter }), container);
   });
 
-  assert.equal(
-    container.querySelector('.transcript-loading'),
-    null,
+  assert.ok(
+    container.querySelector('.transcript-loading') === null,
     'Should stop showing the transcript loader once an empty session has loaded',
   );
   assert.ok(container.querySelector('textarea'), 'Composer should remain available for an empty session');
@@ -382,7 +381,7 @@ test('empty continuation fails closed without backend capability even for a comp
   act(() => {
     window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, sessionViewState()) }));
   });
-  assert.equal(container.querySelector('[data-action="continue"]'), null);
+  assert.ok(container.querySelector('[data-action="continue"]') === null);
   const submit = container.querySelector('[data-action="send"]') as HTMLButtonElement;
   assert.ok(submit);
   assert.equal(submit.disabled, true);
@@ -713,7 +712,7 @@ test('sendRejected.inputs restores composer attachments immediately (inputsResto
   });
 
   // No attachments yet.
-  assert.equal(container.querySelector('.attachment-card'), null);
+  assert.ok(container.querySelector('.attachment-card') === null);
 
   // sendRejected carrying a pasted/dropped attachment.
   const imgInput = { id: 'in1', kind: 'filesystemPathRef' as const, path: '/f', name: 'f', source: 'picker' as const };
@@ -775,9 +774,8 @@ test('background send rejection does not restore its draft or inputs into the ac
   });
 
   assert.equal((container.querySelector('textarea') as HTMLTextAreaElement).value, '');
-  assert.equal(
-    container.querySelector('.attachment-card'),
-    null,
+  assert.ok(
+    container.querySelector('.attachment-card') === null,
     'a background rejection must not attach files to the active session composer',
   );
 });
@@ -896,8 +894,8 @@ test('Brief H: NoticeBanner renders recovery action buttons for a projected noti
   assert.ok(findNoticeAction(container, 'Retry without pruning'), 'Retry-without-pruning button renders');
   assert.ok(findNoticeAction(container, 'Open settings'), 'Open settings button renders');
   // No restart-backend / show-logs for this kind.
-  assert.equal(findNoticeAction(container, 'Restart backend'), null);
-  assert.equal(findNoticeAction(container, 'Show logs'), null);
+  assert.ok(findNoticeAction(container, 'Restart backend') === null);
+  assert.ok(findNoticeAction(container, 'Show logs') === null);
 });
 
 test('Brief H: NoticeBanner renders [retry, show-logs] for a model-start-timeout (concurrency wait, not pruning)', () => {
@@ -914,9 +912,9 @@ test('Brief H: NoticeBanner renders [retry, show-logs] for a model-start-timeout
   assert.ok(findNoticeAction(container, 'Retry'), 'Retry button renders');
   assert.ok(findNoticeAction(container, 'Show logs'), 'Show logs button renders');
   // Pruning remedies do NOT apply (pruning already succeeded).
-  assert.equal(findNoticeAction(container, 'Retry without pruning'), null);
-  assert.equal(findNoticeAction(container, 'Open settings'), null);
-  assert.equal(findNoticeAction(container, 'Restart backend'), null);
+  assert.ok(findNoticeAction(container, 'Retry without pruning') === null);
+  assert.ok(findNoticeAction(container, 'Open settings') === null);
+  assert.ok(findNoticeAction(container, 'Restart backend') === null);
 });
 
 test('NoticeBanner uses typed severity instead of classifying notification copy', () => {
@@ -929,7 +927,7 @@ test('NoticeBanner uses typed severity instead of classifying notification copy'
   act(() => { render(h(App, { adapter }), container); });
 
   assert.ok(container.querySelector('.notice'));
-  assert.equal(container.querySelector('.notice.error'), null);
+  assert.ok(container.querySelector('.notice.error') === null);
 });
 
 test('operational error More reveals the exact backend diagnostic', () => {
@@ -948,7 +946,7 @@ test('operational error More reveals the exact backend diagnostic', () => {
 
   const more = container.querySelector<HTMLButtonElement>('button.notice-detail');
   assert.equal(more?.textContent?.trim(), 'More');
-  assert.equal(container.querySelector('.notice-raw-detail'), null);
+  assert.ok(container.querySelector('.notice-raw-detail') === null);
 
   act(() => { more!.click(); });
 
@@ -1099,5 +1097,5 @@ test('interrupt reflects "Stopping…" within one frame (optimistic, before the 
       data: stateEnvelope(2, sessionViewState({ busy: false, runningSessionPaths: [] })),
     }));
   });
-  assert.equal(container.querySelector('button[aria-label="Stopping response"]'), null, 'Stopping… clears once the host confirms the abort (busy false)');
+  assert.ok(container.querySelector('button[aria-label="Stopping response"]') === null, 'Stopping… clears once the host confirms the abort (busy false)');
 });

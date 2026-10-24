@@ -166,8 +166,7 @@ test('McpServerList offers an inline Refresh in the non-empty state only when sh
       onRefresh: () => undefined,
     }), container);
   });
-  assert.equal(container.querySelector('.mcp-server-list-head .mcp-server-refresh'), null,
-    'the Settings tab keeps its own header Refresh and must not double up');
+  assert.ok(container.querySelector('.mcp-server-list-head .mcp-server-refresh') === null, 'the Settings tab keeps its own header Refresh and must not double up');
 });
 
 test('McpSection lists servers under the global toggle and refreshes on mount', () => {

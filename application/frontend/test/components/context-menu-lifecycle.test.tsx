@@ -70,7 +70,7 @@ test(`${shiftKey ? 'Shift+Tab' : 'Tab'} exits a multi-item menu from its logical
     const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
     act(() => { document.activeElement!.dispatchEvent(event); });
     assert.equal(event.defaultPrevented, false);
-    assert.equal(document.activeElement, trigger, 'keydown must re-anchor before native Tab');
+    assert.ok(document.activeElement === trigger, 'keydown must re-anchor before native Tab');
     assert.ok(container.querySelector('[role="menu"]')!.hasAttribute('inert'));
     // The DOM harness has no native Tab action. Model sequential navigation
     // from the actual active element, rather than forcing a chosen destination.
@@ -79,10 +79,10 @@ test(`${shiftKey ? 'Shift+Tab' : 'Tab'} exits a multi-item menu from its logical
     const index = candidates.indexOf(document.activeElement as HTMLButtonElement);
     candidates[index + (shiftKey ? -1 : 1)]!.focus();
     const destination = shiftKey ? before : after;
-    assert.equal(document.activeElement, destination);
+    assert.ok(document.activeElement === destination);
     await act(async () => { await tick(); });
     assert.equal(container.querySelector('[role="menu"]'), null);
-    assert.equal(document.activeElement, destination);
+    assert.ok(document.activeElement === destination);
   } finally {
     act(() => render(null, container));
     before.remove(); trigger.remove(); container.remove(); after.remove();
