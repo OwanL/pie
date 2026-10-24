@@ -213,15 +213,11 @@
   padding-inline: 6px;
 }
 
+/* Keep global costs beside the session indicators; the controls absorb
+   spare space rather than spreading the indicators across the row. */
 .composer-global-indicators {
-  flex: 1 0 auto;
-  justify-content: center;
-}
-
-/* Only the centre group absorbs spare space; growing the controls as well
-   pushes the costs off-centre and leaves an oversized gap after More. */
-.composer-bottom-bar:has(.composer-global-indicators) > .composer-controls {
   flex: 0 0 auto;
+  justify-content: flex-end;
 }
 
 .composer-indicators {

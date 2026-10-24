@@ -86,7 +86,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
     },
   });
 
-  test('centres the smaller global costs between the actual control and session groups', async ({ page }) => {
+  test('keeps smaller global costs adjacent to the right-hand session indicators', async ({ page }) => {
     for (const width of [800, 1000]) {
       await openComposer(page, width, 640);
       const costs = page.locator('.composer-global-indicators .aggregate-strip');
@@ -104,9 +104,10 @@ test.describe('composer toolbar overflow in Chromium', () => {
           sessionFontSize: parseFloat(getComputedStyle(session).fontSize),
         };
       });
-      expect(Math.abs(metrics.leftGap - metrics.rightGap)).toBeLessThan(2);
-      expect(metrics.leftGap).toBeGreaterThan(0);
-      expect(metrics.fontSize).toBeLessThan(10);
+      expect(metrics.rightGap).toBeGreaterThanOrEqual(0);
+      expect(metrics.rightGap).toBeLessThanOrEqual(6);
+      expect(metrics.leftGap).toBeGreaterThan(metrics.rightGap);
+      expect(metrics.fontSize).toBeLessThan(9);
       expect(metrics.fontSize).toBeLessThan(metrics.sessionFontSize);
     }
   });

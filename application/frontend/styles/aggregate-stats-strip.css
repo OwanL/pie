@@ -5,7 +5,7 @@
   flex-shrink: 0;
   gap: 4px;
   font-family: var(--panel-font-mono);
-  font-size: 9px;
+  font-size: 8px;
   line-height: 1;
   letter-spacing: 0.01em;
   color: var(--panel-muted);
