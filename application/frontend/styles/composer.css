@@ -218,8 +218,10 @@
   justify-content: center;
 }
 
+/* Only the centre group absorbs spare space; growing the controls as well
+   pushes the costs off-centre and leaves an oversized gap after More. */
 .composer-bottom-bar:has(.composer-global-indicators) > .composer-controls {
-  flex: 1 0 auto;
+  flex: 0 0 auto;
 }
 
 .composer-indicators {

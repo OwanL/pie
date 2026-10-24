@@ -86,6 +86,31 @@ test.describe('composer toolbar overflow in Chromium', () => {
     },
   });
 
+  test('centres the smaller global costs between the actual control and session groups', async ({ page }) => {
+    for (const width of [800, 1000]) {
+      await openComposer(page, width, 640);
+      const costs = page.locator('.composer-global-indicators .aggregate-strip');
+      await expect(costs).toBeVisible();
+      const metrics = await costs.evaluate((element) => {
+        const bar = element.closest('.composer-bottom-bar')!;
+        const left = bar.querySelector('.composer-overflow-trigger:not([data-composer-overflow-measurement])')!.getBoundingClientRect();
+        const right = bar.querySelector('.composer-indicators')!.getBoundingClientRect();
+        const pair = element.getBoundingClientRect();
+        const session = bar.querySelector('.composer-indicators .panel-chip-toolbar')!;
+        return {
+          leftGap: pair.left - left.right,
+          rightGap: right.left - pair.right,
+          fontSize: parseFloat(getComputedStyle(element).fontSize),
+          sessionFontSize: parseFloat(getComputedStyle(session).fontSize),
+        };
+      });
+      expect(Math.abs(metrics.leftGap - metrics.rightGap)).toBeLessThan(2);
+      expect(metrics.leftGap).toBeGreaterThan(0);
+      expect(metrics.fontSize).toBeLessThan(10);
+      expect(metrics.fontSize).toBeLessThan(metrics.sessionFontSize);
+    }
+  });
+
   test('keeps model text readable and pinned hitboxes separate at ordinary phone widths', async ({ page }) => {
     for (const width of [390, 320]) {
       await openComposer(page, width, 640);
