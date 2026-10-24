@@ -274,6 +274,35 @@ test('working and finished subagents share header geometry without uppercase ter
   assert.match(css, /\.tool-call\.tool-call-subagent\.running:hover > \.subagent-header,\s*\.tool-call\.tool-call-subagent\.completed:hover > \.subagent-header\s*\{/);
 });
 
+test('subagent prose uses shared sans typography and idle labels retain readable semantic colors', async () => {
+  const css = await readToolCallCss();
+  const rule = (selector: string) => {
+    const blocks = css.split(`\n${selector} {`).slice(1);
+    assert.ok(blocks.length, `expected ${selector} rule`);
+    return blocks.map(block => block.slice(0, block.indexOf('}'))).join('\n');
+  };
+
+  for (const selector of [
+    '.subagent-header', '.subagent-live-preview', '.subagent-task',
+    '.subagent-current-text', '.subagent-header > .status-chip',
+    '.subagent-header .subagent-activity', '.subagent-header .subagent-agent-name',
+    '.subagent-task-popover', '.subagent-task-tooltip',
+  ]) {
+    assert.match(rule(selector), /var\(--panel-font-sans\)/);
+  }
+  assert.match(rule('.subagent-task'), /font-size:\s*12px;/);
+  assert.match(rule('.subagent-task'), /line-height:\s*18px;/);
+  assert.match(rule('.subagent-task'), /color:\s*var\(--panel-foreground-soft\);/);
+  assert.match(rule('.subagent-current:has(> .turn-activity-tail-label) .subagent-current-text'), /font:\s*11\.5px\/17px var\(--panel-font-mono/);
+  for (const [selector, color] of [
+    ['.tool-call.tool-call-subagent.idle .subagent-primary-meta', 'panel-foreground-soft'],
+    ['.tool-call.tool-call-subagent.idle .subagent-activity', 'panel-muted'],
+  ]) {
+    assert.ok(rule(selector).includes(`color: var(--${color});`));
+    assert.doesNotMatch(rule(selector), /opacity:/);
+  }
+});
+
 test('subagent header keeps metadata in one row without hiding reasoning or cost', async () => {
   const css = await readToolCallCss();
   const subagentSummaryRule = css.match(/\.subagent-header-summary\s*\{[\s\S]*?\n\}/);

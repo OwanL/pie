@@ -652,7 +652,7 @@
   min-height: 30px;
   padding: 0 8px;
   flex-wrap: nowrap;
-  font: 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
+  font: 11px/18px var(--panel-font-sans);
   border-radius: calc(var(--panel-radius-md) - 1px);
   cursor: pointer;
   /* `relative` (not `sticky`): the header used to pin to the top of the
@@ -981,7 +981,7 @@
 }
 
 .subagent-live-preview {
-  font: 12px/1.5 var(--vscode-font-family, Segoe UI, sans-serif);
+  font: 12px/18px var(--panel-font-sans);
   user-select: text;
   overflow-wrap: anywhere;
   color: var(--panel-foreground-soft);
@@ -997,11 +997,11 @@
 }
 .subagent-task {
   -webkit-line-clamp: 3;
-  font-family: var(--vscode-font-family, Segoe UI, sans-serif);
+  font-family: var(--panel-font-sans);
   white-space: pre-wrap;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: color-mix(in srgb, var(--panel-foreground) 72%, var(--subagent-card-surface));
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--panel-foreground-soft);
   cursor: help;
 }
 .subagent-current,
@@ -1016,7 +1016,7 @@
 .subagent-current > .turn-activity-tail-label { display: none; }
 .subagent-current-text {
   min-width: 0;
-  font-family: var(--vscode-font-family, Segoe UI, sans-serif);
+  font-family: var(--panel-font-sans);
 }
 .subagent-current:has(> .turn-activity-tail-label) .subagent-current-text {
   font: 11.5px/17px var(--panel-font-mono, Consolas, monospace);
@@ -1056,7 +1056,7 @@
   min-width: 0;
   gap: 5px;
   justify-content: flex-start;
-  font: 400 11px/18px var(--vscode-font-family, Segoe UI, sans-serif);
+  font: 400 11px/18px var(--panel-font-sans);
   text-transform: none;
   letter-spacing: normal;
 }
@@ -1066,11 +1066,11 @@
   height: 5px;
   opacity: 1;
 }
-.subagent-header .subagent-activity { overflow: hidden; min-height: 18px; font: 400 11px/18px var(--vscode-font-family, Segoe UI, sans-serif); }
+.subagent-header .subagent-activity { overflow: hidden; min-height: 18px; font: 400 11px/18px var(--panel-font-sans); }
 .subagent-header .subagent-activity-label,
 .subagent-header > .status-chip .status-chip-label { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
 .subagent-header .subagent-activity-detail { display: none; }
-.subagent-header .subagent-agent-name { font-family: var(--vscode-font-family, Segoe UI, sans-serif); font-size: 12px; font-weight: 600; }
+.subagent-header .subagent-agent-name { font-family: var(--panel-font-sans); font-size: 12px; font-weight: 600; }
 .subagent-live-preview { background: transparent; }
 .subagent-header .subagent-primary-meta { order: 2; flex: 1 0 auto; min-width: 52px; width: 0; max-width: 370px; }
 .subagent-primary-meta .pie-tooltip-trigger { display: flex; min-width: 0; max-width: 100%; }
@@ -1111,7 +1111,7 @@
   min-height: 0;
   max-height: min(365px, var(--pie-tooltip-available-height, 365px));
   overflow: hidden;
-  font-family: var(--vscode-font-family, Segoe UI, sans-serif);
+  font-family: var(--panel-font-sans);
 }
 .subagent-task-popover-heading {
   flex: 0 0 auto;
@@ -1129,7 +1129,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
-  font: 12px/1.5 var(--vscode-font-family, Segoe UI, sans-serif);
+  font: 12px/18px var(--panel-font-sans);
 }
 .subagent-task-tooltip::-webkit-scrollbar { width: 9px; }
 .subagent-task-tooltip::-webkit-scrollbar-thumb {
@@ -1705,11 +1705,11 @@
 .tool-call.tool-call-subagent.idle .subagent-agent-name,
 .tool-call.tool-call-subagent.idle .subagent-header-summary,
 .tool-call.tool-call-subagent.idle .subagent-primary-meta {
-  opacity: 0.5;
+  color: var(--panel-foreground-soft);
 }
 
 .tool-call.tool-call-subagent.idle .subagent-activity {
-  opacity: 0.65;
+  color: var(--panel-muted);
 }
 
 /* Lifecycle changes the bounded header/border rather than adding rings,
