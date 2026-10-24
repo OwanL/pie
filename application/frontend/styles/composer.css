@@ -220,11 +220,11 @@
   justify-content: flex-end;
 }
 
-/* The 8px cost strip is centered in the 26px control row, but that places its
-   small text above the taller session labels. Lower the glyphs to their
-   baseline without moving the row or its neighboring controls. */
+/* Centering the 8px mono line puts its baseline 2.5px above the 11px
+   model, reasoning and session labels. Align those text baselines, not their
+   font-descent boxes, without moving controls or changing pointer targets. */
 .composer-global-indicators .aggregate-strip {
-  top: 1.5px;
+  top: 2.5px;
 }
 
 .composer-indicators {

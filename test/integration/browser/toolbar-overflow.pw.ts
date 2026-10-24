@@ -1,6 +1,7 @@
 // Playwright-only spec; the .pw.ts suffix keeps it out of pie's node:test discovery.
 import type { Page } from '@playwright/test';
 
+import { EMPTY_AGGREGATE_STATS } from '../../../application/lib/protocol/index.js';
 import { expect, test } from './ui-smoke-fixtures.js';
 
 interface BrowserSocketWindow extends Window {
@@ -78,6 +79,15 @@ test.describe('composer toolbar overflow in Chromium', () => {
       modelSettings: { defaultModel: 'fixture-model', defaultProvider: 'fixture', defaultThinkingLevel: 'medium' },
       availableModels: [{ id: 'fixture-model', name: 'Offline fixture model', provider: 'fixture', reasoning: true, inputKinds: ['text'], contextWindow: 128_000 }],
       contextUsage: { tokens: 32_000, contextWindow: 128_000, percent: 25 },
+      aggregateStats: { ...EMPTY_AGGREGATE_STATS, ready: true, todayCost: 12.84, weekCost: 68.27 },
+      sessionUsage: {
+        authority: 'canonical', freshness: 'fresh', refreshStatus: 'idle',
+        samples: [{
+          sourceId: 'toolbar-fixture', kind: 'assistant', provider: 'fixture', modelId: 'fixture-model',
+          inputTokens: 42_000, outputTokens: 4_200, cacheReadTokens: 0, cacheWriteTokens: 0,
+          totalTokens: 46_200, reportedCostUsd: 1.26, provenance: 'exact',
+        }],
+      },
       browserServer: {
         running: true, localUrl: 'http://127.0.0.1:0', port: 0, clientCount: 1,
         lanEnabled: false, configuredLanEnabled: false, lanUrls: [],
@@ -97,34 +107,43 @@ test.describe('composer toolbar overflow in Chromium', () => {
         const right = bar.querySelector('.composer-indicators')!.getBoundingClientRect();
         const pair = element.getBoundingClientRect();
         const session = bar.querySelector('.composer-indicators .panel-chip-toolbar')!;
-        const textBottom = (root: Element) => {
-          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-          let bottom = Number.NEGATIVE_INFINITY;
-          while (walker.nextNode()) {
-            const node = walker.currentNode;
-            if (!node.textContent?.trim()) continue;
-            const range = document.createRange();
-            range.selectNodeContents(node);
-            for (const rect of Array.from(range.getClientRects())) bottom = Math.max(bottom, rect.bottom);
+        // A zero-height inline-block's top is the actual inline baseline.
+        // Range bottoms include font descent and hid the previous 1px error.
+        const baselines = Array.from(bar.querySelectorAll<HTMLElement>(
+          '.model-picker-trigger-label, .choice-picker-trigger-label, '
+          + '.composer-indicators .panel-chip-label, .composer-global-indicators .aggregate-strip-cost',
+        )).map((label) => {
+          const text = label.firstChild!;
+          const wrapper = document.createElement('span');
+          const marker = document.createElement('span');
+          marker.style.cssText = 'display:inline-block;width:0;height:0;padding:0;border:0;vertical-align:baseline';
+          text.replaceWith(wrapper);
+          wrapper.append(text, marker);
+          try {
+            return { text: label.textContent, baseline: marker.getBoundingClientRect().top };
+          } finally {
+            wrapper.replaceWith(text);
           }
-          return bottom;
-        };
+        });
         return {
           leftGap: pair.left - left.right,
           rightGap: right.left - pair.right,
           fontSize: parseFloat(getComputedStyle(element).fontSize),
           sessionFontSize: parseFloat(getComputedStyle(session).fontSize),
-          textBottom: textBottom(element),
-          sessionTextBottom: textBottom(session),
+          baselines,
         };
       });
       expect(metrics.rightGap).toBeGreaterThanOrEqual(0);
       expect(metrics.rightGap).toBeLessThanOrEqual(6);
       expect(metrics.leftGap).toBeGreaterThan(metrics.rightGap);
-      expect(metrics.fontSize).toBeLessThan(9);
+      expect(metrics.fontSize).toBe(8);
       expect(metrics.fontSize).toBeLessThan(metrics.sessionFontSize);
-      // Range boxes include font descent space, unlike the visible numeric glyphs.
-      expect(Math.abs(metrics.textBottom - metrics.sessionTextBottom)).toBeLessThanOrEqual(2);
+      // Model, reasoning, session cost, context, and BOTH global cost labels.
+      expect(metrics.baselines).toHaveLength(6);
+      const reference = metrics.baselines[0]!.baseline;
+      for (const label of metrics.baselines) {
+        expect(Math.abs(label.baseline - reference), `${label.text} baseline at ${width}px`).toBeLessThan(0.05);
+      }
     }
   });
 
