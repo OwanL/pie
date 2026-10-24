@@ -1,3 +1,5 @@
+import { normalizeToolProgress } from '../../harness/agent-processes/workers/tool-progress-normalizer';
+import { getRenderableSubagentResult, getSubagentBillingEntries } from '../../harness/agent-processes/workers/subagent-result';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -24,6 +26,23 @@ import {
   type WebviewToHostMessage,
   EMPTY_AGGREGATE_STATS,
 } from '../../application/lib/protocol/index.js';
+
+test('collapsed subagent preview transports activity and provisional evidence without accounting or transcripts', () => {
+  const preview = normalizeToolProgress('subagent', { details: { results: [{
+    agent: 'worker', task: 'inspect', exitCode: -1,
+    messages: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'call', name: 'read', arguments: { path: 'source.ts' }, status: 'running', result: { text: 'partial' } }] }],
+    providerInvocations: [{ invocationId: 'turn-1', attemptId: 'attempt', model: 'first' }, { invocationId: 'turn-2', attemptId: 'attempt', model: 'second' }],
+  }] } });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind !== 'subagent') return;
+  const transported = JSON.parse(JSON.stringify(preview));
+  assert.equal(transported.children[0].messages, undefined);
+  assert.deepEqual(getRenderableSubagentResult(transported)?.results[0].toolActivity,
+    { name: 'read', input: 'source.ts', output: 'partial', running: true });
+  assert.equal(transported.displayBilling[0].invocations.length, 2);
+  assert.equal(transported.displayBilling[0].usage, undefined);
+  assert.deepEqual(getSubagentBillingEntries(transported), []);
+});
 
 test('session bucket choices retain full entries across preference snapshots', () => {
   assert.deepEqual(DEFAULT_CHAT_PREFS.subagentBucketTogglesBySession, {});

@@ -3,6 +3,7 @@ import type { Locator } from '@playwright/test';
 import { expect, test } from './ui-smoke-fixtures.js';
 import { EMPTY_VIEW_STATE } from '../../../application/frontend/lib/hooks/use-host-sync.js';
 import type { ChatMessage } from '../../../application/lib/protocol/index.js';
+import { normalizeToolProgress } from '../../../harness/agent-processes/workers/tool-progress-normalizer.js';
 import type { SubagentSingleResult } from '../../../harness/agent-processes/workers/subagent-result.js';
 
 const NOW = Date.parse('2026-10-24T12:00:00Z');
@@ -30,11 +31,11 @@ const children: SubagentSingleResult[] = [
   },
 ];
 
-function state(results = children, seq = 0) {
+function state(results = children, seq = 0, normalized = false) {
   const toolCall = {
     id: 'illustrative-auth-delegation', name: 'subagent', status: 'running' as const, seq,
     input: { tasks: results.map(({ agent, task }) => ({ agent, task })) },
-    result: { mode: 'parallel', results },
+    result: normalized ? normalizeToolProgress('subagent', { mode: 'parallel', results }) : { mode: 'parallel', results },
   };
   const transcript: ChatMessage[] = [{
     id: 'illustrative-auth-review', role: 'assistant', createdAt: new Date(NOW).toISOString(),
@@ -207,6 +208,52 @@ test.describe('subagent redesign in the real isolated renderer', () => {
     await expect(elapsed.nth(0)).toHaveText('1:45');
     await expect(elapsed.nth(1)).toHaveText('2:21');
     await expect(elapsed.nth(2)).toHaveText('0:58');
+  });
+});
+
+test.describe('bounded live subagent preview', () => {
+  const usage = { input: 10_000, output: 100, cacheRead: 0, cacheWrite: 0 };
+  const child = { ...children[0]!, model: 'fixture/Model', provider: 'fixture',
+    usage: { ...usage, contextTokens: 18_000, turns: 2 },
+    providerInvocations: [0, 1].map((index) => ({ invocationId: `response-${index}`, model: 'Model', provider: 'fixture', usage })),
+  };
+  test.use({ viewState: { ...state([child], 0, true), availableModels: [{
+    id: 'Model', name: 'Model', provider: 'fixture', reasoning: false, inputKinds: ['text'],
+    subagent: { eligible: true, pricing: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } },
+  }] } });
+
+  test('keeps a dense header and stable live viewport while exposing commands, output and cost', async ({ page, isolatedHost }, info) => {
+    await page.clock.setFixedTime(NOW);
+    await page.setViewportSize({ width: 420, height: 900 });
+    await page.goto('/');
+    const item = page.locator('.tool-call-subagent');
+    await expect(item).toHaveCount(1);
+    const heights: number[] = [];
+    let current: SubagentSingleResult = child;
+    let seq = 0;
+    const publish = async (patch: Partial<SubagentSingleResult>, expected: string, screenshot?: string) => {
+      current = { ...current, ...patch };
+      isolatedHost.publishState(state([current], ++seq, true));
+      await expect(item).toContainText(expected);
+      await page.evaluate(() => document.fonts.ready);
+      heights.push((await item.boundingBox())!.height);
+      if (screenshot) await page.screenshot({ path: info.outputPath(`${screenshot}.png`) });
+    };
+    await publish({ activityDetail: 'Waiting for fixture provider' }, 'Waiting for fixture provider');
+    await publish({ activityPhase: 'streaming', activityDetail: undefined, streamingReasoning: 'Inspecting the cancellation owner.' }, 'Inspecting the cancellation owner.');
+    await publish({ streamingReasoning: 'Inspecting shared cancellation ownership and independent caller lifetimes. '.repeat(12) }, 'Inspecting shared cancellation', 'live-reasoning');
+    const call = { role: 'assistant', content: [{ type: 'toolCall', id: 'live-bash', name: 'bash', arguments: { command: 'pnpm test -- cancellation' },
+      result: { content: [{ type: 'text', text: 'Checking cancellation scope…\n12 tests passed\nNo leaked listeners' }] },
+    }] };
+    await publish({ activityPhase: 'running_tool', runningTools: ['bash'], streamingReasoning: undefined, messages: [call] }, 'bash', 'live-tool');
+    // A real normalized preview has no transcript messages. Its bounded fields
+    // must carry both current activity and per-response cost through rendering.
+    await expect(item.locator('.subagent-current-input')).toHaveText('pnpm test -- cancellation');
+    await expect(item.locator('.subagent-current-output')).toContainText('No leaked listeners');
+    await expect(item.locator('.subagent-telemetry-cost')).toHaveText('~$0.02');
+    expect((await header(item).boundingBox())!.height).toBeLessThanOrEqual(28);
+    expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
+    await expectContained(item);
   });
 });
 

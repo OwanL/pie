@@ -42,6 +42,19 @@ test('compact current tool input is raw and never includes previous tool output'
   assert.deepEqual(subagentCompactActivity(result({ agent: 'a', task: 't', streamingReasoning: 'actual reasoning' })), { text: 'actual reasoning', reasoning: true });
 });
 
+test('bounded live tool activity includes matching output without a detail subscription', () => {
+  const child = result({ agent: 'worker', task: 'inspect', exitCode: -1,
+    runningTools: ['bash'], streamingReasoning: 'stale reasoning', messages: [],
+    toolActivity: { name: 'bash', input: 'pnpm test', output: '12 tests passed', running: true },
+  });
+  assert.deepEqual(subagentCompactActivity(child), { label: 'bash', text: 'pnpm test', output: '12 tests passed' });
+  assert.deepEqual(subagentCompactActivity({ ...child, runningTools: [], streamingReasoning: undefined,
+    toolActivity: { ...child.toolActivity!, running: false },
+  }), { label: 'bash · finished', text: 'pnpm test', output: '12 tests passed' });
+  assert.deepEqual(subagentCompactActivity({ ...child, runningTools: [], streamingReasoning: 'new reasoning' }),
+    { text: 'new reasoning', reasoning: true });
+});
+
 test('retry wait uses only actual current detail despite stale tools and streams', () => {
   const child = result({ agent: 'worker', task: 'inspect', exitCode: -1,
     activityPhase: 'retry_wait', activityDetail: '  Rate limited; retrying in 8s.  ',

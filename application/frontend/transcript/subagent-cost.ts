@@ -142,7 +142,11 @@ export function subagentDisplayCosts(
   resultCount: number,
   pricingForModel?: TokenPricingResolver,
 ): Array<SubagentDisplayCost | undefined> {
-  const entries = getSubagentBillingEntries(rawResult);
+  // Live previews carry separate, display-only evidence. Never treat it as
+  // canonical accounting or reprice a multi-turn aggregate as one response.
+  const live = rawResult as { kind?: unknown; displayBilling?: unknown } | undefined;
+  const entries = getSubagentBillingEntries(live?.kind === 'subagent' && Array.isArray(live.displayBilling)
+    ? { billing: live.displayBilling } : rawResult);
   return Array.from({ length: resultCount }, (_, index) => subagentDisplayCostForEntry(
     entries.find((entry) => entry.path === String(index)),
     pricingForModel,

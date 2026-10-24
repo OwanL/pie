@@ -478,6 +478,12 @@ interface LatestToolActivity {
  * it surfaces before the `toolResult` message arrives. Scans backward so the
  * newest toolCall wins (the one currently streaming output). */
 function latestToolActivity(result: SubagentSingleResult): LatestToolActivity | undefined {
+  // Ordinary live snapshots deliberately omit messages; consume their bounded
+  // activity projection without subscribing to the full child transcript.
+  if (result.toolActivity) {
+    const { name, input, output, running } = result.toolActivity;
+    return { name, inputLine: input, rawInput: input, output, running };
+  }
   const messages: RawMessage[] = Array.isArray(result.messages) ? result.messages : [];
   if (messages.length === 0) return undefined;
 
@@ -544,18 +550,19 @@ function rawSubagentToolInput(input: unknown): string | undefined {
 
 /** Current-only compact content. Never carry a previous tool's output into a
  * new input, or replay completed tool output as current model activity. */
-export function subagentCompactActivity(result: SubagentSingleResult): { label?: string; text: string; reasoning?: boolean } | undefined {
+export function subagentCompactActivity(result: SubagentSingleResult): { label?: string; text: string; output?: string; reasoning?: boolean } | undefined {
   if (result.activityPhase === 'retry_wait') {
     return result.activityDetail?.trim() ? { text: result.activityDetail } : undefined;
   }
   const tool = latestToolActivity(result);
   const executingTool = result.activityPhase === 'running_tool' || (result.runningTools?.length ?? 0) > 0;
-  if (executingTool && tool?.running && tool.rawInput) {
-    return { label: tool.name, text: tool.rawInput };
-  }
+  const toolPreview = tool && (tool.rawInput || tool.output)
+    ? { label: tool.running ? tool.name : `${tool.name} · finished`, text: tool.rawInput ?? '', ...(tool.output !== undefined ? { output: tool.output } : {}) }
+    : undefined;
+  if (executingTool && tool?.running) return toolPreview;
   if (result.streamingText?.trim()) return { text: result.streamingText.trim() };
   if (result.streamingReasoning?.trim()) return { text: result.streamingReasoning.trim(), reasoning: true };
-  return tool?.rawInput ? { label: tool.name, text: tool.rawInput } : undefined;
+  return toolPreview;
 }
 
 /** Settled excerpts use the same conversion as the transcript: finalOutput is

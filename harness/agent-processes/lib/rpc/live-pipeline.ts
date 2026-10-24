@@ -77,6 +77,8 @@ export type ToolPreview =
       /** Compact terminal-only accounting sideband. Nested transcripts stay
        * out of the live/UI payload while every recursive child remains billed. */
       billing?: SubagentBillingEntry[];
+      /** UI-only provisional direct-child evidence; never canonical accounting. */
+      displayBilling?: SubagentBillingEntry[];
     }
   | { kind: 'question'; promptSummary: string; optionCount: number }
   | { kind: 'generic'; summary: string };
@@ -127,6 +129,7 @@ export interface SubagentChildPreview {
    * descendants. Kept separately from render content so live-rate measurement
    * stays monotonic without repeatedly tokenizing the complete transcript. */
   cumulativeOutputTokens?: number;
+  toolActivity?: { name: string; input?: string; output?: string; running: boolean };
   runningTools?: string[];
   /** Compatibility-only field for old durable/checkpoint parsing. New ordinary
    * live producers always omit it. */
@@ -517,6 +520,7 @@ function isTokenChannelPresence(value: unknown): boolean {
 
 function isSubagentChildPreviewTelemetry(value: unknown): boolean {
   if (!isRecord(value)) return false;
+  if (value.toolActivity !== undefined && !isSubagentToolActivity(value.toolActivity)) return false;
   if (value.cwd !== undefined && typeof value.cwd !== 'string') return false;
   if (value.parentUserContextMode !== undefined
     && value.parentUserContextMode !== 'latest' && value.parentUserContextMode !== 'all') return false;
@@ -558,6 +562,13 @@ function isSubagentChildPreviewTelemetry(value: unknown): boolean {
   return true;
 }
 
+export function isSubagentToolActivity(value: unknown): value is NonNullable<SubagentChildPreview['toolActivity']> {
+  return isRecord(value) && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 128
+    && typeof value.running === 'boolean'
+    && (value.input === undefined || (typeof value.input === 'string' && value.input.length <= 1024))
+    && (value.output === undefined || (typeof value.output === 'string' && value.output.length <= 4096));
+}
+
 export function isToolPreview(value: unknown): value is ToolPreview {
   if (!isRecord(value) || typeof value.kind !== 'string') return false;
   switch (value.kind) {
@@ -566,6 +577,7 @@ export function isToolPreview(value: unknown): value is ToolPreview {
     case 'subagent': return Array.isArray(value.children)
       && value.children.every(isSubagentChildPreviewTelemetry)
       && isFiniteNumber(value.omittedChildren)
+      && (value.displayBilling === undefined || (Array.isArray(value.displayBilling) && value.displayBilling.every(isSubagentBillingEntry)))
       && (value.billing === undefined || (Array.isArray(value.billing) && value.billing.every(isSubagentBillingEntry)));
     case 'question': return typeof value.promptSummary === 'string' && isFiniteNumber(value.optionCount);
     case 'generic': return typeof value.summary === 'string';

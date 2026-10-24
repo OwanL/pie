@@ -974,11 +974,18 @@ function SubagentSingleBlock({
         <div class="subagent-live-preview">
           <SubagentTaskPreview task={singleResult.task} agent={singleResult.agent} />
           {hasPendingAskUser && <button type="button" class="subagent-pending-prompt" onClick={(event) => { event.stopPropagation(); setOpen(true); }}>Response needed — open subagent transcript</button>}
-          {!compactActivity && activity && <div class="subagent-activity" title={activity.diagnostic}>{activity.label === 'Responding' ? 'Waiting for output' : activity.label}{activity.detail ? ' · ' + activity.detail : ''}{activity.elapsed ? ' · ' + activity.elapsed : ''}</div>}
-          {compactActivity && (
-            <div class={cx('subagent-current', compactActivity.reasoning && 'subagent-current-reasoning')}>
-              {compactActivity.label && <span class="turn-activity-tail-label">{compactActivity.label}</span>}
-              <span class="subagent-current-text">{compactActivity.text}</span>
+          {live && (
+            <div class={cx('subagent-current', compactActivity?.reasoning && 'subagent-current-reasoning', compactActivity?.label && 'subagent-current-tool')}>
+              {compactActivity?.label && (
+                <div class="subagent-current-command">
+                  <span class="turn-activity-tail-label">{compactActivity.label}</span>
+                  <span class="subagent-current-input" title={compactActivity.text}>{compactActivity.text}</span>
+                </div>
+              )}
+              <div class="subagent-current-output">
+                {compactActivity ? <span class="subagent-current-text">{compactActivity.label ? compactActivity.output : compactActivity.text}</span>
+                  : activity && <span class="subagent-current-text subagent-activity" title={activity.diagnostic}>{activity.label === 'Responding' ? 'Waiting for output' : activity.label}{activity.detail ? ' · ' + activity.detail : ''}</span>}
+              </div>
             </div>
           )}
           {settledExcerpt && <div class="subagent-outcome">{settledExcerpt.split(/((?:\r?\n)[\t ]*\r?\n(?:[\t ]*\r?\n)*)/).map((part, index) =>

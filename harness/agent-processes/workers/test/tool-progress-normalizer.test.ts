@@ -1,9 +1,53 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { getRenderableSubagentResult, getSubagentBillingEntries } from '../subagent-result';
+import { isToolPreview } from '../../lib/rpc/live-pipeline';
 import { encode } from 'gpt-tokenizer/encoding/cl100k_base';
 
 import { isBoundedToolPreview, normalizeToolProgress } from '../tool-progress-normalizer';
 import { estimateTextTokens } from '../../../../lib/token-estimation';
+
+test('raw running child tool activity and multi-turn display billing stay bounded through roundtrip', () => {
+  const child = {
+    agent: 'worker', task: 'test', exitCode: -1,
+    messages: [{ role: 'assistant', content: [
+      { type: 'toolCall', id: 'old', name: 'read', arguments: { path: 'old' } },
+      { type: 'toolCall', id: 'current', name: 'bash', arguments: { command: 'x'.repeat(4000) }, status: 'running', result: { content: [{ type: 'text', text: 'a'.repeat(9000) + 'tail' }, { type: 'image', data: 'secret' }] } },
+    ] }, { role: 'toolResult', toolCallId: 'old', content: 'stale' }],
+    providerInvocations: Array.from({ length: 67 }, (_, index) => ({ invocationId: `turn-${index}`, attemptId: 'attempt', model: `model-${index}`, usage: { input: index + 1, output: 2, cacheRead: 0, cacheWrite: 0 } })),
+  };
+  const preview = normalizeToolProgress('subagent', { details: { mode: 'single', results: [child] } });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind !== 'subagent') return;
+  assert.equal(preview.children[0].messages, undefined);
+  assert.equal(preview.children[0].toolActivity?.input?.length, 1024);
+  assert.equal(preview.children[0].toolActivity?.output?.length, 4096);
+  assert.equal(preview.children[0].toolActivity?.running, true);
+  assert.ok(preview.children[0].toolActivity?.output?.endsWith('tail'));
+  assert.equal(isToolPreview(preview), true);
+  assert.deepEqual(getRenderableSubagentResult(JSON.parse(JSON.stringify(preview)))?.results[0].toolActivity, preview.children[0].toolActivity);
+  assert.equal(preview.displayBilling?.[0].invocations?.length, 64);
+  assert.equal(preview.displayBilling?.[0].omittedInvocationCount, 3);
+  assert.equal(preview.displayBilling?.[0].invocations?.[1].model, 'model-1');
+  assert.deepEqual(getSubagentBillingEntries(preview), []);
+  child.messages.push({ role: 'toolResult', toolCallId: 'current', content: 'finished' });
+  const done = normalizeToolProgress('subagent', { results: [child] });
+  if (done.kind !== 'subagent') return;
+  assert.deepEqual(done.children[0].toolActivity, { name: 'bash', input: 'x'.repeat(1024), output: 'finished', running: false });
+  assert.equal(isToolPreview({ ...done, children: [{ ...done.children[0], toolActivity: { name: 'bash', running: 'yes' } }] }), false);
+});
+
+test('newer partial tool results win over older inline output from the same call', () => {
+  const preview = normalizeToolProgress('subagent', { results: [{ agent: 'worker', exitCode: -1, messages: [
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'bash-1', name: 'bash', arguments: { command: 'pnpm test' },
+      result: { content: [{ type: 'text', text: 'Earlier output' }] },
+    }] },
+    { role: 'toolResult', toolCallId: 'bash-1', partial: true, content: [{ type: 'text', text: 'Latest output' }] },
+  ] }] });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind !== 'subagent') return;
+  assert.deepEqual(preview.children[0].toolActivity, { name: 'bash', input: 'pnpm test', output: 'Latest output', running: true });
+});
 
 test('tool progress adapters emit typed bounded previews', () => {
   const command = normalizeToolProgress('bash', { command: 'npm test', output: 'x'.repeat(20_000) });

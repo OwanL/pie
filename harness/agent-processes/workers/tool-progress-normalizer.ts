@@ -1,7 +1,7 @@
 import { LIVE_PIPELINE_LIMITS, type SubagentChildPreview, type ToolPreview } from '../lib/rpc/live-pipeline.js';
 import { isLiveSubagentDetailAddress, PROVIDER_TOOL_CALL_ID_MAX_BYTES, type LiveSubagentDetailAddress, type SubagentChildIdentity } from '../lib/rpc/subagent-detail.js';
 import { estimateTextTokens } from '../../../lib/token-estimation.js';
-import { hasNestedToolFailure } from './subagent-result.js';
+import { getSubagentBillingEntries, hasNestedToolFailure } from './subagent-result.js';
 import { compactSubagentFileChanges } from '../../session-storage/transcripts/lazy-details.js';
 import { recordBackendLivePipelineTrace, isBackendLivePipelineTraceEnabled } from '../coordinator/live-pipeline-trace-runtime.js';
 
@@ -192,6 +192,7 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
       streamingText: boundedTailOptional(stringField(child, ['streamingText']), MAX_TAIL_CHARS),
       streamingReasoning: boundedTailOptional(stringField(child, ['streamingReasoning']), MAX_TAIL_CHARS),
       cumulativeOutputTokens: estimateCumulativeSubagentTokens(child),
+      toolActivity: latestToolActivity(child.messages),
       runningTools: Array.isArray(child.runningTools)
         ? child.runningTools.filter((tool): tool is string => typeof tool === 'string').slice(0, 20).map((tool) => boundedHead(tool, 128))
         : undefined,
@@ -219,6 +220,16 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
     : undefined;
   const normalized = toJsonSafe({
     kind: 'subagent', mode, children, omittedChildren: Math.max(0, rawChildren.length - children.length),
+    // Project only direct evidence: accounting's recursive parser must never
+    // inspect child messages or descendants on this live display path.
+    displayBilling: getSubagentBillingEntries({ results: rawChildren.map((value) => {
+      const child = asRecord(value);
+      return child ? {
+        usage: child.usage, model: child.model, selectedModel: child.selectedModel,
+        provider: child.provider, providerInvocations: child.providerInvocations,
+        attemptRecords: child.attemptRecords,
+      } : {};
+    }) }),
   }, new WeakSet(), measuredCounters) as ToolPreview;
   if (counters && measuredCounters) Object.assign(counters, measuredCounters, { available: true });
   if (revision) {
@@ -229,6 +240,70 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
     }
   }
   return normalized;
+}
+
+function latestToolActivity(value: unknown): SubagentChildPreview['toolActivity'] {
+  if (!Array.isArray(value)) return undefined;
+  // Inspect direct messages only. Never recurse into result details/images.
+  let call: Record<string, unknown> | undefined;
+  let callIndex = -1;
+  for (let i = value.length - 1; i >= 0 && !call; i -= 1) {
+    const message = asRecord(value[i]);
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
+    for (let j = message.content.length - 1; j >= 0; j -= 1) {
+      const part = asRecord(message.content[j]);
+      if (part?.type === 'toolCall' && typeof part.name === 'string' && part.name) {
+        call = part; callIndex = i; break;
+      }
+    }
+  }
+  if (!call) return undefined;
+  const args = asRecord(call.arguments);
+  const preferred = stringField(args, ['command', 'path', 'file_path']);
+  const input = preferred ?? boundedArgs(args);
+  let output: string | undefined;
+  let running = true;
+  if (typeof call.id === 'string') for (let i = value.length - 1; i > callIndex; i -= 1) {
+    const result = asRecord(value[i]);
+    if (result?.role !== 'toolResult' || result.toolCallId !== call.id) continue;
+    output = plainToolText(result.content);
+    running = result.partial === true || result.isPartial === true;
+    break;
+  }
+  if (running && output === undefined && call.result !== undefined) {
+    const partial = asRecord(call.result);
+    output = plainToolText(partial?.content ?? partial?.text ?? partial?.output ?? call.result);
+    running = call.status !== 'completed' && call.status !== 'failed';
+  }
+  return { name: boundedHead(call.name as string, 128),
+    ...(input === undefined ? {} : { input: boundedHead(input, 1024) }),
+    ...(output === undefined ? {} : { output }), running };
+}
+
+function plainToolText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.slice(-4096);
+  if (!Array.isArray(value)) return undefined;
+  let tail = '';
+  for (let i = value.length - 1; i >= 0 && tail.length < 4096; i -= 1) {
+    const part = asRecord(value[i]);
+    if (part?.type === 'text' && typeof part.text === 'string') {
+      tail = (part.text.slice(-4096) + (tail ? '\n' + tail : '')).slice(-4096);
+    }
+  }
+  return tail || undefined;
+}
+
+function boundedArgs(args: Record<string, unknown> | undefined): string | undefined {
+  if (!args) return undefined;
+  const preview: Record<string, unknown> = {};
+  let count = 0;
+  for (const key in args) {
+    if (!Object.hasOwn(args, key) || count++ >= 16) break;
+    const value = args[key];
+    if (typeof value === 'string') preview[key.slice(0, 128)] = value.slice(0, 1024);
+    else if (typeof value === 'boolean' || value === null || (typeof value === 'number' && Number.isFinite(value))) preview[key.slice(0, 128)] = value;
+  }
+  return JSON.stringify(preview).slice(0, 1024);
 }
 
 function normalizeLineage(value: unknown): SubagentChildIdentity[] | undefined {

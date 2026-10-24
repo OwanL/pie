@@ -218,7 +218,7 @@ test('settled outcome preserves exact paragraph separators without parsing prose
   assert.equal(outcome.querySelector('strong'), null);
 });
 
-test('compact current input wraps raw content without retained tool output or duplicate expanded preview', () => {
+test('compact current input retains raw content without stale output or duplicate expanded preview', () => {
   const command = 'run --value="' + 'long argument '.repeat(50) + '"\nsecond line';
   const call: ToolCall = { id: 'current-only', name: 'subagent', status: 'running', input: {}, result: { details: { results: [{
     agent: 'worker', task: 'One task', exitCode: -1, activityPhase: 'running_tool', messages: [
@@ -228,7 +228,8 @@ test('compact current input wraps raw content without retained tool output or du
     ],
   }] } } };
   mount(call, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-current-text')?.textContent, command);
+  assert.equal(container.querySelector('.subagent-current-input')?.textContent, command);
+  assert.equal(container.querySelector('.subagent-current-input')?.getAttribute('title'), command);
   assert.doesNotMatch(container.querySelector('.subagent-live-preview')?.textContent ?? '', /Old output|old.ts/);
   assert.equal(container.querySelectorAll('.subagent-task').length, 1);
   act(() => container.querySelector<HTMLElement>('.subagent-header')!.click());

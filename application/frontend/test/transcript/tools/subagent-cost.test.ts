@@ -5,6 +5,7 @@ import {
   subagentDisplayCosts,
   subagentDisplayCostForEntry,
 } from '../../../transcript/subagent-cost';
+import { normalizeToolProgress } from '../../../../../harness/agent-processes/workers/tool-progress-normalizer';
 import {
   createTokenPricingResolver,
   type TokenPricingResolver,
@@ -122,6 +123,19 @@ test('per-invocation evidence combines reported and catalog costs', () => {
     cost: 0.01 + ((100 + (10 * 2)) / 1_000_000),
     estimated: true,
   });
+});
+
+test('normalized live previews retain per-response pricing without treating a subtotal as complete', () => {
+  const normalize = (providerInvocations: unknown[]) => normalizeToolProgress('subagent', { results: [{
+    agent: 'worker', task: 'inspect', exitCode: -1, model: 'provider/model', provider: 'provider',
+    usage: { ...completeUsage(201, 20), turns: 2 }, providerInvocations,
+  }] });
+  const invocations = [invocation(completeUsage(100, 10)), invocation(completeUsage(101, 10))];
+  assert.deepEqual(subagentDisplayCosts(normalize(invocations), 1, pricingForModel),
+    subagentDisplayCosts(rawBilling(invocations), 1, pricingForModel));
+  assert.ok(subagentDisplayCosts(normalize(invocations), 1, pricingForModel)[0]?.estimated);
+  assert.equal(subagentDisplayCosts(normalize([...invocations, invocation({ input: 12 })]), 1, pricingForModel)[0], undefined);
+  assert.equal(subagentDisplayCosts(normalize(Array.from({ length: 65 }, () => invocations[0])), 1, pricingForModel)[0], undefined);
 });
 
 test('multi-turn aggregate usage is not repriced as one invocation', () => {

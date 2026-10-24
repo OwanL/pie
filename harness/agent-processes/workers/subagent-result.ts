@@ -1,3 +1,4 @@
+import { isSubagentToolActivity, type SubagentChildPreview } from '../lib/rpc/live-pipeline.js';
 import type { ToolCall } from '../lib/rpc/message-contract.js';
 import type { LiveSubagentDetailAddress, SubagentChildIdentity } from '../lib/rpc/subagent-detail';
 import { isLiveSubagentDetailAddress } from '../lib/rpc/subagent-detail';
@@ -124,6 +125,8 @@ export interface SubagentSingleResult {
   stderr?: string;
   stopReason?: string;
   errorMessage?: string;
+  /** Bounded command/path and output for the collapsed live preview. */
+  toolActivity?: SubagentChildPreview['toolActivity'];
   /** Tool names currently executing inside this subagent run. */
   runningTools?: string[];
   /** Live child lifecycle diagnostics emitted by the subagent extension. */
@@ -784,6 +787,7 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
           ? { parentUserContext: candidate.parentUserContext.slice(0, 12_000) } : {}),
         ...(candidate.hasNestedToolFailure === true ? { hasNestedToolFailure: true } : {}),
         ...(fileChanges ? { fileChanges } : {}),
+        ...(isSubagentToolActivity(candidate.toolActivity) ? { toolActivity: { ...candidate.toolActivity } } : {}),
         ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
         ...(typeof candidate.selectedModel === 'string' ? { selectedModel: candidate.selectedModel } : {}),
         ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),

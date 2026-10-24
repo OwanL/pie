@@ -699,7 +699,7 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.doesNotMatch(html, /gpt-5\.4/);  // actual execution model not shown when selectedModel present
   assert.match(html, /claude-opus-4\.6/);  // selectedModel is now visible in header
   assert.match(html, /subagent-model-label/);
-  assert.match(html, />1m 5s</);
+  assert.match(html, /title="Total elapsed: 1:05"[^>]*>1:05<\/span>/);
   assert.doesNotMatch(html, />ctx 1\.6k \/ 200k/);
   assert.doesNotMatch(html, />tok 1\.6k</);
   assert.doesNotMatch(html, />in 1\.2k<|>out 345<|>cache 50<|>2t</);
@@ -841,18 +841,20 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.doesNotMatch(runningParentHtml, /status-chip-label">Running/);
   assert.doesNotMatch(runningParentHtml, /subagent-model-tag/);
   assert.match(runningParentHtml, /gpt-4\.1/);  // model remains available in the header
-  assert.match(runningParentHtml, /status-chip-completed[^>]*>.*Finished/);
+  assert.match(runningParentHtml, /class="tool-call tool-call-subagent[^\"]* completed"/);
+  assert.match(runningParentHtml, /aria-label="Toggle scout subagent"/);
+  assert.doesNotMatch(runningParentHtml, /status-chip-completed|Finished/);
   assert.doesNotMatch(runningParentHtml, /Starting|waiting for first status update/);
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
-  // Optional header groups are rendered for card-local CSS to reveal; SSR
-  // cannot establish which groups are visible at a particular width.
+  // Context, cost and elapsed stay in the header; detailed usage belongs to
+  // the model tooltip rather than redundant inline groups.
   assert.match(runningParentHtml, /subagent-inline-context"[^>]*>51k\/200k<\/span>/);
-  assert.match(runningParentHtml, /<span>In 51k<\/span><span>Out 2\.4k<\/span>/);
-  assert.match(runningParentHtml, /subagent-inline-cache">Cache read 38\.6k<\/span>/);
-  assert.match(runningParentHtml, /subagent-inline-turns">2 provider turns<\/span>/);
+  assert.match(runningParentHtml, /aria-label="Cost: \$0\.1234"/);
+  assert.match(runningParentHtml, /subagent-telemetry-cost">\$0\.12<\/span>/);
+  assert.doesNotMatch(runningParentHtml, /subagent-inline-cache|subagent-inline-turns/);
   assert.doesNotMatch(runningParentHtml, /Cache write|tok 92k/);
   assert.doesNotMatch(runningParentHtml, /last 12\.0 tok\/s/);
-  assert.match(runningParentHtml, /Recovered/);
+  assert.doesNotMatch(runningParentHtml, /Recovered/); // recovery details remain in the model tooltip
 
   const abortedHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -1077,8 +1079,10 @@ test('rendered parallel subagent cards keep per-child summaries and statuses whi
     renderToolCall: () => null,
   }));
 
-  assert.match(html, /subagent-agent-name[^>]*>scout<\/span>/);
-  assert.match(html, /subagent-agent-name[^>]*>reviewer<\/span>/);
+  assert.match(html, /data-role-icon="scout"/);
+  assert.match(html, /data-role-icon="reviewer"/);
+  assert.match(html, /aria-label="Inspect scout model exchange"/);
+  assert.match(html, /aria-label="Inspect reviewer model exchange"/);
   assert.match(html, /Gather logs/);
   assert.match(html, /Review output/);
   assert.doesNotMatch(html, /scout: Gather logs/);
@@ -1191,11 +1195,13 @@ test('subagent card keeps task context stable and shows live or settled previews
   assert.match(completedCollapsedHtml, /subagent-live-preview/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-current/);
   assert.match(completedCollapsedHtml, /Inspect regression/);
-  assert.match(completedCollapsedHtml, /status-chip-completed[^>]*>.*Finished/);
+  assert.match(completedCollapsedHtml, /class="tool-call tool-call-subagent[^\"]* completed"/);
+  assert.match(completedCollapsedHtml, /subagent-outcome"><p>Looks good\./);
+  assert.doesNotMatch(completedCollapsedHtml, /status-chip-completed|Finished/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);
 });
 
-test('a completed parallel child shows the same finished UI while its sibling keeps running', () => {
+test('a completed parallel child retains its lifecycle state while its sibling keeps running', () => {
   const { ToolCallItem } = webviewModules;
 
   const html = renderToString(h(ToolCallItem, {
@@ -1221,10 +1227,11 @@ test('a completed parallel child shows the same finished UI while its sibling ke
     renderToolCall: () => null,
   }));
 
-  assert.equal((html.match(/tool-call-subagent[^"]* completed/g) ?? []).length, 1);
-  assert.equal((html.match(/status-chip-completed/g) ?? []).length, 1);
-  assert.match(html, /Finished/);
-  assert.match(html, /Waiting for output/);
+  assert.equal((html.match(/class="tool-call tool-call-subagent[^"]* completed"/g) ?? []).length, 1);
+  assert.equal((html.match(/class="tool-call tool-call-subagent[^"]* running"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /status-chip-completed|Finished/);
+  assert.match(html, /aria-label="Inspect scout model exchange"/);
+  assert.match(html, /aria-label="Task for reviewer"/);
 });
 
 test('parallel subagent children share one minimally indented batch wrapper', () => {
@@ -1260,23 +1267,15 @@ test('parallel subagent children share one minimally indented batch wrapper', ()
   assert.equal((html.match(/subagent-agent-name/g) ?? []).length, 2);
 });
 
-test('parallel-group CSS uses one thin shallow spine without connector ticks', async () => {
+test('parallel subagent groups use a shared boundary without a rail', async () => {
   const css = await readFile(new URL('../../styles/tool-call.css', import.meta.url), 'utf8');
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*gap:\s*6px/);
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*7px/);
-  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*1px solid var\(--panel-border\)/);
-  assert.doesNotMatch(css, /\.subagent-parallel-child::before\s*\{/);
-
-  const groupedRow = css.match(/\.tool-call-parallel-child\s*\{[^}]*\}/)?.[0] ?? '';
-  assert.match(groupedRow, /position:\s*relative/);
-  assert.doesNotMatch(groupedRow, /padding|margin/);
-  assert.match(css, /\.tool-call-parallel-child::before\s*\{[^}]*left:\s*0;[^}]*background:\s*var\(--panel-border\)/);
-  assert.doesNotMatch(css, /tool-call-parallel-item-done|text-decoration:\s*line-through/);
-  assert.match(css, /\.tool-call-parallel-child::before\s*\{[^}]*top:\s*-3px[^}]*bottom:\s*-3px[^}]*width:\s*1px/);
-  assert.doesNotMatch(css, /\.tool-call-parallel-child::after\s*\{/);
-  assert.match(css, /\.tool-call-parallel-start::before\s*\{[^}]*top:\s*0/);
-  assert.match(css, /\.tool-call-parallel-end::before\s*\{[^}]*bottom:\s*0/);
-  assert.doesNotMatch(css, /\.tool-call-parallel-group\s*\{/);
+  const group = css.match(/\.subagent-parallel-group\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.match(group, /display:\s*flex/);
+  assert.match(group, /border:\s*1px solid var\(--panel-border-subtle\)/);
+  assert.doesNotMatch(group, /border-left|padding-left/);
+  assert.match(css, /\.subagent-parallel-child \+ \.subagent-parallel-child\s*\{[^}]*border-top:\s*1px solid var\(--panel-border-subtle\)/);
+  assert.match(css, /\.subagent-parallel-child > \.tool-call\.tool-call-subagent\s*\{\s*border:\s*0;\s*border-radius:\s*0;/);
+  assert.doesNotMatch(css, /\.subagent-parallel-child::before\s*\{|\.subagent-parallel-child::after\s*\{/);
 });
 
 test('rendered SystemPromptMessage covers summary fallbacks, suppressed summaries, and token estimate branches', () => {
