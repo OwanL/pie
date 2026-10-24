@@ -200,7 +200,7 @@ export function ToolCallBody({ toolCall, prefs = DEFAULT_CHAT_PREFS, onOpenFile,
             </ResizablePre>
           ) : (
             <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80} scrollLabel="Structured tool result">
-              <code class="hljs language-yaml" dangerouslySetInnerHTML={{ __html: formatValueAsHighlightedYaml(toolCall.result) }} />
+              <code class="hljs language-yaml" dangerouslySetInnerHTML={{ __html: yamlText !== undefined ? highlightToolResultText(yamlText, 'yaml') : formatValueAsHighlightedYaml(toolCall.result) }} />
             </ResizablePre>
           )}
         </div>
