@@ -5,113 +5,71 @@ description: "Use when implementing, debugging, reviewing, or documenting pie it
 
 # Develop pie
 
-Use this skill only for work on the `pie` repository. **pie** is the VS Code sidebar and personal configuration stack built around the **Pi** coding-agent runtime; keep those names distinct.
+Use this skill only for the `pie` repository. **Pie** is the application and personal configuration stack; **Pi** is its coding-agent runtime.
 
-Route to a specialized skill when the request matches one; this skill remains the general workflow reference:
-
-- **`add-provider`** — adding or updating providers/models in the centralized catalog
-- **`diagnose`** — hard, unclear, intermittent, or performance bugs
-- **`grill-with-docs`** — challenging a plan against the repo's language and documented decisions
-
-## Repository map
-
-For the repository overview, see the [README](../../../../README.md#whats-in-this-repo); architectural ownership and dependency boundaries are described in [Architecture](../../../../docs/architecture/ARCHITECTURE.md#ownership-and-dependencies). Computer-use and Playwright dependencies remain owned by `extensions/` (see the [computer-use](../../../../docs/operations/COMPUTER-USE.md) and [Playwright](../../../../docs/operations/PLAYWRIGHT.md) guides).
-
-For setup, storage, and repository-wide workflows, see [`README.md`](../../../../README.md). Use scoped search for task-relevant documents. For documentation changes, follow the [documentation policy](../../../../docs/DOCUMENTATION-POLICY.md).
+Also load `add-provider` for provider/model work, `diagnose` for difficult bugs, or `grill-with-docs` when challenging a plan against documented decisions.
 
 ## Common practices
 
-- Use the repository-root Proto/pnpm scripts. The primary `test` route is Moon's affected task graph (`:test --affected --include-relations`), not a static-import/file-URL test-file selector. Explicit task inputs cover consumer sources; project dependencies alone do not propagate consumer selection in Moon 2.4.2. Do not add deep task traversal to ordinary checks: it can include artifact tasks. Use the uncached `proto run moon -- run root:graphTest` for NOOP affected-selection qualification in temporary Git fixtures. Ordinary Moon test tasks exclude files matching `*.artifact.test.*`; the default `test:artifact` selectors include SDK-backed cases and development-refresh/checkpoint suites. SDK-backed package-resolution, unbundled-module and CLI cases run in artifact companions; their SDK-free cases remain in ordinary tests. Generic native test selection supports repeatable `--include` and `--exclude <repo-relative glob>` file globs. Use `test:file` for focused native `node:test` work, and do not invoke `npx tsx` directly. TypeScript entries use private CommonJS wrappers with the local `tsx` loader; JavaScript and `.mjs` entries use Node's standard loading. This focused compatibility route does not qualify full native parity; see the root [README test guidance](../../../../README.md#test-and-validate) for coverage limits and retained legacy routes. Its optional `--sdk-path` supplies aliases from an already compiled SDK package but does not verify/acquire an artifact; SDK-backed source fixtures must point at the coding-agent package inside an independently verified `pi-runtime`, not `harness/pi/packages/coding-agent`.
-- Ordinary build/watch are local development only: `proto run pnpm -- run build` and `proto run pnpm -- run watch` write to `application/hosts/vscode/out-dev` and never publish. Use `proto run pnpm -- run dev` or `proto run pnpm -- run dev:vscode` for the isolated development host. Backend/Pi refresh requires stop → build → relaunch; shared renderer rebuilds reload the development host and are not HMR. See the root [README lifecycle](../../../../README.md#build-and-run-pie-from-source) for the profile, reader gate, and explicit delivery route.
-- Artifact delivery is separate: `proto run pnpm -- run delivery:build` builds only, while `proto run pnpm -- run extension:publish` explicitly publishes. Loader setup/upgrade additionally requires the explicit `--delivery --activate` route. Build/publication success does not establish installation, loading, or behavior verification; keep those states distinct. See the root [README lifecycle](../../../../README.md#build-and-run-pie-from-source) for workflow details.
-- For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A staged delivery is not a live fix; only report it as loaded after checking the active host and matching delivery setup. Do not mistake reopening the sidebar for restarting the extension host.
-- Treat [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under the owning test roots, including `test/integration/sync-contract.test.ts`.
-- Production analytics source mode is canonical-only: the SQLite store at the exact resolved data root, with read-only adoption of its sole existing capture namespace (or `canonical` for a new/empty store). Old activation artifacts are inert; helper failure never selects legacy capture or dual-write. This source mode is not evidence of live installation/activation. See [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage paths; the separate `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff must not be described as active without evidence.
-- Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
-- Preserve unrelated working-tree changes. Generated or user-owned files may already be modified; inspect status and focused diffs before finishing.
-
-### Model configuration
-
-Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files; `scripts/model-config/test/model-config-sync.test.ts` guards against drift. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
-
-### Context-lean terminology
-
-Do not conflate these mechanisms:
-
-- **History compaction**: Pi summarizes older conversation history across turns (`/compact`; `compaction{enabled,reserveTokens,keepRecentTokens}`). Avoid unqualified “compaction” or “summarization.”
-- **Skill pruning**: the `skill-pruner` extension's prepass removes tools or skills from the catalog for a turn (`pruning-result`; `disablePruning`). Avoid unqualified “pruning.”
-- **Tool-result pruning**: deterministic middleware rewrites one tool result before it enters context (for example ANSI stripping or JSON minification). Avoid “output compaction” and “result compaction.” See [`docs/contracts/TOOL-RESULT-PRUNING.md`](../../../../docs/contracts/TOOL-RESULT-PRUNING.md).
+- Use repository-root Proto/pnpm scripts. Preserve unrelated working-tree changes, including user-owned settings.
+- Start with the [README](../../../../README.md) for setup and workflows, and [Architecture](../../../../docs/architecture/ARCHITECTURE.md#ownership-and-dependencies) for ownership boundaries. Search for task-specific docs rather than loading everything. Follow the [documentation policy](../../../../docs/DOCUMENTATION-POLICY.md): keep guidance short and link instead of duplicating.
+- Keep the host CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
+- Read the [state contract](../../../../docs/contracts/STATE_CONTRACT.md) before changing host↔webview synchronization; update owning tests, including `test/integration/sync-contract.test.ts`, when the contract changes.
+- Read the [analytics contract](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage. Production uses canonical SQLite, never legacy fallback or dual-write. Source behavior does not prove live activation or authorize the separate storage cutoff.
+- Moon's affected selection needs explicit consumer-source inputs; project dependencies alone do not select consumers. Do not add deep task traversal to ordinary checks: it can include artifact tasks. Use `proto run moon -- run root:graphTest` to qualify selection without builds or providers.
 
 ## Commands
 
-Run from the repository root unless noted:
+Run from the repository root:
 
 ```bash
-proto run pnpm -- run setup                 # gated frozen-lockfile dependency setup
-proto run pnpm -- run install:dependencies  # alias for setup
-proto run pnpm -- run test                  # primary affected Moon project tasks
-proto run pnpm -- run test:file path/to/owner/test.ts
-proto run pnpm -- run test:file path/to/owner/test.ts -- --test-name-pattern=pattern # native flags follow --
-proto run pnpm -- run test:artifact         # artifact fixtures; prepares one private SDK artifact
-proto run pnpm -- run test:artifact -- --pi-runtime "<absolute verified runtime root>" # reuse artifact
-proto run pnpm -- run test:all              # all configured Moon :test project tasks
-proto run pnpm -- run test:integration      # retained opt-in integration route
-proto run pnpm -- run test:fast              # compatibility alias for affected Moon tasks
-proto run pnpm -- run test:coverage          # retained legacy coverage gate
-proto run pnpm -- run typecheck
-proto run pnpm -- run lint                  # extension-owned lint command
-proto run pnpm -- run check                 # model drift + typecheck + affected Moon tests
-proto run pnpm -- run verify                # model drift + typecheck + Moon tests + VS Code build
-proto run pnpm -- run verify:release        # coverage-gated legacy release route
-proto run pnpm -- run sync-models           # regenerate centralized model configuration
-proto run pnpm -- run sync-models -- --check
-proto run pnpm -- run build                 # local development output only: application/hosts/vscode/out-dev
-proto run pnpm -- run watch                 # local development build/watch; no publication
-proto run pnpm -- run dev                   # isolated standalone development host
-proto run pnpm -- run dev:vscode            # isolated VS Code development host
-proto run pnpm -- run delivery:build        # explicit artifact build only: application/hosts/vscode/out
-proto run pnpm -- run delivery:qualify      # uncached private delivery + relocated headless hosts/browser; no publication
-proto run pnpm -- run extension:package     # package a VSIX; does not install or publish
-proto run pnpm -- run extension:publish     # explicit --delivery --publish publication
-proto run pnpm -- run extension:test:browser
-proto run pnpm -- run doctor                # non-destructive installation/config check
+proto run pnpm -- run setup              # gated, frozen-lockfile dependency setup
+proto run pnpm -- run test:file path/to/test.ts
+proto run pnpm -- run test               # affected Moon project tests
+proto run pnpm -- run test:all           # all configured ordinary test tasks
+proto run pnpm -- run test:artifact      # separate SDK/artifact fixtures
+proto run pnpm -- run check              # model drift, typecheck, affected tests
+proto run pnpm -- run verify             # model drift, typecheck, all ordinary tests, build
+proto run pnpm -- run build              # local development output only
+proto run pnpm -- run watch              # local build plus renderer reload
+proto run pnpm -- run dev                # isolated standalone development host
+proto run pnpm -- run dev:vscode         # isolated VS Code development host
 ```
 
-For a focused SDK-backed fixture, pass `--sdk-path` before the selector and use the coding-agent package from a separately verified artifact (not the native Pi workspace). For example, `completion-entry.artifact.test.ts` can be selected with `test:file`:
+### Verification
 
-```bash
-proto run pnpm -- run test:file --sdk-path "<absolute verified runtime root>/node_modules/@earendil-works/pi-coding-agent" harness/tool-and-skill-selection/prepass/test/completion-entry.artifact.test.ts
-```
+Choose focused tests while iterating, then checks proportionate to the change. Use `test:file`, not direct `npx tsx`; native test flags follow `--`, for example `-- --test-name-pattern=pattern`.
 
-The `test:file` runner checks that the selected SDK package graph is compiled/coherent; it does not itself verify the artifact manifest or acquire a runtime. The dedicated `test:artifact` command delegates to Moon `root:artifactTest`, whose `pi:build` dependency compiles the workspace, then prepares one private SDK artifact (or reuses the explicit verified runtime) and invokes the native runner once for the artifact fixtures. This task boundary is not a lightweight-artifact or speed claim. These are production-style SDK bytes, not an application release build, publication or installation; no SDK cache is added. An explicit `-- --pi-runtime <absolute runtime root>` reuses a verified artifact and skips private artifact preparation, but not the Pi workspace build prerequisite. Some provider/integration cases remain opt-in or skip without credentials; do not report the task as running or qualifying all fixtures or integration smoke tests. Native TypeScript totals and the evaluated c8/Monocart candidates remain unqualified. Use the retained `test:coverage` / `verify:release` lane: Node/tsx test APIs are unchanged, with four rolling owner jobs, exact invocation-private V8/generated-script/source-map capture, and AST-aware Istanbul conversion from the pinned agent framework's existing coverage dependencies. Missing or conflicting source provenance fails the gate; accounting failures and uncertain child lifetime retain raw evidence and alias overlays. Keep thresholds, deadlines and provider skip flags. `test:fast` aliases affected Moon tasks; legacy package `--fast` invokes native dispatch, not the removed batching/impact/custom result-cache/cost tooling. No full live/browser/provider qualification or equivalence to native TypeScript totals is claimed.
+Ordinary tests exclude `*.artifact.test.*`. Use `test:artifact` for those fixtures; provider/integration cases may still require credentials or opt-in. For focused SDK-backed tests, `test:file --sdk-path` must point to the coding-agent package inside a separately verified `pi-runtime`, never the native Pi workspace. That option supplies aliases; it does not verify or acquire the artifact.
 
-`delivery:qualify` composes the existing gated Pi compiler, external-output delivery build and relocated-host/browser fixtures in an invocation-owned OS-temp package. Explicit `-- --pi-runtime <absolute runtime root>` verifies/reuses caller bytes and skips Pi compilation. It does not publish/install, launch visible Electron, download browsers or send prompts. Failure/cancellation/uncertain nested teardown retains the package; success removes it after confirmed completion. It is a smoke route, not coverage, all-browser, installed-host or real-Electron qualification.
+Use `test:coverage` / `verify:release` for TypeScript coverage; native TypeScript coverage remains unqualified. See [test and validation guidance](../../../../README.md#test-and-validate) for artifact reuse, compatibility limits, browser/integration routes, and coverage details.
 
-Root setup uses the shared frozen pnpm installer behind the [development-workspace gate](../../../../lib/development-runtime/lifetime.mjs). Setup/rebuild is allowed only without active workspace readers; preserve the installed host. Windows native SDK verification uses a dedicated keeper plus atomic Job containment, and, after child admission, releases only after open-handle/zero-active proof. Native test startup requires explicit authorization (EOF cannot authorize it); launcher loss follows normal cleanup, while WMI cannot authorize cleanup for an owned route. Guardian/keeper/enclosing-Job failure retains unknown state; this is not universal crash recovery. CLI behavior and non-Windows/materialized-SDK paths are unchanged. Never reclaim legacy registrations by PID or age or delete gate state. Bootstrap's default compiles Pi and prepares a private shared-lock artifact; explicit `--pi-runtime` verifies/reuses one and skips compilation. Neither route publishes. The [runtime guide](../../../../harness/pi-runtime/README.md) owns construction details; there is one shared lock and no npm bridge refresh route.
+### Build and delivery
 
-For real development Pi/backend refresh, stop the isolated host → `build` → relaunch; renderer watch only rebuilds/reloads renderer output. The printed development profile owns private settings/auth/session-settings and does not copy installed state; ambient provider variables may still be inherited, so this is not a credential sandbox. Development standalone/headless adapter and refresh checks require `PIE_RUN_DEVELOPMENT_HOST_TESTS=1`. Visible real-Electron acceptance requires explicit user consent and `PIE_RUN_ELECTRON_ACCEPTANCE=1`; never launch it as an ordinary check. See the root [README](../../../../README.md#build-and-run-pie-from-source) for practical commands and distinctions; the [migration plan](../../../../docs/plans/PIE-PRODUCTIZATION.md) owns acceptance/status.
+`build` and `watch` write to `application/hosts/vscode/out-dev`, never installed output. For backend/Pi refresh: **stop the isolated host → build → relaunch**. Renderer watch rebuilds/reloads; it is not HMR. The development profile does not copy installed settings/auth, but may inherit provider environment variables.
 
-Choose focused tests while iterating, then run checks proportionate to the changed behavior.
+Setup/rebuild must respect active workspace readers. Preserve the installed host; never bypass the [workspace gate](../../../../lib/development-runtime/lifetime.mjs), reclaim registrations by PID/age, or delete gate state. Uncertain process teardown is not permission to rebuild.
 
-## Read more by task
+Delivery is explicit: `delivery:build` builds without publishing, `delivery:qualify` runs private relocated-host/browser smoke checks, and `extension:publish` publishes. Loader setup/upgrade additionally requires explicit `--delivery --activate`. **Built, staged, loaded, and behavior verified are different states.** Verify the active host/build before claiming a live fix; reopening the sidebar is not an extension-host restart.
 
-### pie architecture and UI
+Visible Electron acceptance requires user consent and `PIE_RUN_ELECTRON_ACCEPTANCE=1`; it is never an ordinary check. See the [build/run guide](../../../../README.md#build-and-run-pie-from-source) for delivery, profiles, and opt-in acceptance commands.
 
-- [`docs/architecture/ARCHITECTURE.md`](../../../../docs/architecture/ARCHITECTURE.md) — primary system architecture, data flow, extension points, and invariants
-- [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) — authoritative host↔webview state contract
-- [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
-- [UI design philosophy](../../../../docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](../../../../docs/operations/GUI-DEVELOPMENT.md)
+## Model configuration
 
-### Pi runtime documentation (in-tree source)
+Edit `models.yaml`, then run `proto run pnpm -- run sync-models`. Do not hand-edit generated `models.json`, `model-profiles.yaml`, or model-owned fields in `settings.json`. Settings are tracked; preserve user-owned chat/pruning selections. If missing, seed settings with `proto run pnpm -- run settings:init`.
 
-For Pi API work, use the topic that owns the API being changed. The in-tree coding-agent source is based on upstream Pi 0.80.6 plus Pie's local semantic changes; use its [README](../../../../harness/pi/packages/coding-agent/README.md), docs, and examples as the API references. The [Pie productization plan](../../../../docs/plans/PIE-PRODUCTIZATION.md) owns source provenance and the local-change boundary.
+Use `proto run pnpm -- run sync-models -- --check` and the focused `scripts/model-config/test/model-config-sync.test.ts` test to check drift. Load `add-provider` for provider-specific rules.
 
-- [extensions](../../../../harness/pi/packages/coding-agent/docs/extensions.md) and [extension examples](../../../../harness/pi/packages/coding-agent/examples/extensions/)
-- [skills](../../../../harness/pi/packages/coding-agent/docs/skills.md)
-- [SDK](../../../../harness/pi/packages/coding-agent/docs/sdk.md) and [SDK examples](../../../../harness/pi/packages/coding-agent/examples/sdk/)
-- [RPC protocol](../../../../harness/pi/packages/coding-agent/docs/rpc.md)
-- [custom providers](../../../../harness/pi/packages/coding-agent/docs/custom-provider.md) and [models](../../../../harness/pi/packages/coding-agent/docs/models.md)
-- [settings](../../../../harness/pi/packages/coding-agent/docs/settings.md), [packages](../../../../harness/pi/packages/coding-agent/docs/packages.md), and [prompt templates](../../../../harness/pi/packages/coding-agent/docs/prompt-templates.md)
-- [TUI](../../../../harness/pi/packages/coding-agent/docs/tui.md) and [keybindings](../../../../harness/pi/packages/coding-agent/docs/keybindings.md)
+## Pi API references
 
-A Pi package version alone does not identify a built runtime: use the verified artifact's `pi-runtime/manifest.json` identity, which includes source and lock fingerprints, target, package trees, and payload hash. See the [runtime artifact guide](../../../../harness/pi-runtime/README.md). The upstream landing page is [pi.dev](https://pi.dev/).
+For the running harness's Pi APIs, use the pinned SDK docs/examples identified in the session instructions. For changes to in-tree Pi source, also consult that checkout's [coding-agent README](../../../../harness/pi/packages/coding-agent/README.md) and its linked docs/examples. Do not assume checkout source and the installed runtime match.
+
+A package version alone does not identify a built runtime: use the verified artifact's `pi-runtime/manifest.json`. The [runtime guide](../../../../harness/pi-runtime/README.md) owns artifact construction/identity; the [productization plan](../../../../docs/plans/PIE-PRODUCTIZATION.md) records source provenance and acceptance status.
+
+## Terminology
+
+Keep these mechanisms distinct; avoid unqualified “compaction” or “pruning”:
+
+- **History compaction:** Pi summarizes older conversation history across turns (`/compact`).
+- **Skill pruning:** the `skill-pruner` prepass removes tools/skills from a turn's catalog.
+- **Tool-result pruning:** deterministic middleware rewrites a tool result before it enters context; see its [contract](../../../../docs/contracts/TOOL-RESULT-PRUNING.md).
