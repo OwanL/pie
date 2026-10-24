@@ -1054,10 +1054,13 @@ test('depth-3 subagent: every level ≥ 2 is nested (non-detaching header, free-
   assert.ok(scrolls[1].classList.contains('subagent-messages-scroll-nested'), 'depth-2 body flows');
   assert.ok(scrolls[2].classList.contains('subagent-messages-scroll-nested'), 'depth-3 body flows');
 });
-test('model indicators show only recorded reasoning as semantic superscript', () => {
+test('completed model indicators show only recorded reasoning as semantic superscript', () => {
   for (const thinkingLevel of [undefined, 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
     const call = telemetrySubagentToolCall('legacy');
-    Object.assign((call.result as any).details.results[0], { selectedModel: 'fixture/Selected Model', thinkingLevel });
+    Object.assign((call.result as any).details.results[0], {
+      selectedModel: 'fixture/Selected Model', thinkingLevel,
+      exitCode: 0, activityPhase: 'completed', completedAt: Date.now(),
+    });
     mount(call, prefsWith({ autoExpandSubagentCalls: false }));
     const label = container.querySelector('.subagent-model-label');
     assert.equal(label?.querySelector('.subagent-model-short')?.textContent, 'Selected Model');

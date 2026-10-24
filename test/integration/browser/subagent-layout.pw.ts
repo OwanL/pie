@@ -22,7 +22,7 @@ const children: SubagentSingleResult[] = [
     usage: { contextTokens: 41_000, cost: 0.12 }, messages: [],
   },
   {
-    agent: 'reviewer', task: 'Review shared refresh ownership', model: 'fixture/GPT-6.1 Sol',
+    agent: 'reviewer', task: 'Review shared refresh ownership', model: 'fixture/GPT-6.1 Sol', thinkingLevel: 'high',
     exitCode: 0, activityPhase: 'completed', startedAt: NOW - 100_000,
     completedAt: NOW - 42_000, contextWindow: 200_000,
     usage: { contextTokens: 24_000, cost: 0.06 },
@@ -92,7 +92,12 @@ test.describe('subagent redesign in the real isolated renderer', () => {
           await expect(item.locator('.subagent-role-icon')).toHaveAttribute('stroke-width', '1.4');
           const reasoning = item.locator('.subagent-model-label sup');
           const level = children[index]!.thinkingLevel;
-          if (level) await expect(reasoning).toHaveText(level);
+          if (level) {
+            await expect(reasoning).toHaveText(level);
+            await expect(reasoning).toHaveCSS('vertical-align', 'text-top');
+            // Tailwind's sup reset otherwise raises the glyph via relative top.
+            await expect(reasoning).toHaveCSS('position', 'static');
+          }
           else await expect(reasoning).toHaveCount(0);
           await expectContained(item);
         }

@@ -1080,7 +1080,7 @@
 /* ── Subagent model label ─────────────────────────────────────────────────── */
 
 .subagent-model-label { min-width: 0; max-width: 100%; font: inherit; color: inherit; white-space: normal; overflow-wrap: anywhere; }
-.subagent-model-reasoning { margin-left: 2px; font-size: 0.7em; font-weight: 400; line-height: 1; vertical-align: super; white-space: nowrap; }
+.subagent-model-reasoning { position: static; margin-left: 2px; font-size: 0.7em; font-weight: 400; line-height: 1; vertical-align: text-top; white-space: nowrap; }
 
 /* ── Subagent model selection detail panel ───────────────────────────────── */
 /* Shown when model selection reasoning is available */
