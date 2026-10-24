@@ -9,13 +9,13 @@ import type { SubagentSingleResult } from '../../../harness/agent-processes/work
 const NOW = Date.parse('2026-10-24T12:00:00Z');
 const children: SubagentSingleResult[] = [
   {
-    agent: 'scout', task: 'Trace refresh cancellation', model: 'fixture/GPT-6 Luna',
+    agent: 'scout', task: 'Trace refresh cancellation', model: 'fixture/GPT-6 Luna', thinkingLevel: 'high',
     exitCode: -1, activityPhase: 'waiting_provider', startedAt: NOW - 102_000,
     activitySince: NOW - 4_000, contextWindow: 128_000,
     usage: { contextTokens: 18_000, cost: 0.08 }, messages: [],
   },
   {
-    agent: 'worker', task: 'Verify cancellation isolation', model: 'fixture/GPT-6 Astra',
+    agent: 'worker', task: 'Verify cancellation isolation', model: 'fixture/GPT-6 Astra', thinkingLevel: 'medium',
     exitCode: -1, activityPhase: 'streaming', startedAt: NOW - 138_000,
     activitySince: NOW - 2_000, contextWindow: 128_000,
     streamingText: '14 tests passed; investigating the remaining AbortError.',
@@ -89,6 +89,11 @@ test.describe('subagent redesign in the real isolated renderer', () => {
           await item.scrollIntoViewIfNeeded();
           for (const text of expected) await expect(header(item)).toContainText(text);
           await expect(item.locator('.subagent-role-icon')).toHaveAttribute('data-role-icon', children[index]!.agent);
+          await expect(item.locator('.subagent-role-icon')).toHaveAttribute('stroke-width', '1.4');
+          const reasoning = item.locator('.subagent-model-label sup');
+          const level = children[index]!.thinkingLevel;
+          if (level) await expect(reasoning).toHaveText(level);
+          else await expect(reasoning).toHaveCount(0);
           await expectContained(item);
         }
         if (width === 420 || width === 520) {
@@ -340,7 +345,7 @@ test.describe('terminal subagent diagnostics', () => {
 test.describe('subagent layout under constrained touch widths', () => {
   test.use({ hasTouch: true, viewState: state([
     {
-      ...children[0]!, model: `fixture/GPT-6-Astra-${'long-model-identifier-'.repeat(5)}`,
+      ...children[0]!, model: `fixture/GPT-6-Astra-${'long-model-identifier-'.repeat(5)}`, thinkingLevel: 'xhigh',
       exitCode: 0, activityPhase: 'completed', startedAt: NOW - 3_723_000, completedAt: NOW,
       contextWindow: 2_000_000_000, usage: { contextTokens: 1_234_567, cost: 12345.6789 },
       messages: [
@@ -362,6 +367,25 @@ test.describe('subagent layout under constrained touch widths', () => {
       await expectContained(parent);
       const unknown = card(page.locator('body'), 'custom-auditor');
       await expect(header(unknown)).toContainText('Model unavailable');
+      await expect(header(unknown).locator('sup')).toHaveCount(0);
+      const reasoning = parent.locator('.subagent-model-label sup').first();
+      await expect(reasoning).toHaveText('xhigh');
+      await page.evaluate(() => document.fonts.ready);
+      const reasoningBounds = (await reasoning.boundingBox())!;
+      const modelBounds = (await parent.locator('.subagent-model-label').first().boundingBox())!;
+      const metricsBounds = (await parent.locator('.subagent-header-metrics').first().boundingBox())!;
+      if (metricsBounds.y > modelBounds.y && metricsBounds.x < modelBounds.x + modelBounds.width) {
+        expect(reasoningBounds.y + reasoningBounds.height, `full reasoning box must clear the next metrics row at ${width}px`).toBeLessThanOrEqual(metricsBounds.y);
+      }
+      expect(reasoningBounds.height).toBeGreaterThan(0);
+      // Check the full superscript ink box, not its zero-height inline line box.
+      // Metrics can be alongside the identity or on the next grid row.
+      for (const metric of await parent.locator('.subagent-header').first().locator('.subagent-inline-context, .subagent-telemetry-cost, .subagent-telemetry-elapsed').all()) {
+        const bounds = (await metric.boundingBox())!;
+        const intersects = reasoningBounds.x < bounds.x + bounds.width && reasoningBounds.x + reasoningBounds.width > bounds.x
+          && reasoningBounds.y < bounds.y + bounds.height && reasoningBounds.y + reasoningBounds.height > bounds.y;
+        expect(intersects, `reasoning must clear ${await metric.getAttribute('class')} at ${width}px`).toBe(false);
+      }
       await expect(header(unknown)).toContainText('—/—');
       await expect(unknown.locator('.subagent-telemetry-cost')).toHaveText('—');
       await expect(unknown.locator('.subagent-telemetry-elapsed')).toHaveText('—');
