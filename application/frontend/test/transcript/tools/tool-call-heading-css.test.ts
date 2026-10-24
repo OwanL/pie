@@ -290,6 +290,10 @@ test('subagent prose uses shared sans typography and idle labels retain readable
   ]) {
     assert.match(rule(selector), /var\(--panel-font-sans\)/);
   }
+  const modelLabel = rule('.subagent-header .subagent-model-label');
+  assert.match(modelLabel, /font:\s*inherit;/);
+  assert.match(modelLabel, /color:\s*inherit;/);
+  assert.match(modelLabel, /opacity:\s*1;/);
   assert.match(rule('.subagent-task'), /font-size:\s*12px;/);
   assert.match(rule('.subagent-task'), /line-height:\s*18px;/);
   assert.match(rule('.subagent-task'), /color:\s*var\(--panel-foreground-soft\);/);

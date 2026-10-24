@@ -1075,6 +1075,7 @@
 .subagent-header .subagent-primary-meta { order: 2; flex: 1 0 auto; min-width: 52px; width: 0; max-width: 370px; }
 .subagent-primary-meta .pie-tooltip-trigger { display: flex; min-width: 0; max-width: 100%; }
 .subagent-header .subagent-model-details-trigger { max-width: 100%; font: inherit; color: var(--panel-foreground-soft); }
+.subagent-header .subagent-model-label { font: inherit; color: inherit; opacity: 1; }
 .subagent-reasoning-label { flex: 0 0 auto; white-space: pre; color: var(--panel-foreground-soft); }
 .subagent-header .subagent-runtime-telemetry { order: 4; flex: 0 0 auto; flex-wrap: nowrap; margin-left: auto; font: inherit; color: var(--panel-foreground-soft); font-variant-numeric: tabular-nums; }
 .subagent-header .subagent-runtime-telemetry-stable { order: 5; margin-left: 0; }
