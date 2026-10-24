@@ -220,6 +220,13 @@
   justify-content: flex-end;
 }
 
+/* The 8px cost strip is centered in the 26px control row, but that places its
+   small text above the taller session labels. Lower the glyphs to their
+   baseline without moving the row or its neighboring controls. */
+.composer-global-indicators .aggregate-strip {
+  top: 1.5px;
+}
+
 .composer-indicators {
   flex: 0 0 auto;
   margin-left: auto;

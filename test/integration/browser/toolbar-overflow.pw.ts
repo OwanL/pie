@@ -97,11 +97,25 @@ test.describe('composer toolbar overflow in Chromium', () => {
         const right = bar.querySelector('.composer-indicators')!.getBoundingClientRect();
         const pair = element.getBoundingClientRect();
         const session = bar.querySelector('.composer-indicators .panel-chip-toolbar')!;
+        const textBottom = (root: Element) => {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          let bottom = Number.NEGATIVE_INFINITY;
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            if (!node.textContent?.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of Array.from(range.getClientRects())) bottom = Math.max(bottom, rect.bottom);
+          }
+          return bottom;
+        };
         return {
           leftGap: pair.left - left.right,
           rightGap: right.left - pair.right,
           fontSize: parseFloat(getComputedStyle(element).fontSize),
           sessionFontSize: parseFloat(getComputedStyle(session).fontSize),
+          textBottom: textBottom(element),
+          sessionTextBottom: textBottom(session),
         };
       });
       expect(metrics.rightGap).toBeGreaterThanOrEqual(0);
@@ -109,6 +123,8 @@ test.describe('composer toolbar overflow in Chromium', () => {
       expect(metrics.leftGap).toBeGreaterThan(metrics.rightGap);
       expect(metrics.fontSize).toBeLessThan(9);
       expect(metrics.fontSize).toBeLessThan(metrics.sessionFontSize);
+      // Range boxes include font descent space, unlike the visible numeric glyphs.
+      expect(Math.abs(metrics.textBottom - metrics.sessionTextBottom)).toBeLessThanOrEqual(2);
     }
   });
 
