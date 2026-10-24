@@ -179,10 +179,9 @@ function normalizedSubagentModelName(model: string, provider?: string): string {
  * handoff data is available from the keyboard-focusable model trigger below. */
 function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
   const model = result.selectedModel ?? result.model;
-  if (!model) return null;
-  const short = shortModelName(model);
+  const short = model ? shortModelName(model) : 'Model unavailable';
   const reasoning = result.thinkingLevel;
-  const accessibleLabel = `Show ${model}${reasoning ? `, reasoning ${reasoning}` : ''} and subagent runtime details`;
+  const accessibleLabel = `Show ${model ?? 'unavailable model'}${reasoning ? `, reasoning ${reasoning}` : ''} and subagent runtime details`;
   return (
     <Tooltip
       placement="bottom"
@@ -200,7 +199,6 @@ function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSi
           <span class="subagent-model-short">{short}</span>
           <span class="subagent-model-qualified">{model}</span>
         </span>
-        {reasoning && <span class="subagent-reasoning-label"> · {reasoning}</span>}
       </span>
     </Tooltip>
   );
@@ -422,36 +420,18 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
   );
 }
 
-/** Optional reported usage; CSS reveals whole groups against this card's width. */
 function InlineUsage({ result }: { result: SubagentSingleResult }) {
-  const usage = result.usage;
-  const context = knownNonNegative(usage?.contextTokens);
-  const window = knownNonNegative(result.contextWindow);
-  const input = knownNonNegative(usage?.input);
-  const output = knownNonNegative(usage?.output);
-  const read = knownNonNegative(usage?.cacheRead);
-  const write = knownNonNegative(usage?.cacheWrite);
-  const turns = knownNonNegative(usage?.turns);
-  const cache = [
-    read !== undefined && read > 0 ? `Cache read ${formatDetailTokens(read)}` : undefined,
-    write !== undefined && write > 0 ? `${read !== undefined && read > 0 ? 'write' : 'Cache write'} ${formatDetailTokens(write)}` : undefined,
-  ].filter(Boolean).join(' · ');
-  return <>
-    {context !== undefined && window !== undefined && window > 0 && <span class="subagent-inline-usage subagent-inline-context" title="Context tokens used / context window">{formatDetailTokens(context)}/{formatDetailTokens(window)}</span>}
-    {(input !== undefined || output !== undefined) && <span class="subagent-inline-usage subagent-inline-tokens">
-      {input !== undefined && <span>In {formatDetailTokens(input)}</span>}
-      {output !== undefined && <span>Out {formatDetailTokens(output)}</span>}
-    </span>}
-    {cache && <span class="subagent-inline-usage subagent-inline-cache">{cache}</span>}
-    {turns !== undefined && <span class="subagent-inline-usage subagent-inline-turns">{formatDetailTokens(turns)} provider {turns === 1 ? 'turn' : 'turns'}</span>}
-  </>;
+  const context = knownNonNegative(result.usage?.contextTokens);
+  const window = knownNonNegative(result.contextWindow) || undefined;
+  return (
+    <span class="subagent-inline-usage subagent-inline-context" title="Context tokens used / context window">
+      {context === undefined ? '—' : formatDetailTokens(context)}/{window === undefined ? '—' : formatDetailTokens(window)}
+    </span>
+  );
 }
 
 /** High-priority metadata that should remain visible before summary text. */
 function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
-  const hasModel = !!(result.selectedModel ?? result.model);
-  if (!hasModel) return null;
-
   return (
     <span class="subagent-primary-meta">
       <ModelLabel result={result} requestedMode={requestedMode} displayCost={displayCost} />
@@ -459,51 +439,45 @@ function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentS
   );
 }
 
-/** Elapsed, cost and recovered-retry state share the single-row header.
- * The keyboard-accessible model tooltip retains all detailed metrics, including
- * usage groups that are hidden in narrower cards. */
-function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
-  const startedAt = result.startedAt ?? result.activitySince;
-  if (startedAt === undefined || !Number.isFinite(startedAt)) return null;
-  const endedAt = result.completedAt ?? (isSubagentSingleResultRunning(result) ? now : result.lastProgressAt ?? now);
-  const elapsed = formatActivityDuration(Math.max(0, endedAt - startedAt));
-  return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span>;
+/** Total elapsed is distinct from phase duration. Settled cards require a
+ * producer terminal endpoint so remounting cannot invent historical runtime. */
+export function subagentElapsed(result: SubagentSingleResult, now: number, live: boolean): string | undefined {
+  const start = knownNonNegative(result.startedAt);
+  const end = knownNonNegative(result.completedAt) ?? (live ? now : undefined);
+  if (start === undefined || end === undefined || end < start) return undefined;
+  const seconds = Math.floor((end - start) / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function RuntimeTelemetry({ result, displayCost, costOnly = false }: { result: SubagentSingleResult; displayCost?: SubagentDisplayCost; costOnly?: boolean }) {
-  const cost = displayCost;
-  const retryCount = knownNonNegative(result.retryCount);
-  const recovered = !costOnly && result.exitCode === 0
-    && !isSubagentSingleResultRunning(result)
-    && (retryCount !== undefined && retryCount > 0 || result.fallback === true);
-  if (cost === undefined && !recovered) return null;
+function ElapsedTelemetry({ result, now, live }: { result: SubagentSingleResult; now: number; live: boolean }) {
+  const elapsed = subagentElapsed(result, now, live);
+  return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={elapsed ? `Total elapsed: ${elapsed}` : 'Elapsed unavailable'}>{elapsed ?? '—'}</span>;
+}
 
-  const title = [
-    cost !== undefined
-      ? `${cost.estimated ? 'Estimated cost: ~' : 'Cost: '}$${cost.cost.toFixed(4)}`
-      : undefined,
-    recovered
-      ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}`
-      : undefined,
-  ].filter(Boolean).join(' · ');
-
+function RuntimeTelemetry({ displayCost }: { displayCost?: SubagentDisplayCost }) {
+  const title = displayCost ? (displayCost.estimated ? 'Estimated cost: ~' : 'Cost: ') + '$' + displayCost.cost.toFixed(4) : 'Cost unavailable';
   return (
     <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
-      {cost !== undefined && (
-        <span class="subagent-telemetry-item subagent-telemetry-cost">${cost.cost.toFixed(2)}</span>
-      )}
-      {recovered && <span class="subagent-telemetry-item subagent-telemetry-recovered">Recovered</span>}
+      <span class="subagent-telemetry-item subagent-telemetry-cost">
+        {displayCost ? (displayCost.estimated ? '~' : '') + '$' + displayCost.cost.toFixed(2) : '—'}
+      </span>
     </span>
   );
 }
 
+function SubagentRoleIcon({ agent }: { agent: string }) {
+  return <svg class="subagent-role-icon" data-role-icon={['scout', 'worker', 'reviewer'].includes(agent) ? agent : 'generic'} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {agent === 'scout' ? <><circle cx="12" cy="12" r="9" /><path d="m16 8-3 5-5 3 3-5 5-3Z" /></>
+      : agent === 'worker' ? <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.77 3.77Z" />
+      : agent === 'reviewer' ? <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>
+      : <><circle cx="12" cy="8" r="4" /><path d="M4 21v-2a8 8 0 0 1 16 0v2" /></>}
+  </svg>;
+}
+
 type SubagentVisualStatus = 'idle' | 'running' | 'interrupted' | 'failed' | 'completed';
 
-/** Status indicator chip at the right side of the header. */
+/** Exceptional states remain explicit beside the body, not in the metric row. */
 function StatusIndicator({ status, errorDetail }: { status: SubagentVisualStatus; errorDetail?: string }) {
-  if (status === 'completed') {
-    return <StatusChip tone="completed" label="Finished" className="status-chip-fixed" />;
-  }
   if (status !== 'failed' && status !== 'interrupted') return null;
   const interrupted = status === 'interrupted';
 
@@ -976,37 +950,31 @@ function SubagentSingleBlock({
                 aria-label={`Inspect ${singleResult.agent} model exchange`}
                 title={singleResult.agent}
               >
-                {singleResult.agent}
+                <SubagentRoleIcon agent={singleResult.agent} />
               </span>
             </RawToolInspector>
           </span>
-          {activity && (
-            <span class={cx('subagent-activity', status === 'idle' && 'subagent-activity-idle')} title={activity.diagnostic} aria-label={activity.diagnostic}>
-              <span class="subagent-activity-dot" aria-hidden="true" />
-              <span class="subagent-activity-label">{activity.label}{activity.elapsed ? ` ${activity.elapsed}` : ''}</span>
-              {activity.detail && <span class="subagent-activity-detail">{activity.detail}</span>}
-            </span>
-          )}
-          {!activity && status === 'idle' && (
-            <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
-          )}
           <PrimaryMeta
             result={singleResult}
             requestedMode={requestedParentUserContextMode(toolCall.input)}
             displayCost={displayCost}
           />
-          <InlineUsage result={singleResult} />
-          <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
-          <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
-            <ElapsedTelemetry result={singleResult} now={activityNow} />
+          <span class="subagent-header-metrics">
+            <InlineUsage result={singleResult} />
+            <RuntimeTelemetry displayCost={displayCost} />
+            <span class="subagent-runtime-telemetry-stable">
+              <ElapsedTelemetry result={singleResult} now={activityNow} live={live} />
+            </span>
           </span>
         </div>
-        <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
       </div>
+      <StatusIndicator status={status} errorDetail={errorDetail} />
       {!renderBody && (
         <div class="subagent-live-preview">
           <SubagentTaskPreview task={singleResult.task} agent={singleResult.agent} />
+          {hasPendingAskUser && <button type="button" class="subagent-pending-prompt" onClick={(event) => { event.stopPropagation(); setOpen(true); }}>Response needed — open subagent transcript</button>}
+          {!compactActivity && activity && <div class="subagent-activity" title={activity.diagnostic}>{activity.label === 'Responding' ? 'Waiting for output' : activity.label}{activity.detail ? ' · ' + activity.detail : ''}{activity.elapsed ? ' · ' + activity.elapsed : ''}</div>}
           {compactActivity && (
             <div class={cx('subagent-current', compactActivity.reasoning && 'subagent-current-reasoning')}>
               {compactActivity.label && <span class="turn-activity-tail-label">{compactActivity.label}</span>}
@@ -1121,8 +1089,7 @@ function SubagentBlock({
     return (
       <div class="subagent-parallel-group">
         {result.results.map((singleResult, index) => (
-          // Keep a stable wrapper per child while the group owns the single
-          // shallow vertical batch marker outside each card's clipping boundary.
+          // Keep disclosure identities independent inside the shared batch surface.
           <div class="subagent-parallel-child" key={index}>
             <SubagentSingleBlock
               singleResult={singleResult}

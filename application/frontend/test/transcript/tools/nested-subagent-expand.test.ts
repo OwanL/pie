@@ -200,7 +200,7 @@ test('card task stays stable as live activity settles; transcript control activa
   const control = container.querySelector<HTMLButtonElement>('.subagent-header')!;
   act(() => control.click());
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'true');
-  assert.equal(container.querySelector('.subagent-live-preview'), null);
+  assert.equal(container.querySelector('.subagent-live-preview') === null, true, 'expanded card has no compact preview');
   act(() => control.click());
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
 });
@@ -340,16 +340,16 @@ test('subagent model tooltip shows the exact inherited context packet', async ()
   assert.equal(container.querySelector('.subagent-model-label')?.getAttribute('title'), null, 'model label must not duplicate the tooltip natively');
 });
 
-test('responsive inline usage keeps valid zero channels, omits invalid groups, and preserves model identity', () => {
+test('header context keeps known zero while detailed usage stays out of the header', () => {
   const toolCall = telemetrySubagentToolCall('legacy');
   const child = (toolCall.result as any).details.results[0];
   child.usage = { input: 0, output: NaN, contextTokens: 0, cacheRead: 0, cacheWrite: 1200, turns: 1 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
   assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '0/200k');
   assert.equal(container.querySelector('.subagent-inline-context')?.getAttribute('title'), 'Context tokens used / context window');
-  assert.equal(container.querySelector('.subagent-inline-tokens')?.textContent?.trim(), 'In 0');
-  assert.equal(container.querySelector('.subagent-inline-cache')?.textContent, 'Cache write 1.2k');
-  assert.equal(container.querySelector('.subagent-inline-turns')?.textContent, '1 provider turn');
+  assert.equal(container.querySelector('.subagent-inline-tokens'), null);
+  assert.equal(container.querySelector('.subagent-inline-cache'), null);
+  assert.equal(container.querySelector('.subagent-inline-turns'), null);
   assert.equal(container.querySelector('.subagent-model-qualified')?.textContent, 'provider/worker-model');
   const trigger = container.querySelector('.subagent-model-details-trigger');
   assert.equal(trigger?.getAttribute('tabindex'), '0');
@@ -367,21 +367,14 @@ test('wide model identity never combines a requested model with a different actu
   }
 });
 
-test('responsive usage CSS uses per-card named thresholds without replacing tool-row containment', async () => {
-  const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
-  assert.match(css, /container: tool-row subagent-card \/ inline-size/);
-  assert.match(css, /container: tool-row \/ inline-size/);
-  for (const width of [760, 1050, 1350, 1600]) {
-    assert.ok(css.includes(`@container subagent-card (min-width: ${width}px)`));
-  }
-  assert.match(css, /\.subagent-inline-usage \{[^}]*flex: 0 0 auto;/);
-  assert.match(css, /\.subagent-header \{[^}]*flex-wrap: nowrap;/);
-  assert.match(css, /\.subagent-header \.subagent-primary-meta \{[^}]*min-width: 52px;/);
-  const runtimeRule = css.indexOf('.subagent-header .subagent-runtime-telemetry {');
-  const elapsedRule = css.indexOf('.subagent-header .subagent-runtime-telemetry-stable {');
-  assert.ok(elapsedRule > runtimeRule, 'elapsed owns its trailing order and zero margin after the shared telemetry rule');
-  assert.match(css.slice(elapsedRule), /^\.subagent-header \.subagent-runtime-telemetry-stable \{ order: 5; margin-left: 0; \}/);
-  assert.doesNotMatch(css, /\.subagent-footer/);
+test('header metrics remain grouped without status or activity decoration', () => {
+  mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
+  const header = container.querySelector('.subagent-header')!;
+  const metrics = header.querySelector('.subagent-header-metrics')!;
+  assert.equal(metrics.querySelector('.subagent-inline-context')?.textContent, '1.5k/200k');
+  assert.equal(metrics.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
+  assert.equal(metrics.querySelector('.subagent-telemetry-elapsed')?.textContent, '0:02');
+  for (const selector of ['.subagent-activity', '.subagent-activity-dot', '.status-chip']) assert.equal(header.querySelector(selector), null);
 });
 
 test('model interactions stay inside the single-row header while header Enter expands', async () => {
@@ -408,23 +401,23 @@ test('responsive inline usage omits unknown and invalid values without inventing
   child.contextWindow = 0;
   child.usage = { input: -1, output: Infinity, contextTokens: 10, cacheRead: 0, cacheWrite: -2, turns: 0 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-inline-context'), null);
+  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '10/—', 'zero is not a usable context-window capacity');
   assert.equal(container.querySelector('.subagent-inline-tokens'), null);
   assert.equal(container.querySelector('.subagent-inline-cache'), null);
-  assert.equal(container.querySelector('.subagent-inline-turns')?.textContent, '0 provider turns');
+  assert.equal(container.querySelector('.subagent-inline-turns'), null);
 });
 
-test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recovery inline while detailed metrics move to the model tooltip', async () => {
+test('completed legacy subagent keeps model, elapsed and cost inline while recovery and reasoning stay in the tooltip', async () => {
   mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
-  assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /2s/);
+  assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /^0:02$/);
   assert.equal(container.querySelector('.subagent-footer'), null);
   assert.match(header.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.match(header.textContent ?? '', /· off/);
+  assert.equal(header.querySelector('.subagent-reasoning-label'), null);
   assert.equal(header.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
-  assert.match(header.querySelector('.subagent-telemetry-recovered')?.textContent ?? '', /Recovered/);
+  assert.equal(header.querySelector('.subagent-telemetry-recovered'), null);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -473,7 +466,7 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
   assert.ok(header?.querySelector('.subagent-telemetry-elapsed'), 'live elapsed time should remain visible');
   assert.equal(container.querySelector('.subagent-footer'), null);
   assert.match(header?.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
-  assert.match(header?.textContent ?? '', /· high/);
+  assert.equal(header?.querySelector('.subagent-reasoning-label'), null);
 
   const modelTrigger = container.querySelector<HTMLElement>('.subagent-model-details-trigger');
   assert.ok(modelTrigger);
@@ -608,7 +601,7 @@ test('worker, reviewer, and scout names lazily inspect exact captured subagent J
     assert.equal(messages.length, before, 'mounting and model hover do not request a raw capture');
     act(() => render(null, container));
     mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
-    assert.equal(agentName().textContent, agent);
+    assert.equal(agentName().getAttribute('aria-label'), `Inspect ${agent} model exchange`);
     const host = await openDetailsTooltip(agentName());
     assert.equal(messages.length, before + 1);
     settleCapture(messages, toolCall, host);
@@ -617,15 +610,15 @@ test('worker, reviewer, and scout names lazily inspect exact captured subagent J
   }
 });
 
-test('agent-name raw inspection is available without a model label', async () => {
+test('agent-name raw inspection works when the model is unavailable', async () => {
   const messages = captureRequests();
   const toolCall = requestedAgentToolCall('scout');
   const child = (toolCall.result as any).details.results[0];
   delete child.model;
   delete child.selectedModel;
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
-  assert.equal(container.querySelector('.subagent-model-label'), null);
-  assert.equal(container.querySelector('.subagent-model-details-trigger'), null);
+  assert.equal(container.querySelector('.subagent-model-label')?.textContent, 'Model unavailable');
+  assert.match(container.querySelector('.subagent-model-details-trigger')?.getAttribute('aria-label') ?? '', /unavailable model/);
   assert.equal(messages.length, 0);
   settleCapture(messages, toolCall, await openDetailsTooltip(agentName()));
 });
@@ -642,7 +635,7 @@ test('parallel agent names inspect the same original parent capture, not synthet
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: true }), undefined, captureSession);
   assert.equal(messages.length, 0);
   const names = Array.from(container.querySelectorAll<HTMLElement>('.subagent-agent-name'));
-  assert.deepEqual(names.map((name) => name.textContent), ['worker', 'reviewer', 'scout']);
+  assert.deepEqual(names.map((name) => name.getAttribute('title')), ['worker', 'reviewer', 'scout']);
   for (const name of names) {
     const before: number = messages.length;
     const host = await openDetailsTooltip(name);
@@ -661,7 +654,7 @@ test('nested agent-name inspection is safely unavailable when the exact child se
   mount(nestedSubagentToolCall(), prefsWith({ autoExpandSubagentCalls: true }), undefined, captureSession);
   const names = container.querySelectorAll<HTMLElement>('.subagent-agent-name');
   assert.equal(names.length, 2);
-  assert.equal(names[1].textContent, 'scout');
+  assert.equal(names[1].getAttribute('aria-label'), 'Inspect scout model exchange');
   const host = await openDetailsTooltip(names[1]);
   assertCapturedInspector(host);
   assert.match(host.textContent ?? '', /child durable session identity is not available/);
@@ -669,18 +662,15 @@ test('nested agent-name inspection is safely unavailable when the exact child se
   assert.doesNotMatch(host.textContent ?? '', /Recon complete|recon the codebase/);
 });
 
-test('long agent names retain their full accessible inspection label and bounded ellipsis styling', async () => {
+test('long agent names retain their full accessible inspection label and generic icon', async () => {
   const toolCall = requestedAgentToolCall('worker');
   const agent = 'worker'.repeat(100);
   (toolCall.result as any).details.results[0].agent = agent;
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(agentName().textContent, agent);
   assert.equal(agentName().getAttribute('aria-label'), `Inspect ${agent} model exchange`);
-  const css = await readFile(new URL('../../../styles/tool-call.css', import.meta.url), 'utf8');
-  assert.match(css, /\.subagent-agent-trigger\s*\{[^}]*max-width:\s*100%[^}]*flex:\s*0 1 auto/);
-  assert.match(css, /\.subagent-agent-trigger > \.pie-tooltip-trigger\s*\{[^}]*min-width:\s*0[^}]*max-width:\s*100%/);
-  assert.match(css, /\.subagent-agent-name\s*\{[^}]*flex:\s*0 1 auto[^}]*text-overflow:\s*ellipsis/);
-  assert.match(css, /\.subagent-messages-scroll\[tabindex="0"\]:focus-visible\s*\{[^}]*outline:/);
+  assert.equal(agentName().getAttribute('aria-label'), `Inspect ${agent} model exchange`);
+  assert.equal(agentName().querySelector('svg')?.getAttribute('data-role-icon'), 'generic');
+  assert.equal(agentName().querySelector('svg')?.getAttribute('aria-hidden'), 'true');
 });
 
 test('agent-name raw inspection retains focus and dismissal without toggling the header', async () => {
@@ -830,11 +820,11 @@ test('subagent tooltip keeps failure details ahead of lower-priority metrics', a
   assert.ok((host.textContent ?? '').indexOf('Failure: provider') < (host.textContent ?? '').indexOf('Usage & performance'));
 });
 
-test('subagent without cost evidence omits the inline cost and tooltip row', async () => {
+test('subagent without cost evidence shows unknown cost and omits tooltip cost row', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, contextTokens: 100 }), prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
-  assert.equal(container.querySelector('.subagent-runtime-telemetry:not(.subagent-runtime-telemetry-stable)'), null);
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '—');
+  assert.ok(container.querySelector('.subagent-runtime-telemetry'));
 
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Input100 tok/);
@@ -872,27 +862,26 @@ test('small positive reported cost uses two decimals inline and keeps detail pre
   assert.match(host.textContent ?? '', /Cost\$0\.0004/);
 });
 
-test('estimated cost has no inline estimate decoration but keeps semantics in hover details', async () => {
+test('estimated cost retains visible estimate marker and hover details', async () => {
   const pricingForModel: TokenPricingResolver = () => ({ input: 4, output: 4, cacheRead: 4, cacheWrite: 4 });
   mount(costEvidenceToolCall({ input: 100_000, output: 60_000, cacheRead: 0, cacheWrite: 0, contextTokens: 160_000 }), prefsWith({ autoExpandSubagentCalls: false }), pricingForModel);
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '$0.64');
-  assert.doesNotMatch(container.querySelector('.subagent-telemetry-cost')?.textContent ?? '', /~|</);
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '~$0.64');
   const costTelemetry = container.querySelector<HTMLElement>('.subagent-telemetry-cost')?.parentElement;
   assert.match(costTelemetry?.getAttribute('title') ?? '', /Estimated cost: ~\$0\.6400/);
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Estimated cost~\$0\.6400/);
 });
 
-test('recovery telemetry remains when no cost is available', () => {
+test('recovery detail stays out of the header when no cost is available', () => {
   const toolCall = costEvidenceToolCall(undefined);
   const details = (toolCall.result as any).details;
   details.results[0].retryCount = 1;
   details.results[0].fallback = true;
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
-  assert.ok(container.querySelector('.subagent-header .subagent-telemetry-recovered'));
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '—');
+  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-recovered'), null);
 });
 
 test('parallel child costs stay separate instead of repeating the group total', () => {
@@ -926,7 +915,7 @@ test('nested subagent: with autoExpand, both outer and inner subagent headers re
   const headers = container.querySelectorAll('.subagent-header');
   // Expect at least 2: the outer worker header + the inner scout header.
   assert.ok(headers.length >= 2, `expected >=2 subagent headers, got ${headers.length}`);
-  const agentNames = Array.from(headers).map((h) => h.querySelector('.subagent-agent-name')?.textContent ?? '');
+  const agentNames = Array.from(headers).map((h) => h.querySelector('.subagent-agent-name')?.getAttribute('title') ?? '');
   assert.ok(agentNames.includes('worker'), `outer header should show worker, got ${JSON.stringify(agentNames)}`);
   assert.ok(agentNames.includes('scout'), `inner header should show scout, got ${JSON.stringify(agentNames)}`);
 });
@@ -954,7 +943,7 @@ test('nested subagent: expanding the outer reveals the inner subagent header', (
   const headers = container.querySelectorAll('.subagent-header');
   assert.equal(headers.length, 2, 'outer + inner header after expanding outer');
   const innerHeader = headers[1];
-  assert.equal(innerHeader.querySelector('.subagent-agent-name')?.textContent, 'scout');
+  assert.equal(innerHeader.querySelector('.subagent-agent-name')?.getAttribute('aria-label'), 'Inspect scout model exchange');
   assert.equal(innerHeader.getAttribute('aria-expanded'), 'false', 'inner is collapsed');
 });
 
@@ -1044,8 +1033,8 @@ test('nested subagent CSS: every header is relative (non-detaching); nested body
   // read as a detaching bar; the bottom close footer now keeps the close
   // reachable without the pin. The depth-1 body stays a capped scroll region.
   assert.match(css, /\.subagent-header\s*\{[^}]*position:\s*relative/);
-  assert.match(css, /\.subagent-header\s*\{[^}]*top:\s*auto/);
-  assert.match(css, /\.subagent-header\s*\{[^}]*z-index:\s*auto/);
+  assert.doesNotMatch(css, /\.subagent-header\s*\{[^}]*(?:position:\s*(?:sticky|fixed)|top:)/);
+
   assert.match(css, /\.subagent-messages-scroll\s*\{[^}]*max-height:\s*var\(--expanded-section-max-height\)/);
 });
 
@@ -1062,4 +1051,18 @@ test('depth-3 subagent: every level ≥ 2 is nested (non-detaching header, free-
   assert.ok(!scrolls[0].classList.contains('subagent-messages-scroll-nested'), 'depth-1 body is a bounded scroll region');
   assert.ok(scrolls[1].classList.contains('subagent-messages-scroll-nested'), 'depth-2 body flows');
   assert.ok(scrolls[2].classList.contains('subagent-messages-scroll-nested'), 'depth-3 body flows');
+});
+test('role icons preserve full accessible inspector names and stable unknown metrics', () => {
+  for (const agent of ['scout', 'worker', 'reviewer', 'custom long role']) {
+    const call = telemetrySubagentToolCall('legacy');
+    Object.assign((call.result as any).details.results[0], { agent, usage: undefined, contextWindow: undefined, startedAt: undefined, completedAt: undefined });
+    mount(call, prefsWith({ autoExpandSubagentCalls: false }));
+    assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('data-role-icon'), agent.startsWith('custom') ? 'generic' : agent);
+    assert.equal(container.querySelector('.subagent-agent-name')?.getAttribute('aria-label'), 'Inspect ' + agent + ' model exchange');
+    const cells = container.querySelector('.subagent-header-metrics');
+    assert.equal(cells?.children.length, 3);
+    assert.equal(cells?.children[0]?.textContent, '—/—');
+    assert.equal(cells?.children[2]?.textContent, '—');
+    assert.equal(container.querySelector('.subagent-header .status-chip'), null);
+  }
 });

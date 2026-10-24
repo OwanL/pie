@@ -12,6 +12,7 @@ import type { SessionSummary, ViewState } from '../../../application/lib/protoco
 
 interface IsolatedHost {
   url: string;
+  publishState(patch: Partial<ViewState>): void;
 }
 
 type Fixtures = {
@@ -48,7 +49,7 @@ async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promis
       modifiedAt: new Date().toISOString(),
       messageCount: 0,
     };
-    const viewState: ViewState = {
+    let viewState: ViewState = {
       ...EMPTY_VIEW_STATE,
       backendReady: true,
       sessions: [session],
@@ -80,7 +81,13 @@ async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promis
     }
 
     return {
-      host: { url: outcome.url },
+      host: {
+        url: outcome.url,
+        publishState(patch) {
+          viewState = { ...viewState, ...patch };
+          server!.scheduleState();
+        },
+      },
       dispose: async () => {
         await server?.stop();
         server?.dispose();

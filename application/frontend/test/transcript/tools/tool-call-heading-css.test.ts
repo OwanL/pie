@@ -262,70 +262,30 @@ test('shared collapsed-header typography is defined in transcript.css', async ()
   assert.match(css, /\.transcript-header-command-details\s*\{/);
 });
 
-test('working and finished subagents share header geometry without uppercase terminal badges', async () => {
+test('subagent header uses a stable grid and non-detaching geometry for every lifecycle', async () => {
   const css = await readToolCallCss();
-  const terminal = css.match(/\.subagent-header > \.status-chip\s*\{([^}]+)\}/)?.[1] ?? '';
-  assert.match(terminal, /text-transform:\s*none;/);
-  assert.match(terminal, /letter-spacing:\s*normal;/);
-  assert.match(terminal, /font:\s*400 11px\/18px/);
-  assert.match(terminal, /gap:\s*5px;/);
-  assert.match(css, /\.subagent-header \.subagent-activity\s*\{[^}]*font:\s*400 11px\/18px/);
-  assert.match(css, /\.tool-call\.tool-call-subagent\.running > \.subagent-header,\s*\.tool-call\.tool-call-subagent\.completed > \.subagent-header\s*\{/);
-  assert.match(css, /\.tool-call\.tool-call-subagent\.running:hover > \.subagent-header,\s*\.tool-call\.tool-call-subagent\.completed:hover > \.subagent-header\s*\{/);
-});
-
-test('subagent prose uses shared sans typography and idle labels retain readable semantic colors', async () => {
-  const css = await readToolCallCss();
-  const rule = (selector: string) => {
-    const blocks = css.split(`\n${selector} {`).slice(1);
-    assert.ok(blocks.length, `expected ${selector} rule`);
-    return blocks.map(block => block.slice(0, block.indexOf('}'))).join('\n');
-  };
-
-  for (const selector of [
-    '.subagent-header', '.subagent-live-preview', '.subagent-task',
-    '.subagent-current-text', '.subagent-header > .status-chip',
-    '.subagent-header .subagent-activity', '.subagent-header .subagent-agent-name',
-    '.subagent-task-popover', '.subagent-task-tooltip',
-  ]) {
-    assert.match(rule(selector), /var\(--panel-font-sans\)/);
-  }
-  const modelLabel = rule('.subagent-header .subagent-model-label');
-  assert.match(modelLabel, /font:\s*inherit;/);
-  assert.match(modelLabel, /color:\s*inherit;/);
-  assert.match(modelLabel, /opacity:\s*1;/);
-  assert.match(rule('.subagent-task'), /font-size:\s*12px;/);
-  assert.match(rule('.subagent-task'), /line-height:\s*18px;/);
-  assert.match(rule('.subagent-task'), /color:\s*var\(--panel-foreground-soft\);/);
-  assert.match(rule('.subagent-current:has(> .turn-activity-tail-label) .subagent-current-text'), /font:\s*11\.5px\/17px var\(--panel-font-mono/);
-  for (const [selector, color] of [
-    ['.tool-call.tool-call-subagent.idle .subagent-primary-meta', 'panel-foreground-soft'],
-    ['.tool-call.tool-call-subagent.idle .subagent-activity', 'panel-muted'],
-  ]) {
-    assert.ok(rule(selector).includes(`color: var(--${color});`));
-    assert.doesNotMatch(rule(selector), /opacity:/);
-  }
-});
-
-test('subagent header keeps metadata in one row without hiding reasoning or cost', async () => {
-  const css = await readToolCallCss();
-  const subagentSummaryRule = css.match(/\.subagent-header-summary\s*\{[\s\S]*?\n\}/);
-  const primaryMetaRule = css.match(/\.subagent-primary-meta\s*\{[\s\S]*?\n\}/);
-
-  assert.ok(subagentSummaryRule, 'expected subagent summary rule in tool-call.css');
-  assert.match(subagentSummaryRule[0], /flex:\s*1 1 auto;/);
-
-  assert.ok(primaryMetaRule, 'expected primary subagent metadata rule in tool-call.css');
-  assert.match(primaryMetaRule[0], /display:\s*inline-flex;/);
-  assert.match(primaryMetaRule[0], /align-items:\s*center;/);
-  assert.match(primaryMetaRule[0], /flex:\s*0 0 auto;/);
-
+  const header = css.match(/\.subagent-header\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(header, /display:\s*grid/);
+  assert.match(header, /grid-template-columns:/);
+  assert.match(header, /position:\s*relative/);
+  assert.doesNotMatch(css, /\.subagent-header > \.status-chip/);
   assert.doesNotMatch(css, /\.subagent-footer\b/);
-  assert.match(css, /\.subagent-header\s*\{[^}]*flex-wrap:\s*nowrap/);
-  assert.match(css, /\.subagent-reasoning-label\s*\{[^}]*flex:\s*0 0 auto/);
-  assert.match(css, /\.subagent-header \.subagent-runtime-telemetry\s*\{[^}]*flex:\s*0 0 auto/);
+});
+
+test('subagent prose uses shared sans typography while metrics stay tabular', async () => {
+  const css = await readToolCallCss();
+  for (const selector of ['subagent-header', 'subagent-live-preview', 'subagent-task']) {
+    const rule = css.match(new RegExp('\\.' + selector + '\\s*\\{([^}]+)\\}'))?.[1] ?? '';
+    assert.match(rule, /var\(--panel-font-sans\)/);
+  }
+  assert.match(css, /\.subagent-header-metrics\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+  assert.match(css, /\.subagent-model-label\s*\{[^}]*font:\s*inherit/);
+});
+
+test('subagent model and metrics can shrink without reintroducing metadata badges', async () => {
+  const css = await readToolCallCss();
+  assert.match(css, /\.subagent-primary-meta > \.pie-tooltip-trigger\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.subagent-header-metrics\s*\{[^}]*grid-template-columns:/);
   assert.match(css, /\.subagent-task-trigger\s*\{[^}]*display:\s*block;[^}]*min-width:\s*0/);
-  assert.ok(!css.includes('.subagent-secondary-meta'), 'subagent secondary-meta chrome should be removed');
-  assert.ok(!css.includes('.subagent-model-tag'), 'subagent model badges should be removed');
-  assert.ok(!css.includes('.subagent-thinking-tag'), 'subagent thinking badges should be removed');
+  for (const selector of ['subagent-secondary-meta', 'subagent-model-tag', 'subagent-thinking-tag']) assert.ok(!css.includes('.' + selector));
 });
