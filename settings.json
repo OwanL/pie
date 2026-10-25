@@ -22,7 +22,7 @@
   ],
   "pruning": {
     "model": "gpt-6-luna",
-    "provider": "github-copilot",
+    "provider": "openai-codex",
     "thinkingLevel": "low",
     "prepass": {
       "temperature": 0.2,
