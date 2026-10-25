@@ -10,6 +10,7 @@ import reporter, {
   accountTestFiles,
   normalizeCoverage,
   normalizeTestFileIdentity,
+  REPORT_PREFIX,
   TEST_FILE_ACCOUNTING_ENV,
   TEST_FILE_MARKER,
 } from '../test-reporter.mjs';
@@ -85,6 +86,68 @@ test('intentional reruns are accounted for separately from duplicate dispatch', 
   assert.equal(accounting.success, true);
   assert.deepEqual(accounting.duplicates, []);
   assert.deepEqual(accounting.intentionalReruns, [{ file, expected: 1, executed: 1 }]);
+});
+
+test('reporter timings sum reported tests, excluding suites and file wrappers', async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-test-timings-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'nested.test.mjs');
+  const contextPath = path.join(directory, 'context.json');
+  writeFileSync(contextPath, JSON.stringify({ expectedFiles: [file], collectTimings: true }));
+  const previousContext = process.env[TEST_FILE_ACCOUNTING_ENV];
+  process.env[TEST_FILE_ACCOUNTING_ENV] = contextPath;
+  t.after(() => {
+    if (previousContext === undefined) delete process.env[TEST_FILE_ACCOUNTING_ENV];
+    else process.env[TEST_FILE_ACCOUNTING_ENV] = previousContext;
+  });
+  async function* events() {
+    yield { type: 'test:complete', data: { name: 'nested suite', file, nesting: 1, details: { type: 'suite', duration_ms: 90 } } };
+    yield { type: 'test:complete', data: { name: 'leaf one', file, nesting: 2, details: { type: 'test', duration_ms: 12 } } };
+    yield { type: 'test:complete', data: { name: 'leaf two', file, nesting: 2, details: { type: 'test', duration_ms: 18 } } };
+    yield { type: 'test:complete', data: { name: 'parent test', file, nesting: 1, details: { type: 'test', duration_ms: 40 } } };
+    yield { type: 'test:complete', data: { name: file, file, nesting: 0, details: { type: 'test', duration_ms: 100, passed: false } } };
+  }
+  const output = [];
+  for await (const chunk of reporter(events())) output.push(chunk);
+  assert.ok(output[0].startsWith(REPORT_PREFIX));
+  const report = JSON.parse(output[0].slice(REPORT_PREFIX.length));
+  assert.deepEqual(report.fileAccounting.timings, {
+    files: [{ file, durationMs: 100, passed: false }],
+    totalFileDurationMs: 100,
+    reportedTestDurationMs: 70,
+  });
+});
+
+test('timing fields are opt-in and invalid durations remain null', async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-test-timings-invalid-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'missing-duration.test.mjs');
+  const contextPath = path.join(directory, 'context.json');
+  writeFileSync(contextPath, JSON.stringify({ expectedFiles: [file], collectTimings: true }));
+  const previousContext = process.env[TEST_FILE_ACCOUNTING_ENV];
+  process.env[TEST_FILE_ACCOUNTING_ENV] = contextPath;
+  t.after(() => {
+    if (previousContext === undefined) delete process.env[TEST_FILE_ACCOUNTING_ENV];
+    else process.env[TEST_FILE_ACCOUNTING_ENV] = previousContext;
+  });
+  async function* events() {
+    yield { type: 'test:complete', data: { name: 'leaf', file, nesting: 1, details: { type: 'test' } } };
+    yield { type: 'test:complete', data: { name: file, file, nesting: 0, details: { type: 'suite', passed: false } } };
+  }
+  const output = [];
+  for await (const chunk of reporter(events())) output.push(chunk);
+  const report = JSON.parse(output[0].slice(REPORT_PREFIX.length));
+  assert.deepEqual(report.fileAccounting.timings, {
+    files: [{ file, durationMs: null, passed: false }],
+    totalFileDurationMs: null,
+    reportedTestDurationMs: null,
+  });
+
+  writeFileSync(contextPath, JSON.stringify({ expectedFiles: [file] }));
+  const unopted = [];
+  for await (const chunk of reporter(events())) unopted.push(chunk);
+  const unoptedReport = JSON.parse(unopted[0].slice(REPORT_PREFIX.length));
+  assert.equal(Object.hasOwn(unoptedReport.fileAccounting, 'timings'), false);
 });
 
 test('reporter accounts for generated batch markers and direct file-level completions', async (t) => {

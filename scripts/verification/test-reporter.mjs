@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
+export const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 export const TEST_FILE_MARKER = '__PI_TEST_FILE__:';
 export const TEST_FILE_ACCOUNTING_ENV = 'PIE_TEST_FILE_ACCOUNTING_CONTEXT';
 
@@ -94,6 +94,12 @@ export function readTestFileAccountingContext(env = process.env) {
 export function createTestFileExecutionCollector(context) {
   if (!context) return null;
   const executedFiles = [];
+  const timingsEnabled = context.collectTimings === true;
+  const timedFiles = [];
+  let totalFileDurationMs = 0;
+  let fileDurationsValid = true;
+  let reportedTestDurationMs = 0;
+  let testDurationsValid = true;
   const directFiles = new Map(Object.entries(context.directFiles ?? {})
     .map(([inputPath, sourceFile]) => [normalizeTestFileIdentity(inputPath), sourceFile]));
   const ignoredFiles = new Set((context.ignoredFiles ?? []).map(normalizeTestFileIdentity));
@@ -102,20 +108,49 @@ export function createTestFileExecutionCollector(context) {
       if (event.type === 'test:start' && typeof event.data?.name === 'string'
         && event.data.name.startsWith(TEST_FILE_MARKER)) {
         executedFiles.push(event.data.name.slice(TEST_FILE_MARKER.length));
-      } else if (event.type === 'test:complete' && event.data?.nesting === 0
-        && typeof event.data?.file === 'string'
-        && normalizeTestFileIdentity(event.data.name) === normalizeTestFileIdentity(event.data.file)) {
-        // Node's harness completes one top-level test named after each input
-        // file, even when its tests fail. Per-file summaries are not guaranteed
-        // by every runner; nested tests/suites must not count as file runs.
-        const identity = normalizeTestFileIdentity(event.data.file);
-        const sourceFile = directFiles.get(identity);
-        if (sourceFile) executedFiles.push(sourceFile);
-        else if (!ignoredFiles.has(identity)) executedFiles.push(event.data.file);
+      } else if (event.type === 'test:complete') {
+        const data = event.data;
+        const isFileCompletion = data?.nesting === 0
+          && typeof data.file === 'string'
+          && normalizeTestFileIdentity(data.name) === normalizeTestFileIdentity(data.file);
+        // Sum reported test durations, not suites or file wrappers. Parent
+        // tests may include their subtests: this is not CPU time or elapsed time.
+        if (timingsEnabled && data?.details?.type === 'test' && !isFileCompletion) {
+          const duration = data.details.duration_ms;
+          if (Number.isFinite(duration) && duration >= 0) reportedTestDurationMs += duration;
+          else testDurationsValid = false;
+        }
+        if (isFileCompletion) {
+          // Node's harness completes one top-level test named after each input
+          // file, even when its tests fail. Per-file summaries are not guaranteed
+          // by every runner; nested tests/suites must not count as file runs.
+          const identity = normalizeTestFileIdentity(data.file);
+          const sourceFile = directFiles.get(identity);
+          const accountedFile = sourceFile || (!ignoredFiles.has(identity) ? data.file : null);
+          if (accountedFile) {
+            executedFiles.push(accountedFile);
+            if (timingsEnabled) {
+              const duration = data.details?.duration_ms;
+              const validDuration = Number.isFinite(duration) && duration >= 0;
+              timedFiles.push({ file: accountedFile, durationMs: validDuration ? duration : null, passed: data.details?.passed === true });
+              if (validDuration) totalFileDurationMs += duration;
+              else fileDurationsValid = false;
+            }
+          }
+        }
       }
     },
     report() {
-      return accountTestFiles(context.expectedFiles, executedFiles, context.intentionalReruns ?? []);
+      const accounting = accountTestFiles(context.expectedFiles, executedFiles, context.intentionalReruns ?? []);
+      if (!timingsEnabled) return accounting;
+      return {
+        ...accounting,
+        timings: {
+          files: timedFiles,
+          totalFileDurationMs: fileDurationsValid ? totalFileDurationMs : null,
+          reportedTestDurationMs: testDurationsValid ? reportedTestDurationMs : null,
+        },
+      };
     },
   };
 }

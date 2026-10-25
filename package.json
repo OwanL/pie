@@ -24,6 +24,7 @@
     "test:integration": "node ./scripts/verification/run-tests.mjs --fast --integration",
     "test:large-detail": "npm --prefix application/hosts/vscode run test:large-detail",
     "test:file": "node ./scripts/verification/test-node.mjs",
+    "test:bench": "node ./scripts/verification/benchmark-tests.mjs",
     "test:changed": "proto run moon -- run :test --affected --include-relations",
     "test:scripts": "proto run moon -- run scripts:test",
     "lint": "npm --prefix application/hosts/vscode run lint --",

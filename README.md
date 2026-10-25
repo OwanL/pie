@@ -190,6 +190,9 @@ proto run pnpm -- run test
 # Focused native Node test file (TypeScript is loaded through the local tsx setup)
 proto run pnpm -- run test:file application/backend/test/path/to/test.ts
 
+# Compare concurrency on one frozen selection; reuse an existing verified runtime
+proto run pnpm -- run test:bench --pi-runtime "<absolute verified runtime root>" --concurrency-list 4,8 application/frontend/test
+
 # Focused SDK-backed artifact fixture, using a separately verified runtime
 proto run pnpm -- run test:file --sdk-path "<absolute verified runtime root>/node_modules/@earendil-works/pi-coding-agent" harness/tool-and-skill-selection/prepass/test/completion-entry.artifact.test.ts
 
@@ -228,6 +231,8 @@ The uncached `proto run moon -- run root:graphTest` checks affected selection wi
 `test:artifact` prepares one private SDK artifact or reuses the explicit verified runtime; its Moon `pi:build` prerequisite runs either way. It tests production-style SDK bytes, not an application release, publication or installation, and makes no speed claim. Provider/integration cases may require credentials or opt-in; this does not qualify every fixture or integration smoke.
 
 `test:file` runs isolated native `node:test`, using private CommonJS wrappers and local `tsx` for TypeScript and standard Node loading for JavaScript/`.mjs`. This compatibility route does not qualify ESM namespace behavior, top-level await or full native parity. `--sdk-path` supplies aliases but neither acquires nor verifies artifacts: use a separately verified `pi-runtime` coding-agent package for SDK-backed source fixtures, never the native workspace package. Do not invoke `npx tsx` directly.
+
+`test:bench` reuses runtime verification and aliases across serial runs, with fresh isolated fixtures each time. It writes raw reports, per-file timings and median comparisons to a printed OS-temp directory; suite time and full runner wall time are separate. `--repeat 2` reverses variant order on alternate rounds. Failed tests, changed test counts or uncertain cleanup stop the comparison. Keep source files unchanged during a comparison. It does not build an SDK or change concurrency defaults.
 
 For explicit offline Pi Vitest qualification, use `proto run node -- scripts/verification/test-framework-offline.mjs --package ai --` (or `agent` / `coding-agent`, with Vitest arguments after `--`). The selected Pi package must already be compiled; this command checks for its entry point and does not build Pi. The invocation isolates credentials and state, disables automatic local-model tests, denies external Node networking, and holds the workspace reader through confirmed teardown. It does not change ordinary developer commands or qualify skipped provider cases; native subprocess networking is not sandboxed.
 
