@@ -529,14 +529,6 @@ body.session-tab-dragging {
   flex: 0 0 40px;
 }
 
-/* The active pinned chip shares its fixed-width row between its avatar and the
-   compact actions trigger; inactive pinned chips retain their 40px footprint. */
-.session-tab.pinned.active {
-  min-width: 64px;
-  max-width: 64px;
-  flex-basis: 64px;
-}
-
 .session-tab.pinned .session-tab-main {
   justify-content: center;
   padding: 0;
