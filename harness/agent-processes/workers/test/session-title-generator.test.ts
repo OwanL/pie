@@ -319,9 +319,6 @@ test('generation is bounded by a short fail-open timeout', async () => {
 test('output sanitizer accepts only the compact 25-character candidate contract', () => {
   assert.equal(SESSION_TITLE_MAX_CHARS, 25);
   assert.match(SESSION_TITLE_SYSTEM_PROMPT, /at most 25 characters/);
-  for (const example of [...SESSION_TITLE_SYSTEM_PROMPT.matchAll(/^Title: (.+)$/gmu)]) {
-    assert.ok(example[1]!.trim().length <= SESSION_TITLE_MAX_CHARS, example[1]);
-  }
   assert.equal(sanitizeGeneratedSessionTitle('Title: Review PR #208\n'), 'Review PR #208');
   assert.equal(sanitizeGeneratedSessionTitle('One'), 'One');
   assert.equal(sanitizeGeneratedSessionTitle('修复登录问题'), '修复登录问题');
@@ -337,6 +334,16 @@ test('output sanitizer accepts only the compact 25-character candidate contract'
     undefined,
     'a 26+ character candidate is invalid, like any oversize base title',
   );
+});
+
+test('title prompt examples leave headroom below the hard character limit', () => {
+  const examples = [...SESSION_TITLE_SYSTEM_PROMPT.matchAll(/^Title: (.+)$/gmu)]
+    .map((match) => match[1]!.trim());
+  assert.ok(examples.length > 0, 'the prompt must demonstrate compact titles');
+  for (const title of examples) {
+    assert.ok(title.length <= 20, `example exceeds the first-pass target: ${title}`);
+    assert.equal(sanitizeGeneratedSessionTitle(title), title);
+  }
 });
 
 test('a corrective request returns a complete replacement', async () => {
@@ -379,7 +386,9 @@ for (const provider of ['ollama', 'openai-codex']) {
     assert.deepEqual(result, { generated: true, name: 'Replace Image Viewer' });
     assert.equal(requests.length, 2);
     for (const request of requests) {
-      assert.ok(request.length <= SESSION_TITLE_MAX_INPUT_CHARS + '<request>\n\n</request>'.length);
+      const input = request.match(/<request>\n([\s\S]*)\n<\/request>/u)?.[1];
+      assert.ok(input && input.length <= SESSION_TITLE_MAX_INPUT_CHARS);
+      assert.match(request, /<\/request>\n\nReturn only a short task label/u);
     }
     assert.equal(fake.writtenName, undefined);
   });

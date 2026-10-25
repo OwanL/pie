@@ -19,24 +19,25 @@ export const SESSION_TITLE_MAX_INPUT_CHARS = 4_000;
 export const SESSION_TITLE_MAX_CHARS = 25;
 export const SESSION_TITLE_MAX_OUTPUT_TOKENS = 48;
 
-export const SESSION_TITLE_SYSTEM_PROMPT = `Write a short title for a coding-agent session from its first user request.
+export const SESSION_TITLE_SYSTEM_PROMPT = `Write a compact task label for a coding-agent session from its first user request.
 
-Return only the title, with no quotes, label, punctuation, or explanation.
-- Write a complete title of at most 25 characters, including spaces. Aim for 15–20 characters to leave room; prefer 2 or 3 short words when appropriate for the language.
-- Put the primary action and subject first; omit secondary details to fit the character budget.
-- Capture the primary task, problem, or question, not the conversational framing.
-- Ignore workflow instructions such as using subagents, reading files first, asking questions, being read-only, or making the smallest change.
-- Preserve useful identifiers such as ticket IDs, PR numbers, filenames, APIs, and product names.
-- For a reported problem, describe the investigation or fix the user wants.
-- Do not invent details.
+Return only the title: one line, no quotes, label, or explanation.
+The title must be at most 25 characters INCLUDING SPACES. Aim for 15–20 characters, not the limit.
+- Use a short action and the core subject: prefer short verbs such as Fix, Audit, Move, Add, or Compare.
+- Prefer just 2 short words where appropriate for the language: an action and a subject. This is a task label, not a detailed summary.
+- Drop secondary details, qualifiers, and extra product names. Use a shorter description of the subject rather than squeezing in every detail.
+- Keep an identifier only when it is central to the task and fits. Do not invent details.
+- Ignore conversational framing and workflow instructions such as using subagents, reading files first, or making the smallest change.
 
 Examples:
 User: Could you use subagents to investigate why our Windows tests are flaky?
-Title: Fix Flaky Windows Tests
+Title: Stabilize Tests
 User: I'm deciding between SQLite and JSON for our cache. Compare their trade-offs.
-Title: Compare SQLite JSON Cache
+Title: Compare Caches
 User: Review https://github.com/acme/app/pull/42. Do not make changes.
-Title: Review PR #42`;
+Title: Review PR#42
+
+Before answering, shorten the wording until the complete title fits. Maximum: 25 characters including spaces.`;
 
 interface AuxiliaryModel {
   id: string;
@@ -159,7 +160,7 @@ export function sanitizeGeneratedSessionTitle(raw: string, _compactOversize = fa
 }
 
 function titleUserMessage(prompt: string): string {
-  return `<request>\n${prompt}\n</request>`;
+  return `<request>\n${prompt}\n</request>\n\nReturn only a short task label: 2 short words where appropriate for the language, at most 25 characters including spaces. Omit secondary details.`;
 }
 
 async function completeOllamaNative(
