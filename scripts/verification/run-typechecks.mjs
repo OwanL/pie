@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -16,6 +16,7 @@ import { createTsconfigOverlay, resolveTypeScriptCompiler } from '../lib/package
 import { TYPECHECK_PROJECTS } from '../lib/test-packages.mjs';
 
 import { extractRuntimeArgs, withVerificationRuntime } from './verification-runtime.mjs';
+import { createTypecheckCacheKey } from './typecheck-project.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -105,6 +106,15 @@ const boundedProcesses = (entries) => (entries ?? []).slice(0, 64).map((entry) =
 export function runProject(project, signal, runtime, dependencies = {}) {
   const started = performance.now();
   const configPath = path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config);
+  const compilerPath = resolveProjectCompiler(project);
+  const key = (dependencies.createTypecheckCacheKey ?? createTypecheckCacheKey)({
+    configPath, compilerPath, sdkPath: runtime.sdkPath, root: repoRoot,
+  });
+  // Keep only compiler state across runs. Overlays remain private so an
+  // unconfirmed child can retain its inputs without another run rewriting them.
+  const cacheDirectory = path.join(dependencies.cacheRoot ?? path.join(repoRoot, '.cache', 'typecheck', 'registry'),
+    key, project.includeOwnerDependencies === true ? 'owner' : 'sdk');
+  mkdirSync(cacheDirectory, { recursive: true });
   const overlay = (dependencies.createTsconfigOverlay ?? createTsconfigOverlay)(configPath, {
     typescript: true,
     includeOwnerDependencies: project.includeOwnerDependencies === true,
@@ -113,11 +123,11 @@ export function runProject(project, signal, runtime, dependencies = {}) {
   let launched = false;
   return new Promise((resolve, reject) => {
     const child = (dependencies.spawn ?? spawn)(process.execPath, [
-      resolveProjectCompiler(project),
+      compilerPath,
       '--noEmit',
       '--project', overlay?.configPath ?? configPath,
       '--incremental',
-      '--tsBuildInfoFile', path.join(overlay.directory, `${project.id}.tsbuildinfo`),
+      '--tsBuildInfoFile', path.join(cacheDirectory, 'project.tsbuildinfo'),
     ], withProcessTreeIsolation({ cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }));
     launched = true;
     let output = '';

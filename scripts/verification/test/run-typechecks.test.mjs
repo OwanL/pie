@@ -94,6 +94,8 @@ function projectFixture(t, settle) {
   let settlements = 0;
   const logs = [];
   const dependencies = {
+    cacheRoot: directory,
+    createTypecheckCacheKey: () => 'fixture',
     createTsconfigOverlay: () => ({ directory, configPath: path.join(directory, 'tsconfig.json'), dispose: () => { disposed += 1; } }),
     spawn: () => child,
     watchChildProcess: (_child, options) => {
@@ -170,6 +172,40 @@ test('confirmed compiler close preserves ordinary success/failure results withou
     assert.equal(fixture.settlements, 1);
     assert.equal(existsSync(path.join(fixture.directory, 'teardown.json')), false);
   }
+});
+
+test('registry checks retain compiler state across disposable overlays and still recheck edits', async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-registry-typecheck-cache-'));
+  let uncertain = false;
+  t.after(() => { if (!uncertain) rmSync(directory, { recursive: true, force: true }); });
+  const config = path.join(directory, 'tsconfig.json');
+  const source = path.join(directory, 'source.ts');
+  writeFileSync(config, JSON.stringify({ compilerOptions: { strict: true, target: 'ES2022', types: [] }, files: ['./source.ts'] }));
+  writeFileSync(source, 'const answer: number = 42;\n');
+  const project = { id: 'cache-proof', config, compiler: resolveTypeScriptCompiler() };
+  const invocations = [];
+  const { spawn } = await import('node:child_process');
+  const check = async () => {
+    try {
+      return await runProject(project, undefined, {}, {
+        cacheRoot: path.join(directory, 'cache'),
+        spawn: (executable, args, options) => {
+          invocations.push({ overlay: args[args.indexOf('--project') + 1], buildInfo: args[args.indexOf('--tsBuildInfoFile') + 1] });
+          return spawn(executable, args, options);
+        },
+      });
+    } catch (error) { uncertain ||= error?.teardownUnconfirmed === true; throw error; }
+  };
+  const first = await check();
+  assert.equal(first.code, 0, first.output);
+  assert.equal(existsSync(invocations[0].overlay), false, 'confirmed teardown still disposes the private overlay');
+  assert.equal(existsSync(invocations[0].buildInfo), true, 'compiler state survives overlay disposal');
+  writeFileSync(source, "const answer: number = 'wrong';\n");
+  const second = await check();
+  assert.notEqual(second.code, 0, 'cached state never skips checking changed sources');
+  assert.match(second.output, /string.*not assignable.*number/u);
+  assert.notEqual(invocations[0].overlay, invocations[1].overlay, 'each compiler retains its own overlay lifetime');
+  assert.equal(invocations[0].buildInfo, invocations[1].buildInfo, 'unchanged compilation inputs reuse the compiler-state path');
 });
 
 test('CLI reserves exit 125 for uncertainty even when compiler closes successfully', async (t) => {
