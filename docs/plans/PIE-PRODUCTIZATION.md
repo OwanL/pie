@@ -44,6 +44,10 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Preserve the human's selected model when it disappears from a listing; listing absence alone is not proof it cannot serve requests. Warn and use valid last-known request settings where authorization and metadata permit. Do not silently replace models or clamp the saved thinking preference; unsupported effective modes require a choice before dispatch.
 - Unknown pricing is usable target behavior, not zero/free. Keep token usage and historical attribution, identify partially unpriced totals, and exclude unknown rates from cheapest-model ranking. Do not reprice past requests after refresh.
 
+### Windows installation
+
+- Reuse a compatible installed Node runtime. When none is available, download a release-compatible Node runtime into Pie-managed user-local storage. Node binaries do not belong in Git; acquisition must not replace the user's Node installation or alter global PATH. Both hosts need a startup route that can acquire Node without requiring Node to run that route.
+
 ### Safety and scope
 
 - Preserve the pure reducer/passive-renderer architecture, explicit session addressing, durable-before-terminal publication, write fencing and no-replay recovery. UI polish or faster startup must not weaken these guarantees.
@@ -76,11 +80,11 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 **Required work**
 
 - Select and document the user-facing release/install route for VS Code and standalone, reusing existing artifact and generation machinery rather than another build pipeline.
-- Resolve backend Node availability/version/ABI for users without a build toolchain: bundle/manage an appropriate runtime or provide a supported prerequisite flow. Report unsupported platforms/storage and missing prerequisites with an actionable remedy.
+- Implement compatible installed-Node reuse and on-demand private Node acquisition for users without a build toolchain, preserving runtime version/ABI verification. Report unsupported platforms/storage and missing prerequisites with an actionable remedy.
 - Make first launch provision the user profile and lead an unconfigured user to provider setup instead of stale-path or empty-model troubleshooting. Installation must not rewrite unrelated VS Code preferences or global development configuration.
 - Define update, deliberate rollback, repair and uninstall behavior. User configuration/history must outlive application replacement; data removal must be a separate explicit action.
 
-**Decide first:** release channel/artifact, Node ownership and prerequisite acquisition, supported Windows/storage baseline, and standalone distribution form. Do not add macOS/Linux packaging to this milestone.
+**Decide first:** release channel/artifact, Node acquisition/offline UX, supported Windows/storage baseline, and standalone distribution form. Do not add macOS/Linux packaging to this milestone.
 
 **Acceptance:** use the actual release on a clean Windows profile/device with no checkout, global Pi, inherited provider credentials or development toolchain. Install, launch each supported host, authenticate, complete a task, restart/resume, update and recover to the prior compatible release using disposable data. Verify loaded identity, not just files on disk. Reinstallation preserves user data.
 
