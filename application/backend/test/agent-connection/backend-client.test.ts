@@ -45,9 +45,10 @@ class FakeChildProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   killCount = 0;
 
-  constructor(analyticsContext?: Record<string, unknown>) {
+  constructor(analyticsContext?: Record<string, unknown>, exitOnEof = true) {
     super();
     this.stdout = new ImmediateReadyStream(analyticsContext);
+    if (exitOnEof) this.stdin.once('finish', () => this.emit('exit', 0));
   }
 
   kill(): boolean {
@@ -69,7 +70,7 @@ class DrainingChildProcess extends FakeChildProcess {
   private requestId = 'req-1';
 
   constructor() {
-    super();
+    super(undefined, false); // Accepted requests must drain before EOF can exit.
     this.requestSeen = new Promise<void>((resolve) => { this.resolveRequestSeen = resolve; });
     this.acceptedRequestReleased = new Promise<void>((resolve) => { this.releaseAcceptedRequest = resolve; });
     this.stdin.on('data', (chunk) => {
@@ -199,7 +200,8 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     await standaloneStop;
 
     const context = { mode: 'canonical-only' as const, generationId: 'capture', buildId: 'capture-build', workspaceId: 'workspace', hostInstanceId: 'host' };
-    nextProc = new FakeChildProcess(context) as unknown as cp.ChildProcess;
+    const contextProc = new FakeChildProcess(context);
+    nextProc = contextProc as unknown as cp.ChildProcess;
     const contextClient = new BackendClient({ orphanReaper: noOrphans });
     const ready = await contextClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd', analyticsContext: context });
     assert.deepEqual(ready.analyticsContext, context);
@@ -207,6 +209,12 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv)?.PI_CODING_AGENT_SESSION_DIR,
       path.join(agentDir, 'data/outcomes/sessions'), 'canonical analytics does not authorize the session-root cutoff');
     contextClient.dispose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(contextProc.stdin.writableFinished, true, 'ordinary disposal closes stdin');
+    assert.equal(contextProc.killCount, 0, 'ordinary EOF exits without forced termination');
+    assert.equal((contextClient as unknown as { killEscalationTimer?: unknown }).killEscalationTimer, undefined,
+      'EOF exit clears the escalation timer rather than leaving a five-second cleanup tail');
+    assert.equal(contextClient.isRuntimeLifetimeTeardownConfirmed(), true);
 
     process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = STORAGE_CUTOFF_AUTHORIZATION_VALUE;
     const cutoffClient = new BackendClient({ orphanReaper: noOrphans });

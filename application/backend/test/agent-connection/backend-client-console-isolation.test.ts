@@ -50,6 +50,7 @@ class FakeChildProcess extends EventEmitter {
   constructor() {
     super();
     this.stdout = new ImmediateReadyStream();
+    this.stdin.once('finish', () => this.emit('exit', 0));
   }
 
   kill(): boolean {
@@ -62,6 +63,7 @@ const noOrphans = async () => ({ candidates: [], reaped: [], failures: [] });
 
 test('backend spawn options carry the scoped standalone console isolation', async () => {
   const captured: cp.SpawnOptions[] = [];
+  const clients: Array<{ dispose(): void }> = [];
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
@@ -90,12 +92,15 @@ test('backend spawn options carry the scoped standalone console isolation', asyn
     // console windows, and POSIX spawns keep their current process-group
     // behavior.
     const isolated = new BackendClient({ orphanReaper: noOrphans, standaloneConsoleIsolation: true });
+    clients.push(isolated);
     await isolated.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
 
     const vscodeShaped = new BackendClient({ editorVersion: '1.102.3-test', orphanReaper: noOrphans });
+    clients.push(vscodeShaped);
     await vscodeShaped.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
 
     const standalone = createStandaloneBackendClient();
+    clients.push(standalone);
     await standalone.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
 
     assert.equal(captured.length, 3, 'every client start must spawn exactly once');
@@ -112,6 +117,7 @@ test('backend spawn options carry the scoped standalone console isolation', asyn
     assert.equal(standaloneOptions.detached, undefined);
     assert.equal((standaloneOptions.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, undefined);
   } finally {
+    for (const client of clients) client.dispose();
     moduleWithLoad._load = originalLoad;
   }
 });

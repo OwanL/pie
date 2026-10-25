@@ -35,6 +35,7 @@ class FaultProcess extends EventEmitter {
 
   constructor() {
     super();
+    this.stdin.once('finish', () => this.emit('exit', 0));
     this.stdin.on('data', (chunk) => {
       for (const line of String(chunk).split('\n').filter(Boolean)) {
         this.requests.push(JSON.parse(line) as { id: string; method: string; params?: unknown });

@@ -50,6 +50,11 @@ class FakeChildProcess extends EventEmitter {
   readonly stderr = new PassThrough();
   readonly stdin = new PassThrough();
 
+  constructor() {
+    super();
+    this.stdin.once('finish', () => this.emit('exit', 0));
+  }
+
   kill(): boolean {
     this.emit('exit', 0);
     return true;
