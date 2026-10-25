@@ -17,6 +17,7 @@ Also load `add-provider` for provider/model work, `diagnose` for difficult bugs,
 - Read the [state contract](../../../../docs/contracts/STATE_CONTRACT.md) before changing host↔webview synchronization; update owning tests, including `test/integration/sync-contract.test.ts`, when the contract changes.
 - Read the [analytics contract](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage. Production uses canonical SQLite, never legacy fallback or dual-write. Source behavior does not prove live activation or authorize the separate storage cutoff.
 - Moon's affected selection needs explicit consumer-source inputs; project dependencies alone do not select consumers. Do not add deep task traversal to ordinary checks: it can include artifact tasks. Use `proto run moon -- run root:graphTest` to qualify selection without builds or providers.
+- Stage builds after completing milestones.
 
 ## Commands
 
