@@ -4,7 +4,6 @@
  */
 
 // Row renderers
-import './rows/system-prompts-row';
 import './rows/top-gap-row';
 import './rows/bottom-gap-row';
 import './rows/message-row';

@@ -106,7 +106,7 @@ test('real tool disclosure pins only while focused; editor pin and saved expansi
   }
 });
 
-test('same mounted list uses current catalog row keys and count on every render', async () => {
+test('same mounted list uses current transcript row keys on every render', async () => {
   await import('../../../transcript/rows/message-row');
   const { TranscriptVirtualList } = await import('../../../transcript/virtual-list');
   const root = document.createElement('div');
@@ -148,7 +148,7 @@ test('same mounted list uses current catalog row keys and count on every render'
   try {
     for (const count of [7, 0, 7]) {
       expectedKeys = scopeTranscriptRowsToSession(buildTranscriptRows({
-        transcript, systemPromptCount: count, hasOlder: true, hasNewer: false,
+        transcript, hasOlder: true, hasNewer: false,
         olderCount: 240, newerCount: 0, busy: false, showPruningMessages: true,
       }), '/warm').map((row) => row.key);
       render(h(TranscriptVirtualList, {

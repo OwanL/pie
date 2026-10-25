@@ -5,7 +5,7 @@ import { VirtualItem, Virtualizer, elementScroll, measureElement as measureVirtu
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
-import { type ChatMessage, type ChatPrefs, type ComposerInput, type PruningResult, type PruningSettings, type SystemPromptEntry, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../lib/protocol/index.js';
+import { type ChatMessage, type ChatPrefs, type ComposerInput, type PruningResult, type PruningSettings, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../lib/protocol/index.js';
 import { deriveTurnActivityState } from './activity';
 import { MessageRail } from './message-rail';
 import { createMessageRailJumpController, type MessageRailJumpController } from './message-rail-jump';
@@ -66,14 +66,12 @@ function fallbackTranscriptRow(rows: readonly TranscriptRow[]): TranscriptRow {
 
 function getRowRole(row: TranscriptRow | undefined): string | null {
   if (row?.kind === 'message') return row.message.role;
-  if (row?.kind === 'systemPrompts') return 'system';
   return null;
 }
 
 function useTranscriptRows({
   sessionKey,
   transcript,
-  systemPrompts,
   transcriptWindow,
   busy,
   compacting,
@@ -86,7 +84,6 @@ function useTranscriptRows({
 }: {
   sessionKey: string | null;
   transcript: ChatMessage[];
-  systemPrompts: SystemPromptEntry[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
   compacting?: boolean;
@@ -110,7 +107,6 @@ function useTranscriptRows({
 
   const rows = useMemo(() => scopeTranscriptRowsToSession(buildTranscriptRows({
     transcript,
-    systemPromptCount: systemPrompts.length,
     hasOlder: transcriptWindow.hasOlder,
     hasNewer: transcriptWindow.hasNewer,
     olderCount: transcriptWindow.loadedStart,
@@ -121,7 +117,7 @@ function useTranscriptRows({
     prepassStartedAt,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-  }), sessionKey), [sessionKey, systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, prepassStartedAt, pendingAssistantModelId, pendingAssistantThinkingLevel]);
+  }), sessionKey), [sessionKey, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, prepassStartedAt, pendingAssistantModelId, pendingAssistantThinkingLevel]);
 
   return rows;
 }
@@ -273,7 +269,6 @@ interface VirtualRowProps {
   lastRow: TranscriptRow | undefined;
   busy: boolean;
   prefs: ChatPrefs;
-  systemPrompts: SystemPromptEntry[];
   pruningResult: PruningResult | null;
   workingDirectory: string | null;
   editingId: string | null;
@@ -301,7 +296,6 @@ const VirtualRow = memo(function VirtualRow({
   lastRow,
   busy,
   prefs,
-  systemPrompts,
   pruningResult,
   workingDirectory,
   editingId,
@@ -346,7 +340,6 @@ const VirtualRow = memo(function VirtualRow({
         row={row}
         busy={busy}
         prefs={prefs}
-        systemPrompts={systemPrompts}
         pruningResult={pruningResult}
         workingDirectory={workingDirectory}
         editingId={editingId}
@@ -382,7 +375,6 @@ export function TranscriptVirtualList({
   prepassStartedAt,
   prefs,
   pruningSettings,
-  systemPrompts,
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
@@ -403,7 +395,6 @@ export function TranscriptVirtualList({
   const rows = useTranscriptRows({
     sessionKey,
     transcript,
-    systemPrompts,
     transcriptWindow,
     busy,
     compacting,
@@ -569,7 +560,6 @@ export function TranscriptVirtualList({
               lastRow={lastRow}
               busy={busy}
               prefs={prefs}
-              systemPrompts={systemPrompts}
               pruningResult={pruningResult}
               workingDirectory={workingDirectory}
               editingId={editingId}

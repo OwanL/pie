@@ -71,7 +71,6 @@ test('buildTranscriptRows adds an assistant placeholder row when busy after a us
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -99,7 +98,6 @@ test('buildTranscriptRows omits typingIndicator when last message is already str
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -114,7 +112,6 @@ test('buildTranscriptRows omits typingIndicator when last message is already str
 test('buildTranscriptRows omits typingIndicator when not busy', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('user-1', 'user')],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -127,15 +124,14 @@ test('buildTranscriptRows omits typingIndicator when not busy', () => {
 test('buildTranscriptRows keeps the assistant placeholder before bottomGap', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('user-1', 'user')],
-    systemPromptCount: 1,
     hasOlder: false,
     hasNewer: true,
     busy: true,
   });
 
   const kinds = rows.map((r) => r.kind);
-  assert.deepEqual(kinds, ['systemPrompts', 'message', 'message', 'bottomGap']);
-  assert.equal(rows[2]?.kind === 'message' ? rows[2].message.id : null, 'assistant-placeholder:user-1');
+  assert.deepEqual(kinds, ['message', 'message', 'bottomGap']);
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].message.id : null, 'assistant-placeholder:user-1');
 });
 
 test('estimateTranscriptRowSize returns stable size for typingIndicator', () => {

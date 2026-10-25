@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
-import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningResult, SystemPromptEntry, ToolCall } from '../../lib/protocol/index.js';
+import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningResult, ToolCall } from '../../lib/protocol/index.js';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import type { TranscriptRow } from './virtual-list-rows';
 import type { LazyDetailState } from './lazy-detail-store';
@@ -14,7 +14,6 @@ export interface RowRendererProps {
   row: TranscriptRow;
   busy: boolean;
   prefs: ChatPrefs;
-  systemPrompts: SystemPromptEntry[];
   pruningResult: PruningResult | null;
   workingDirectory: string | null;
   editingId: string | null;

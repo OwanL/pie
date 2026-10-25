@@ -947,7 +947,7 @@ test('overflowed controls show short action names beside their icons while the r
   assert.deepEqual(labelsByItem, {
     'subagent-providers': 'Subagents',
     'subagent-buckets': 'Buckets',
-    'system-prompts': 'Prompts',
+    'system-prompts': 'Instructions',
     mcp: 'MCP',
     'compact-context': 'Compact',
     'autonomous-mode': 'Autonomous',

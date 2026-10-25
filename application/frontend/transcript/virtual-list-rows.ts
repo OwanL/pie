@@ -5,7 +5,6 @@ import { isPruningResultMessage, pruningDetailsFromMessage, type PruningHeaderSt
 import { messageRenderIdentity } from './render-identity';
 
 export type TranscriptRow =
-  | { kind: 'systemPrompts'; key: string }
   | { kind: 'topGap'; key: string; hiddenCount?: number }
   | { kind: 'message'; key: string; message: ChatMessage; requestCreatedAt?: string; pruningHeaderState?: PruningHeaderState; activityState?: TurnActivityState | null; transcriptIndex?: number }
   | { kind: 'typingIndicator'; key: string; activityState?: TurnActivityState | null }
@@ -25,7 +24,6 @@ export function scopeTranscriptRowsToSession(
 
 interface BuildTranscriptRowsOptions {
   transcript: readonly ChatMessage[];
-  systemPromptCount: number;
   hasOlder: boolean;
   hasNewer: boolean;
   olderCount?: number;
@@ -243,7 +241,6 @@ function attachActivityState(rows: TranscriptRow[], activityState: TurnActivityS
 
 export function buildTranscriptRows({
   transcript,
-  systemPromptCount,
   hasOlder,
   hasNewer,
   olderCount,
@@ -256,9 +253,6 @@ export function buildTranscriptRows({
   prepassStartedAt,
 }: BuildTranscriptRowsOptions): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
-  if (systemPromptCount > 0) {
-    rows.push({ kind: 'systemPrompts', key: 'system-prompts' });
-  }
   if (hasOlder) {
     rows.push({
       kind: 'topGap',
@@ -297,9 +291,6 @@ export function buildTranscriptRows({
 }
 
 export function estimateTranscriptRowSize(row: TranscriptRow): number {
-  if (row.kind === 'systemPrompts') {
-    return 140;
-  }
   if (row.kind === 'topGap' || row.kind === 'bottomGap') {
     return 56;
   }

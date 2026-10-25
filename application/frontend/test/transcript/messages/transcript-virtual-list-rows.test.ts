@@ -21,7 +21,6 @@ function makeMessage(id: string, role: ChatMessage['role']): ChatMessage {
 test('session-scoped row keys isolate local row state across forked sessions with shared message ids', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('shared-message', 'assistant')],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -60,13 +59,12 @@ function makePruningMessage(id: string): ChatMessage {
   } as unknown as ChatMessage;
 }
 
-test('buildTranscriptRows keeps system prompts, paging gaps, and messages in display order', () => {
+test('buildTranscriptRows keeps paging gaps and messages in display order', () => {
   const rows = buildTranscriptRows({
     transcript: [
       makeMessage('user-1', 'user'),
       makeMessage('assistant-1', 'assistant'),
     ],
-    systemPromptCount: 2,
     hasOlder: true,
     hasNewer: true,
     busy: false,
@@ -74,17 +72,16 @@ test('buildTranscriptRows keeps system prompts, paging gaps, and messages in dis
 
   assert.deepEqual(
     rows.map((row) => row.kind),
-    ['systemPrompts', 'topGap', 'message', 'message', 'bottomGap'],
+    ['topGap', 'message', 'message', 'bottomGap'],
   );
-  assert.equal(rows[2]?.kind, 'message');
-  assert.equal(rows[2]?.kind === 'message' ? rows[2].message.id : null, 'user-1');
-  assert.equal(rows[3]?.kind === 'message' ? rows[3].message.id : null, 'assistant-1');
+  assert.equal(rows[1]?.kind, 'message');
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].message.id : null, 'user-1');
+  assert.equal(rows[2]?.kind === 'message' ? rows[2].message.id : null, 'assistant-1');
 });
 
 test('buildTranscriptRows exposes exact unloaded counts on paging gaps', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('assistant-1', 'assistant')],
-    systemPromptCount: 0,
     hasOlder: true,
     hasNewer: true,
     olderCount: 1_942,
@@ -109,7 +106,6 @@ test('buildTranscriptRows associates each assistant header with its owning user 
       secondUser,
       makeMessage('assistant-2', 'assistant'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -122,7 +118,6 @@ test('buildTranscriptRows associates each assistant header with its owning user 
 test('buildTranscriptRows omits optional system and gap rows when not needed', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('assistant-1', 'assistant')],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -132,10 +127,9 @@ test('buildTranscriptRows omits optional system and gap rows when not needed', (
   assert.equal(rows[0]?.kind === 'message' ? rows[0].requestCreatedAt : null, undefined);
 });
 
-test('buildTranscriptRows does not create a systemPrompts row for pruning alone', () => {
+test('buildTranscriptRows keeps a user message as the sole row when no gaps are needed', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('user-1', 'user')],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -151,7 +145,6 @@ test('buildTranscriptRows attaches pruning-result details to the following assis
       makePruningMessage('pruning-1'),
       makeMessage('assistant-1', 'assistant'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -183,7 +176,6 @@ test('buildTranscriptRows hides pruning-result messages when pruning summaries a
       makePruningMessage('pruning-1'),
       makeMessage('assistant-1', 'assistant'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -209,7 +201,6 @@ test('buildTranscriptRows falls back to a raw pruning system message when detail
         createdAt: '2026-05-16T00:00:01.000Z',
       } as unknown as ChatMessage,
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -236,7 +227,6 @@ test('buildTranscriptRows keeps a stable assistant placeholder shell when prunin
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -277,7 +267,6 @@ test('buildTranscriptRows preserves pruning result when the run ends before an a
       makeMessage('user-1', 'user'),
       makePruningMessage('pruning-1'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -297,7 +286,6 @@ test('buildTranscriptRows folds late pruning-result into the existing streaming 
       streamingAssistant,
       makePruningMessage('pruning-1'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -321,7 +309,6 @@ test('buildTranscriptRows folds late pruning-result into a completed assistant r
       makeMessage('assistant-1', 'assistant'),
       makePruningMessage('pruning-1'),
     ],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -350,7 +337,6 @@ test('buildTranscriptRows shows a pending pruning header in a stable assistant p
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -387,7 +373,6 @@ test('buildTranscriptRows suppresses standalone typingIndicator when busy and la
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -414,7 +399,6 @@ test('buildTranscriptRows suppresses standalone typingIndicator when assistant i
   });
   const rows = buildTranscriptRows({
     transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -442,7 +426,7 @@ test('queued follow-ups do not steal active tool activity or create a reply belo
   assert.equal(activityState?.phase, 'runningTool');
 
   const rows = buildTranscriptRows({
-    transcript, systemPromptCount: 0, hasOlder: false, hasNewer: false, busy: true, activityState,
+    transcript, hasOlder: false, hasNewer: false, busy: true, activityState,
   });
   assert.deepEqual(rows.map((row) => row.kind === 'message' ? row.message.id : row.kind), [
     'user-1', 'assistant-1', 'queued-1',
@@ -465,7 +449,7 @@ test('pending assistant placeholder stays before queued follow-ups', () => {
     pruningSettings: { mode: 'auto' },
   });
   const rows = buildTranscriptRows({
-    transcript, systemPromptCount: 0, hasOlder: false, hasNewer: false, busy: true, activityState,
+    transcript, hasOlder: false, hasNewer: false, busy: true, activityState,
   });
   assert.deepEqual(rows.map((row) => row.kind === 'message' ? row.message.id : row.kind), [
     'user-1', 'assistant-placeholder:user-1', 'queued-1',
@@ -482,7 +466,6 @@ test('buildTranscriptRows shows standalone typingIndicator when busy with empty 
   });
   const rows = buildTranscriptRows({
     transcript: [],
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -493,7 +476,6 @@ test('buildTranscriptRows shows standalone typingIndicator when busy with empty 
 });
 
 test('estimateTranscriptRowSize uses stable size buckets by row kind', () => {
-  assert.equal(estimateTranscriptRowSize({ kind: 'systemPrompts', key: 'system-prompts' }), 140);
   assert.equal(estimateTranscriptRowSize({ kind: 'topGap', key: 'gap:older' }), 56);
   assert.equal(estimateTranscriptRowSize({ kind: 'bottomGap', key: 'gap:newer' }), 56);
   assert.equal(

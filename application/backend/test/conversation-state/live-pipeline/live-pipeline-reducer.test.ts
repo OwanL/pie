@@ -107,7 +107,6 @@ test('sequenced live events project without mutating durable transcript and term
   assert.equal(liveView.liveTurnPhase, 'streaming');
   const liveRow = buildTranscriptRows({
     transcript: liveView.transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: true,
@@ -132,7 +131,6 @@ test('sequenced live events project without mutating durable transcript and term
   const durableView = selectViewState(committed.state);
   const durableRow = buildTranscriptRows({
     transcript: durableView.transcript,
-    systemPromptCount: 0,
     hasOlder: false,
     hasNewer: false,
     busy: false,
@@ -264,7 +262,7 @@ test('idle session.opened preserves reconciled render and batch identity while d
 
   const beforeRefresh = selectViewState(state);
   const beforeRow = buildTranscriptRows({
-    transcript: beforeRefresh.transcript, systemPromptCount: 0,
+    transcript: beforeRefresh.transcript,
     hasOlder: false, hasNewer: false, busy: false,
   }).at(-1);
   assert.equal(beforeRow?.key, 'message:live-assistant');
@@ -309,7 +307,7 @@ test('idle session.opened preserves reconciled render and batch identity while d
   assert.equal(refreshedPartCall?.seq, 4);
   assert.deepEqual(refreshed?.toolCalls?.[0], refreshedPartCall);
   const afterRow = buildTranscriptRows({
-    transcript: selectViewState(state).transcript, systemPromptCount: 0,
+    transcript: selectViewState(state).transcript,
     hasOlder: false, hasNewer: false, busy: false,
   }).at(-1);
   assert.equal(afterRow?.key, beforeRow?.key);

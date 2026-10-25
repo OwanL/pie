@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
 installDom();
+import DOMPurify from 'dompurify';
+import { JSDOM } from 'jsdom';
+const sanitizer = DOMPurify(new JSDOM('').window as unknown as Parameters<typeof DOMPurify>[0]);
+const originalSanitize = DOMPurify.sanitize;
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -17,14 +21,15 @@ type TestOnSetToggles = (ids: string[]) => unknown;
 type ToggleApplyResult = void | boolean | Promise<void | boolean>;
 
 beforeEach(() => {
+  DOMPurify.sanitize = sanitizer.sanitize;
   container = document.createElement('div');
   document.body.appendChild(container);
 });
 
 afterEach(() => {
+  DOMPurify.sanitize = originalSanitize;
   render(null, container);
   container.remove();
-  document.querySelectorAll('.system-prompt-toggle-dropdown').forEach((el) => el.remove());
 });
 
 function providerEntry(): SystemPromptEntry {
@@ -57,31 +62,30 @@ function mount(
   sessionPath: string | null = null,
   notice: string | null = null,
   noticeSessionPath: string | null = null,
+  commandsAvailable = true,
 ): void {
   act(() => {
     render(
       h(NoticeContext.Provider, { value: { notice, sessionPath: noticeSessionPath, dismiss: null } },
-        h(SystemPromptToggleMenu, { prompts, sessionPath, onSetToggles: onSetToggles as (ids: string[]) => ToggleApplyResult })),
+        h(SystemPromptToggleMenu, { prompts, sessionPath, commandsAvailable, onSetToggles: onSetToggles as (ids: string[]) => ToggleApplyResult })),
       container,
     );
   });
 }
 
-function rerender(
-  prompts: SystemPromptEntry[],
-  onSetToggles: TestOnSetToggles,
-  sessionPath: string | null = null,
-  notice: string | null = null,
-  noticeSessionPath: string | null = null,
-): void {
-  act(() => {
-    render(
-      h(NoticeContext.Provider, { value: { notice, sessionPath: noticeSessionPath, dismiss: null } },
-        h(SystemPromptToggleMenu, { prompts, sessionPath, onSetToggles: onSetToggles as (ids: string[]) => ToggleApplyResult })),
-      container,
-    );
-  });
+const rerender = mount;
+
+function click(text: string): void {
+  const button = [...document.querySelectorAll<HTMLButtonElement>('.system-instructions-dialog button')].find(el => el.textContent === text);
+  assert.ok(button, text);
+  act(() => button.click());
 }
+function toggle(title: string): void {
+  const input = document.querySelector<HTMLInputElement>(`input[aria-label="Include ${title}"]`)!;
+  assert.ok(input);
+  act(() => input.click());
+}
+function badge(): string | null { return container.querySelector('.system-prompt-toggle-badge')?.textContent ?? null; }
 
 function openMenu(): void {
   const trigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
@@ -91,427 +95,205 @@ function openMenu(): void {
   });
 }
 
-function items(): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>('.toolbar-settings-item'));
-}
 
-function findItem(title: string): HTMLElement {
-  const match = items().find((el) => el.querySelector('.system-prompt-toggle-entry-title')?.textContent === title);
-  assert.ok(match, `toggle item "${title}" should be rendered`);
-  return match!;
-}
+test('rapid draft edits only send one complete set on Apply; Cancel discards', () => {
+  const calls: string[][] = [];
+  mount([entry('a','A'), entry('b','B')], ids => { calls.push(ids); });
+  openMenu(); toggle('A'); toggle('B'); toggle('A');
+  assert.deepEqual(calls, []); assert.equal(badge(), null);
+  click('Cancel'); openMenu();
+  assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="Include B"]')!.checked, true);
+  toggle('A'); toggle('B'); click('Apply changes');
+  assert.deepEqual(calls, [['a','b']]); assert.equal(badge(), '2');
+});
+test('failed apply rolls back; confirmations release overlay', () => {
+  mount([entry('a','A')], () => false); openMenu(); toggle('A'); click('Apply changes');
+  assert.equal(badge(), null);
+  const send = () => undefined;
+  rerender([entry('a','A')], send); openMenu(); toggle('A'); click('Apply changes');
+  assert.equal(badge(), '1');
+  rerender([entry('a','A',true)], send); rerender([entry('a','A')], send);
+  assert.equal(badge(), null);
+});
+test('draft and stale async failures cannot cross A B A', async () => {
+  const rejects: Array<() => void> = [];
+  const send = () => new Promise<void>((_, reject) => rejects.push(() => reject(new Error('late'))));
+  mount([entry('a','A')], send, 'a'); openMenu(); toggle('A'); click('Apply changes');
+  rerender([entry('a','A')], send, 'b'); openMenu(); toggle('A');
+  rerender([entry('a','A')], send, 'a'); openMenu();
+  assert.equal(document.querySelector<HTMLInputElement>('input[type=checkbox]')!.checked, true);
+  toggle('A'); click('Apply changes');
+  await act(async () => { rejects[0](); await Promise.resolve(); });
+  assert.equal(badge(), '1');
+  assert.deepEqual(scopePendingOverlay({sessionPath:'a',sessionGeneration:0,intents:{a:true}},'a',2), {});
+});
+test('provider information is inspectable; resolved preview excludes unavailable and disabled text', () => {
+  mount([providerEntry(),entry('a','A',true),{...entry('b','B'),availability:'unknown'},entry('c','C')], () => undefined);
+  openMenu();
+  assert.equal(document.querySelectorAll('.system-instructions-list input').length, 3);
+  assert.match(document.querySelector('.system-instructions-list')!.textContent!, /Provider system prompt/);
+  click('Resolved preview');
+  const preview = document.querySelector('.system-instructions-resolved')!;
+  assert.match(preview.textContent!, /C body/); assert.doesNotMatch(preview.textContent!, /A body|B body/);
+  const search = document.querySelector<HTMLInputElement>('[aria-label="Search assembled preview"]')!;
+  act(() => { search.value='no match'; search.dispatchEvent(new Event('input',{bubbles:true})); });
+  assert.match(preview.textContent!, /No matching sources/);
+});
+test('copy exports the complete assembled preview independent of search', async () => {
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { copied = text; } } });
+  mount([entry('a','A'), entry('b','B',true)], () => undefined);
+  openMenu(); click('Resolved preview');
+  const search = document.querySelector<HTMLInputElement>('[aria-label="Search assembled preview"]')!;
+  act(() => { search.value = 'no match'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+  await act(async () => { click('Copy'); await Promise.resolve(); });
+  assert.match(copied, /A body/); assert.doesNotMatch(copied, /B body/);
+  assert.match(copied, /not sent history/);
+  assert.ok([...document.querySelectorAll('button')].some(button => button.textContent === 'Copied'));
+  rerender([entry('a', 'A', true), entry('b', 'B')], () => undefined);
+  assert.ok([...document.querySelectorAll('button')].some(button => button.textContent === 'Copy'));
+});
 
-function clickItem(title: string): void {
+test('modal initial focus, Tab wrap, Escape restore and backdrop discard', () => {
+  mount([entry('a','A')], () => { throw new Error('must not send'); }); openMenu();
+  const close = document.querySelector<HTMLButtonElement>('[aria-label="Close system instructions"]')!;
+  assert.equal(document.activeElement, close);
+  act(() => { close.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true})); });
+  assert.equal(document.activeElement?.textContent, 'Cancel');
+  toggle('A');
+  act(() => { document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); });
+  assert.equal(document.querySelector('[aria-modal=true]'), null);
+  assert.equal(document.activeElement, container.querySelector('.system-prompt-toggle-trigger'));
+  openMenu();
+  assert.equal(document.querySelector<HTMLInputElement>('input[type=checkbox]')!.checked, true);
+  act(() => { document.querySelector('.system-instructions-backdrop')!.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); });
+  assert.equal(document.querySelector('[aria-modal=true]'), null);
+});
+
+test('unchanged Apply is disabled and source labels only inspect', () => {
+  mount([providerEntry(), entry('a', 'A')], () => undefined); openMenu();
+  assert.equal(document.querySelector<HTMLButtonElement>('.primary')!.disabled, true);
+  click('Provider system prompt');
+  assert.equal(document.querySelector<HTMLInputElement>('input[type=checkbox]')!.checked, true);
+  assert.match(document.querySelector('article')!.textContent!, /provider information only/);
+});
+test('draft keeps unrelated updates but removed entries lose edits and selection follows identity', () => {
+  const send = () => undefined;
+  mount([entry('a','A'), entry('b','B')], send); openMenu(); toggle('A'); click('B');
+  rerender([entry('b','B',true), entry('a','A')], send);
+  assert.equal(document.querySelector('article h3')!.textContent, 'B');
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="Include A"]')!.checked, false);
+  rerender([entry('b','B')], send); rerender([entry('b','B'), entry('a','A')], send);
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="Include A"]')!.checked, true);
+  rerender([entry('a','A')], send);
+  assert.equal(document.querySelector('article h3')!.textContent, 'A');
+});
+test('provider-only inspector and real harness tools classification', () => {
+  mount([providerEntry()], () => undefined); openMenu();
+  assert.equal(document.querySelectorAll('input[type=checkbox]').length, 0);
+  assert.match(document.querySelector('article')!.textContent!, /provider information only/);
+  click('Cancel');
+  rerender([entry('tools','Tools')], () => undefined); openMenu(); click('Tool definitions');
+  assert.match(document.querySelector('article')!.textContent!, /separate from system-message/);
+  click('Resolved preview');
+  const sections = document.querySelectorAll('.system-instructions-preview > section');
+  assert.doesNotMatch(sections[0].textContent!, /Tools body/);
+  assert.match(sections[1].textContent!, /Tools body/);
+});
+test('notice rolls back applied overlay', () => {
+  const send = () => undefined;
+  mount([entry('a','A')], send); openMenu(); toggle('A'); click('Apply changes');
+  rerender([entry('a','A')], send, null, 'Failed to save the system-prompt setting.');
+  assert.equal(badge(), null);
+});
+test('a reversed Apply survives an older acknowledgement before its confirmation', () => {
+  const calls: string[][] = [];
+  const send = (ids: string[]) => { calls.push(ids); };
+  const initial = [entry('a', 'A')];
+  mount(initial, send);
+  openMenu(); toggle('A'); click('Apply changes');
+  openMenu(); toggle('A'); click('Apply changes');
+  assert.deepEqual(calls, [['a'], []]);
+  assert.equal(badge(), null);
+  rerender([entry('a', 'A', true)], send);
+  assert.equal(badge(), null, 'older disable confirmation cannot replace the enable intent');
+  openMenu();
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="Include A"]')!.checked, true);
+  click('Cancel');
+  rerender([entry('a', 'A')], send);
+  rerender([entry('a', 'A', true)], send);
+  assert.equal(badge(), '1', 'after confirmation a later backend setting is authoritative');
+});
+
+test('newer same-session apply survives older async failure', async () => {
+  let rejectOld!: () => void;
+  let calls = 0;
+  const send = () => ++calls === 1 ? new Promise<void>((_, reject) => { rejectOld = () => reject(new Error('old')); }) : undefined;
+  mount([entry('a','A'),entry('b','B')], send); openMenu(); toggle('A'); click('Apply changes');
+  openMenu(); toggle('B'); click('Apply changes');
+  await act(async () => { rejectOld(); await Promise.resolve(); });
+  assert.equal(badge(), '2');
+});
+test('an open inspector cannot apply while disconnected and retains the draft until reconnect', () => {
+  const prompts = [entry('a', 'A')];
+  const calls: string[][] = [];
+  const send = (ids: string[]) => { calls.push(ids); };
+  mount(prompts, send);
+  openMenu(); toggle('A');
+  rerender(prompts, send, null, null, null, false);
+  assert.ok(document.querySelector<HTMLButtonElement>('.primary')!.disabled);
+  assert.match(document.querySelector('footer')!.textContent!, /Reconnect to apply/);
+  assert.deepEqual(calls, []);
+  rerender(prompts, send);
+  assert.equal(document.querySelector<HTMLButtonElement>('.primary')!.disabled, false);
+  click('Apply changes');
+  assert.deepEqual(calls, [['a']]);
+});
+
+test('tabs use arrow navigation and Markdown code controls remain usable', async () => {
+  let copied = '';
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: async (text: string) => { copied = text; },
+  } });
+  const code = Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n');
+  mount([{ ...entry('a', 'A'), text: `\`\`\`text\n${code}\n\`\`\`` }], () => undefined);
+  openMenu();
+  const sourcesTab = document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')!;
   act(() => {
-    findItem(title).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    sourcesTab.focus();
+    sourcesTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
   });
-}
-
-function isChecked(el: HTMLElement): boolean {
-  return el.getAttribute('aria-checked') === 'true';
-}
-
-function badgeText(): string | null {
-  const badge = container.querySelector('.system-prompt-toggle-badge');
-  return badge?.textContent ?? null;
-}
-
-function triggerHasDisabled(): boolean {
-  return container.querySelector('.system-prompt-toggle-trigger')?.classList.contains('has-disabled') ?? false;
-}
-
-test('toggle applies optimistically — checkbox + badge update before the backend round-trip', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  // Backend still reports the harness as enabled (round-trip not yet landed).
-  mount([providerEntry(), entry('harness', 'Harness')], onSet);
-  openMenu();
-
-  const harnessItem = findItem('Harness');
-  assert.equal(isChecked(harnessItem), true, 'harness starts enabled');
-  assert.equal(badgeText(), null, 'no badge when nothing disabled');
-  assert.equal(triggerHasDisabled(), false);
-
-  clickItem('Harness');
-
-  assert.equal(isChecked(findItem('Harness')), false, 'checkbox unchecks instantly on click');
-  assert.equal(badgeText(), '1', 'badge appears instantly');
-  assert.equal(triggerHasDisabled(), true, 'trigger is accented instantly');
-  assert.deepEqual(calls, [['harness']], 'posts the single disabled id');
-});
-
-test('rapid successive toggles accumulate (lost-update regression)', () => {
-  // Regression: the previous version derived each toggle's "next" set from the
-  // stale `prompts` prop, so a second click before the backend re-emitted
-  // `session.opened` computed its set WITHOUT the first toggle and clobbered
-  // it. The effective set must carry the first toggle along.
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  // Backend reports both enabled throughout (simulating neither round-trip has
-  // landed yet).
-  mount(
-    [providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')],
-    onSet,
-  );
-  openMenu();
-
-  clickItem('Harness'); // disable harness
-  clickItem('Tools');   // disable tools — must NOT drop harness
-
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0], ['harness']);
-  assert.deepEqual(
-    calls[1].sort(),
-    ['harness', 'tools'],
-    'second toggle carries the first along instead of clobbering it',
-  );
-  assert.equal(isChecked(findItem('Harness')), false, 'harness stays disabled');
-  assert.equal(isChecked(findItem('Tools')), false, 'tools now disabled');
-  assert.equal(badgeText(), '2');
-});
-
-test('toggling an already-disabled entry back on re-enables it optimistically', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount(
-    [providerEntry(), entry('harness', 'Harness', true)],
-    onSet,
-  );
-  openMenu();
-
-  assert.equal(isChecked(findItem('Harness')), false, 'starts disabled (remote truth)');
-
-  clickItem('Harness');
-
-  assert.equal(isChecked(findItem('Harness')), true, 're-enables instantly');
-  assert.deepEqual(calls, [[]], 'posts an empty set to re-enable');
-  assert.equal(badgeText(), null);
-});
-
-test('reconcile: backend confirmation clears pending without flicker', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  const prompts0 = [providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')];
-  mount(prompts0, onSet);
-  openMenu();
-
-  clickItem('Harness');
-  clickItem('Tools');
-  assert.deepEqual(calls[1].sort(), ['harness', 'tools']);
-
-  // Backend now confirms both disabled (the round-trip lands).
-  rerender(
-    [providerEntry(), entry('harness', 'Harness', true), entry('tools', 'Tools', true)],
-    onSet,
-  );
-  assert.equal(isChecked(findItem('Harness')), false, 'harness still disabled after ack');
-  assert.equal(isChecked(findItem('Tools')), false, 'tools still disabled after ack');
-  assert.equal(badgeText(), '2');
-
-  // Pending has been acked, so a fresh toggle posts the effective set cleanly.
-  clickItem('Harness'); // re-enable harness only
-  assert.deepEqual(
-    calls[2],
-    ['tools'],
-    'after ack, toggling harness back on keeps tools disabled',
-  );
-});
-
-test('reconcile prunes pending entries that vanish from the prompt list', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount(
-    [providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')],
-    onSet,
-  );
-  openMenu();
-  clickItem('Tools'); // disable tools (pending)
-
-  // Backend re-emits with the tools entry gone entirely (e.g. no tools loaded).
-  rerender([providerEntry(), entry('harness', 'Harness')], onSet);
-
-  assert.equal(items().length, 1, 'tools entry is gone');
-  assert.equal(badgeText(), null, 'pending tools intent is pruned, not stuck');
-});
-
-test('Reset clears every disabled entry optimistically', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  // Both already disabled per remote truth.
-  mount(
-    [providerEntry(), entry('harness', 'Harness', true), entry('tools', 'Tools', true)],
-    onSet,
-  );
-  openMenu();
-
-  const reset = container.querySelector('.system-prompt-toggle-reset') as HTMLButtonElement | null;
-  assert.ok(reset, 'reset button renders when entries are disabled');
-  act(() => {
-    reset!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  assert.equal(document.activeElement?.textContent, 'Resolved preview');
+  assert.ok(document.querySelector('[role="tabpanel"][aria-labelledby]'));
+  const showAll = document.querySelector<HTMLButtonElement>('.code-block-toggle')!;
+  act(() => showAll.click());
+  assert.equal(showAll.getAttribute('aria-expanded'), 'true');
+  assert.ok(!showAll.closest('.code-block')!.classList.contains('code-block-collapsed'));
+  await act(async () => {
+    document.querySelector<HTMLButtonElement>('.code-block-copy')!.click();
+    await Promise.resolve();
   });
-
-  assert.equal(isChecked(findItem('Harness')), true, 'harness re-enabled instantly');
-  assert.equal(isChecked(findItem('Tools')), true, 'tools re-enabled instantly');
-  assert.equal(badgeText(), null, 'badge clears instantly');
-  assert.deepEqual(calls, [[]], 'posts an empty set');
+  assert.equal(copied, code);
 });
 
-test('keeps the trigger visible across the 0 -> N entries transition', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  // Only the non-toggleable provider card: keep the indicator visible but
-  // disable interaction until prompt metadata resolves.
-  mount([providerEntry()], onSet);
-  const unresolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
-  assert.ok(unresolvedTrigger, 'trigger remains visible when nothing is toggleable');
-  assert.equal(unresolvedTrigger.disabled, true, 'unresolved trigger is disabled');
-
-  // Session resolves and toggleable entries appear without changing the
-  // toolbar layout.
-  assert.doesNotThrow(() => {
-    rerender([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  });
-  const resolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
-  assert.ok(resolvedTrigger, 'trigger remains visible once entries exist');
-  assert.equal(resolvedTrigger.disabled, false, 'resolved trigger becomes interactive');
-
-  // And it still works after the transition.
-  openMenu();
-  clickItem('Harness');
-  assert.deepEqual(calls, [['harness']]);
-});
-
-test('Escape closes the dropdown and returns focus to the trigger', () => {
-  mount([providerEntry(), entry('harness', 'Harness')], () => undefined);
-  openMenu();
-  assert.ok(container.querySelector('.system-prompt-toggle-dropdown'), 'dropdown is open');
-
-  const trigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement;
-  act(() => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  });
-
-  assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'dropdown closes on Escape');
-  assert.ok(document.activeElement === trigger, 'focus returns to the trigger');
-});
-
-test('keeps the trigger visible across the N -> 0 entries transition', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  openMenu();
-  clickItem('Harness'); // leaves a pending intent
-
-  // All toggleable entries vanish (e.g. session de-resolved to provider card
-  // only). Keep the stable indicator, close its menu, and disable interaction.
-  assert.doesNotThrow(() => rerender([providerEntry()], onSet));
-  const unresolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
-  assert.ok(unresolvedTrigger, 'trigger remains visible when nothing is toggleable');
-  assert.equal(unresolvedTrigger.disabled, true, 'unresolved trigger is disabled');
-  assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'dropdown closes when entries vanish');
-
-  // And it becomes interactive again when entries come back.
-  assert.doesNotThrow(() => rerender([providerEntry(), entry('harness', 'Harness')], onSet));
-  const resolvedTrigger = container.querySelector('.system-prompt-toggle-trigger') as HTMLButtonElement | null;
-  assert.ok(resolvedTrigger, 'trigger remains visible when entries return');
-  assert.equal(resolvedTrigger.disabled, false, 'trigger is re-enabled');
-});
-
-test('partial backend ack: confirming one pending entry keeps the other pending', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  openMenu();
-  clickItem('Harness');
-  clickItem('Tools');
-  assert.deepEqual(calls[1].sort(), ['harness', 'tools']);
-
-  // Backend confirms ONLY harness (tools still enabled remotely).
-  rerender([providerEntry(), entry('harness', 'Harness', true), entry('tools', 'Tools')], onSet);
-  assert.equal(isChecked(findItem('Harness')), false, 'harness acked, still disabled');
-  assert.equal(isChecked(findItem('Tools')), false, 'tools stays disabled via pending overlay');
-  assert.equal(badgeText(), '2');
-
-  // Backend now confirms tools too.
-  rerender([providerEntry(), entry('harness', 'Harness', true), entry('tools', 'Tools', true)], onSet);
-  assert.equal(isChecked(findItem('Harness')), false);
-  assert.equal(isChecked(findItem('Tools')), false);
-  assert.equal(badgeText(), '2');
-
-  // Pending is fully acked: a fresh toggle posts the clean effective set.
-  clickItem('Harness');
-  assert.deepEqual(calls[2], ['tools'], 're-enabling harness leaves tools disabled');
-});
-
-test('a backend-driven flip on one entry does not disturb a pending intent on another', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  openMenu();
-  clickItem('Harness'); // pending { harness: true }
-
-  // Backend independently disables tools (no user toggle) while harness's
-  // pending intent is still unconfirmed.
-  rerender([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools', true)], onSet);
-  assert.equal(isChecked(findItem('Harness')), false, 'harness disabled via pending overlay');
-  assert.equal(isChecked(findItem('Tools')), false, 'tools disabled via remote flip');
-  assert.equal(badgeText(), '2');
-
-  // Toggling tools back on must carry the still-pending harness intent along.
-  clickItem('Tools');
-  assert.deepEqual(calls[1], ['harness'], 're-enabling tools keeps harness disabled');
-  assert.equal(isChecked(findItem('Tools')), true, 'tools re-enabled optimistically');
-  assert.equal(isChecked(findItem('Harness')), false, 'harness still disabled');
-  assert.equal(badgeText(), '1');
-});
-
-test('rapid off -> on of the same entry cancels out before the round-trip', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness')], onSet);
-  openMenu();
-
-  clickItem('Harness'); // disable
-  clickItem('Harness'); // re-enable (before backend confirms)
-
-  assert.deepEqual(calls, [['harness'], []], 'net effect is a no-op empty set');
-  assert.equal(isChecked(findItem('Harness')), true, 'back to enabled');
-  assert.equal(badgeText(), null);
-});
-
-test('Reset clears pending overlays, not just remote-disabled entries', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  // Both enabled remotely; user disables both via pending overlay only.
-  mount([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  openMenu();
-  clickItem('Harness');
-  clickItem('Tools');
-  assert.equal(badgeText(), '2');
-
-  const reset = container.querySelector('.system-prompt-toggle-reset') as HTMLButtonElement;
-  act(() => {
-    reset.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-  });
-
-  assert.deepEqual(calls[2], [], 'reset posts an empty set');
-  assert.equal(isChecked(findItem('Harness')), true, 'harness re-enabled optimistically');
-  assert.equal(isChecked(findItem('Tools')), true, 'tools re-enabled optimistically');
-  assert.equal(badgeText(), null);
-
-  // Backend confirms (both still enabled): pending overlays ack cleanly, no flicker.
-  rerender([providerEntry(), entry('harness', 'Harness'), entry('tools', 'Tools')], onSet);
-  assert.equal(isChecked(findItem('Harness')), true);
-  assert.equal(isChecked(findItem('Tools')), true);
-  assert.equal(badgeText(), null);
-});
-
-test('session changes clear pending prompt intents before rendering the next tab', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-  clickItem('Harness');
-  assert.equal(isChecked(findItem('Harness')), false);
-
-  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
-
-  assert.ok(!container.querySelector('.system-prompt-toggle-dropdown'), 'session switch closes the old menu');
-  openMenu();
-  assert.equal(isChecked(findItem('Harness')), true, 'session B must not inherit session A pending state');
-  assert.equal(badgeText(), null);
-});
-
-test('pending overlay derivation rejects an old session state before effects run', () => {
-  const state = {
-    sessionPath: '/sessions/a',
-    sessionGeneration: 0,
-    intents: { harness: true },
-  };
-
-  assert.deepEqual(
-    scopePendingOverlay(state, '/sessions/b', 1),
-    {},
-    'session B must render without A intents even before the reset effect runs',
-  );
-  assert.deepEqual(
-    scopePendingOverlay(state, '/sessions/a', 2),
-    {},
-    'returning to A under a newer generation must not resurrect stale intents',
-  );
-});
-
-test('async rollback is fenced across A -> B -> A', async () => {
-  const rejectors: Array<(reason?: unknown) => void> = [];
-  const onSet = (_ids: string[]) => new Promise<void>((_resolve, reject) => {
-    rejectors.push(reject);
-  });
-  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-  clickItem('Harness');
-
-  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
-  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-  clickItem('Harness');
-
-  rejectors[0]?.(new Error('late A request failed'));
-  await Promise.resolve();
-  await Promise.resolve();
-
-  assert.equal(isChecked(findItem('Harness')), false, 'old A rejection must not roll back the new A intent');
-});
-
-test('a synchronous failed prompt-toggle write rolls back the optimistic overlay', () => {
-  const onSet = (_ids: string[]) => false;
-  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-
-  clickItem('Harness');
-
-  assert.equal(isChecked(findItem('Harness')), true, 'failed transport writes do not remain optimistic');
-  assert.equal(badgeText(), null);
-});
-
-test('the authoritative prompt-toggle failure notice rolls back pending state', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-  clickItem('Harness');
-  assert.equal(isChecked(findItem('Harness')), false);
-
-  rerender(
-    [providerEntry(), entry('harness', 'Harness')],
-    onSet,
-    '/sessions/a',
-    'Failed to save the system-prompt setting. See the pie log for details.',
-  );
-
-  assert.equal(isChecked(findItem('Harness')), true, 'failed persistence must return to remote truth');
-  assert.equal(badgeText(), null);
-});
-
-test('a late failure notice for session A does not clear session B pending state', () => {
-  const calls: string[][] = [];
-  const onSet = (ids: string[]) => calls.push(ids);
-  mount([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/a');
-  openMenu();
-  clickItem('Harness');
-
-  rerender([providerEntry(), entry('harness', 'Harness')], onSet, '/sessions/b');
-  openMenu();
-  clickItem('Harness');
-  assert.equal(isChecked(findItem('Harness')), false);
-
-  rerender(
-    [providerEntry(), entry('harness', 'Harness')],
-    onSet,
-    '/sessions/b',
-    'Failed to save the system-prompt setting. See the pie log for details.',
-    '/sessions/a',
-  );
-
-  assert.equal(isChecked(findItem('Harness')), false, 'session A failure must not erase B optimistic state');
-  assert.equal(badgeText(), '1');
+test('markdown links and tabindex targets participate in focus wrap', () => {
+  mount([{...entry('a','A'), text:'[Link](https://example.com)'}], () => undefined); openMenu();
+  const link = document.querySelector<HTMLAnchorElement>('.message-body a')!;
+  assert.ok(link);
+  const cancel = [...document.querySelectorAll<HTMLButtonElement>('.system-instructions-dialog button')].find(b => b.textContent === 'Cancel')!;
+  cancel.hidden = true;
+  const close = document.querySelector<HTMLButtonElement>('[aria-label="Close system instructions"]')!;
+  act(() => { close.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true})); });
+  assert.ok(document.activeElement === link);
+  act(() => { link.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true})); });
+  assert.ok(document.activeElement === close);
+  const generatedTarget = document.createElement('a');
+  generatedTarget.tabIndex = 0;
+  generatedTarget.textContent = 'Generated markdown target';
+  document.querySelector('.message-body')!.appendChild(generatedTarget);
+  act(() => { close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })); });
+  assert.ok(document.activeElement === generatedTarget);
+  generatedTarget.style.display = 'none';
+  act(() => { close.focus(); close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })); });
+  assert.ok(document.activeElement === link);
 });

@@ -71,6 +71,10 @@ function isOverflowPortalTarget(target: EventTarget | null, popover: HTMLElement
   // overflow-owned nested layer as inside while its trigger is open.
   if (popover?.querySelector('.browser-server-trigger[aria-expanded="true"]')
     && element.closest('.browser-server-popover')) return true;
+  // The instructions inspector is modal and portals outside this popover.
+  // Keep its owning toolbar item mounted while focus or clicks enter it.
+  if (popover?.querySelector('.system-prompt-toggle-menu .system-prompt-toggle-trigger[aria-expanded="true"]')
+    && element.closest('.system-instructions-backdrop')) return true;
   // Settings is a body portal. Only claim it (and its nested model/help
   // portals) while this overflow's Settings trigger owns the open surface.
   if (popover?.querySelector('.toolbar-settings-trigger[aria-expanded="true"]')) {

@@ -334,8 +334,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
       key: 'system-prompts',
       overflowOnly: true,
       kind: 'control',
-      shortLabel: 'Prompts',
-      content: <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />,
+      shortLabel: 'Instructions',
+      content: <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} commandsAvailable={commandsAvailable} onSetToggles={onSetSystemPromptToggles} />,
     },
     {
       key: 'mcp',

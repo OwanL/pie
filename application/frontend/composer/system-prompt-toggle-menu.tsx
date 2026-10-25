@@ -5,8 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 import type { SystemPromptEntry } from '../../lib/protocol/index.js';
-import { useDisclosureFocusDismiss } from '../lib/hooks/use-disclosure-focus-dismiss';
-import { useAnchoredOverlay } from '../lib/components/anchored-overlay';
+import { SystemInstructionsDialog } from './system-instructions-dialog';
 import { Tooltip } from '../lib/components/tooltip';
 import { useNoticeContext } from '../lib/hooks/notice-context';
 import { cx } from '../lib/components/cx';
@@ -16,6 +15,7 @@ interface SystemPromptToggleMenuProps {
    *  allowed to cross this boundary when the toolbar is reused for a tab
    *  switch. */
   sessionPath?: string | null;
+  commandsAvailable?: boolean;
   /** Full system-prompt entry list for the active session (each carries an
    *  `id` and a `disabled` flag). The backend is the source of truth — the
    *  webview renders this list and sends toggle changes back via
@@ -63,27 +63,8 @@ function noticeTargetsSession(noticeSessionPath: string | null | undefined, sess
   return noticeSessionPath === undefined || noticeSessionPath === null || noticeSessionPath === sessionPath;
 }
 
-/** A toolbar menu for toggling individual system-prompt entries on/off.
- *
- *  Placed immediately to the right of the model / reasoning pickers. Each entry
- *  is a checkbox row: checked = enabled (sent to the model + shown in the
- *  transcript), unchecked = disabled (stripped from the prompt + hidden).
- *
- *  The backend owns the toggle set and re-emits `session.opened` to update
- *  this list — but that round-trip is asynchronous. To stay robust under rapid
- *  interaction (the previous version computed each toggle's "next" set from a
- *  not-yet-updated `prompts` and silently dropped the prior toggle, and the
- *  checkbox lagged a full round-trip behind the click), the component keeps a
- *  local `pending` overlay of per-entry intents:
- *    - the *effective* disabled set is the remote set (`prompts`) with pending
- *      overrides applied on top;
- *    - `toggle`/`reset` update `pending` optimistically AND post the full
- *      effective set, so successive clicks accumulate locally instead of
- *      racing the stale prop;
- *    - a reconcile effect acks pending intents the backend has confirmed (or
- *      prunes ones whose entry vanished), so the overlay never masks later
- *      backend-driven changes or grows without bound. */
-export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggles }: SystemPromptToggleMenuProps) {
+/** Session-owned optimistic persistence for the system instructions editor. */
+export function SystemPromptToggleMenu({ prompts, sessionPath = null, commandsAvailable = true, onSetToggles }: SystemPromptToggleMenuProps) {
   const [open, setOpen] = useState(false);
   /** Local per-entry intent overlay, keyed by entry id: `true` = disabled,
    *  `false` = enabled. Cleared as the backend confirms each intent. */
@@ -95,9 +76,11 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
   const currentSessionPathRef = useRef<string | null>(sessionPath);
   const sessionGenerationRef = useRef(0);
   const pendingOperationRef = useRef(0);
+  // A draft can reverse an earlier unconfirmed Apply. The pre-submit catalog
+  // must not acknowledge that reversal simply because it already matches it.
+  const submittedCatalogRef = useRef(prompts);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useDisclosureFocusDismiss(open, triggerRef, menuRef, () => setOpen(false));
+
   const { notice, sessionPath: noticeSessionPath } = useNoticeContext();
 
   // Scope the overlay synchronously as soon as the identity changes. The
@@ -138,20 +121,10 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
     });
   }, [notice, noticeSessionPath, sessionGeneration, sessionPath]);
 
-  useAnchoredOverlay({
-    open,
-    triggerRef,
-    overlayRef: menuRef,
-    preferredDirection: 'up',
-    preferredWidth: 320,
-    minHeight: 120,
-    maxHeight: 380,
-  });
-
   // Only entries with a stable `id` that are `toggleable` appear as checkboxes.
   // Display-only entries (`toggleable === false`, e.g. the provider card) are
   // excluded: pi cannot strip them from the sent prompt, so a toggle would be
-  // misleading. Legacy/mock entries without an `id` are always-on and hidden.
+  // misleading. Legacy/mock entries without an `id` remain inspectable information.
   const entries = useMemo(
     () => prompts.filter(
       (p): p is ToggleableEntry => !!p.id && p.toggleable !== false,
@@ -166,9 +139,8 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
   );
 
   // Effective disabled set = remote truth overlaid with local pending intents.
-  // Pending overrides let a click take effect instantly (checkbox + badge) and
-  // lets rapid successive toggles accumulate against the effective set instead
-  // of a stale remote prop — which previously caused lost updates.
+  // Pending overrides keep applied changes visible until backend confirmation.
+  // Checkbox edits remain local to the dialog until Apply.
   const disabledIds = useMemo(() => {
     const set = new Set<string>(remoteDisabledIds);
     for (const [id, intent] of Object.entries(sessionPending)) {
@@ -183,14 +155,14 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
   // no longer exist (e.g. a context file removed from the project). Keeping
   // `pending` tight prevents it from masking later backend-driven changes or
   // growing without bound. The effect fires only when remote state changes
-  // (the sole condition under which an ack can occur), so a local `toggle`
+  // (the sole condition under which an ack can occur), so a local Apply
   // does not trigger an extra reconcile pass; the functional `setPending` reads
   // fresh state and the `prev`-guard avoids re-render loops when nothing
   // reconciles.
   useEffect(() => {
     if (notice?.startsWith(SYSTEM_PROMPT_FAILURE_NOTICE)
       && noticeTargetsSession(noticeSessionPath, sessionPath)) return;
-    if (Object.keys(sessionPending).length === 0) return;
+    if (Object.keys(sessionPending).length === 0 || prompts === submittedCatalogRef.current) return;
     setPendingState((prev) => {
       if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
       const present = new Set(entries.map((e) => e.id));
@@ -207,33 +179,10 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
       }
       return changed ? { ...prev, intents: next } : prev;
     });
-  }, [entries, notice, noticeSessionPath, remoteDisabledIds, sessionGeneration, sessionPath, sessionPending]);
-
-  // Outside-click + Escape handling, wired only while the dropdown is open.
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      const insideMenu = menuRef.current?.contains(target);
-      const insideTrigger = triggerRef.current?.contains(target);
-      if (!insideMenu && !insideTrigger) setOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [open]);
+  }, [entries, prompts, notice, noticeSessionPath, remoteDisabledIds, sessionGeneration, sessionPath, sessionPending]);
 
   const disabledCount = disabledIds.size;
-  const promptsAvailable = entries.length > 0;
+  const promptsAvailable = prompts.length > 0;
 
   // Keep the indicator stable in the toolbar even while a session's prompt
   // metadata is unresolved. It becomes available as soon as toggleable entries
@@ -242,23 +191,21 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
     if (!promptsAvailable && open) setOpen(false);
   }, [open, promptsAvailable]);
 
-  const toggle = (entry: ToggleableEntry) => {
-    const willDisable = !disabledIds.has(entry.id);
-    // Build the next full set from the *effective* (pending-aware) set so a
-    // rapid second toggle carries the first along instead of clobbering it.
-    const next = new Set(disabledIds);
-    if (willDisable) next.add(entry.id);
-    else next.delete(entry.id);
+  const apply = (next: Set<string>) => {
+    if (!commandsAvailable) return;
     const previous = sessionPending;
+    const previousCatalog = submittedCatalogRef.current;
+    submittedCatalogRef.current = prompts;
     const operation = ++pendingOperationRef.current;
-    setPendingState((prev) => {
-      if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
-      return { ...prev, intents: { ...prev.intents, [entry.id]: willDisable } };
-    });
+    const intents: Record<string, boolean> = {};
+    for (const entry of entries) intents[entry.id] = next.has(entry.id);
+    setPendingState({ sessionPath, sessionGeneration, intents });
+    setOpen(false);
     const rollback = () => {
       if (pendingOperationRef.current !== operation
         || currentSessionPathRef.current !== sessionPath
         || sessionGenerationRef.current !== sessionGeneration) return;
+      submittedCatalogRef.current = previousCatalog;
       setPendingState((prev) => (
         prev.sessionPath === sessionPath && prev.sessionGeneration === sessionGeneration
           ? { ...prev, intents: previous }
@@ -278,43 +225,6 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
       rollback();
     }
   };
-
-  const resetAll = () => {
-    if (disabledCount === 0) return;
-    // Mark every currently-effective disabled entry as pending-enabled so the
-    // UI clears instantly; the backend's empty-set re-emit later confirms it.
-    const previous = sessionPending;
-    const operation = ++pendingOperationRef.current;
-    setPendingState((prev) => {
-      if (prev.sessionPath !== sessionPath || prev.sessionGeneration !== sessionGeneration) return prev;
-      const next = { ...prev.intents };
-      for (const id of disabledIds) next[id] = false;
-      return { ...prev, intents: next };
-    });
-    const rollback = () => {
-      if (pendingOperationRef.current !== operation
-        || currentSessionPathRef.current !== sessionPath
-        || sessionGenerationRef.current !== sessionGeneration) return;
-      setPendingState((prev) => (
-        prev.sessionPath === sessionPath && prev.sessionGeneration === sessionGeneration
-          ? { ...prev, intents: previous }
-          : prev
-      ));
-    };
-    try {
-      const result = onSetToggles([]);
-      if (result === false) {
-        rollback();
-      } else if (result && typeof result !== 'boolean' && typeof result.then === 'function') {
-        void result.then((accepted) => {
-          if (accepted === false) rollback();
-        }, rollback);
-      }
-    } catch {
-      rollback();
-    }
-  };
-
   const onTriggerKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -324,14 +234,14 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
 
   return (
     <div class="system-prompt-toggle-menu">
-      <Tooltip content={open ? null : promptsAvailable ? 'Toggle system prompts on/off' : 'System prompts unavailable'} placement="top">
+      <Tooltip content={open ? null : promptsAvailable ? 'System instructions' : 'System instructions unavailable'} placement="top">
         <button
           ref={triggerRef}
           type="button"
           class={cx('system-prompt-toggle-trigger', open && promptsAvailable && 'open', disabledCount > 0 && 'has-disabled')}
           aria-haspopup="dialog"
           aria-expanded={open && promptsAvailable}
-          aria-label="Toggle system prompts"
+          aria-label="System instructions"
           disabled={!promptsAvailable}
           onClick={() => setOpen((o) => !o)}
           onKeyDown={onTriggerKeyDown}
@@ -348,52 +258,9 @@ export function SystemPromptToggleMenu({ prompts, sessionPath = null, onSetToggl
         </button>
       </Tooltip>
 
-      {open && promptsAvailable && (
-        <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="System prompt toggles">
-          <div class="system-prompt-toggle-header">
-            <span class="system-prompt-toggle-title">System prompts</span>
-            {disabledCount > 0 && (
-              <button
-                type="button"
-                class="system-prompt-toggle-reset"
-                onClick={resetAll}
-                title="Re-enable all system prompts"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          <div class="system-prompt-toggle-body">
-            {entries.map((entry) => {
-              // Reflect the effective (pending-aware) state so the checkbox
-              // responds to the click immediately, before the round-trip.
-              const enabled = !disabledIds.has(entry.id);
-              return (
-                <button
-                  key={entry.id}
-                  type="button"
-                  class={cx('toolbar-settings-item', enabled && 'checked')}
-                  role="checkbox"
-                  aria-checked={enabled}
-                  title={entry.tooltip ?? entry.title}
-                  onClick={() => toggle(entry)}
-                >
-                  <span class="toolbar-settings-item-check" aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={enabled ? '' : 'opacity:0'}>
-                      <polyline points="2.5,6.5 5,9 10.5,3.5" />
-                    </svg>
-                  </span>
-                  <span class="toolbar-settings-item-label">
-                    <span class="system-prompt-toggle-entry-title">{entry.title}</span>
-                    {entry.summary && (
-                      <span class="system-prompt-toggle-entry-summary">{entry.summary}</span>
-                    )}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+      {open && promptsAvailable && pendingState.sessionGeneration === sessionGeneration && (
+        <SystemInstructionsDialog key={sessionGeneration} prompts={prompts} disabledIds={disabledIds}
+          canApply={commandsAvailable} onApply={apply} onCancel={() => setOpen(false)} triggerRef={triggerRef} />
       )}
     </div>
   );

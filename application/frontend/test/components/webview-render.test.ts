@@ -1354,8 +1354,9 @@ test('SystemPromptToggleMenu hides display-only entries like the provider card',
     prompts: [providerEntry],
     onSetToggles: () => undefined,
   }));
-  assert.match(unavailableHtml, /system-prompt-toggle-trigger/);
-  assert.match(unavailableHtml, /disabled/);
+  assert.match(unavailableHtml, /class="system-prompt-toggle-trigger"/);
+  assert.match(unavailableHtml, /aria-label="System instructions"/);
+  assert.doesNotMatch(unavailableHtml, /disabled/);
 
   // Once a toggleable entry exists the trigger becomes interactive. The
   // dropdown only mounts when open (SSR defaults to closed); the backend test
@@ -1365,57 +1366,18 @@ test('SystemPromptToggleMenu hides display-only entries like the provider card',
     prompts: [providerEntry, harnessEntry],
     onSetToggles: () => undefined,
   }));
-  assert.match(triggerHtml, /system-prompt-toggle-trigger/);
+  assert.match(triggerHtml, /class="system-prompt-toggle-trigger"/);
+  assert.match(triggerHtml, /aria-label="System instructions"/);
   assert.doesNotMatch(triggerHtml, /disabled/);
 });
 
-test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap rows', () => {
-  const { SystemPromptMessage, TranscriptVirtualRow } = webviewModules;
-  const prompt: SystemPromptEntry = {
-    source: 'harness',
-    availability: 'available',
-    title: 'Harness system prompt',
-    text: 'Always validate changes.',
-    summary: 'Always validate changes.',
-  };
-
-  const systemPromptHtml = renderToString(h(SystemPromptMessage, { prompts: [prompt] }));
-  assert.match(systemPromptHtml, /1 system prompt/);
-  assert.match(systemPromptHtml, /class="collapsible system-prompts"/);
-  assert.doesNotMatch(systemPromptHtml, /rounded-xl|bg-card/);
-  assert.match(systemPromptHtml, /data-scroll-anchor-id="system-prompts"/);
-  // The collapsed group keeps a single label with muted count context.
-  assert.match(systemPromptHtml, />1 entry</);
-  assert.doesNotMatch(systemPromptHtml, /Harness system prompt/);
-
-  const hiddenSummaryHtml = renderToString(h(SystemPromptMessage, {
-    prompts: [
-      {
-        source: 'provider',
-        availability: 'unknown',
-        title: 'Provider system prompt',
-        text: 'unknown',
-        summary: 'unknown',
-      },
-      {
-        source: 'user',
-        availability: 'missing',
-        title: 'Custom system prompt',
-        text: '',
-        summary: 'none configured',
-      },
-    ],
-  }));
-  assert.match(hiddenSummaryHtml, /2 system prompts/);
-  // Titles only visible in expanded content, which SSR doesn't render (groupOpen defaults to false)
-  assert.doesNotMatch(hiddenSummaryHtml, /Provider system prompt/);
-  assert.doesNotMatch(hiddenSummaryHtml, /max-w-\[var\(--tool-call-summary-column-width\)\]/);
+test('rendered TranscriptVirtualRow covers gap rows', () => {
+  const { TranscriptVirtualRow } = webviewModules;
 
   const topGapHtml = renderToString(h(TranscriptVirtualRow, {
     row: { kind: 'topGap', key: 'top-gap' },
     busy: false,
     prefs: DEFAULT_CHAT_PREFS,
-    systemPrompts: [prompt],
     pruningResult: null,
     workingDirectory: '/repo',
     editingId: null,
@@ -1437,7 +1399,6 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
     row: { kind: 'bottomGap', key: 'bottom-gap' },
     busy: false,
     prefs: DEFAULT_CHAT_PREFS,
-    systemPrompts: [prompt],
     pruningResult: null,
     workingDirectory: '/repo',
     editingId: null,
@@ -1466,7 +1427,6 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
     row: { kind: 'typingIndicator', key: 'typing-row', activityState: pruningActivityState },
     busy: true,
     prefs: DEFAULT_CHAT_PREFS,
-    systemPrompts: [prompt],
     pruningResult: null,
     workingDirectory: '/repo',
     editingId: null,
@@ -1501,7 +1461,6 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
     row: { kind: 'message', key: 'message-row', message: assistantMessage([{ kind: 'text', text: 'Rendered row' }], { status: 'completed' }), activityState: thinkingActivityState },
     busy: true,
     prefs: DEFAULT_CHAT_PREFS,
-    systemPrompts: [prompt],
     pruningResult: null,
     workingDirectory: '/repo',
     editingId: null,
@@ -1523,8 +1482,6 @@ test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap
   assert.match(messageRowHtml, /turn-activity-strip-label">thinking</);
   assert.match(messageRowHtml, /turn-activity-strip-dot running/);
 
-  const emptyPromptHtml = renderToString(h(SystemPromptMessage, { prompts: [] }));
-  assert.equal(emptyPromptHtml, '');
   assert.deepEqual(EMPTY_TRANSCRIPT_WINDOW, {
     totalCount: 0,
     loadedStart: 0,

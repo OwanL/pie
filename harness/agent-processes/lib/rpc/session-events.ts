@@ -117,15 +117,15 @@ export interface SystemPromptEntry {
    *  fixtures may omit it (the webview falls back to `title`). */
   id?: string;
   /** True when the user has toggled this entry off for the session. A disabled
-   *  entry is stripped from the system prompt sent to the model AND hidden from
-   *  the transcript display. Absent/`false` = enabled. */
+   *  entry is excluded from the next request but remains inspectable in the
+   *  system-instructions picker. Absent/`false` = enabled. */
   disabled?: boolean;
   /** False for display-only entries that pi cannot strip from the sent prompt
    *  and the user therefore cannot toggle. The provider card is the canonical
    *  case: the provider's own system prompt is injected server-side and is
    *  outside pi's control, so "turning it off" is impossible. Such entries are
-   *  always shown in the transcript (never hidden) and never render a checkbox
-   *  in the toggle menu. Absent/`true` = toggleable. */
+   *  always inspectable as information and never render a checkbox in the
+   *  system-instructions picker. Absent/`true` = toggleable. */
   toggleable?: boolean;
 }
 

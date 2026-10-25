@@ -7,7 +7,6 @@ import { act } from 'preact/test-utils';
 import { DEFAULT_CHAT_PREFS } from '../../../lib/protocol/index.js';
 import { SubagentBucketMenu } from '../../composer/subagent-bucket-menu';
 import { SubagentProviderMenu } from '../../composer/subagent-provider-menu';
-import { SystemPromptToggleMenu } from '../../composer/system-prompt-toggle-menu';
 
 const sessionPath = '/session/focus.jsonl';
 const disclosures = {
@@ -15,9 +14,6 @@ const disclosures = {
   providers: () => h(SubagentProviderMenu, { sessionPath,
     prefs: { ...DEFAULT_CHAT_PREFS, subagentProviderDefaults: { anthropic: true, openai: true } },
     availableModels: [], onSetPrefs: () => {} }),
-  prompts: () => h(SystemPromptToggleMenu, { sessionPath, onSetToggles: () => {},
-    prompts: ['one', 'two'].map(id => ({ id, source: 'harness' as const, availability: 'available' as const,
-      title: id, summary: id, text: id, disabled: false })) }),
 };
 
 for (const [name, disclosure] of Object.entries(disclosures)) {
