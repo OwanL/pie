@@ -300,7 +300,7 @@ async function verifyOptionalBrowserFirstPaint(t, baseUrl, profile) {
     assert.equal(result.assetVersion, browserAssetVersion, 'both delivered peers must paint the same compiled renderer asset build');
     passed = true;
     if (environment.PIE_RUN_DELIVERED_PROVIDER_TESTS === '1') t.diagnostic('Private compiled MAIN-host provider controls exercised after New session; fake loopback discovery only, no prompts or vendor authentication.');
-    else t.diagnostic('Private headless compiled empty-session UI first paint and connected/backend-ready New session control verified; composer/Settings correctly absent without open tabs. No user actions, external browser network or renderer errors.');
+    else t.diagnostic('Private headless compiled empty-session UI first paint and connected/backend-ready New session control verified; composer absent and Settings present in the empty tab bar. No user actions, external browser network or renderer errors.');
   } finally {
     const teardown = await closeChildTree(browserChild);
     if (passed && teardown.safe && result?.safe) await rm(browserFixtureRoot, { recursive: true, force: true });
