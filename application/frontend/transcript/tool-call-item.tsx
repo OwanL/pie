@@ -425,9 +425,10 @@ function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { r
 function InlineUsage({ result }: { result: SubagentSingleResult }) {
   const context = knownNonNegative(result.usage?.contextTokens);
   const window = knownNonNegative(result.contextWindow) || undefined;
+  if (context === undefined) return null;
   return (
-    <span class="subagent-inline-usage subagent-inline-context" title="Context tokens used / context window">
-      {context === undefined ? '—' : formatDetailTokens(context)}/{window === undefined ? '—' : formatDetailTokens(window)}
+    <span class="subagent-inline-usage subagent-inline-context" title={window === undefined ? 'Context tokens used' : 'Context tokens used / context window'}>
+      {formatDetailTokens(context)}{window === undefined ? ' tok' : `/${formatDetailTokens(window)}`}
     </span>
   );
 }
@@ -457,11 +458,12 @@ function ElapsedTelemetry({ result, now, live }: { result: SubagentSingleResult;
 }
 
 function RuntimeTelemetry({ displayCost }: { displayCost?: SubagentDisplayCost }) {
-  const title = displayCost ? (displayCost.estimated ? 'Estimated cost: ~' : 'Cost: ') + '$' + displayCost.cost.toFixed(4) : 'Cost unavailable';
+  if (displayCost === undefined) return null;
+  const title = (displayCost.estimated ? 'Estimated cost: ~' : 'Cost: ') + '$' + displayCost.cost.toFixed(4);
   return (
     <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
       <span class="subagent-telemetry-item subagent-telemetry-cost">
-        {displayCost ? (displayCost.estimated ? '~' : '') + '$' + displayCost.cost.toFixed(2) : '—'}
+        {(displayCost.estimated ? '~' : '') + '$' + displayCost.cost.toFixed(2)}
       </span>
     </span>
   );
@@ -964,9 +966,7 @@ function SubagentSingleBlock({
           <span class="subagent-header-metrics">
             <InlineUsage result={singleResult} />
             <RuntimeTelemetry displayCost={displayCost} />
-            <span class="subagent-runtime-telemetry-stable">
-              <ElapsedTelemetry result={singleResult} now={activityNow} live={live} />
-            </span>
+            <ElapsedTelemetry result={singleResult} now={activityNow} live={live} />
           </span>
         </div>
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />

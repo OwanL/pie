@@ -410,7 +410,7 @@ test('responsive inline usage omits unknown and invalid values without inventing
   child.contextWindow = 0;
   child.usage = { input: -1, output: Infinity, contextTokens: 10, cacheRead: 0, cacheWrite: -2, turns: 0 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
-  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '10/—', 'zero is not a usable context-window capacity');
+  assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '10 tok', 'unknown capacity is omitted without losing known usage');
   assert.ok(container.querySelector('.subagent-inline-tokens') === null);
   assert.ok(container.querySelector('.subagent-inline-cache') === null);
   assert.ok(container.querySelector('.subagent-inline-turns') === null);
@@ -830,11 +830,11 @@ test('subagent tooltip keeps failure details ahead of lower-priority metrics', a
   assert.ok((host.textContent ?? '').indexOf('Failure: provider') < (host.textContent ?? '').indexOf('Usage & performance'));
 });
 
-test('subagent without cost evidence shows unknown cost and omits tooltip cost row', async () => {
+test('subagent without cost evidence omits cost from the header and tooltip', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, contextTokens: 100 }), prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '—');
-  assert.ok(container.querySelector('.subagent-runtime-telemetry'));
+  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
+  assert.equal(container.querySelector('.subagent-runtime-telemetry'), null);
 
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Input100 tok/);
@@ -864,6 +864,18 @@ test('subagent with provider-reported cost renders only the two-decimal USD amou
   assert.match(host.textContent ?? '', /Cost\$0\.6400/);
 });
 
+test('normalized completed card shows canonical cost even when its display preview has none', () => {
+  const toolCall = telemetrySubagentToolCall('live');
+  toolCall.status = 'completed';
+  Object.assign(toolCall.result as object, {
+    billing: [{ path: '0', usage: { providerReportedCostUsd: 0.64 } }],
+    displayBilling: [],
+  });
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+
+  assert.equal(container.querySelector('.subagent-header .subagent-telemetry-cost')?.textContent, '$0.64');
+});
+
 test('small positive reported cost uses two decimals inline and keeps detail precision in the tooltip', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.0004 }), prefsWith({ autoExpandSubagentCalls: false }));
 
@@ -890,7 +902,7 @@ test('recovery detail stays out of the header when no cost is available', () => 
   details.results[0].fallback = true;
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '—');
+  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
   assert.ok(container.querySelector('.subagent-header .subagent-telemetry-recovered') === null);
 });
 
@@ -1090,7 +1102,7 @@ test('completed model indicators append recorded reasoning as plain text', () =>
   }
 });
 
-test('role icons preserve full accessible inspector names and stable unknown metrics', () => {
+test('role icons preserve full accessible inspector names without unknown metric placeholders', () => {
   for (const agent of ['scout', 'worker', 'reviewer', 'custom long role']) {
     const call = telemetrySubagentToolCall('legacy');
     Object.assign((call.result as any).details.results[0], { agent, usage: undefined, contextWindow: undefined, startedAt: undefined, completedAt: undefined });
@@ -1100,8 +1112,8 @@ test('role icons preserve full accessible inspector names and stable unknown met
     assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('aria-hidden'), 'true');
     assert.equal(container.querySelector('.subagent-agent-name')?.getAttribute('aria-label'), 'Inspect ' + agent + ' model exchange');
     const cells = container.querySelector('.subagent-header-metrics');
-    assert.equal(cells?.children.length, 3);
-    assert.equal(cells?.children[0]?.textContent, '—/—');
+    assert.equal(cells?.children.length, 0);
+    assert.equal(cells?.textContent, '');
     assert.ok(cells?.querySelector('.subagent-telemetry-elapsed') === null, 'unknown elapsed stays hidden');
     assert.ok(container.querySelector('.subagent-header .status-chip') === null);
   }

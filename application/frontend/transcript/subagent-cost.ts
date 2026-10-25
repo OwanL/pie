@@ -142,10 +142,12 @@ export function subagentDisplayCosts(
   resultCount: number,
   pricingForModel?: TokenPricingResolver,
 ): Array<SubagentDisplayCost | undefined> {
-  // Live previews carry separate, display-only evidence. Never treat it as
-  // canonical accounting or reprice a multi-turn aggregate as one response.
-  const live = rawResult as { kind?: unknown; displayBilling?: unknown } | undefined;
-  const entries = getSubagentBillingEntries(live?.kind === 'subagent' && Array.isArray(live.displayBilling)
+  // Terminal normalization retains display-only evidence alongside canonical
+  // billing. Prefer the canonical sideband, even when it is incomplete; only
+  // live previews without it should fall back to provisional display evidence.
+  const live = rawResult as { kind?: unknown; billing?: unknown; displayBilling?: unknown } | undefined;
+  const entries = getSubagentBillingEntries(live?.kind === 'subagent'
+    && !Array.isArray(live.billing) && Array.isArray(live.displayBilling)
     ? { billing: live.displayBilling } : rawResult);
   return Array.from({ length: resultCount }, (_, index) => subagentDisplayCostForEntry(
     entries.find((entry) => entry.path === String(index)),

@@ -402,8 +402,12 @@ test.describe('subagent layout under constrained touch widths', () => {
           && identity.top < bounds.bottom && identity.bottom > bounds.top));
         expect(intersects, `identity text must clear ${await metric.getAttribute('class')} at ${width}px`).toBe(false);
       }
-      await expect(header(unknown)).toContainText('—/—');
-      await expect(unknown.locator('.subagent-telemetry-cost')).toHaveText('—');
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: info.outputPath(`unknown-telemetry-${width}.png`) });
+      await expect(header(unknown)).not.toContainText('—');
+      await expect(unknown.locator('.subagent-inline-context')).toHaveCount(0);
+      await expect(unknown.locator('.subagent-telemetry-cost')).toHaveCount(0);
+      await expect(unknown.locator('.subagent-header-metrics')).toBeEmpty();
       await expect(unknown.locator('.subagent-telemetry-elapsed')).toHaveCount(0);
       await expectContained(unknown);
       await parent.locator('.collapsible-chevron').first().click();

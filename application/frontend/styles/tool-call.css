@@ -675,10 +675,9 @@
   cursor: help;
 }
 .subagent-model-qualified { display: none; }
-/* Persistent cells retain v24 spacing even when telemetry is unknown. */
+/* Unknown metrics take no space; known values stay grouped. */
 .subagent-header-metrics {
-  display: grid;
-  grid-template-columns: minmax(8ch, max-content) minmax(5ch, max-content) minmax(5ch, max-content);
+  display: flex;
   align-items: baseline;
   column-gap: 8px;
   min-width: 0;

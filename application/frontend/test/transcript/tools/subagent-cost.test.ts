@@ -5,6 +5,7 @@ import {
   subagentDisplayCosts,
   subagentDisplayCostForEntry,
 } from '../../../transcript/subagent-cost';
+import { BackendLiveTurnAccumulator } from '../../../../../harness/agent-processes/workers/live-turn-accumulator';
 import { normalizeToolProgress } from '../../../../../harness/agent-processes/workers/tool-progress-normalizer';
 import {
   createTokenPricingResolver,
@@ -136,6 +137,39 @@ test('normalized live previews retain per-response pricing without treating a su
   assert.ok(subagentDisplayCosts(normalize(invocations), 1, pricingForModel)[0]?.estimated);
   assert.equal(subagentDisplayCosts(normalize([...invocations, invocation({ input: 12 })]), 1, pricingForModel)[0], undefined);
   assert.equal(subagentDisplayCosts(normalize(Array.from({ length: 65 }, () => invocations[0])), 1, pricingForModel)[0], undefined);
+});
+
+test('terminal normalized results prefer canonical billing over display-only evidence', () => {
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: 7, sessionPath: '/session.jsonl', requestId: 'request',
+    turnId: 'turn', attemptId: 'attempt', canonicalMessageId: 'message', startedAt: 100,
+  });
+  accumulator.observe({ kind: 'turn.started' }, 100);
+  accumulator.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  const terminal = accumulator.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'completed', durableEntryId: 'entry',
+    result: {
+      ...rawBilling([invocation({ providerReportedCostUsd: 0.02 })]),
+      results: [{ agent: 'worker', task: 'inspect', exitCode: 0 }],
+    },
+  }, 120);
+  assert.equal(terminal.kind, 'tool.terminal');
+  if (terminal.kind !== 'tool.terminal') return;
+  assert.deepEqual((terminal.result as { displayBilling: unknown }).displayBilling, []);
+  assert.deepEqual(subagentDisplayCosts(terminal.result, 1, pricingForModel), [
+    { cost: 0.02, estimated: false },
+  ]);
+});
+
+test('canonical incomplete billing is not replaced by a display subtotal', () => {
+  assert.deepEqual(subagentDisplayCosts({
+    kind: 'subagent',
+    ...rawBilling([invocation({ input: 100 })]),
+    displayBilling: rawBilling([invocation({ providerReportedCostUsd: 0.02 })]).billing,
+  }, 1, pricingForModel), [undefined]);
 });
 
 test('multi-turn aggregate usage is not repriced as one invocation', () => {
