@@ -42,6 +42,7 @@
 .composer-shell {
   position: relative;
   isolation: isolate;
+  background-color: color-mix(in srgb, var(--panel-input-surface) 97%, var(--panel-foreground));
   border-color: transparent;
   box-shadow: none;
 }
