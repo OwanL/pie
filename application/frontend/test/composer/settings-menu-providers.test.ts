@@ -13,10 +13,6 @@ import { withRenderCount } from '../helpers/render-counter';
 import { initialArchState, reducer } from '../../../backend/conversation-state/reducer';
 import { ProvidersSection } from '../../settings/settings-menu-providers';
 
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 function pausedOpenaiMetrics(pausedUntilMs: number, strikeCount = 2): ProviderGateStats {
   return {
     enabled: true,
@@ -334,7 +330,8 @@ test('paused countdown recalculates immediately when the deadline changes', () =
   }
 });
 
-test('paused provider countdown ticks down per second from a component-local interval', async () => {
+test('paused provider countdown ticks down per second from a component-local interval', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1_000_000 });
   const container = document.createElement('div');
   document.body.appendChild(container);
   const counts = new Map<string, number>();
@@ -353,7 +350,7 @@ test('paused provider countdown ticks down per second from a component-local int
     assert.match(container.textContent ?? '', /⏸ Paused — 5s remaining \(strike 2\)/);
 
     await act(async () => {
-      await sleep(1_100);
+      t.mock.timers.tick(1_000);
     });
     assert.match(container.textContent ?? '', /Paused — 4s remaining/);
     assert.equal(counts.get('section'), 1, 'per-second ticks must not re-render the section');
@@ -363,7 +360,8 @@ test('paused provider countdown ticks down per second from a component-local int
   }
 });
 
-test('stale pause deadlines clamp at zero instead of counting negative', async () => {
+test('stale pause deadlines clamp at zero instead of counting negative', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1_000_000 });
   const container = document.createElement('div');
   document.body.appendChild(container);
   renderPausedProvidersSection(container, pausedOpenaiMetrics(Date.now() - 30_000));
@@ -372,7 +370,7 @@ test('stale pause deadlines clamp at zero instead of counting negative', async (
     expandOpenai(container);
     assert.match(container.textContent ?? '', /⏸ Paused — 0s remaining \(strike 2\)/);
     await act(async () => {
-      await sleep(1_100);
+      t.mock.timers.tick(1_000);
     });
     assert.match(container.textContent ?? '', /Paused — 0s remaining/, 'clamped remaining stays at zero');
     assert.doesNotMatch(container.textContent ?? '', /-\d+s remaining/);
@@ -382,7 +380,8 @@ test('stale pause deadlines clamp at zero instead of counting negative', async (
   }
 });
 
-test('the paused countdown interval is cleared on unmount and on resume', async () => {
+test('the paused countdown interval is cleared on unmount and on resume', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1_000_000 });
   const container = document.createElement('div');
   document.body.appendChild(container);
   const originalSetInterval = globalThis.setInterval;
@@ -421,7 +420,7 @@ test('the paused countdown interval is cleared on unmount and on resume', async 
     assert.match(container.textContent ?? '', /Live: 1 active \/ 0 queued/);
     assert.deepEqual(clearedIntervals, createdIntervals, 'no new interval after resume');
     await act(async () => {
-      await sleep(1_100);
+      t.mock.timers.tick(1_000);
     });
     assert.match(container.textContent ?? '', /Live: 1 active \/ 0 queued/,
       'no stale countdown writes after resume');

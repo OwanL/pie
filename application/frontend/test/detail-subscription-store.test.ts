@@ -292,6 +292,12 @@ test.beforeEach(() => {
   resetDetailStoreBudgets();
 });
 
+test.afterEach(() => {
+  clearDetailSubscriptionStore();
+  resetDetailStoreBudgets();
+  assert.deepEqual(getDetailStoreDebugState(), { records: 0, pages: 0, pageBytes: 0, valueBytes: 0, tombstones: 0, cursors: 0 });
+});
+
 test('collapsed cards never subscribe; expansion subscribes exactly once; collapse unsubscribes immediately', () => {
   const posts = install();
   assert.equal(posts.length, 0, 'no subscription while collapsed');
@@ -1021,7 +1027,17 @@ test('address change replaces the owner instead of reusing it', () => {
   assert.deepEqual(subscribePosts(posts)[1]!.address, otherAddress);
 });
 
-test('delta against an evicted (unassembled) value rebases instead of replaying', () => {
+test('delta against an evicted (unassembled) value rebases instead of replaying', (t) => {
+  const timers = installFakeTimers();
+  // Registered after the file's cleanup hook: verify the final rebasing owner
+  // is released by afterEach, before restoring the clock that owns its timer.
+  t.after(() => {
+    try {
+      assert.equal(timers.activeCount(), 0, 'afterEach cancels the replacement owner deadline');
+    } finally {
+      timers.restore();
+    }
+  });
   const posts = install();
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });
   const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1);
@@ -1034,4 +1050,5 @@ test('delta against an evicted (unassembled) value rebases instead of replaying'
   // A delta on the correct base still cannot apply to a missing value.
   receiveDetailImperative(streamDelta(stream, 1, 2, [{ op: 'set', path: ['exitCode'], value: 0 }]));
   assert.equal(subscribePosts(posts).length, 2, 'gap rebase instead of replaying a delta over nothing');
+  assert.equal(timers.activeCount(), 1, 'replacement subscribe leaves a deadline for afterEach to release');
 });

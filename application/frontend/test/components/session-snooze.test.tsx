@@ -77,10 +77,13 @@ test('snooze cascading menu supports arrow navigation and one-layer Escape', () 
   assert.equal(closed, 1);
 }));
 
-test('submenu mouseleave respects focus and pointer presence before delayed dismissal', async () => {
+test('submenu mouseleave respects focus and pointer presence before delayed dismissal', async (t) => {
+  // The menu uses global timers (not window timers); retain act around each
+  // elapsed delay so focus events and Preact effects flush before assertions.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const container = document.createElement('div');
   document.body.append(container);
-  const waitForDismissal = () => new Promise((resolve) => setTimeout(resolve, 380));
+  const waitForDismissal = () => t.mock.timers.tick(380);
   try {
     act(() => render(h(SessionTabContextMenu, {
       tabContextMenu: { x: 10, y: 10, tabPath: path }, sessionByPath: new Map([[path, session]]),
