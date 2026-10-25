@@ -10,7 +10,23 @@ const prompts = [
   { source: 'provider', id: 'provider', title: 'Provider instructions', text: 'Provider-owned hidden text.', summary: 'Unknown provider prompt', availability: 'unknown', toggleable: false },
   { source: 'harness', id: 'harness-main', title: 'Harness instructions', text: '# Workspace rules\n\n- Keep changes focused.\n- Read [the guide](https://example.test/guide).', summary: 'Workspace guidance', availability: 'available' },
   { source: 'user', id: 'append-system', title: 'APPEND_SYSTEM.md', text: 'Append **user guidance** here.', summary: 'User additions', availability: 'available' },
-  { source: 'harness', id: 'agents', title: 'AGENTS.md', text: 'Use the local project conventions.', summary: 'Repository guidance', availability: 'available' },
+  { source: 'harness', id: 'agents', title: 'AGENTS.md', tooltip: 'C:\\dev\\AGENTS.md', text: `# Agent operating guide
+
+This file applies to everything under \`C:\\dev\`.
+
+## Directory contract
+
+- \`repos\\\`: Git repositories and repository worktrees.
+- \`data\\\`: Durable local development data that does not belong in a repository.
+- \`scratch\\\`: Disposable build experiments, downloads, and generated artifacts.
+
+## Working rules
+
+- Follow the local project conventions.
+- Keep each repository’s instructions in its own \`AGENTS.md\`.
+- Use ordinary branches in the primary checkout; do not create or use Git worktrees.
+- Keep temporary artifacts outside source trees.
+- Treat \`data\\\` as durable and potentially irreplaceable.`, summary: 'Agent operating guide', availability: 'available' },
   { source: 'harness', id: 'tools', title: 'Tool schemas', text: 'schema-marker: fixture_tool({ value: string })', summary: 'Available tool definitions', availability: 'available' },
   { source: 'harness', id: 'skills', title: 'Skills', text: 'Skill instruction marker.', summary: 'Loaded skills', availability: 'available' },
   { source: 'harness', id: 'runtime', title: 'Runtime instructions', text: 'Runtime prompt marker.', summary: 'Runtime guidance', availability: 'available' },
@@ -69,6 +85,8 @@ test('system instructions dialog fits desktop and narrow composer layouts', asyn
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
     await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeInViewport();
     await expect(dialog.getByRole('button', { name: 'Apply changes' })).toBeInViewport();
+    await dialog.getByRole('button', { name: 'AGENTS.md', exact: true }).click();
+    await expect(dialog.locator('.system-instructions-document h1')).toHaveText('Agent operating guide');
     await captureScreenshot(page, testInfo, `system-instructions-${viewport.label}`);
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);

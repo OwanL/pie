@@ -148,7 +148,7 @@ test('copy exports the complete assembled preview independent of search', async 
   act(() => { search.value = 'no match'; search.dispatchEvent(new Event('input', { bubbles: true })); });
   await act(async () => { click('Copy'); await Promise.resolve(); });
   assert.match(copied, /A body/); assert.doesNotMatch(copied, /B body/);
-  assert.match(copied, /not sent history/);
+  assert.match(copied, /not a record of a sent request/);
   assert.ok([...document.querySelectorAll('button')].some(button => button.textContent === 'Copied'));
   rerender([entry('a', 'A', true), entry('b', 'B')], () => undefined);
   assert.ok([...document.querySelectorAll('button')].some(button => button.textContent === 'Copy'));

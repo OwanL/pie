@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 import { createPortal } from 'preact/compat';
 import type { RefObject } from 'preact';
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { SystemPromptEntry } from '../../lib/protocol/index.js';
 import { renderMarkdown } from '../transcript/markdown';
 import { handleTranscriptClick } from '../transcript/transcript-click-handler';
@@ -16,7 +16,14 @@ const isToggleable = (entry: SystemPromptEntry): entry is SystemPromptEntry & { 
 const preferredEntry = (prompts: SystemPromptEntry[]) =>
   prompts.find(entry => isToggleable(entry) && entry.availability === 'available') ?? prompts[0];
 const tabs = ['sources', 'resolved'] as const;
-const note = 'Reconstructed next-message preview — not sent history or an exact provider payload. Hidden provider instructions are unavailable and excluded.';
+const note = 'Reconstructed preview, not a record of a sent request. Hidden provider instructions are not included.';
+
+function DocumentIcon() {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M14 3H5v18h14V8zM14 3v6h5M8 13h8M8 17h6" />
+  </svg>;
+}
 
 function isFocusable(node: HTMLElement): boolean {
   if (node.tabIndex < 0 || node.matches(':disabled') || node.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
@@ -49,8 +56,6 @@ export function SystemInstructionsDialog({ prompts, disabledIds, canApply, onApp
   const tabId = useId();
   const [search, setSearch] = useState('');
   const [copyStatus, setCopyStatus] = useState('Copy');
-  const [sourcesOverflow, setSourcesOverflow] = useState(false);
-  const sourceList = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef(onCancel);
@@ -85,16 +90,6 @@ export function SystemInstructionsDialog({ prompts, disabledIds, canApply, onApp
       triggerRef.current?.focus();
     };
   }, []);
-
-  useLayoutEffect(() => {
-    const list = sourceList.current;
-    if (!list) return;
-    const measure = () => setSourcesOverflow(list.scrollHeight > list.clientHeight + 1);
-    measure();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    observer?.observe(list);
-    return () => observer?.disconnect();
-  }, [prompts, tab]);
 
   const disabled = (entry: SystemPromptEntry) => isToggleable(entry)
     ? edits[entry.id] ?? disabledIds.has(entry.id) : !!entry.disabled;
@@ -135,13 +130,13 @@ export function SystemInstructionsDialog({ prompts, disabledIds, canApply, onApp
       if (event.target === event.currentTarget) onCancel();
     }}>
       <div ref={dialog} class="system-instructions-dialog" role="dialog" aria-modal="true" aria-label="System instructions">
-        <header>
-          <div>
-            <h2>System instructions</h2>
-            <p>Choose what is included in this session.</p>
-            <p>{available.length} included · Approx. {tokenLabel}</p>
-          </div>
-          <button ref={close} type="button" aria-label="Close system instructions" onClick={onCancel}>×</button>
+        <header class="system-instructions-header">
+          <h2 class="system-instructions-title">System instructions</h2>
+          <button ref={close} class="system-instructions-close" type="button"
+            aria-label="Close system instructions" onClick={onCancel}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
         </header>
         <div class="system-instructions-tabs" role="tablist" aria-label="Instruction views">
           {tabs.map((value, index) => (
@@ -164,57 +159,64 @@ export function SystemInstructionsDialog({ prompts, disabledIds, canApply, onApp
         {tab === 'sources' ? (
           <div id={`${tabId}-sources-panel`} class="system-instructions-sources" role="tabpanel"
             aria-labelledby={`${tabId}-sources`}>
-            <div class="system-instructions-list-heading">
-              <span>Instruction sources</span>
-              <span>{prompts.length} sources{sourcesOverflow ? ' · Scroll to browse ↓' : ''}</span>
-            </div>
-            <div ref={sourceList} class="system-instructions-list" tabIndex={0} aria-label="Instruction sources">
-              {prompts.map(entry => (
-                <div key={identity(entry)} class={`system-instructions-source ${chosen && identity(chosen) === identity(entry) ? 'selected' : ''}`}>
+            <div class="system-instructions-list" tabIndex={0} aria-label="Instruction sources">
+              {[...prompts.filter(entry => entry.source !== 'provider'), ...prompts.filter(entry => entry.source === 'provider')].map(entry => (
+                <div key={identity(entry)} class={`system-instructions-source ${entry.source === 'provider' ? 'system-instructions-provider' : ''} ${chosen && identity(chosen) === identity(entry) ? 'selected' : ''}`}>
                   {isToggleable(entry) ? (
                     <input type="checkbox" aria-label={`Include ${entry.title}`} checked={!disabled(entry)}
                       onChange={event => {
                         const excluded = !event.currentTarget.checked;
                         setEdits(previous => ({ ...previous, [entry.id]: excluded }));
                       }} />
-                  ) : <span title="Information only">ⓘ</span>}
-                  <button type="button" title={[entry.tooltip, entry.summary].filter(Boolean).join('\n')}
-                    aria-pressed={!!chosen && identity(chosen) === identity(entry)}
-                    onClick={() => setSelected(identity(entry))}>
-                    {isTool(entry) ? 'Tool definitions' : entry.title}
-                  </button>
+                  ) : <span class="system-instructions-info-icon" title="Information only"><DocumentIcon /></span>}
+                  <div class="system-instructions-source-label">
+                    <button type="button" title={[entry.tooltip, entry.summary].filter(Boolean).join('\n')}
+                      aria-pressed={!!chosen && identity(chosen) === identity(entry)}
+                      onClick={() => setSelected(identity(entry))}>
+                      {isTool(entry) ? 'Tool definitions' : entry.title}
+                    </button>
+                  </div>
                   {entry.source === 'provider' || entry.availability === 'available' ? null
                     : <span class="system-instructions-availability">Unavailable</span>}
                 </div>
               ))}
             </div>
-            <article class="system-instructions-preview">
-              <h3>{chosen?.title}</h3>
-              {chosen?.tooltip && <p class="system-instructions-source-path">{chosen.tooltip}</p>}
-              {chosen && <>
-                <p>{chosen.availability === 'available'
-                  ? disabled(chosen) ? 'Excluded from next message' : 'Available source text'
-                  : 'Source text unavailable'}</p>
-                {chosen.source === 'provider' && <p>Hidden provider instructions are unavailable; this is provider information only.</p>}
-                {isTool(chosen) && <p>Tool definitions are separate from system-message text.</p>}
-                <Markdown text={chosen.text} />
-              </>}
+            <article class="system-instructions-preview system-instructions-source-preview">
+              <div class="system-instructions-document-heading">
+                <DocumentIcon />
+                <h3>{chosen?.tooltip || chosen?.title}</h3>
+              </div>
+              <div class="system-instructions-document">
+                {chosen && <>
+                  {chosen.source === 'provider'
+                    ? <p class="system-instructions-document-note">Hidden provider instructions are unavailable; this is provider information only.</p>
+                    : chosen.availability !== 'available'
+                      ? <p class="system-instructions-document-note">Source text unavailable</p>
+                      : disabled(chosen) && <p class="system-instructions-document-note">Excluded from next message</p>}
+                  {isTool(chosen) && <p class="system-instructions-document-note">Tool definitions are separate from system-message text.</p>}
+                  <Markdown text={chosen.text} />
+                </>}
+              </div>
             </article>
           </div>
         ) : (
           <div id={`${tabId}-resolved-panel`} class="system-instructions-resolved" role="tabpanel"
             aria-labelledby={`${tabId}-resolved`}>
             <div class="system-instructions-search">
-              <input aria-label="Search assembled preview" placeholder="Search assembled preview" value={search}
-                onInput={event => setSearch(event.currentTarget.value)} />
+              <label class="system-instructions-search-field">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="1.5" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 5 5" /></svg>
+                <input aria-label="Search assembled preview" placeholder="Search combined instructions" value={search}
+                  onInput={event => setSearch(event.currentTarget.value)} />
+              </label>
+              <span class="system-instructions-token-estimate" title="Estimated tokens in enabled instruction text and tool definitions">≈ {tokenLabel}</span>
               <button type="button" onClick={copyPreview}>{copyStatus}</button>
             </div>
             <p class="system-instructions-note">{note}</p>
-            <p class="system-instructions-note">Approx. {tokenLabel} · available enabled instruction text and tool definitions only</p>
             <div class="system-instructions-preview">
               {groups.map(group => (
                 <section key={group.title}>
-                  <h3>{group.title}</h3>
+                  <h3 class="system-instructions-boundary">{group.title}</h3>
                   {group.entries.filter(matchesSearch).map(entry => (
                     <section key={identity(entry)}><h4>{entry.title}</h4><Markdown text={entry.text} /></section>
                   ))}
@@ -225,10 +227,8 @@ export function SystemInstructionsDialog({ prompts, disabledIds, canApply, onApp
           </div>
         )}
         <footer>
-          <div>
-            Session only · {pendingCount} pending change{pendingCount === 1 ? '' : 's'}
-            <small>{canApply ? 'Changes apply to the next message, not earlier messages.'
-              : 'Reconnect to apply changes.'}</small>
+          <div class="system-instructions-scope">
+            {canApply ? 'This session · from your next message' : 'Reconnect to apply changes.'}
           </div>
           <div class="system-instructions-actions">
             <button type="button" onClick={onCancel}>Cancel</button>
