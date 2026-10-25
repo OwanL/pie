@@ -990,6 +990,12 @@
   margin-top: 0;
 }
 
+/* Only the transient outer footer may collapse below its normal minimum. */
+.message-activity-footer[data-space-moving] {
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* ── Loading wheel ───────────────────────────────────────────────────────── */
 /* Spinner used for transcript-loading state; animation defined in index.css */
 

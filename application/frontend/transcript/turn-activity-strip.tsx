@@ -2,6 +2,8 @@
 /** @jsxImportSource preact */
 
 import { cx } from '../lib/components/cx';
+import { useRef } from 'preact/hooks';
+import { useActivityLabelMotion } from './activity-status-motion';
 
 export type TurnActivityStripTone = 'neutral' | 'accent' | 'warning' | 'error' | 'success';
 
@@ -64,8 +66,11 @@ export function TurnActivityStrip({
   phase = 'preparing',
   ariaLabel,
 }: TurnActivityStripProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  useActivityLabelMotion(ref, label, detail);
   return (
     <div
+      ref={ref}
       class={cx(
         'turn-activity-strip',
         tone !== 'neutral' && tone,

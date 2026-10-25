@@ -412,6 +412,11 @@
   margin-top: 4px;
 }
 
+/* A stable empty box permits appearance/removal motion without retaining text.
+   Contain margins in the measured inner box; height alone clips, never scales. */
+.tool-call-preview-space { overflow: clip; }
+.tool-call-preview-content { display: flow-root; }
+
 /* Bounded drafts and output tails never turn into an automatic expansion. */
 .tool-call-live-preview {
   position: relative;

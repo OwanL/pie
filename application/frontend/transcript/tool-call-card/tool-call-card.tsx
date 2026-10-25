@@ -21,6 +21,7 @@ import { ToolCallHeader } from './tool-call-header';
 import { provisionalToolSummary } from './provisional';
 import { liveToolPreview } from './display-model';
 import { useToolDisclosureMotion } from './use-tool-disclosure-motion';
+import { useToolPreviewMotion } from './use-tool-preview-motion';
 import type { ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
 
 interface ToolCallCardProps {
@@ -64,6 +65,8 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
   const pruningBadge = (toolCall.result as { details?: { pruningBadge?: ToolResultPruningBadgeData } } | null | undefined)?.details?.pruningBadge;
   const preview = !open && !isSubagent ? liveToolPreview(toolCall, activityTailLines ?? prefs.activityTailLines) : null;
 
+  const previewMotion = useToolPreviewMotion(JSON.stringify(preview), open);
+
   return (
     <div ref={cardRef} class={cx('tool-call-card', className)} data-status={toolCall.status} data-provisional={isProvisional ? 'true' : undefined}
       role="group" aria-label={`${presentation.name} tool call, ${isProvisional ? (toolCall.status === 'drafting' ? 'Drafting' : 'Ready') : toolCall.status}`}
@@ -72,11 +75,13 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
         summaryModel={summaryModel ?? undefined} errorDetail={errorDetail} pruningBadge={pruningBadge}
         durationMs={toolCall.durationMs} ariaControls={disclosure.mounted ? bodyId : undefined} prefs={prefs} toolCall={toolCall}
         onToggle={() => setOpen((value) => !value)} />
+      {!isSubagent && <div ref={previewMotion.wrapperRef} class="tool-call-preview-space"><div ref={previewMotion.contentRef} class="tool-call-preview-content">
       {preview && <div class="tool-call-live-preview" role="group" aria-label={`${presentation.name} ${preview.provisional ? 'draft input' : 'live result'} preview`}>
         {preview.truncated && <span class="tool-call-preview-truncation" title="Recent content only. Expand for all available details."><span aria-hidden="true">…</span><span class="sr-only">Earlier preview content omitted.</span></span>}
         {preview.provisional && preview.editIndex !== undefined && <span class="tool-call-preview-label">replacement {preview.editIndex}</span>}
         <pre style={{ '--tool-preview-lines': preview.lines }} data-truncated={preview.truncated ? 'true' : undefined}>{preview.text}</pre>
       </div>}
+      </div></div>}
       {disclosure.mounted && <div ref={disclosure.bodyRef} id={bodyId} class={cx('tool-call-body-wrap', !isSubagent && 'tool-call-disclosure-body')} inert={!open} aria-hidden={!open}><div class={cx('tool-call-body-inner', !isSubagent && 'tool-call-inspector-body')}>
         {renderDetails && !isProvisional ? renderDetails(renderedCall) : <ToolCallBody toolCall={renderedCall} prefs={prefs} headerPath={headerPath} workingDirectory={workingDirectory} onOpenFile={onOpenFile} />}
         {toolCall.detailRef && detail.state.status !== 'loaded' && <div class="tool-call-detail-status" role="status">
