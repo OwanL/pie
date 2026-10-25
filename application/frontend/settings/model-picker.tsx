@@ -432,6 +432,8 @@ interface ModelPickerRowProps {
   onMouseEnter: () => void;
   onMouseDown: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
   onClick: () => void;
+  isFavorite: boolean;
+  onContextMenu: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
 }
 
 function ModelPickerRow({
@@ -443,6 +445,8 @@ function ModelPickerRow({
   onMouseEnter,
   onMouseDown,
   onClick,
+  isFavorite,
+  onContextMenu,
 }: ModelPickerRowProps) {
   return (
     <div
@@ -452,15 +456,17 @@ function ModelPickerRow({
       class={getRowClass(isSelected, isActive, entry.ineligible)}
       role="option"
       aria-selected={isSelected}
-      aria-label={`${entry.label}, ${entry.model.provider}/${entry.model.id}, input price ${entry.tokenInPrice ? `${entry.tokenInPrice} per million tokens` : 'unavailable'}, output price ${entry.tokenOutPrice ? `${entry.tokenOutPrice} per million tokens` : 'unavailable'}, ${entry.supportsImages ? 'supports images' : 'text only'}`}
-      title={`${entry.label}\n${entry.model.provider}/${entry.model.id}\n${entry.title}`}
+      aria-label={`${entry.label}, ${entry.model.provider}/${entry.model.id}, input price ${entry.tokenInPrice ? `${entry.tokenInPrice} per million tokens` : 'unavailable'}, output price ${entry.tokenOutPrice ? `${entry.tokenOutPrice} per million tokens` : 'unavailable'}, ${entry.supportsImages ? 'supports images' : 'text only'}${isFavorite ? ', favorited' : ''}`}
+      title={`${entry.label}\n${entry.model.provider}/${entry.model.id}\n${entry.title}\nRight-click to toggle favorite`}
       onMouseEnter={onMouseEnter}
       onMouseDown={onMouseDown}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       <span class="model-picker-col model-picker-col-name">
         <span class="model-picker-selection" aria-hidden="true">{isSelected ? '✓' : ''}</span>
         <span class="model-picker-name">{entry.selectedLabel}</span>
+        {isFavorite && <span class="model-picker-favorite" aria-hidden="true">★</span>}
       </span>
       <span class="model-picker-col model-picker-col-provider">{entry.model.provider}</span>
       <span class="model-picker-col model-picker-col-price">
@@ -524,13 +530,9 @@ function ModelPickerDropdown({
   onLeave,
 }: ModelPickerDropdownProps) {
   const favorites = useContext(ModelFavoritesContext);
-  // Moving keyed rows can blur their focused button. Restore that same node,
-  // never a replacement candidate, after the reorder has committed.
-  const focusedControl = typeof document !== 'undefined' && listRef.current?.contains(document.activeElement)
-    ? document.activeElement as HTMLElement : null;
-  useLayoutEffect(() => {
-    if (focusedControl?.isConnected && document.activeElement !== focusedControl) focusedControl.focus();
-  });
+  const toggleFavorite = (entry: ModelPickerEntry | undefined) => {
+    if (entry && !favorites.disabled) favorites.onToggle(formatModelSpec(entry.model));
+  };
   return (
     <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)} onKeyDown={(e) => {
       if (e.key !== 'Tab') return;
@@ -562,11 +564,19 @@ function ModelPickerDropdown({
           autocomplete="off"
           spellcheck={false}
           onInput={onSearchInput}
-          onKeyDown={onKeyDown}
+          aria-description="Right-click a model to toggle favorite, or press Shift+F10 or ContextMenu for the highlighted model."
+          onKeyDown={(e) => {
+            if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+              e.preventDefault();
+              e.stopPropagation();
+              toggleFavorite(entries[activeIndex]);
+              return;
+            }
+            onKeyDown(e);
+          }}
         />
       </div>
       <div class="model-picker-header">
-        <span title="Favorites first" aria-label="Favorites first">★</span>
         {([['name', 'Model'], ['provider', 'Provider'], ['input', 'In'], ['output', 'Out'], ['images', 'Img']] as const).map(([key, text]) => (
           <span>
             <button type="button" onClick={() => onSort(key)} aria-label={`Sort by ${text}`}
@@ -577,9 +587,7 @@ function ModelPickerDropdown({
           </span>
         ))}
       </div>
-      <div id={listId} role="listbox" aria-label={ariaLabel}
-        aria-owns={entries.map(entry => `${idBase}-option-${entry.model.provider}-${entry.model.id}`).join(' ') || undefined} />
-      <div class="model-picker-rows">
+      <div id={listId} role="listbox" aria-label={ariaLabel} class="model-picker-rows">
         {entries.length === 0 ? (
           <div class="model-picker-empty">{query.trim() ? `No models match "${query}"` : 'No models available'}</div>
         ) : (
@@ -588,15 +596,15 @@ function ModelPickerDropdown({
             const isActive = i === activeIndex;
             const optionId = `${idBase}-option-${entry.model.provider}-${entry.model.id}`;
             return (
-              <div class="model-picker-row-wrap" key={formatModelSpec(entry.model)} role="presentation">
-                <button type="button" class="model-picker-star" disabled={favorites.disabled}
-                  aria-pressed={favorites.favorites.includes(formatModelSpec(entry.model))}
-                  aria-label={`Favorite ${entry.model.provider}/${entry.model.id}`}
-                  onClick={() => favorites.onToggle(formatModelSpec(entry.model))}>
-                  {favorites.favorites.includes(formatModelSpec(entry.model)) ? '★' : '☆'}
-                </button>
               <ModelPickerRow
+                key={formatModelSpec(entry.model)}
                 entry={entry}
+                isFavorite={favorites.favorites.includes(formatModelSpec(entry.model))}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  toggleFavorite(entry);
+                }}
                 isSelected={isSelected}
                 isActive={isActive}
                 optionId={optionId}
@@ -608,7 +616,6 @@ function ModelPickerDropdown({
                 }}
                 onClick={() => handleSelect(formatModelSpec(entry.model))}
               />
-              </div>
             );
           })
         )}

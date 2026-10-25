@@ -13,7 +13,7 @@ function entry(id: string, price?: number, provider = 'p'): ModelPickerEntry {
     ...(price === undefined ? {} : { subagent: { eligible: true, pricing: { input: price, output: price, cacheRead: 0, cacheWrite: 0 } } }),
   }])[0];
 }
-test('stars and sortable headers retain menu, stable identity, focus and scoped Escape', () => {
+test('row favorites and sortable headers retain menu, stable identity, focus and scoped Escape', () => {
   const container = document.createElement('div'); document.body.append(container);
   const selected: string[] = [];
   let favorites: readonly string[] = [];
@@ -32,10 +32,15 @@ test('stars and sortable headers retain menu, stable identity, focus and scoped 
     key(input, 'Enter'); assert.deepEqual(selected, []);
     key(input, 'ArrowDown');
     const active = input.getAttribute('aria-activedescendant');
-    const star = document.querySelector<HTMLButtonElement>('[aria-label="Favorite p/beta"]')!;
-    star.focus(); act(() => star.click());
-    assert.ok(document.activeElement === star, 'favorite reorder retains focused star');
-    assert.equal(star.getAttribute('aria-pressed'), 'true');
+    const row = Array.from(document.querySelectorAll<HTMLElement>('[role=option]')).find(el => el.getAttribute('aria-label')?.includes('p/beta'))!;
+    input.focus();
+    const context = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 });
+    act(() => { row.dispatchEvent(context); });
+    assert.equal(context.defaultPrevented, true);
+    assert.ok(document.activeElement === input, 'favorite reorder retains search focus');
+    assert.match(row.getAttribute('aria-label')!, /favorited/);
+    assert.equal(row.querySelector('.model-picker-favorite')?.textContent, '★');
+    assert.deepEqual(favorites, ['p/beta']);
     assert.equal(input.getAttribute('aria-activedescendant'), active);
     assert.deepEqual(selected, []);
     assert.ok(document.querySelector('.model-picker-dropdown'));
@@ -46,14 +51,16 @@ test('stars and sortable headers retain menu, stable identity, focus and scoped 
     assert.equal(sortDescription(), 'Sorted ascending');
     act(() => header.click()); assert.equal(sortDescription(), 'Sorted descending');
     const listbox = document.querySelector('[role=listbox]')!;
-    assert.equal(listbox.querySelector('button'), null, 'stars are outside the listbox');
-    assert.deepEqual(listbox.getAttribute('aria-owns')?.split(' '), Array.from(document.querySelectorAll('[role=option]'), option => option.id));
+    assert.equal(listbox.querySelector('button'), null);
+    assert.equal(listbox.getAttribute('aria-owns'), null);
+    assert.equal(listbox.children.length, rows.length);
+    assert.ok(Array.from(listbox.children).every(el => el.getAttribute('role') === 'option'));
     assert.equal(document.querySelector('[role=columnheader]'), null);
     assert.equal(input.getAttribute('aria-activedescendant'), active);
     rows = [...rows].reverse(); act(paint);
     assert.equal(input.getAttribute('aria-activedescendant'), active);
     input.focus(); key(input, 'Tab'); assert.ok(document.querySelector('.model-picker-dropdown'), 'Tab enters interactive controls');
-    key(star, 'Escape');
+    key(input, 'Escape');
     assert.equal(document.querySelector('.model-picker-dropdown'), null);
     assert.equal(escaped, 0, 'scoped Escape does not bubble to parent settings');
     assert.ok(document.activeElement === container.querySelector('.model-picker-trigger'), 'Escape restores trigger focus');
@@ -61,4 +68,53 @@ test('stars and sortable headers retain menu, stable identity, focus and scoped 
     document.removeEventListener('keydown', parentEscape);
     act(() => render(null, container)); container.remove();
   }
+});
+
+
+test('favorite keyboard shortcuts require an active catalog identity and honor disabled context', () => {
+  const container = document.createElement('div'); document.body.append(container);
+  let favorites: readonly string[] = ['unknown/missing'];
+  let disabled = false;
+  const toggled: string[] = [];
+  const paint = () => {
+    render(h(ModelFavoritesContext.Provider, { value: { favorites, disabled, onToggle: (spec: string) => {
+      toggled.push(spec);
+      favorites = favorites.includes(spec) ? favorites.filter(s => s !== spec) : [...favorites, spec];
+      paint();
+    } }, children: h(ModelPicker, { entries: [entry('same', 1, 'a'), entry('same', 1, 'b')],
+      value: 'unknown/missing', label: 'Unknown', ariaLabel: 'Model', title: 'Model',
+      onChange: () => assert.fail('favorite shortcuts must not select') }) }), container);
+  };
+  const key = (input: HTMLInputElement, key: string, shiftKey = false) => {
+    const event = new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true });
+    act(() => { input.dispatchEvent(event); });
+    return event;
+  };
+  try {
+    act(paint);
+    act(() => { container.querySelector<HTMLButtonElement>('button')!.click(); });
+    const input = document.querySelector<HTMLInputElement>('.model-picker-search')!;
+    input.focus();
+    assert.match(input.getAttribute('aria-description')!, /Shift\+F10/);
+    assert.equal(key(input, 'ContextMenu').defaultPrevented, true);
+    key(input, 'F10', true);
+    assert.deepEqual(toggled, []);
+    key(input, 'Home');
+    const active = input.getAttribute('aria-activedescendant');
+    key(input, 'F10', true);
+    assert.deepEqual(favorites, ['unknown/missing', 'a/same']);
+    assert.equal(input.getAttribute('aria-activedescendant'), active);
+    assert.equal(document.querySelectorAll('.model-picker-favorite').length, 1);
+    assert.ok(document.activeElement === input);
+    key(input, 'ContextMenu');
+    assert.deepEqual(favorites, ['unknown/missing']);
+    disabled = true; act(paint);
+    key(input, 'ContextMenu');
+    const row = document.querySelector('[role=option]')!;
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    act(() => { row.dispatchEvent(event); });
+    assert.equal(event.defaultPrevented, true);
+    assert.deepEqual(toggled, ['a/same', 'a/same']);
+    assert.ok(document.querySelector('.model-picker-dropdown'));
+  } finally { act(() => { render(null, container); }); container.remove(); }
 });

@@ -98,31 +98,36 @@ test('table headers toggle both directions and sort costs numerically with missi
   expect(await prices()).toEqual(['$10.00', '$2.00', '$0.00', '—']);
 });
 
-test('stars share intent across composer and compact settings, survive reload, and do not select', async ({ page }) => {
+test('right-click favorites share intent across composer and compact settings, survive reload, and do not select', async ({ page }) => {
   await open(page);
   const selected = () => page.getByRole('option', { selected: true });
   await expect(selected()).toContainText('Swift 2');
-  const star = page.getByRole('button', { name: 'Favorite anthropic/pro-2', exact: true });
-  await star.click();
-  await expect(star).toHaveAttribute('aria-pressed', 'true');
+  const row = page.getByRole('option').filter({ hasText: 'Pro 2' });
+  const star = row.locator('.model-picker-name + .model-picker-favorite');
+  await row.click({ button: 'right' });
+  await expect(star).toHaveText('★');
+  await expect(star).toHaveAttribute('aria-hidden', 'true');
+  await expect(row.getByRole('button')).toHaveCount(0);
+  await expect(page.locator('.model-picker-header > span')).toHaveCount(5);
+  await expect(row.locator(':scope > .model-picker-col')).toHaveCount(5);
+  await expect(page.getByRole('menu')).toHaveCount(0);
   await expect(selected()).toContainText('Swift 2');
   await expect(page.getByRole('option').first()).toContainText('Pro 2');
   await page.getByRole('combobox', { name: 'Model', exact: true }).focus();
-  for (let i = 0; i < 6; i++) await page.keyboard.press('Tab');
-  await expect(star).toBeFocused();
-  await page.keyboard.press('Space');
-  await expect(star).toHaveAttribute('aria-pressed', 'false');
-  await page.keyboard.press('Enter');
-  await expect(star).toHaveAttribute('aria-pressed', 'true');
+  await row.click({ button: 'right' });
+  await expect(star).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toBeFocused();
+  await expect(selected()).toContainText('Swift 2');
+  await row.click({ button: 'right' });
+  await expect(star).toHaveText('★');
   await expect(selected()).toContainText('Swift 2');
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Models', exact: true }).click();
   const compact = page.getByRole('button', { name: 'Chat default model', exact: true });
   await compact.click();
-  await expect(star).toHaveAttribute('aria-pressed', 'true');
+  await expect(star).toHaveText('★');
   await bounded(page);
-  await capture(page, '600-settings-model-open.png');
   await page.getByRole('combobox', { name: 'Chat default model', exact: true }).focus();
   await page.keyboard.press('Escape');
   await expect(page.locator('.model-picker-dropdown')).toHaveCount(0);
@@ -130,13 +135,47 @@ test('stars share intent across composer and compact settings, survive reload, a
   await expect(compact).toBeFocused();
   await page.reload();
   await page.getByRole('button', { name: 'Model', exact: true }).click();
-  await expect(star).toHaveAttribute('aria-pressed', 'true');
+  await expect(star).toHaveText('★');
   await expect(selected()).toContainText('Swift 2');
+});
+
+test('keyboard context-menu shortcuts toggle the active favorite without closing or moving focus', async ({ page }) => {
+  await open(page);
+  const search = page.getByRole('combobox', { name: 'Model', exact: true });
+  await search.fill('Pro 2');
+  const active = await search.getAttribute('aria-activedescendant');
+  const row = page.getByRole('option');
+  await expect(row).toContainText('Pro 2');
+  await page.evaluate(() => {
+    (window as any).pickerKeys = [];
+    document.addEventListener('keydown', event => {
+      if (event.key === 'ContextMenu' || event.key === 'F10')
+        setTimeout(() => (window as any).pickerKeys.push({ key: event.key, prevented: event.defaultPrevented }), 0);
+    }, true);
+  });
+  for (const [key, starred] of [['Shift+F10', true], ['ContextMenu', false]] as const) {
+    await search.press(key);
+    await expect(row.locator('.model-picker-favorite')).toHaveCount(starred ? 1 : 0);
+    await expect(search).toBeFocused();
+    await expect(search).toHaveAttribute('aria-activedescendant', active!);
+    await expect(page.locator('.model-picker-dropdown')).toBeVisible();
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Model', exact: true })).toContainText('Swift 2');
+  }
+  await expect.poll(() => page.evaluate(() => (window as any).pickerKeys)).toEqual([
+    { key: 'F10', prevented: true }, { key: 'ContextMenu', prevented: true },
+  ]);
 });
 
 test('table remains bounded at baseline widths including long provider and model labels', async ({ page }) => {
   for (const width of [600, 360]) {
     await open(page, width);
+    for (const label of ['Pro 2', 'Very Long Model Name']) {
+      const row = page.getByRole('option').filter({ hasText: label });
+      if (await row.locator('.model-picker-favorite').count() === 0) await row.click({ button: 'right' });
+      await expect(row.locator('.model-picker-name + .model-picker-favorite')).toHaveText('★');
+    }
+    await page.mouse.move(0, 0);
     await bounded(page);
     await capture(page, `${width}-model-open.png`);
     await page.keyboard.press('Escape');
@@ -144,6 +183,9 @@ test('table remains bounded at baseline widths including long provider and model
     await page.getByRole('tab', { name: 'Models', exact: true }).click();
     await page.getByRole('button', { name: 'Chat default model', exact: true }).click();
     await bounded(page);
+    const long = page.getByRole('option').filter({ hasText: 'Very Long Model Name' });
+    await expect(long.locator('.model-picker-favorite')).toBeVisible();
+    expect(await long.locator('.model-picker-name').evaluate(el => el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)).toBe(true);
     await capture(page, `${width}-settings-model-open.png`);
   }
 });
