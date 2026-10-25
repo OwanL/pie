@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { BrowserServerViewState, ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SessionTitlesSettings, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../lib/protocol/index.js';
+import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from './thinking-level-options.js';
 import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
 import type { ComponentChildren } from 'preact';
@@ -9,6 +10,7 @@ import { useMemo, useRef } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
 import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarActionChip } from '../lib/components/panel-chip';
+import { ChoicePicker } from '../lib/components/choice-picker';
 import { ModelPicker } from '../settings/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
 import { McpToggleMenu } from './mcp-toggle-menu';
@@ -169,6 +171,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   selectedModel,
   selectedProvider,
   selectedLevel,
+  supportsReasoning,
   contextIndicator,
   contextBreakdown,
   sessionCostIndicator,
@@ -237,6 +240,9 @@ export const ComposerToolbar = memo(function ComposerToolbar({
     selectedProviderRemoved ? 'Selected provider was removed — select another model' : null,
     selectedProviderDisabled ? 'Selected provider is disabled — select another model' : null,
   ].filter((line): line is string => !!line).join('\n');
+  const selectedThinkingLevels = getModelThinkingLevels(selectedModelEntry?.model);
+  const selectedThinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
+    selectedThinkingLevels.includes(option.value));
   const autonomousMode = getAutonomousModeForSession(prefs, sessionPath);
   const autonomousModeLabel = autonomousMode
     ? 'Autonomous mode on — ask_user is unavailable'
@@ -260,10 +266,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           title={selectedModelTooltip}
           disabled={!commandsAvailable}
           entries={modelEntries}
-          reasoning={{ value: selectedLevel, onChange: (spec, level) => {
-            const { id, provider } = parseModelSpec(spec);
-            onModelChange(id, provider, level);
-          } }}
           onChange={(spec) => {
             // The picker emits the shared provider-qualified identity so the
             // backend resolves the exact provider for duplicate model ids.
@@ -288,6 +290,17 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           label={selectedModelLabel || (availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…')}
           tooltip={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
           ariaLabel={availableModelsStatus === 'authoritative' ? 'No models available' : 'Loading models…'}
+        />
+      )}
+      {supportsReasoning && selectedThinkingOptions.length > 0 && (
+        <ChoicePicker
+          value={selectedLevel}
+          label={THINKING_LEVEL_LABELS[selectedLevel]}
+          ariaLabel="Reasoning level"
+          title="Reasoning effort"
+          options={selectedThinkingOptions}
+          disabled={!commandsAvailable}
+          onChange={(level) => onModelChange(selectedModel, selectedProvider, level)}
         />
       )}
     </>
