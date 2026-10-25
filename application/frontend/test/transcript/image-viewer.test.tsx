@@ -5,386 +5,178 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import PhotoSwipe from 'photoswipe';
-import { ImageViewer } from '../../transcript/image-viewer';
+import type Viewer from '../../vendor/viewerjs/viewer.esm';
+import { ImageViewer, type ViewerFactory } from '../../transcript/image-viewer';
 import { clearImageViewer, inlineViewerSource, openImageViewer } from '../../transcript/image-viewer-store';
 
-test('inline sources reject non-raster and remote bytes', () => {
-  assert.equal(inlineViewerSource('https://example.com/image.png'), null);
-  assert.equal(inlineViewerSource('data:image/svg+xml;base64,YQ=='), null);
-  assert.deepEqual(inlineViewerSource('data:image/png;base64,YQ=='), { kind: 'inline', mimeType: 'image/png', base64: 'YQ==' });
-});
-
-/** Minimal PhotoSwipe core stand-in: registers UI elements like the real UI module. */
-class FakePswp {
-  static instances: FakePswp[] = [];
-  static reset(): void { FakePswp.instances.length = 0; }
-
-  options: any;
-  inited = false;
-  destroyed = false;
-  isOpen = false;
-  isDestroying = false;
-  currSlide: object | undefined = undefined;
-  elements: Record<string, HTMLElement> = {};
-  registrations: Record<string, any> = {};
-  handlers = new Map<string, Array<(event: any) => void>>();
-  focusTarget: HTMLElement | null = null;
-
-  constructor(options: any) {
-    this.options = options;
-    FakePswp.instances.push(this);
-  }
-
-  init(): boolean {
-    this.inited = true;
-    this.focusTarget = document.createElement('button');
-    document.body.appendChild(this.focusTarget);
-    this.focusTarget.focus();
-    this.emit('uiRegister');
-    if (this.options.showHideAnimationType === 'none') this.isOpen = true;
-    else setTimeout(() => { this.isOpen = true; this.emit('openingAnimationEnd'); }, 333);
-    return true;
-  }
-
-  on(name: string, callback: (event: any) => void): this {
-    const handlers = this.handlers.get(name) ?? [];
-    handlers.push(callback);
-    this.handlers.set(name, handlers);
-    return this;
-  }
-
-  addFilter(): this { return this; }
-
-  emit(name: string, event: Record<string, unknown> = {}): void {
-    for (const handler of this.handlers.get(name) ?? []) handler({ content: {}, ...event });
-  }
-
-  close(): void {
-    if (!this.isOpen || this.isDestroying) return;
-    this.isDestroying = true;
-    this.emit('close');
-    this.destroy();
-  }
-
-  destroy(): void {
-    if (!this.isDestroying) {
-      this.options.showHideAnimationType = 'none';
-      this.close();
-      return;
-    }
-    this.destroyed = true;
-    this.emit('destroy');
-    this.focusTarget?.remove();
-  }
-
-  /** PhotoSwipe UI wiring: mirrors the real constructor of registered UI elements. */
-  ui = {
-    registerElement: (data: any) => {
-      const element = document.createElement(data.isButton ? 'button' : data.tagName ?? 'div');
-      if (data.isButton) element.type = 'button';
-      if (data.className) element.className = data.className;
-      if (typeof data.html === 'string') element.textContent = data.html;
-      if (data.ariaLabel) element.setAttribute('aria-label', data.ariaLabel);
-      else if (data.title) element.setAttribute('title', data.title);
-      data.onInit?.(element, this);
-      this.elements[data.name] = element;
-      this.registrations[data.name] = data;
-      if (typeof data.onClick === 'function') {
-        element.addEventListener('click', (event: Event) => (data.onClick as any)(event, element, this));
-      }
-    },
-  };
-}
-
-function viewerHarness() {
+function harness() {
   const dom = new JSDOM('<body><button id="before">Before</button><div id="mount"></div></body>');
-  for (const key of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'HTMLImageElement', 'KeyboardEvent'] as const) {
+  for (const key of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'HTMLImageElement', 'KeyboardEvent', 'MouseEvent'] as const) {
     Object.defineProperty(globalThis, key, { configurable: true, value: key === 'window' ? dom.window : (dom.window as any)[key] });
   }
-  const mount = document.getElementById('mount')!;
-  return { dom, mount };
-}
-
-function adapterHarness() {
   let receive: (message: any) => void = () => {};
+  let connection: (state: string) => void = () => {};
   const sent: any[] = [];
+  const instances: Array<{ source: HTMLImageElement; options: Viewer.Options; shown: boolean; destroyed: number }> = [];
+  const factory: ViewerFactory = (source, options) => {
+    const instance = { source, options, shown: false, destroyed: 0 };
+    instances.push(instance);
+    return { show() { instance.shown = true; }, destroy() { instance.destroyed++; } };
+  };
   const adapter: any = {
-    postMessage: (message: any) => sent.push(message),
     initialState: { imageActionCapabilities: { copy: true, reveal: true, openInBrowser: false } },
+    postMessage: (message: any) => sent.push(message),
     transport: {
       subscribe: (handler: any) => { receive = handler; return () => {}; },
-      onConnectionStateChange: () => () => {},
+      onConnectionStateChange: (handler: any) => { connection = handler; return () => {}; },
     },
   };
-  return { adapter, sent, receive: () => receive };
-}
-
-function inlineSource() {
-  return { kind: 'inline' as const, mimeType: 'image/png', base64: 'YQ==' };
-}
-
-function pswpFactory(options: any): PhotoSwipe {
-  return new FakePswp(options) as unknown as PhotoSwipe;
-}
-
-function unmount(mount: HTMLElement) {
-  return act(async () => { render(null, mount); });
-}
-
-/** Promise continuations schedule rerenders that only flush on a following act. */
-async function flush(): Promise<void> { await act(async () => {}); }
-
-test('real PhotoSwipe opener survives immediate lifecycle clearing without a ghost', async () => {
-  const { dom, mount } = viewerHarness();
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
-  dom.window.matchMedia = (() => ({ matches: false })) as any;
-  const requestFrame = (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0) as any;
-  Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, value: requestFrame });
-  Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, value: clearTimeout });
-  const instance = new PhotoSwipe({
-    dataSource: [{ src: 'data:image/png;base64,YQ==', width: 2, height: 2 }],
-    showHideAnimationType: 'none', returnFocus: false,
-  });
-  instance.init();
-  assert.equal(instance.opener.isOpen, true, 'no 333ms opening window remains');
-  instance.destroy();
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(document.querySelector('.pswp'), null, 'real destroy removes modal after its scheduled close');
-  const { adapter } = adapterHarness();
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} />, mount); });
-  await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Race', source: null }); });
-  await flush();
-  assert.ok(document.querySelector('.pswp'));
-  await act(async () => { clearImageViewer(); });
-  const retiring = document.querySelector<HTMLElement>('.pswp');
-  if (retiring) assert.equal(retiring.hidden, true, 'clearing hides immediately, before asynchronous destroy');
-  await new Promise(resolve => setTimeout(resolve, 20));
-  await flush();
-  assert.equal(document.querySelector('.pswp'), null, 'clearing within the former 333ms opening window removes the real viewer');
-  await unmount(mount);
-  dom.window.close();
-});
-
-test('viewer opens PhotoSwipe with measured dimensions and library-owned surface', async () => {
-  const { dom, mount } = viewerHarness();
-  FakePswp.reset();
-  const { adapter } = adapterHarness();
-  const measure = async () => ({ width: 2, height: 2 });
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={measure} pswpFactory={pswpFactory} />, mount); });
-  await act(async () => {
-    openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Chart', source: inlineSource() });
-  });
-  await flush();
-  assert.equal(mount.querySelector('[role="dialog"]'), null, 'PhotoSwipe owns the open modal surface');
-  const instance = FakePswp.instances.at(-1)!;
-  assert.ok(instance, 'viewer opened');
-  assert.deepEqual(instance.options.dataSource, [
-    { src: 'data:image/png;base64,YQ==', alt: 'Chart', width: 2, height: 2 },
-  ]);
-  assert.equal(instance.options.wheelToZoom, true);
-  assert.equal(instance.options.bgOpacity, undefined, 'use the stock backdrop');
-  assert.equal(instance.options.arrowPrev, undefined, 'PhotoSwipe hides navigation for a single slide');
-  assert.equal(instance.options.counter, undefined);
-  assert.equal(instance.options.mainClass, 'pie-image-viewer');
-  assert.ok(instance.inited);
-  const copy = instance.elements['pie-image-copy'] as HTMLButtonElement | undefined;
-  const reveal = instance.elements['pie-image-reveal'] as HTMLButtonElement | undefined;
-  const status = instance.elements['pie-image-status'];
-  assert.equal(copy?.getAttribute('aria-label'), 'Copy image');
-  assert.ok(copy?.classList.contains('image-viewer-action'));
-  for (const action of ['copy', 'openInBrowser', 'reveal']) {
-    const registration = instance.registrations[`pie-image-${action}`];
-    assert.equal(registration.appendTo, 'bar');
-    assert.equal(registration.html.isCustomSVG, true, 'native actions use stock icon buttons, not text controls');
-    assert.match(registration.html.inner, /<path /);
-    assert.ok(registration.order < 10, 'keep stock zoom and close at the right edge');
-  }
-  assert.equal(instance.registrations['pie-image-status'].appendTo, 'root', 'status never changes the stock toolbar layout');
-  assert.equal(instance.options.showHideAnimationType, 'none');
-  assert.equal(instance.options.returnFocus, false);
-  assert.ok(!copy?.classList.contains('image-viewer-action-hidden'));
-  assert.equal(reveal?.getAttribute('aria-label'), 'Show in file system');
-  assert.ok(!reveal?.classList.contains('image-viewer-action-hidden'));
-  assert.ok(instance.elements['pie-image-openInBrowser']?.classList.contains('image-viewer-action-hidden'),
-    'Open in browser is not a granted capability');
-  assert.equal(status?.getAttribute('role'), 'status');
-  assert.equal(status?.textContent, '', 'normal image has no overlay caption');
-  await unmount(mount);
-  await act(async () => { dom.window.close(); });
-});
-
-test('correlated actions route through PhotoSwipe custom buttons with pending and error states', async () => {
-  const { dom, mount } = viewerHarness();
-  FakePswp.reset();
-  const { adapter, sent, receive } = adapterHarness();
-  const measure = async () => ({ width: 2, height: 2 });
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={measure} pswpFactory={pswpFactory} />, mount); });
-  await act(async () => {
-    openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Chart', source: inlineSource() });
-  });
-  await flush();
-  const instance = FakePswp.instances.at(-1)!;
-  const copy = instance.elements['pie-image-copy'] as HTMLButtonElement;
-  const status = instance.elements['pie-image-status'];
-  await act(async () => { copy.click(); });
-  assert.equal(sent[0].type, 'performImageAction');
-  assert.equal(sent[0].action, 'copy');
-  assert.deepEqual(sent[0].source, inlineSource());
-  assert.match(sent[0].requestId, /^image-action:/);
-  assert.equal(copy.disabled, true, 'pending action disables the button');
-  assert.equal(status.textContent, 'Working…');
-  await act(async () => { receive()({ type: 'imageActionResult', requestId: 'stale', success: false, error: 'Wrong' }); });
-  assert.doesNotMatch(status.textContent ?? '', /Wrong/);
-  await act(async () => { receive()({ type: 'imageActionResult', requestId: sent[0].requestId, success: false, error: 'Clipboard unavailable' }); });
-  assert.match(status.textContent ?? '', /Clipboard unavailable/);
-  instance.currSlide = { marker: true };
-  await act(async () => { instance.emit('loadError'); });
-  assert.equal(status.textContent, '', 'PhotoSwipe owns the decoder error, without duplicate action feedback');
-  await act(async () => { instance.emit('loadComplete', { isError: false, slide: instance.currSlide }); });
-  assert.equal(status.textContent, '', 'a successful load of the current slide clears the error');
-  const reveal = instance.elements['pie-image-reveal'] as HTMLButtonElement;
-  await act(async () => { reveal.click(); });
-  assert.equal(sent[1].action, 'reveal');
-  assert.deepEqual(sent[1].source, inlineSource());
-  await unmount(mount);
-  await act(async () => { dom.window.close(); });
-});
-
-test('session switch tears the PhotoSwipe instance down instantly and restores focus', async () => {
-  const { dom, mount } = viewerHarness();
-  FakePswp.reset();
-  const { adapter, receive } = adapterHarness();
-  const measure = async () => ({ width: 2, height: 2 });
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={measure} pswpFactory={pswpFactory} />, mount); });
-  const before = document.getElementById('before')!;
-  before.focus();
-  await act(async () => {
-    openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Chart', source: inlineSource() });
-  });
-  const instance = FakePswp.instances.at(-1)!;
-  assert.ok(document.activeElement !== before, 'PhotoSwipe owns the focus while open');
-  await act(async () => { receive()({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/a' } }); });
-  await act(async () => { receive()({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/b' } }); });
-  assert.equal(instance.destroyed, true, 'session switch destroys the instance without waiting for an animation');
-  assert.ok(document.activeElement === before, 'focus returns to the previously focused element');
-  // A subsequent real PhotoSwipe close animation must not destroy it early.
-  await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Second', source: inlineSource() }); });
-  await flush();
-  const second = FakePswp.instances.at(-1)!;
-  assert.notEqual(second, instance);
-  assert.equal(second.destroyed, false);
-  await act(async () => { second.close(); });
-  assert.equal(second.destroyed, true, 'non-animated library close destroys synchronously');
-  await act(async () => { second.emit('destroy'); });
-  assert.ok(true, 'destroy after animated close retires the instance');
-  await unmount(mount);
-  await act(async () => { dom.window.close(); });
-});
-
-test('explicit anchors own loaded image clicks and Enter while standalone images still open', async () => {
-  const { dom, mount } = viewerHarness();
-  FakePswp.reset();
-  const { adapter } = adapterHarness();
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} pswpFactory={pswpFactory} />, mount); });
-  const surface = document.createElement('div');
-  document.body.appendChild(surface);
-  const delegated: Event[] = [];
-  const delegate = (event: Event) => {
-    assert.equal(event.defaultPrevented, false, 'viewer leaves delegated link activation untouched');
-    delegated.push(event);
-    event.preventDefault(); // Avoid jsdom navigation; the real link owner handles this.
+  const mount = document.getElementById('mount')!;
+  const start = () => act(async () => { render(<ImageViewer adapter={adapter} viewerFactory={factory} />, mount); });
+  const stop = async () => { await act(async () => { render(null, mount); clearImageViewer(); }); dom.window.close(); };
+  const thumbnail = (src = 'data:image/gif;base64,YQ==') => {
+    const image = document.createElement('img'); image.className = 'message-user-image-element'; image.tabIndex = 0; image.src = src;
+    document.body.appendChild(image); return image;
   };
-  surface.addEventListener('click', delegate);
-  surface.addEventListener('keydown', delegate);
-  try {
-    for (const href of ['actual.ts', 'https://example.com/actual']) {
-      surface.innerHTML = `<a href="${href}"><span data-pie-inline-image="./preview.png"><img src="data:image/png;base64,YQ==" tabindex="0"></span></a>`;
-      const image = surface.querySelector('img')!;
-      for (const event of [
-        new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }),
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      ]) {
-        const before = delegated.length;
-        await act(async () => { image.dispatchEvent(event); });
-        await flush();
-        assert.equal(delegated.length, before + 1);
-        assert.equal(FakePswp.instances.length, 0);
-      }
-    }
-    surface.innerHTML = '<span data-pie-inline-image="./preview.png"><img src="data:image/png;base64,YQ==" tabindex="0"></span>';
-    const image = surface.querySelector('img')!;
-    for (const event of [
-      new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }),
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-    ]) {
-      const before = delegated.length;
-      const opened = FakePswp.instances.length;
-      await act(async () => { image.dispatchEvent(event); });
-      await flush();
-      assert.equal(event.defaultPrevented, true);
-      assert.equal(delegated.length, before, 'standalone image activation belongs to viewer');
-      assert.equal(FakePswp.instances.length, opened + 1);
-      await act(async () => { FakePswp.instances.at(-1)!.close(); });
-    }
-  } finally {
-    await unmount(mount);
-    dom.window.close();
-  }
+  return { dom, mount, adapter, factory, instances, sent, start, stop, thumbnail, receive: (message: any) => receive(message), connection: (state: string) => connection(state) };
+}
+const flush = () => act(async () => {});
+
+test('inline native sources exclude remote URLs and SVG', () => {
+  assert.equal(inlineViewerSource('https://example.com/image.png'), null);
+  assert.equal(inlineViewerSource('data:image/svg+xml;base64,YQ=='), null);
+  assert.deepEqual(inlineViewerSource('data:image/gif;base64,YQ=='), { kind: 'inline', mimeType: 'image/gif', base64: 'YQ==' });
 });
 
-test('inline clicks open the viewer, SVG stays view-only, and probe failures use PhotoSwipe', async () => {
-  const { dom, mount } = viewerHarness();
-  FakePswp.reset();
-  const { adapter, sent } = adapterHarness();
-  const measure = (src: string) => src.includes('broken')
-    ? Promise.reject(new Error('no'))
-    : Promise.resolve({ width: 2, height: 2 });
-  await act(async () => { render(<ImageViewer adapter={adapter} measure={measure} pswpFactory={pswpFactory} />, mount); });
-  const thumbnail = document.createElement('img');
-  thumbnail.className = 'message-user-image-element'; thumbnail.tabIndex = 0;
-  thumbnail.src = 'data:image/png;base64,YQ=='; document.body.appendChild(thumbnail);
-  let bubbled = false;
-  thumbnail.addEventListener('click', () => { bubbled = true; });
-  await act(async () => { thumbnail.click(); });
-  await flush();
-  assert.equal(bubbled, false, 'delegated clicks never fall through to link handlers');
-  const opened = FakePswp.instances.at(-1)!;
-  assert.deepEqual(opened.options.dataSource[0].src, thumbnail.src);
-  await act(async () => { opened.close(); });
-  assert.ok(document.activeElement === thumbnail, 'click trigger regains focus after library removal');
-  await act(async () => { clearImageViewer(); });
-  await act(async () => { opened.emit('destroy'); });
-  thumbnail.src = 'data:image/svg+xml;base64,PHN2Zy8+';
-  await act(async () => { thumbnail.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
-  await flush();
-  const svgInstance = FakePswp.instances.at(-1)!;
-  assert.notEqual(svgInstance, opened, 'rendered SVG opens the viewer');
-  assert.ok(svgInstance.elements['pie-image-copy']?.classList.contains('image-viewer-action-hidden'),
-    'SVG embeds grant no native raster actions');
-  assert.ok(svgInstance.elements['pie-image-reveal']?.classList.contains('image-viewer-action-hidden'));
-  await act(async () => { (svgInstance.elements['pie-image-copy'] as HTMLButtonElement).click(); });
-  assert.equal(sent.length, 0, 'SVG never requests native actions');
-  await act(async () => { svgInstance.close(); });
-  assert.ok(document.activeElement === thumbnail, 'keyboard trigger regains focus');
+test('stock library receives original animated bytes without dimension measurement or toolbar customization', async () => {
+  const h = harness(); await h.start();
+  try {
+    const thumb = h.thumbnail();
+    await act(async () => { thumb.click(); });
+    const instance = h.instances[0];
+    assert.ok(instance.shown);
+    assert.equal(instance.source.src, thumb.src);
+    assert.equal(instance.options.toolbar, undefined);
+    assert.equal(instance.options.navbar, undefined);
+    assert.equal(instance.options.className, undefined);
+    assert.equal(instance.options.transition, false);
+    assert.equal(h.mount.querySelector('[role="dialog"]'), null);
+    await act(async () => { instance.options.hidden?.(new h.dom.window.CustomEvent('hidden') as any); });
+    assert.equal(instance.destroyed, 1);
+    assert.equal(document.activeElement, thumb);
+  } finally { await h.stop(); }
+});
 
-  await act(async () => {
-    openImageViewer({ src: 'data:image/png;base64,broken', alt: 'Broken cached image', source: null });
-  });
-  await flush();
-  assert.equal(FakePswp.instances.length, 3, 'a failed probe opens a library error slide');
-  const broken = FakePswp.instances.at(-1)!;
-  assert.equal(broken.options.errorMsg, 'Image could not be loaded.');
-  assert.equal(broken.elements['pie-image-status'].textContent, '', 'do not duplicate the library decoder error');
-  await act(async () => { broken.close(); });
-  assert.equal(mount.querySelector('[role="dialog"]'), null, 'closing the shell dismisses it');
-  await act(async () => {
-    openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Loaded replacement', source: null });
-  });
-  await flush();
-  const valid = FakePswp.instances.at(-1)!;
-  assert.ok(valid, 'changing images opens the viewer for a valid image');
-  await unmount(mount);
-  assert.equal(valid.destroyed, true, 'unmount destroys the document.body-owned PhotoSwipe instance');
-  await act(async () => { dom.window.close(); });
+test('explicit links own image activation; click, Enter and Space open standalone SVG view-only', async () => {
+  const h = harness(); await h.start();
+  try {
+    const thumb = h.thumbnail('data:image/svg+xml;base64,PHN2Zy8+');
+    const link = document.createElement('a'); link.href = '#'; document.body.appendChild(link); link.appendChild(thumb);
+    link.addEventListener('click', event => event.preventDefault());
+    for (const event of [new MouseEvent('click', { bubbles: true, cancelable: true }), new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })]) {
+      await act(async () => { thumb.dispatchEvent(event); });
+      assert.equal(h.instances.length, 0);
+    }
+    document.body.appendChild(thumb);
+    for (const event of [new MouseEvent('click', { bubbles: true, cancelable: true }), ...['Enter', ' '].map(key => new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))]) {
+      const count = h.instances.length;
+      await act(async () => { thumb.dispatchEvent(event); });
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(h.instances.length, count + 1);
+      await act(async () => { clearImageViewer(); });
+    }
+    await act(async () => { thumb.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+    assert.equal(document.querySelector('[role="menu"]'), null);
+    assert.equal(h.sent.length, 0);
+  } finally { await h.stop(); }
+});
+
+test('thumbnail actions are capability gated, source targeted and result correlated', async () => {
+  const h = harness(); await h.start();
+  try {
+    const thumb = h.thumbnail(); thumb.dataset.pieImagePath = '/workspace/demo.gif';
+    thumb.dataset.pieImageReference = 'demo.gif'; thumb.dataset.pieImageCwd = '/workspace';
+    await act(async () => { thumb.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 24 })); });
+    assert.equal(h.instances.length, 0, 'right click never opens viewer');
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    assert.deepEqual(buttons.map(button => button.textContent), ['Copy image', 'Show in file system']);
+    await act(async () => { buttons[0].click(); buttons[0].click(); });
+    assert.equal(h.sent.length, 1, 'pending guard is synchronous');
+    assert.deepEqual(h.sent[0].source, { kind: 'file', path: '/workspace/demo.gif', reference: 'demo.gif', workingDirectory: '/workspace' });
+    assert.equal(buttons[0].disabled, true);
+    assert.match(document.querySelector('[role="status"]')!.textContent!, /Working/);
+    await act(async () => { h.receive({ type: 'imageActionResult', requestId: 'stale', success: false, error: 'Wrong' }); });
+    assert.doesNotMatch(document.body.textContent!, /Wrong/);
+    await act(async () => { h.receive({ type: 'imageActionResult', requestId: h.sent[0].requestId, success: false, error: 'Clipboard unavailable' }); });
+    assert.equal(buttons[0].disabled, false);
+    assert.match(document.querySelector('[role="alert"]')!.textContent!, /Clipboard unavailable/);
+    h.adapter.postMessage = () => { throw new Error('offline'); };
+    await act(async () => { buttons[1].click(); });
+    assert.match(document.querySelector('[role="alert"]')!.textContent!, /Image action unavailable/);
+  } finally { await h.stop(); }
+});
+
+test('decoder failure retires library and exposes accessible dismissible error; stale errors do not close replacement', async () => {
+  const h = harness(); await h.start();
+  try {
+    const thumb = h.thumbnail();
+    await act(async () => { thumb.click(); });
+    const first = h.instances[0];
+    const rendered = document.createElement('img');
+    await act(async () => { first.options.view?.(new h.dom.window.CustomEvent('view', { detail: { image: rendered } }) as any); });
+    await act(async () => { rendered.dispatchEvent(new h.dom.window.Event('error')); });
+    assert.equal(first.destroyed, 1);
+    assert.match(document.querySelector('[role="alert"]')!.textContent!, /Image could not be loaded/);
+    assert.equal(document.activeElement, thumb);
+    await act(async () => { thumb.click(); });
+    assert.equal(document.querySelector('[role="status"]'), null);
+    const second = h.instances[1];
+    await act(async () => { first.source.dispatchEvent(new h.dom.window.Event('error')); rendered.dispatchEvent(new h.dom.window.Event('error')); });
+    assert.equal(second.destroyed, 0);
+    await act(async () => { second.source.dispatchEvent(new h.dom.window.Event('error')); });
+    assert.equal(second.destroyed, 1, 'source errors also handle pre-view loading failure');
+    await act(async () => { document.querySelector<HTMLButtonElement>('[aria-label="Dismiss image error"]')!.click(); });
+    assert.equal(document.querySelector('[role="status"]'), null);
+  } finally { await h.stop(); }
+});
+
+test('session, host, disconnect and unmount retire even a still-loading viewer exactly once', async () => {
+  const h = harness(); await h.start();
+  try {
+    await act(async () => { h.receive({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/a' } }); });
+    for (const dismiss of [
+      () => h.receive({ type: 'state', hostInstanceId: 'h1', state: { activeSessionPath: '/b' } }),
+      () => h.receive({ type: 'state', hostInstanceId: 'h2', state: { activeSessionPath: '/b' } }),
+      () => h.connection('disconnected'),
+    ]) {
+      await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Loading', source: null }); });
+      const instance = h.instances.at(-1)!;
+      await act(async () => { dismiss(); });
+      assert.equal(instance.destroyed, 1);
+      assert.equal(instance.source.hasAttribute('src'), false);
+      await act(async () => { instance.options.hidden?.(new h.dom.window.CustomEvent('hidden') as any); });
+      assert.equal(instance.destroyed, 1);
+    }
+    await act(async () => { openImageViewer({ src: 'data:image/png;base64,YQ==', alt: 'Loading', source: null }); });
+    const last = h.instances.at(-1)!;
+    await act(async () => { render(null, h.mount); }); await flush();
+    assert.equal(last.destroyed, 1);
+  } finally { await h.stop(); }
+});
+
+test('replacement while loading ignores retiring callbacks and preserves unrelated focus', async () => {
+  const h = harness(); await h.start();
+  try {
+    await act(async () => { openImageViewer({ src: 'data:image/gif;base64,YQ==', alt: 'First', source: null }); });
+    const first = h.instances[0];
+    const other = document.getElementById('before')!; other.focus();
+    await act(async () => { openImageViewer({ src: 'data:image/webp;base64,Yg==', alt: 'Second', source: null }); });
+    const second = h.instances[1];
+    assert.equal(first.destroyed, 1);
+    assert.equal(second.source.src, 'data:image/webp;base64,Yg==');
+    await act(async () => { first.options.hidden?.(new h.dom.window.CustomEvent('hidden') as any); first.source.dispatchEvent(new h.dom.window.Event('error')); });
+    assert.equal(second.destroyed, 0);
+    await act(async () => { clearImageViewer(); });
+    assert.equal(document.activeElement, other);
+  } finally { await h.stop(); }
 });

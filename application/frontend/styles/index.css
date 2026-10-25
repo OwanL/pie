@@ -21,7 +21,7 @@
 @import './image-preview.css';
 @import './image-viewer.css';
 @import './local-file-open-feedback.css';
-@import 'photoswipe/dist/photoswipe.css';
+@import '../vendor/viewerjs/viewer.css';
 @import './charts.css';
 
 @source "../**/*.tsx";

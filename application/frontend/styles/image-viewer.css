@@ -1,20 +1,16 @@
 .message-user-image-element, .tool-call-result-image, .attachment-card-image, .image-path-preview img, [data-pie-inline-image] img { cursor: zoom-in; }
 
-/* Keep PhotoSwipe's stock toolbar, buttons, stage and responsive layout.
-   Only host-action visibility and transient action feedback are ours. */
-.pie-image-viewer[hidden],
-.image-viewer-action-hidden { display: none !important; }
-.pswp.pie-image-viewer .image-viewer-status {
-  pointer-events: none;
-  position: absolute;
-  inset: auto 0 0;
-  max-height: 25%;
-  overflow: auto;
-  padding: 8px 12px;
-  text-align: center;
+/* Application feedback only; Viewer.js owns its entire modal presentation. */
+.image-action-feedback {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  max-width: calc(100vw - 24px);
   overflow-wrap: anywhere;
-  color: var(--pswp-icon-color);
-  background: rgba(0, 0, 0, .65);
-  font: inherit;
+  padding: 8px 12px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-widget-border);
+  z-index: 2020;
 }
-.pie-image-viewer .image-viewer-status:empty { display: none; }
+.image-action-feedback button { margin-left: 8px; }

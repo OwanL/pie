@@ -182,7 +182,7 @@ test('session dismissal does not take focus from another control', () => {
   assert.ok(document.activeElement === other);
 });
 
-test('real preview Enter retires preview; first Escape closes real PhotoSwipe and returns transcript focus', async () => {
+test('real preview Enter retires preview; viewer close returns transcript focus', async () => {
   Object.defineProperty(globalThis, 'HTMLImageElement', { configurable: true, value: window.HTMLImageElement });
   const adapter: any = {
     postMessage: () => {},
@@ -190,17 +190,19 @@ test('real preview Enter retires preview; first Escape closes real PhotoSwipe an
   };
   const viewerMount = document.createElement('div');
   host.appendChild(viewerMount);
-  await act(async () => render(<ImageViewer adapter={adapter} measure={async () => ({ width: 2, height: 2 })} />, viewerMount));
+  let closeViewer: () => void = () => {};
+  let destroyed = false;
+  await act(async () => render(<ImageViewer adapter={adapter} viewerFactory={(_source, options) => {
+    closeViewer = () => options.hidden?.(new window.CustomEvent('hidden') as any);
+    return { show() { return this; }, destroy() { destroyed = true; return this; } };
+  }} />, viewerMount));
   try {
     const image = readyFocusedPreview();
     await act(async () => { image.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
     await act(async () => {});
     assert.ok(!host.querySelector('.image-path-preview'), 'opening viewer retires preview');
-    assert.ok(document.querySelector('.pswp'));
-    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
-    // PhotoSwipe defers its close teardown even with animations disabled.
-    await act(async () => { timers.fireOptionalByDelay(0); });
-    assert.ok(!document.querySelector('.pswp'), 'Escape closes viewer');
+    await act(async () => { closeViewer(); });
+    assert.ok(destroyed, 'library close retires viewer');
     assert.ok(document.activeElement === anchor, 'viewer restores anchor focus');
     act(() => { timers.fireOptionalByDelay(350); });
     assert.ok(!host.querySelector('.image-path-preview'), 'viewer focus restoration must not reopen preview');

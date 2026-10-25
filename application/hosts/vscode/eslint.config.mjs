@@ -6,6 +6,8 @@ export default tseslint.config(
   {
     ignores: [
       '**/node_modules/**',
+      // Upstream browser distributions are kept byte-for-byte, not linted as authored code.
+      'application/frontend/vendor/**',
       'application/hosts/vscode/out/**',
       'application/hosts/vscode/out-dev/**',
       'application/hosts/vscode/.tmp/**',
