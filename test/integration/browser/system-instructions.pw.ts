@@ -88,6 +88,11 @@ test('system instructions dialog fits desktop and narrow composer layouts', asyn
     await dialog.getByRole('button', { name: 'AGENTS.md', exact: true }).click();
     await expect(dialog.locator('.system-instructions-document h1')).toHaveText('Agent operating guide');
     await captureScreenshot(page, testInfo, `system-instructions-${viewport.label}`);
+    const document = dialog.locator('.system-instructions-document');
+    await document.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await expect(document.locator('li').last()).toBeInViewport();
+    await dialog.getByRole('button', { name: 'Provider instructions', exact: true }).click();
+    await expect(dialog.locator('.system-instructions-document')).toContainText('provider information only');
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'System instructions', exact: true }).first()).toBeFocused();
