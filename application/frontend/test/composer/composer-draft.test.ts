@@ -8,7 +8,7 @@ installDom();
 import DOMPurify from 'dompurify';
 DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
 
-import { h, render } from 'preact';
+import { h, options, render } from 'preact';
 import { act } from 'preact/test-utils';
 import { useState } from 'preact/hooks';
 
@@ -203,6 +203,82 @@ test('useComposerInput posts setComposerDraft after debounced typing', async () 
     assert.equal((draftMsg as any).sessionPath, '/s');
     assert.equal((draftMsg as any).text, 'typed draft');
   } finally {
+    restoreTimers();
+  }
+});
+
+test('host draft adoption never posts stale text while passive effect cleanup is delayed', async () => {
+  const posted: WebviewToHostMessage[] = [];
+  const postMessage = (msg: WebviewToHostMessage) => { posted.push(msg); };
+  const originalRaf = options.requestAnimationFrame;
+  const frames: Array<() => void> = [];
+  installFakeTimers();
+
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: 'make it su', postMessage }), container);
+    });
+    options.requestAnimationFrame = (callback) => { frames.push(callback); };
+
+    // A passive sidebar receives typing from the LAN browser. Background tabs
+    // can delay the next paint/effect cleanup beyond the draft debounce.
+    render(h(TestHarness, { sessionPath: '/s', draftText: 'make it such that', postMessage }), container);
+    frames.shift()?.();
+    await Promise.resolve();
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    assert.equal(textarea.value, 'make it such that');
+
+    // Fire the draft timers before the next passive cleanup, as a throttled
+    // renderer can do. Merely receiving host text must never write the old
+    // value back to the shared host and restart the echo loop.
+    for (const timer of pending.filter((timer) => timer.ms === 300)) timer.fn();
+    assert.deepEqual(posted.filter((msg) => msg.type === 'setComposerDraft'), []);
+  } finally {
+    options.requestAnimationFrame = originalRaf;
+    act(() => { render(null, container); });
+    restoreTimers();
+  }
+});
+
+test('pending draft timers cannot replay an earlier typing burst before passive cleanup', async () => {
+  const posted: WebviewToHostMessage[] = [];
+  const postMessage = (msg: WebviewToHostMessage) => { posted.push(msg); };
+  const originalRaf = options.requestAnimationFrame;
+  const frames: Array<() => void> = [];
+  installFakeTimers();
+
+  try {
+    act(() => {
+      render(h(TestHarness, { sessionPath: '/s', draftText: '', postMessage }), container);
+    });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    act(() => {
+      textarea.value = 'make it su';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    options.requestAnimationFrame = (callback) => { frames.push(callback); };
+
+    textarea.value = 'make it such that';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await Promise.resolve();
+
+    const flushDraftTimers = () => {
+      const ready = pending.filter((timer) => timer.ms === 300);
+      pending = pending.filter((timer) => timer.ms !== 300);
+      for (const timer of ready) timer.fn();
+    };
+    flushDraftTimers();
+    assert.deepEqual(posted.filter((msg) => msg.type === 'setComposerDraft'), []);
+
+    // Once effects catch up, the newest value still gets persisted normally.
+    frames.shift()?.();
+    flushDraftTimers();
+    assert.deepEqual(posted.filter((msg) => msg.type === 'setComposerDraft'), [
+      { type: 'setComposerDraft', sessionPath: '/s', text: 'make it such that' },
+    ]);
+  } finally {
+    options.requestAnimationFrame = originalRaf;
+    act(() => { render(null, container); });
     restoreTimers();
   }
 });

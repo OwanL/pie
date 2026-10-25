@@ -146,7 +146,15 @@ export function useComposerInput({
     transferOwnerRef.current.mounted = false;
     transferOwnerRef.current.generation++;
   }, []);
-  const [text, setTextState] = useState('');
+  const [text, commitTextState] = useState('');
+  // Write through synchronously: passive-effect cleanup can lag behind a host
+  // draft adoption or an input event in a throttled/background renderer. Draft
+  // timers must check the live buffer, not replay a retired render's text.
+  const liveTextRef = useRef('');
+  const setTextState = useCallback((value: string) => {
+    liveTextRef.current = value;
+    commitTextState(value);
+  }, []);
   const editGenerationRef = useRef(0);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   // Fixed-size feedback summary for overlapping admissions, not an error queue.
@@ -502,15 +510,18 @@ export function useComposerInput({
     if (sessionPath === null) return;
     // The replacement render still holds the retired text until the seed commits.
     if (replacingHost) return;
-    if (text === draftText) return;
+    // An earlier effect may have seeded/adopted host text during this flush.
+    if (text !== liveTextRef.current || text === draftText) return;
 
     if (draftPostTimeoutRef.current) {
       clearTimeout(draftPostTimeoutRef.current);
     }
     const generation = hostGeneration;
     draftPostTimeoutRef.current = setTimeout(() => {
-      if (generation !== hostOwnerRef.current.generation) return;
       draftPostTimeoutRef.current = null;
+      if (generation !== hostOwnerRef.current.generation
+        || sessionPath !== transferOwnerRef.current.sessionPath
+        || text !== liveTextRef.current) return;
       postMessage({ type: 'setComposerDraft', sessionPath, text });
     }, 300);
 
