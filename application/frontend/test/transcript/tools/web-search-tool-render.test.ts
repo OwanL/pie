@@ -89,7 +89,7 @@ test('web_search renders queries as a wrapped list with a count and option chips
   assert.match(html, /web-search-option">recency: month/);
   assert.match(html, /web-search-option">domains: -spam\.com/);
   // No raw YAML dump of the input.
-  assert.doesNotMatch(html, /tool-call-pre[^-]/);
+  assert.doesNotMatch(html, /<pre\b[^>]*\btool-call-pre\b/);
   // Synthesised answer renders as markdown prose (clickable link), bounded.
   assert.match(html, /web-search-result message-body/);
   assert.match(html, /<a href="https:\/\/example\.com"/);

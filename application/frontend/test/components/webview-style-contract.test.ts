@@ -318,7 +318,7 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
     /\.composer-shell:hover,\s*\.composer-shell:focus-within\s*\{[^}]*border-color:\s*transparent;[^}]*box-shadow:\s*none;/,
   );
   const sliverRule = fileChangesCss.match(/\.file-changes-sliver\s*\{([^}]*)\}/)?.[1] ?? '';
-  const drawerRule = fileChangesCss.match(/\.file-changes-drawer\s*\{([^}]*)\}/)?.[1] ?? '';
+  const drawerRule = fileChangesCss.match(/(?:^|\n)\.file-changes-drawer\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.match(sliverRule, /background:\s*transparent/);
   assert.match(sliverRule, /border-right:\s*1px solid var\(--panel-optical-edge\)/);
   assert.doesNotMatch(fileChangesCss, /\.file-changes-sliver::after|mask-image/);
