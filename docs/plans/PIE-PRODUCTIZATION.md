@@ -1,6 +1,6 @@
 # Pie productization
 
-**Updated 2026-10-25.** Current scope, decisions and acceptance gates for making Pie usable without its maintainer's checkout or assistance. This replaces the migration diary; historical measurements and receipts remain in Git history, not a second plan.
+**Updated 2026-10-26.** Current scope, decisions and acceptance gates for making Pie usable without its maintainer's checkout or assistance. This replaces the migration diary; historical measurements and receipts remain in Git history, not a second plan.
 
 ## Goal and release boundary
 
@@ -26,6 +26,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 ### Product and configuration ownership
 
+- Ship a **curated Pie workflow**: intentionally reviewed general-purpose tools, agents, skills and instructions, not a minimal Pi baseline or a wholesale copy of the maintainer's setup. Personal working policies, integrations, machine paths and account/model selections remain separate; the exact shipped inventory still requires review.
 - Separate shipped integration code, schemas and safe defaults from personal preferences, secrets and rebuildable caches. Personal configuration must not reach the Git remote or enter immutable runtime generations.
 - Normal VS Code and standalone share personal provider configuration. Development/test profiles remain private and cannot fall through to installed settings, credentials or history.
 - Provider configuration is UI-first with optional schema-validated YAML at `%LOCALAPPDATA%/pie/config/providers.yaml`; discovery caches live beneath `<resolved data root>/cache/provider-models/`. Secrets remain separate from YAML, chat and ordinary view snapshots.
