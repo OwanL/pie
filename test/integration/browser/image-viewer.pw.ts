@@ -53,6 +53,7 @@ test('transcript raster remains visible inside real PhotoSwipe, zooms and closes
   await thumbnail.click();
   const viewer = page.locator('.pswp.pie-image-viewer');
   await expect(viewer).toBeVisible();
+  await expect(viewer.locator('.image-viewer-status')).toBeHidden();
   const displayed = viewer.locator('.pswp__img:not(.pswp__img--placeholder)');
   await expect(displayed).toHaveCount(1);
   await expect.poll(() => displayed.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth === 640)).toBe(true);
@@ -106,6 +107,29 @@ for (const reducedMotion of ['no-preference', 'reduce'] as const) {
       await expect(viewer).toBeVisible();
       await expect(displayed).toBeVisible();
       await expect.poll(() => displayed.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth === 640)).toBe(true);
+      const toolbar = viewer.locator('.pswp__top-bar');
+      await expect(toolbar).toBeVisible();
+      expect((await toolbar.boundingBox())?.height).toBe(60);
+      const toolbarButtons = viewer.locator('.pswp__top-bar .pswp__button:visible');
+      await expect(toolbarButtons).toHaveCount(5);
+      const buttonLayouts = await toolbarButtons.evaluateAll(buttons => buttons.map(button => {
+        const rect = button.getBoundingClientRect();
+        const icon = button.querySelector('svg.pswp__icn');
+        const iconRect = icon?.getBoundingClientRect();
+        return { rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+          icon: Boolean(icon && iconRect && iconRect.width > 0 && iconRect.height > 0 && getComputedStyle(icon).visibility !== 'hidden') };
+      }));
+      expect(buttonLayouts.every(({ rect }) => rect.left >= 0 && rect.right <= 320 && rect.top >= 0 && rect.bottom <= 900)).toBe(true);
+      expect(buttonLayouts.every(({ rect }) => Math.abs(rect.top - buttonLayouts[0]!.rect.top) <= 1)).toBe(true);
+      expect(buttonLayouts.every(({ icon }) => icon)).toBe(true);
+      const zoomBounds = await viewer.getByRole('button', { name: 'Zoom', exact: true }).boundingBox();
+      const closeBounds = await viewer.getByRole('button', { name: 'Close', exact: true }).boundingBox();
+      expect(zoomBounds!.x).toBeGreaterThan(buttonLayouts[0]!.rect.left);
+      expect(closeBounds!.x).toBeGreaterThan(zoomBounds!.x);
+      expect(closeBounds!.x + closeBounds!.width).toBeLessThanOrEqual(320);
+      const status = viewer.locator('.image-viewer-status');
+      await expect(status).toBeAttached();
+      expect(await status.evaluate(element => element.parentElement === element.closest('.pswp'))).toBe(true);
       const bounds = await displayed.boundingBox();
       expect(bounds!.width).toBeGreaterThan(0);
       expect(bounds!.height).toBeGreaterThan(0);
@@ -121,6 +145,37 @@ for (const reducedMotion of ['no-preference', 'reduce'] as const) {
   }
 }
 
+test('native image action shows pending and isolated WebSocket error status', async ({ page }) => {
+  let failAction: (() => void) | undefined;
+  await page.routeWebSocket('**/*', socket => {
+    const server = socket.connectToServer();
+    socket.onMessage(raw => {
+      const message = JSON.parse(String(raw));
+      if (message.type === 'performImageAction') {
+        failAction = () => socket.send(JSON.stringify({ type: 'imageActionResult', requestId: message.requestId,
+          success: false, error: 'Clipboard unavailable' }));
+      } else server.send(raw);
+    });
+  });
+  await page.goto('/');
+  const thumbnail = page.getByRole('button', { name: 'Synthetic four-color raster', exact: true });
+  await thumbnail.click();
+  const viewer = page.locator('.pswp.pie-image-viewer');
+  await expect(viewer).toBeVisible();
+  const copy = viewer.getByRole('button', { name: 'Copy image', exact: true });
+  await copy.click();
+  await expect(copy).toBeDisabled();
+  const status = viewer.locator('.image-viewer-status');
+  await expect(status).toHaveText('Working…');
+  await expect.poll(() => Boolean(failAction)).toBe(true);
+  failAction!();
+  await expect(copy).toBeEnabled();
+  await expect(status).toHaveText('Clipboard unavailable');
+  await expect(status).toHaveCSS('pointer-events', 'none');
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+});
+
 test('decoder failure has readable stage error and permits recovery', async ({ page }) => {
   await page.goto('/');
   const broken = page.getByRole('button', { name: 'Corrupt raster', exact: true });
@@ -132,6 +187,7 @@ test('decoder failure has readable stage error and permits recovery', async ({ p
   await expect(error).toBeAttached();
   await expect.soft(error).toHaveText('Image could not be loaded.');
   await expect.soft(error).toBeVisible();
+  await expect(viewer.locator('.image-viewer-status')).toBeHidden();
   await page.keyboard.press('Escape');
   await expect(viewer).toHaveCount(0);
   await expect(broken).toBeFocused();

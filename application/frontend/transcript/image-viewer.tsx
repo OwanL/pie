@@ -11,6 +11,14 @@ export type ViewerDimensions = { width: number; height: number };
 
 const LOAD_ERROR = 'Image could not be loaded.';
 
+// PhotoSwipe's SVG markup API gives native actions the stock button sizing,
+// hover states and toolbar layout, without a second set of control styles.
+const ACTION_ICONS = {
+  copy: '<path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H8V7h11v14Z"/>',
+  openInBrowser: '<path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7ZM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7Z"/>',
+  reveal: '<path d="M20 6h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2Zm0 12H4V8h16v10Z"/>',
+} as const;
+
 /** Native probe measuring an image's intrinsic size; rejects when the bytes cannot render. */
 function probeImageSize(src: string): Promise<ViewerDimensions> {
   return new Promise((resolve, reject) => {
@@ -23,8 +31,8 @@ function probeImageSize(src: string): Promise<ViewerDimensions> {
 
 /**
  * Measures an image and opens the PhotoSwipe instance that owns modal,
- * zoom, pan and keyboard behavior; correlated native actions, capability
- * gating and status text keep the custom UI surface.
+ * zoom, pan, keyboard behavior and stock toolbar. Only host-specific actions
+ * and action feedback are registered through PhotoSwipe's UI API.
  */
 export function ImageViewer({
   adapter,
@@ -66,7 +74,7 @@ export function ImageViewer({
     const actionButton = (action: 'copy' | 'openInBrowser' | 'reveal', label: string, order: number): UIElementData => ({
       name: `pie-image-${action}`,
       className: 'image-viewer-action',
-      html: label,
+      html: { isCustomSVG: true, size: 24, inner: ACTION_ICONS[action] },
       ariaLabel: label,
       title: label,
       isButton: true,
@@ -75,14 +83,14 @@ export function ImageViewer({
       onInit: element => { actionElements.current[action] = element; },
       onClick: () => performActionRef.current(action),
     });
-    instance.ui?.registerElement(actionButton('copy', 'Copy image', 21));
-    instance.ui?.registerElement(actionButton('openInBrowser', 'Open in browser', 22));
-    instance.ui?.registerElement(actionButton('reveal', 'Show in file system', 23));
+    instance.ui?.registerElement(actionButton('copy', 'Copy image', 7));
+    instance.ui?.registerElement(actionButton('openInBrowser', 'Open in browser', 8));
+    instance.ui?.registerElement(actionButton('reveal', 'Show in file system', 9));
     instance.ui?.registerElement({
       name: 'pie-image-status',
       tagName: 'div',
       className: 'image-viewer-status',
-      appendTo: 'bar',
+      appendTo: 'root',
       order: 24,
       onInit: element => { element.setAttribute('role', 'status'); statusElement.current = element; },
     });
@@ -101,11 +109,7 @@ export function ImageViewer({
         showHideAnimationType: 'none',
         // Own the original trigger; library destroy listeners run before DOM removal.
         returnFocus: false,
-        bgOpacity: 0.88,
         wheelToZoom: true,
-        arrowPrev: false,
-        arrowNext: false,
-        counter: false,
         mainClass: 'pie-image-viewer',
         errorMsg: LOAD_ERROR,
       });
@@ -233,7 +237,9 @@ export function ImageViewer({
         (element as HTMLButtonElement).disabled = pending;
       }
     }
-    if (statusElement.current) statusElement.current.textContent = error || (pending ? 'Working…' : image?.alt || '');
+    // Decoder failures already have PhotoSwipe's stage error. Keep the normal
+    // image unobscured; this region is only for host-action feedback.
+    if (statusElement.current) statusElement.current.textContent = error === LOAD_ERROR ? '' : error || (pending ? 'Working…' : '');
   }, [image, pending, error, capabilities, viewerOpen]);
 
   performActionRef.current = (action: 'copy' | 'openInBrowser' | 'reveal') => {

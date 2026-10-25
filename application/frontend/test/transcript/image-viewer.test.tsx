@@ -27,6 +27,7 @@ class FakePswp {
   isDestroying = false;
   currSlide: object | undefined = undefined;
   elements: Record<string, HTMLElement> = {};
+  registrations: Record<string, any> = {};
   handlers = new Map<string, Array<(event: any) => void>>();
   focusTarget: HTMLElement | null = null;
 
@@ -88,6 +89,7 @@ class FakePswp {
       else if (data.title) element.setAttribute('title', data.title);
       data.onInit?.(element, this);
       this.elements[data.name] = element;
+      this.registrations[data.name] = data;
       if (typeof data.onClick === 'function') {
         element.addEventListener('click', (event: Event) => (data.onClick as any)(event, element, this));
       }
@@ -181,10 +183,9 @@ test('viewer opens PhotoSwipe with measured dimensions and library-owned surface
     { src: 'data:image/png;base64,YQ==', alt: 'Chart', width: 2, height: 2 },
   ]);
   assert.equal(instance.options.wheelToZoom, true);
-  assert.equal(instance.options.bgOpacity, 0.88);
-  assert.equal(instance.options.arrowPrev, false);
-  assert.equal(instance.options.arrowNext, false);
-  assert.equal(instance.options.counter, false);
+  assert.equal(instance.options.bgOpacity, undefined, 'use the stock backdrop');
+  assert.equal(instance.options.arrowPrev, undefined, 'PhotoSwipe hides navigation for a single slide');
+  assert.equal(instance.options.counter, undefined);
   assert.equal(instance.options.mainClass, 'pie-image-viewer');
   assert.ok(instance.inited);
   const copy = instance.elements['pie-image-copy'] as HTMLButtonElement | undefined;
@@ -192,6 +193,14 @@ test('viewer opens PhotoSwipe with measured dimensions and library-owned surface
   const status = instance.elements['pie-image-status'];
   assert.equal(copy?.getAttribute('aria-label'), 'Copy image');
   assert.ok(copy?.classList.contains('image-viewer-action'));
+  for (const action of ['copy', 'openInBrowser', 'reveal']) {
+    const registration = instance.registrations[`pie-image-${action}`];
+    assert.equal(registration.appendTo, 'bar');
+    assert.equal(registration.html.isCustomSVG, true, 'native actions use stock icon buttons, not text controls');
+    assert.match(registration.html.inner, /<path /);
+    assert.ok(registration.order < 10, 'keep stock zoom and close at the right edge');
+  }
+  assert.equal(instance.registrations['pie-image-status'].appendTo, 'root', 'status never changes the stock toolbar layout');
   assert.equal(instance.options.showHideAnimationType, 'none');
   assert.equal(instance.options.returnFocus, false);
   assert.ok(!copy?.classList.contains('image-viewer-action-hidden'));
@@ -200,7 +209,7 @@ test('viewer opens PhotoSwipe with measured dimensions and library-owned surface
   assert.ok(instance.elements['pie-image-openInBrowser']?.classList.contains('image-viewer-action-hidden'),
     'Open in browser is not a granted capability');
   assert.equal(status?.getAttribute('role'), 'status');
-  assert.equal(status?.textContent, 'Chart');
+  assert.equal(status?.textContent, '', 'normal image has no overlay caption');
   await unmount(mount);
   await act(async () => { dom.window.close(); });
 });
@@ -231,9 +240,9 @@ test('correlated actions route through PhotoSwipe custom buttons with pending an
   assert.match(status.textContent ?? '', /Clipboard unavailable/);
   instance.currSlide = { marker: true };
   await act(async () => { instance.emit('loadError'); });
-  assert.match(status.textContent ?? '', /could not be loaded/);
+  assert.equal(status.textContent, '', 'PhotoSwipe owns the decoder error, without duplicate action feedback');
   await act(async () => { instance.emit('loadComplete', { isError: false, slide: instance.currSlide }); });
-  assert.equal(status.textContent, 'Chart', 'a successful load of the current slide clears the error');
+  assert.equal(status.textContent, '', 'a successful load of the current slide clears the error');
   const reveal = instance.elements['pie-image-reveal'] as HTMLButtonElement;
   await act(async () => { reveal.click(); });
   assert.equal(sent[1].action, 'reveal');
@@ -365,7 +374,8 @@ test('inline clicks open the viewer, SVG stays view-only, and probe failures use
   await flush();
   assert.equal(FakePswp.instances.length, 3, 'a failed probe opens a library error slide');
   const broken = FakePswp.instances.at(-1)!;
-  assert.match(broken.elements['pie-image-status'].textContent!, /could not be loaded/);
+  assert.equal(broken.options.errorMsg, 'Image could not be loaded.');
+  assert.equal(broken.elements['pie-image-status'].textContent, '', 'do not duplicate the library decoder error');
   await act(async () => { broken.close(); });
   assert.equal(mount.querySelector('[role="dialog"]'), null, 'closing the shell dismisses it');
   await act(async () => {

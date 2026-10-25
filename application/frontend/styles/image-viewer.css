@@ -1,18 +1,20 @@
-.image-viewer { position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column; background: rgba(0,0,0,.88); color: var(--panel-foreground); overscroll-behavior: contain; }
-.image-viewer-toolbar { display: flex; justify-content: center; flex-wrap: wrap; gap: 5px; padding: 12px; z-index: 1; }
-.image-viewer-toolbar button { border: 1px solid var(--panel-border); background: var(--panel-control-surface); border-radius: var(--panel-radius-md); padding: 6px 9px; cursor: pointer; }
-.image-viewer-toolbar button:hover { background: var(--panel-control-hover); }
-.image-viewer-toolbar button:disabled { opacity: .5; cursor: wait; }
-.image-viewer-status { min-height: 32px; padding: 8px 12px; text-align: center; overflow-wrap: anywhere; }
 .message-user-image-element, .tool-call-result-image, .attachment-card-image, .image-path-preview img, [data-pie-inline-image] img { cursor: zoom-in; }
 
-/* PhotoSwipe owns the modal, zoom, pan and keyboard surface (class comes from
-   the `mainClass` option). Custom correlated action buttons and the status
-   row are registered as PhotoSwipe UI elements in the top bar. */
-.pie-image-viewer[hidden] { display: none !important; }
-.pie-image-viewer .pswp__top-bar { height: auto; min-height: 60px; flex-wrap: wrap; align-items: center; gap: 5px; }
-.pie-image-viewer .image-viewer-action { flex-shrink: 0; margin-top: 5px; width: auto; height: auto; padding: 6px 9px; border: 1px solid var(--panel-border); border-radius: var(--panel-radius-md); background: var(--panel-control-surface); color: inherit; font: inherit; cursor: pointer; }
-.pie-image-viewer .image-viewer-action:hover { background: var(--panel-control-hover); }
-.pie-image-viewer .image-viewer-action:disabled { opacity: .5; cursor: wait; }
+/* Keep PhotoSwipe's stock toolbar, buttons, stage and responsive layout.
+   Only host-action visibility and transient action feedback are ours. */
+.pie-image-viewer[hidden],
 .image-viewer-action-hidden { display: none !important; }
-.pie-image-viewer .image-viewer-status { flex-basis: 100%; width: 100%; min-height: 32px; padding: 8px 12px; text-align: center; overflow-wrap: anywhere; align-self: center; color: var(--panel-foreground); font: inherit; }
+.pswp.pie-image-viewer .image-viewer-status {
+  pointer-events: none;
+  position: absolute;
+  inset: auto 0 0;
+  max-height: 25%;
+  overflow: auto;
+  padding: 8px 12px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: var(--pswp-icon-color);
+  background: rgba(0, 0, 0, .65);
+  font: inherit;
+}
+.pie-image-viewer .image-viewer-status:empty { display: none; }
