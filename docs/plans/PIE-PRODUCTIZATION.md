@@ -24,6 +24,13 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 ## Decisions to retain
 
+### Adoption, identity and licensing
+
+- Prioritise adoption, repeat use and community before monetisation. Keep the local product free and customisable; optional sponsorship and creator content are funding candidates, not selected services or revenue assumptions.
+- Rename Pie before committing to a public domain/brand. Plan initially around an individual publisher in New Zealand; do not introduce company formation as a publication prerequisite.
+- Choose **AGPLv3** for the Pie-owned product. The desired protection is reciprocal access to covered improvements: distributed versions carry source-sharing obligations, and modified versions supporting remote network interaction must offer their Corresponding Source to those users. Commercial use and compliant paid forks remain permitted; required notices remain, but neither prominent marketing credit nor contributions to the upstream repository are guaranteed. Branding rules are separate and still need definition. See the [licence text](https://www.gnu.org/licenses/agpl-3.0.html).
+- This records the licensing direction, not an applied repository-wide grant. Before applying it, establish copyright authority, exact version grant and coverage for source, shipped instructions/skills and assets; review the delivered dependency graph, preserve upstream licences/notices and define user-customisation boundaries. A bounded audit found no top-level Pie licence and permissive declarations for inspected direct dependencies; it is not complete legal/distribution clearance.
+
 ### Product and configuration ownership
 
 - Ship a **curated Pie workflow**: intentionally reviewed general-purpose tools, agents, skills and instructions, not a minimal Pi baseline or a wholesale copy of the maintainer's setup. Most existing working instructions are candidates for product defaults; an instruction is not personal merely because it is opinionated. User-specific changes, integration configuration, machine paths and account/model selections remain separate; the exact shipped inventory still requires review.
@@ -85,12 +92,15 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 **Required work**
 
-- Select and document the user-facing release/install route for VS Code and standalone, reusing existing artifact and generation machinery rather than another build pipeline.
+- Select and document the user-facing release/install route for VS Code and standalone, reusing existing artifact and generation machinery rather than another build pipeline. Support both a normal product-page → installer → launch journey and agent-assisted setup from the same authoritative installation instructions and release identities; neither should fall back to building source.
+- Apply the selected AGPLv3 direction with explicit coverage, required notices and compliant Corresponding Source delivery/offers. Verify the actual packaged files; a successful package build is not licence compliance.
 - Implement compatible installed-Node reuse and on-demand private Node acquisition for users without a build toolchain, preserving runtime version/ABI verification. Report unsupported platforms/storage and missing prerequisites with an actionable remedy.
 - Make first launch provision the user profile and lead an unconfigured user to provider setup instead of stale-path or empty-model troubleshooting. Installation must not rewrite unrelated VS Code preferences or global development configuration.
 - Define update, deliberate rollback, repair and uninstall behavior. User configuration/history must outlive application replacement; data removal must be a separate explicit action.
 
 **Release design remains open and needs further brainstorming.** GitHub Releases was proposed, not selected; neither ZIP nor Windows installer distribution has been chosen. Decide the release channel/artifacts, build/publication ownership, update/rollback delivery, Node acquisition/offline UX and supported Windows/storage baseline before implementation. Reuse existing delivery machinery; do not add macOS/Linux packaging to this milestone.
+
+**Research shortlist, not approvals (2026-10-26):** an owned domain with a small static website; GitHub Releases for artifacts; a per-user standalone installer and VS Code Marketplace distribution, with versioned VSIX recovery downloads; shared human/Markdown installation guidance and release metadata; user-approved standalone updates without interrupting work. Keep website, artifact hosting and installers as complementary layers. Domain/site provider, signing supplier/budget, channels and update policy remain undecided. [GitHub Pages has commercial-use limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits); [GitHub Releases supports separate binary assets](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases). [Microsoft Artifact Signing currently limits individual Public Trust enrollment to the US/Canada](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart), so NZ individual signing needs another qualified route; do not assume company eligibility or free OSS signing acceptance. No purchase, publication or signing application is authorised.
 
 **Acceptance:** use the actual release on a clean Windows profile/device with no checkout, global Pi, inherited provider credentials or development toolchain. Install, launch each supported host, authenticate, complete a task, restart/resume, update and recover to the prior compatible release using disposable data. Verify loaded identity, not just files on disk. Reinstallation preserves user data.
 
@@ -131,6 +141,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 - Run the retained release gates plus clean install/connect/task/restart/update/rollback acceptance against one identified candidate. Keep both host adapters in the supported matrix; do not require testing every vendor model.
 - Verify the initial provider matrix with mock/native transport tests and explicitly authorized live checks. Record unsupported cases and entitlement limits rather than claiming universal provider compatibility.
+- Run bounded cost-versus-quality experiments against other harnesses before making comparative efficiency claims. Separate matched-model/provider comparisons from realistic configured-workflow comparisons, including Pie's model buckets. Use repeated tasks with independent tests/review; report acceptance rate, time and human intervention alongside total cost of all scored attempts divided by accepted solutions. Include failed attempts, retries, subagents, auxiliary calls and cache pricing; distinguish measured charges from API-equivalent estimates and subscription costs, and leave missing usage unknown. Select tasks, configurations, repetitions and an explicit spend/data-transmission budget before running; this plan authorises no paid experiments. Outperforming competitors is not itself an installation-release gate.
 - Provide short install/getting-started, update/repair and troubleshooting guidance. Explain local data, usage/cost uncertainty, privacy/retention, backup and explicit deletion. Support diagnostics must identify the build and failed stage without exporting secrets or transcripts by default.
 - Define release/update ownership for the Pi fork and integrations: review cadence plus relevant-fix triggers, upstream provenance, local semantic-delta review, focused compatibility gates and a recoverable prior artifact. Preserve licenses/notices.
 
