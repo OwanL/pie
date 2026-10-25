@@ -20,14 +20,14 @@ test('preview height motion is immediate-content, reversible, reduced-motion saf
   let disconnected = false;
   let reduced = false;
   let mediaChange = () => {};
-  const entries: Array<{ frames: Keyframe[]; cancelled: boolean; finish: () => void }> = [];
+  const entries: Array<{ frames: Keyframe[]; duration: number; cancelled: boolean; finish: () => void }> = [];
   prototype.getBoundingClientRect = function () { return { height: this.className === 'content' ? height : current } as unknown as DOMRect; };
   prototype.animate = function (frames, options) {
-    assert.equal((options as KeyframeAnimationOptions).duration, 160);
-    assert.equal((options as KeyframeAnimationOptions).easing, 'ease-out');
+    const { duration, easing } = options as KeyframeAnimationOptions;
+    assert.equal(easing, duration === 200 ? 'ease-in-out' : 'ease-out');
     let finish = () => {};
     const finished = new Promise<void>(resolve => { finish = resolve; });
-    const entry = { frames: frames as Keyframe[], cancelled: false, finish };
+    const entry = { frames: frames as Keyframe[], duration: Number(duration), cancelled: false, finish };
     entries.push(entry);
     return { finished, cancel: () => { entry.cancelled = true; } } as unknown as Animation;
   };
@@ -60,8 +60,10 @@ test('preview height motion is immediate-content, reversible, reduced-motion saf
     await act(async () => { entries.at(-1)!.finish(); await Promise.resolve(); });
     const count = entries.length;
     height = 58; act(() => { resize(); }); assert.equal(entries.length, count, 'idle resize stays natural');
-    height = 0; paint('', true); assert.equal(entries.length, count, 'manual disclosure does not duplicate motion');
-    height = 26; paint('return', false); assert.equal(entries.length, count);
+    height = 0; paint('', true); assert.equal(entries.length, count + 1, 'preview space collapses alongside the manual disclosure');
+    assert.equal(entries.at(-1)?.duration, 200);
+    height = 26; paint('return', false); assert.equal(entries.length, count + 2);
+    assert.equal(entries.at(-1)?.duration, 200);
     height = 42; paint('updated');
     act(() => { render(null, container); });
     assert.equal(entries.at(-1)?.cancelled, true);

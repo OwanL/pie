@@ -8,11 +8,13 @@ import type { BrowserContext } from '@playwright/test';
 import { BrowserServer } from '../../../application/hosts/browser/http/browser-server.js';
 import type { BrowserServerOptions } from '../../../application/hosts/browser/types.js';
 import { EMPTY_VIEW_STATE } from '../../../application/frontend/lib/hooks/use-host-sync.js';
-import type { SessionSummary, ViewState } from '../../../application/lib/protocol/index.js';
+import type { HostToWebviewMessage, WebviewToHostMessage, SessionSummary, ViewState } from '../../../application/lib/protocol/index.js';
 
 interface IsolatedHost {
   url: string;
   publishState(patch: Partial<ViewState>): void;
+  /** Respond through the host's real, renderer-addressed imperative channel. */
+  onRequest(handler: (message: WebviewToHostMessage, reply: (message: HostToWebviewMessage) => void) => void): void;
 }
 
 type Fixtures = {
@@ -60,6 +62,7 @@ async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promis
       ...viewStateOverrides,
     };
     const activeServer: { current?: BrowserServer } = {};
+    let requestHandler: Parameters<IsolatedHost['onRequest']>[0] | undefined;
     const options: BrowserServerOptions = {
       getSettings: () => ({ enabled: true, port: 0, allowLan: false, requirePreferredPort: true }),
       getViewState: () => viewState,
@@ -70,6 +73,7 @@ async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promis
         if (message.type === 'ready' || message.type === 'refreshState' || message.type === 'requestSnapshot') {
           activeServer.current?.requestState(context.rendererId);
         }
+        requestHandler?.(message, response => activeServer.current?.postImperative(response, context.rendererId));
       },
       assetDir,
     };
@@ -87,6 +91,7 @@ async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promis
           viewState = { ...viewState, ...patch };
           server!.scheduleState();
         },
+        onRequest(handler) { requestHandler = handler; },
       },
       dispose: async () => {
         await server?.stop();

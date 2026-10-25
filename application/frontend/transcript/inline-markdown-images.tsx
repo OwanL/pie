@@ -3,6 +3,7 @@
 
 import type { RefObject } from 'preact';
 import { useLayoutEffect, useRef } from 'preact/hooks';
+import { animateHeightChange, cancelHeightMotion } from '../lib/components/height-motion';
 import type { WebviewToHostMessage } from '../../lib/protocol/index.js';
 import { INLINE_IMAGE_ATTRIBUTE, INLINE_IMAGE_SELECTOR, localRasterImageReference } from './inline-markdown-image';
 import { resolveLocalFilePath } from './markdown-file-path';
@@ -56,6 +57,7 @@ export function InlineMarkdownImages({ rootRef, sessionPath, workingDirectory, p
     const valid = (node: HTMLElement, owner: Owner) => !disposed && node.isConnected
       && root.contains(node) && owners.get(node) === owner && node.getAttribute(INLINE_IMAGE_ATTRIBUTE) === owner.reference;
     const resetDom = (node: HTMLElement, owner: Owner) => {
+      cancelHeightMotion(node);
       if (owner.image) {
         owner.image.removeAttribute('src');
         owner.image.remove();
@@ -120,14 +122,41 @@ export function InlineMarkdownImages({ rootRef, sessionPath, workingDirectory, p
               image.dataset.pieImagePath = path;
               image.dataset.pieImageReference = owner.reference;
               if (workingDirectory) image.dataset.pieImageCwd = workingDirectory;
-              image.addEventListener('error', () => {
+              owner.image = image;
+              const current = () => valid(node, owner) && owner.image === image;
+              const fail = () => {
+                if (!current()) return;
                 resetDom(node, owner);
                 releaseEmpty(node, owner);
-              }, { once: true });
+              };
+              let loading = false;
+              let alreadyLoaded = false;
+              const reveal = () => {
+                if (!current() || image.parentNode) return;
+                if (!image.naturalWidth || !image.naturalHeight) { fail(); return; }
+                // Reserve the decoded aspect ratio before inserting into layout.
+                image.width = image.naturalWidth;
+                image.height = image.naturalHeight;
+                animateHeightChange(node, () => {
+                  node.appendChild(image);
+                  node.querySelector<HTMLElement>('.inline-markdown-image-fallback')?.setAttribute('hidden', '');
+                }, alreadyLoaded ? { duration: 0 } : undefined);
+              };
+              const loaded = () => {
+                if (loading || !current()) return;
+                loading = true;
+                // Decode off-DOM: neither load nor a later intrinsic decode may
+                // change the visible placeholder's occupied space independently.
+                if (typeof image.decode === 'function') image.decode().then(reveal, fail);
+                else reveal();
+              };
+              image.addEventListener('error', fail, { once: true });
+              image.addEventListener('load', loaded, { once: true });
               image.src = result.data.dataUrl;
-              owner.image = image;
-              node.appendChild(image);
-              node.querySelector<HTMLElement>('.inline-markdown-image-fallback')?.setAttribute('hidden', '');
+              // A synchronously available browser-cached image need not replay
+              // hydration motion when revisiting mounted history.
+              alreadyLoaded = image.complete && image.naturalWidth > 0;
+              if (alreadyLoaded) loaded();
             }
             releaseEmpty(node, owner);
             // Disconnect reset cancels every owner before copied store callbacks

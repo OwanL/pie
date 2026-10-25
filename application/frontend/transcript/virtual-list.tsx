@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { VirtualItem, Virtualizer, elementScroll, measureElement as measureVirtualElement, observeElementOffset, observeElementRect } from '@tanstack/virtual-core';
+import { VirtualItem, Virtualizer, elementScroll, observeElementOffset, observeElementRect } from '@tanstack/virtual-core';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
@@ -38,17 +38,18 @@ const TRANSCRIPT_OVERSCAN_ROWS = 1;
 function measureTranscriptElement(
   rows: readonly TranscriptRow[],
   element: HTMLDivElement,
-  entry: ResizeObserverEntry | undefined,
+  _entry: ResizeObserverEntry | undefined,
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>,
 ): number {
-  const size = measureVirtualElement(element, entry, virtualizer);
+  // RO entries are delivered from the previous frame. Height motion may have
+  // advanced (or retargeted) before TanStack's batched callback runs, so using
+  // the entry would place following rows at stale coordinates for another paint.
+  const rect = element.getBoundingClientRect();
+  const size = Math.round(rect.height);
   const index = virtualizer.indexFromElement(element);
   const row = rows[index];
   if (row) {
-    const observedWidth = entry?.borderBoxSize[0]?.inlineSize;
-    const width = typeof observedWidth === 'number'
-      ? observedWidth
-      : element.getBoundingClientRect().width;
+    const width = rect.width;
     transcriptMeasurementCache.observeWidth(width);
     // Streaming rows remeasure on nearly every chunk. Reject them before the
     // descendant query so cache bookkeeping never adds a live-turn DOM scan.
@@ -128,7 +129,6 @@ function useTranscriptVirtualizer(
   editingId: string | null,
 ) {
   const [, setRenderTick] = useState(0);
-  const renderFrameRef = useRef<number | null>(null);
   // The inline editor deliberately owns its live keystroke buffer. Keep its
   // row in TanStack's range even when scroll/streaming would otherwise unmount
   // it, so that buffer cannot reset before it is committed to host state.
@@ -154,14 +154,9 @@ function useTranscriptVirtualizer(
   );
 
   const scheduleVirtualRender = useCallback(() => {
-    if (renderFrameRef.current !== null) {
-      return;
-    }
-
-    renderFrameRef.current = window.requestAnimationFrame(() => {
-      renderFrameRef.current = null;
-      setRenderTick((value) => value + 1);
-    });
+    // TanStack already batches row RO delivery into rAF; Preact batches these
+    // updates too. A second rAF makes adjacent absolute rows lag animated space.
+    setRenderTick((value) => value + 1);
   }, []);
 
   const virtualizerRef = useRef<Virtualizer<HTMLDivElement, HTMLDivElement> | null>(null);
@@ -221,13 +216,6 @@ function useTranscriptVirtualizer(
     const cleanup = virtualizer._didMount();
     return cleanup;
   }, [virtualizer]);
-
-  useEffect(() => () => {
-    if (renderFrameRef.current !== null) {
-      window.cancelAnimationFrame(renderFrameRef.current);
-      renderFrameRef.current = null;
-    }
-  }, []);
 
   return virtualizer;
 }

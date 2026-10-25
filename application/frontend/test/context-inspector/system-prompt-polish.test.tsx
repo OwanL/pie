@@ -37,9 +37,8 @@ function click(el: HTMLButtonElement): void {
   act(() => el.click());
 }
 function finishClose(selector: string): void {
-  const wrap = container.querySelector(selector);
-  assert.ok(wrap);
-  act(() => { wrap.dispatchEvent(new Event('transitionend', { bubbles: true })); });
+  // No layout/WAAPI in this fixture: zero-height disclosures settle immediately.
+  assert.ok(container.querySelector(selector) === null);
 }
 
 const groupSelector = '.system-prompts > .collapsible-header';

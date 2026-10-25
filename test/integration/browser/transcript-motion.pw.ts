@@ -150,7 +150,9 @@ test.describe('transcript motion in the isolated renderer', () => {
     expect(Math.abs((await header.boundingBox())!.y - top)).toBeLessThanOrEqual(2);
     await finish(body);
     await expect(body).toContainText('Visible result line 11');
-    expect(await body.evaluate(el => (el as HTMLElement).style.height)).toBe('');
+    await expect(body).not.toHaveAttribute('data-height-moving', 'true');
+    expect(await body.evaluate(el => Math.abs(el.getBoundingClientRect().height
+      - el.querySelector('.tool-call-body-inner')!.getBoundingClientRect().height))).toBeLessThanOrEqual(1);
     const expanded = (await body.boundingBox())!.height;
     await header.evaluate(el => (el as HTMLElement).click());
     const closing = await midpoint(body);

@@ -88,16 +88,24 @@ export function useScrollEventsEffect(
     };
     const onTouchEnd = () => scheduleManualIdleReset();
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Enter' || event.key === ' ') onDisclosureClick(event);
       if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
       inputIntentActive = true;
       beginManualInteraction();
       scheduleManualIdleReset();
     };
-    const onDisclosureClick = (event: MouseEvent) => {
+    const onDisclosureClick = (event: Event) => {
       const target = event.target as Element | null;
-      if (!target?.closest?.('button.tool-call-toggle[aria-expanded="false"]')) return;
-      // Read the pre-toggle state in capture, including keyboard activation.
-      // Inspecting a tool gives the reader ownership before its body grows.
+      if (target?.closest?.('.subagent-agent-trigger')) return;
+      if (!target?.closest?.([
+        '.tool-call-toggle[aria-expanded="false"]',
+        '.collapsible-header[aria-expanded="false"]',
+        '.subagent-header[aria-expanded="false"]',
+        '.code-block-toggle[aria-expanded="false"]',
+        '.subagent-pending-prompt',
+      ].join(', '))) return;
+      // Capture before either native-button clicks or role-button keyboard
+      // activation: inspecting any transcript section gives the reader control.
       navigationActiveRef.current = false;
       programmaticScrollTargetRef.current = null;
       setAutoFollow(false);

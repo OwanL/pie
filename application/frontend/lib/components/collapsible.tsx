@@ -2,7 +2,8 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useId, useRef } from 'preact/hooks';
+import { useDisclosureMotion } from './use-disclosure-motion';
 
 import { cx } from './cx';
 import { toMouseEvent } from './preact-events';
@@ -35,10 +36,6 @@ export interface CollapsibleProps {
   children: ComponentChildren;
 }
 
-/** Duration (ms) of the open→closed grid-track animation. Keep in sync with the
- *  `transition` on `.collapsible-body-wrap` in styles/highlight.css. */
-const COLLAPSIBLE_CLOSE_MS = 200;
-
 /**
  * Generic, consistent expand/collapse container for transcript sections
  * (reasoning, system prompts, pruning, …). Provides multiple clear close
@@ -59,12 +56,7 @@ const COLLAPSIBLE_CLOSE_MS = 200;
  * expanded content stays selectable and nested collapsibles compose without
  * propagation hacks.
  *
- * Closing animates: the body stays mounted with `data-closing` while a
- * grid-track `1fr→0fr` transition collapses it, then unmounts (with a timer
- * fallback for environments where `transitionend` doesn't fire). Opening
- * mounts instantly — animating `0fr→1fr` against freshly-laid-out content
- * stuttered (the 1fr reference shifts mid-animation), so open stays a plain
- * mount, matching the tool-call card's manual-open behaviour.
+ * The measured body retains its last open content until closing settles.
  *
  * Controlled only — callers own the open state so streaming/auto-show sites
  * (tool calls, subagents) can keep their own open/close logic and still reuse
@@ -84,61 +76,15 @@ export function Collapsible({
   dataAttrs,
   children,
 }: CollapsibleProps) {
-  // `closing` keeps the body mounted while the grid-track close animation runs,
-  // then clears (on transitionend or a fallback timer) to unmount it.
-  const [closing, setClosing] = useState(false);
-  const closeFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Stable id for the body region so the header button can reference it via
-  // `aria-controls`. Only set on the header when the body is actually mounted
-  // (open or closing) — referencing a missing id when collapsed would be
-  // invalid per WAI-ARIA.
+  const disclosure = useDisclosureMotion(open);
   const bodyId = useId();
-
-  const renderBody = open || closing;
-
-  // Opening clears any lingering closing state.
-  useEffect(() => {
-    if (open) setClosing(false);
-  }, [open]);
-
-  // Clear the fallback timer on unmount.
-  useEffect(
-    () => () => {
-      if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
-    },
-    [],
-  );
-
-  const beginClose = () => {
-    // Guard re-entry: clicking the footer while already closing is a no-op.
-    if (closing && !open) return;
-    if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
-    setClosing(true);
-    onToggle(false);
-    // Fallback: if transitionend doesn't fire (the tab is backgrounded, etc.)
-    // the body must still unmount.
-    closeFallbackRef.current = setTimeout(() => {
-      closeFallbackRef.current = null;
-      setClosing(false);
-    }, COLLAPSIBLE_CLOSE_MS + 60);
-  };
-
-  const toggle = () => {
-    if (open) beginClose();
-    else onToggle(true);
-  };
-
-  const onTransitionEnd = (e: TransitionEvent) => {
-    // Only react to transitions on the wrapper itself, not children.
-    if (e.target !== e.currentTarget) return;
-    if (closing && !open) {
-      if (closeFallbackRef.current) {
-        clearTimeout(closeFallbackRef.current);
-        closeFallbackRef.current = null;
-      }
-      setClosing(false);
-    }
-  };
+  // Parents may clear lazy HTML as soon as they commit closed state.
+  const lastOpenChildren = useRef(children);
+  if (!disclosure.mounted) lastOpenChildren.current = null;
+  else if (open) lastOpenChildren.current = children;
+  const renderBody = disclosure.mounted;
+  const beginClose = () => { if (open) onToggle(false); };
+  const toggle = () => onToggle(!open);
 
   return (
     <div
@@ -161,12 +107,13 @@ export function Collapsible({
       {renderBody && (
         <div
           class="collapsible-body-wrap"
-          data-closing={!open && closing ? 'true' : undefined}
-          onTransitionEnd={onTransitionEnd}
+          ref={disclosure.bodyRef}
+          inert={!open}
+          aria-hidden={!open}
         >
-          <div class="collapsible-body-clip">
+          <div ref={disclosure.contentRef} class="collapsible-body-clip">
             <div id={bodyId} class={cx('collapsible-body', bodyClass)}>
-              {children}
+              {open ? children : lastOpenChildren.current}
               {closeFooter && renderBody && (
                 <CollapsibleCloseFooter onCollapse={beginClose} />
               )}

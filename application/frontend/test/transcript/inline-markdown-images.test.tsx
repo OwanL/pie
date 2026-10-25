@@ -21,6 +21,15 @@ let root: HTMLDivElement;
 let target: HTMLDivElement;
 let rootRef: ReturnType<typeof createRef<HTMLDivElement>>;
 let requests: Request[];
+let images: HTMLImageElement[];
+const createElement = document.createElement.bind(document);
+function load(image: HTMLImageElement) {
+  Object.defineProperties(image, {
+    naturalWidth: { configurable: true, value: 640 },
+    naturalHeight: { configurable: true, value: 960 },
+  });
+  image.dispatchEvent(new dom.window.Event('load'));
+}
 const post = (message: WebviewToHostMessage) => { if (message.type === 'requestImagePreview') requests.push(message); };
 async function markdown(text: string, enabled = true) {
   const { renderMarkdown } = await import('../../transcript/markdown');
@@ -29,16 +38,24 @@ async function markdown(text: string, enabled = true) {
 function mount(sessionPath: string | null = '/sessions/a', workingDirectory: string | null = 'C:/workspace') {
   act(() => render(<InlineMarkdownImages rootRef={rootRef} sessionPath={sessionPath} workingDirectory={workingDirectory} postMessage={post} />, target));
 }
-function reply(request: Request, status: 'ready' | 'unavailable' = 'ready', sessionPath = request.sessionPath) {
+function reply(request: Request, status: 'ready' | 'unavailable' = 'ready', sessionPath = request.sessionPath, autoLoad = true) {
+  const before = images.length;
   act(() => receiveImagePreviewResult({
     type: 'imagePreviewResult', requestId: request.requestId, sessionPath, viewGeneration: 1, status,
     ...(status === 'ready' ? { data: { mimeType: 'image/png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' } } : {}),
   }));
+  if (autoLoad) for (const image of images.slice(before)) load(image);
 }
 async function mutations() { await Promise.resolve(); await Promise.resolve(); }
 beforeEach(() => {
   clearImagePreviewRequests();
   requests = [];
+  images = [];
+  document.createElement = ((tag: string, options?: ElementCreationOptions) => {
+    const element = createElement(tag, options);
+    if (tag === 'img') images.push(element as HTMLImageElement);
+    return element;
+  }) as typeof document.createElement;
   root = document.createElement('div');
   target = document.createElement('div');
   rootRef = createRef<HTMLDivElement>();
@@ -50,6 +67,7 @@ afterEach(() => {
   clearImagePreviewRequests();
   root.remove();
   target.remove();
+  document.createElement = createElement;
   delete (globalThis as any).IntersectionObserver;
 });
 
@@ -75,6 +93,55 @@ test('Windows markdown hydrates the actual placeholder with bounded targeted dat
   await mutations();
   assert.equal(requests.length, 1);
 });
+
+test('fallback stays visible until detached load and decode finish, then dimensions are reserved', async () => {
+  root.innerHTML = await markdown('![chart](chart.png)');
+  mount();
+  reply(requests[0], 'ready', '/sessions/a', false);
+  const image = images[0];
+  const fallback = root.querySelector('.inline-markdown-image-fallback')!;
+  let decoded!: () => void;
+  image.decode = () => new Promise<void>(resolve => { decoded = resolve; });
+  assert.equal(image.isConnected, false);
+  assert.equal(fallback.hasAttribute('hidden'), false);
+  load(image);
+  assert.equal(image.isConnected, false);
+  assert.equal(fallback.hasAttribute('hidden'), false);
+  decoded();
+  await mutations();
+  assert.equal(root.querySelector('img'), image);
+  assert.equal(image.width, 640);
+  assert.equal(image.height, 960);
+  assert.equal(fallback.hasAttribute('hidden'), true);
+});
+
+for (const failure of ['load', 'decode', 'reset', 'remove'] as const) {
+  test(`${failure} while detached preserves fallback and never attaches stale image bytes`, async () => {
+    root.innerHTML = await markdown('![chart](chart.png)');
+    mount();
+    reply(requests[0], 'ready', '/sessions/a', false);
+    const image = images[0];
+    let finish!: () => void;
+    let reject!: () => void;
+    image.decode = () => new Promise<void>((resolve, fail) => { finish = resolve; reject = () => fail(new Error('bad decode')); });
+    if (failure === 'load') image.dispatchEvent(new dom.window.Event('error'));
+    else {
+      load(image);
+      if (failure === 'decode') reject();
+      else {
+        if (failure === 'reset') clearImagePreviewRequests();
+        else root.querySelector('[data-pie-inline-image]')!.remove();
+        finish();
+      }
+    }
+    await mutations();
+    assert.equal(image.isConnected, false);
+    assert.equal(image.hasAttribute('src'), false);
+    assert.equal(root.querySelector('img'), null);
+    if (failure !== 'remove') assert.equal(root.querySelector('.inline-markdown-image-fallback')?.hasAttribute('hidden'), false);
+    assert.equal(requests.length, 1);
+  });
+}
 
 test('linked hydrated images remain native anchor labels rather than separate button tab stops', async () => {
   root.innerHTML = await markdown('[![preview](./preview.png)](actual.ts) ![standalone](./other.png)');

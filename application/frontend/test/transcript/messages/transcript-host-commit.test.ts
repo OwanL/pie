@@ -40,6 +40,17 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
   },
 });
 
+window.matchMedia = ((media: string) => ({
+  media, matches: false, onchange: null,
+  addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false,
+})) as typeof window.matchMedia;
+
+// JSDOM has no layout. Keep the current-box measurement coherent with tests'
+// offset geometry rather than reporting a zero-height virtual row.
+HTMLElement.prototype.getBoundingClientRect = function () {
+  return new dom.window.DOMRect(0, 0, this.offsetWidth, this.offsetHeight);
+};
+
 let TranscriptCommitProvider: typeof import('../../../transcript/commit-registry').TranscriptCommitProvider;
 let BufferedTextPart: typeof import('../../../transcript/buffered-text-part').BufferedTextPart;
 let ReasoningBlock: typeof import('../../../transcript/message-item/reasoning-block').ReasoningBlock;

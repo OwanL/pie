@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef } from 'preact/hooks';
 export function useToolPreviewMotion(revision: string, open: boolean) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const state = useRef({ height: 0, initialized: false, open, revision, animation: null as Animation | null, target: 0 });
+  const state = useRef({ height: 0, initialized: false, open, revision, animation: null as Animation | null, target: 0, duration: 160 });
   const retargetRef = useRef<(() => void) | null>(null);
 
   useLayoutEffect(() => {
@@ -30,7 +30,7 @@ export function useToolPreviewMotion(revision: string, open: boolean) {
       s.target = to;
       wrapper.style.height = `${to}px`;
       wrapper.setAttribute('data-preview-moving', 'true');
-      const animation = wrapper.animate([{ height: `${from}px` }, { height: `${to}px` }], { duration: 160, easing: 'ease-out', fill: 'both' });
+      const animation = wrapper.animate([{ height: `${from}px` }, { height: `${to}px` }], { duration: s.duration, easing: s.duration === 200 ? 'ease-in-out' : 'ease-out', fill: 'both' });
       s.animation = animation;
       void animation.finished.then(() => { if (s.animation === animation) settle(); }, () => undefined);
     };
@@ -58,7 +58,7 @@ export function useToolPreviewMotion(revision: string, open: boolean) {
     const changed = s.revision !== revision;
     s.open = open;
     s.revision = revision;
-    if (!s.initialized || manual) {
+    if (!s.initialized) {
       s.initialized = true;
       const animation = s.animation;
       s.animation = null;
@@ -66,7 +66,12 @@ export function useToolPreviewMotion(revision: string, open: boolean) {
       wrapperRef.current?.style.removeProperty('height');
       wrapperRef.current?.removeAttribute('data-preview-moving');
       s.height = height;
-    } else if (changed) retargetRef.current?.();
+    } else if (manual || changed) {
+      // Preview removal/return shares the disclosure's clock so opening a
+      // card never first drops its compact preview's occupied space.
+      s.duration = manual ? 200 : 160;
+      retargetRef.current?.();
+    }
   });
   return { wrapperRef, contentRef };
 }

@@ -1,6 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import { cancelHeightMotion } from '../../../lib/components/height-motion';
 import { handleTranscriptClick } from '../../../transcript/transcript-click-handler';
+
+test('code-block toggle updates truthful state while animating the uncapped block envelope', () => {
+  const dom = new JSDOM('<!doctype html><body><div class="code-block code-block-collapsible code-block-collapsed"><div class="code-block-header"></div><pre><code>many lines</code></pre><button class="code-block-toggle" aria-expanded="false">Show all 20 lines<span></span></button></div></body>');
+  const originalEvent = Object.getOwnPropertyDescriptor(globalThis, 'Event');
+  const { document } = dom.window;
+  const block = document.querySelector<HTMLElement>('.code-block')!;
+  const button = block.querySelector<HTMLButtonElement>('.code-block-toggle')!;
+  const nestedTarget = button.querySelector('span')!;
+  let renderedHeight = 360;
+  Object.defineProperty(block, 'getBoundingClientRect', {
+    value: () => ({
+      height: block.hasAttribute('data-height-moving')
+        ? renderedHeight
+        : block.classList.contains('code-block-collapsed') ? 360 : 1200,
+    }) as DOMRect,
+  });
+  const animations: { frames: Keyframe[]; cancel: () => void }[] = [];
+  block.animate = ((frames: Keyframe[]) => {
+    const animation = { frames, cancel() {} };
+    animations.push(animation);
+    return { ...animation, finished: new Promise<void>(() => {}) } as unknown as Animation;
+  }) as typeof block.animate;
+  try {
+    Object.defineProperty(globalThis, 'Event', { configurable: true, value: dom.window.Event });
+    handleTranscriptClick({ target: nestedTarget } as unknown as MouseEvent);
+    assert.equal(block.classList.contains('code-block-collapsed'), false);
+    assert.equal(button.getAttribute('aria-expanded'), 'true');
+    assert.equal(button.textContent, 'Show less');
+    assert.equal(block.hasAttribute('data-height-moving'), true);
+    assert.equal(animations[0]?.frames[1]?.height, '1200px');
+
+    // Reverse at an intermediate rendered height: the retarget starts there,
+    // not at either the collapsed or expanded endpoint.
+    renderedHeight = 650;
+    handleTranscriptClick({ target: button } as unknown as MouseEvent);
+    assert.equal(block.classList.contains('code-block-collapsed'), true);
+    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    assert.equal(button.textContent, 'Show all 20 lines');
+    assert.equal(block.hasAttribute('data-height-moving'), true);
+    assert.equal(animations[1]?.frames[0]?.height, '650px');
+    assert.equal(animations[1]?.frames[1]?.height, '360px');
+    cancelHeightMotion(block);
+    assert.equal(block.hasAttribute('data-height-moving'), false);
+  } finally {
+    cancelHeightMotion(block);
+    if (originalEvent) Object.defineProperty(globalThis, 'Event', originalEvent);
+    else Reflect.deleteProperty(globalThis, 'Event');
+    dom.window.close();
+  }
+});
 
 test('code copy feedback, retries and detached controls preserve copied content', async () => {
   const originals = ['window', 'document', 'navigator'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);

@@ -13,6 +13,7 @@
  */
 
 import { writeTextToClipboard } from '../lib/components/clipboard';
+import { animateHeightChange } from '../lib/components/height-motion';
 
 /** A scoped, nonvisual live region; never append feedback to copied code. */
 export function announceCopyResult(control: Element, ok: boolean, isCurrent = () => true): void {
@@ -69,17 +70,19 @@ const CODE_BLOCK_CLICK_HANDLERS: CodeBlockClickHandler[] = [
   {
     selector: '.code-block-toggle',
     handle: (_target, btn) => {
-      const block = btn.closest('.code-block');
+      const block = btn.closest<HTMLElement>('.code-block');
       if (!block) return;
       // Preserve the original "Show all N lines" label for re-collapse.
       if (!btn.getAttribute('data-collapsed-label')) {
         btn.setAttribute('data-collapsed-label', btn.textContent ?? 'Show all');
       }
-      const collapsed = block.classList.toggle('code-block-collapsed');
-      btn.setAttribute('aria-expanded', String(!collapsed));
-      btn.textContent = collapsed
-        ? btn.getAttribute('data-collapsed-label') ?? 'Show all'
-        : 'Show less';
+      animateHeightChange(block, () => {
+        const collapsed = block.classList.toggle('code-block-collapsed');
+        btn.setAttribute('aria-expanded', String(!collapsed));
+        btn.textContent = collapsed
+          ? btn.getAttribute('data-collapsed-label') ?? 'Show all'
+          : 'Show less';
+      });
     },
   },
 ];

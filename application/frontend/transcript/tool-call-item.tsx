@@ -3,6 +3,9 @@
 
 import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import type { ComponentChildren } from 'preact';
+import { useDisclosureMotion } from '../lib/components/use-disclosure-motion';
+import { useToolPreviewMotion } from './tool-call-card/use-tool-preview-motion';
 import type { ChatMessage, ChatPrefs, ToolCall } from '../../lib/protocol/index.js';
 import { shouldOpenSubagentContextMenu } from './interactions';
 import { handleTranscriptClick } from './transcript-click-handler';
@@ -874,51 +877,36 @@ function SubagentSingleBlock({
   // `aria-controls` (only when the body is mounted, i.e. open or closing).
   const bodyId = useId();
 
-  // ── Animated close ──────────────────────────────────────────────────────
-  // Mirror the generic `Collapsible`: keep the body mounted with `closing`
-  // while a grid-track `1fr→0fr` transition collapses it, then unmount (with
-  // a timer fallback for environments where `transitionend` doesn't fire).
-  // Opening mounts instantly. Keeps the subagent's open/close consistent with
-  // tool-call cards and reasoning blocks (no snap).
-  const [closing, setClosing] = useState(false);
-  const closeFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const SUBAGENT_CLOSE_MS = 200;
-  const renderBody = open || closing;
-
-  useEffect(() => {
-    if (open) setClosing(false);
-  }, [open]);
-
-  useEffect(() => () => {
-    if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
-  }, []);
-
-  const close = () => {
-    if (closing && !open) return;
-    if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
-    setClosing(true);
-    setOpen(false);
-    closeFallbackRef.current = setTimeout(() => {
-      closeFallbackRef.current = null;
-      setClosing(false);
-    }, SUBAGENT_CLOSE_MS + 60);
-  };
-
-  const toggle = () => {
-    if (open) close();
-    else setOpen(true);
-  };
-
-  const onBodyTransitionEnd = (e: TransitionEvent) => {
-    if (e.target !== e.currentTarget) return;
-    if (closing && !open) {
-      if (closeFallbackRef.current) {
-        clearTimeout(closeFallbackRef.current);
-        closeFallbackRef.current = null;
-      }
-      setClosing(false);
-    }
-  };
+  const disclosure = useDisclosureMotion(open);
+  const renderBody = disclosure.mounted;
+  const close = () => setOpen(false);
+  const toggle = () => setOpen(!open);
+  const previewMotion = useToolPreviewMotion(JSON.stringify([open, singleResult.task, compactActivity, settledExcerpt, hasPendingAskUser]), open);
+  // Closing the subscription can immediately clear its record. Retain the
+  // last visible body until its occupied space has finished collapsing.
+  const lastOpenBody = useRef<ComponentChildren>(null);
+  if (!renderBody) lastOpenBody.current = null;
+  if (open) lastOpenBody.current = detailPending || detailFailed ? (
+    <div id={bodyId} class="subagent-messages p-3" role="status">
+      {detailFailed ? <div>
+        <div>{detailErrorMessage ?? 'Failed to load subagent detail.'}</div>
+        {detailRetryable && <button type="button" class="mt-2 text-accent underline" onClick={retryDetail}>Retry</button>}
+      </div> : <span>{detailLoadingLabel}</span>}
+    </div>
+  ) : (
+    <SubagentCallContext.Provider value={{
+      id: subagentCallId, agent: singleResult.agent, depth: subagentDepth,
+      ...(detailAddress ? { detailRoot: {
+        sessionPath: detailAddress.sessionPath, turnId: detailAddress.turnId,
+        rootToolCallId: detailAddress.rootToolCallId, rootAttemptId: detailAddress.rootAttemptId,
+      } } : {}),
+    }}>
+      <SubagentMessages singleResult={renderResult} toolCall={toolCall} index={index} prefs={prefs}
+        workingDirectory={workingDirectory} onOpenFile={onOpenFile} onContextMenu={onContextMenu}
+        onNestedContextMenu={onNestedContextMenu} renderToolCall={renderToolCall} isNested={isNested}
+        bodyId={bodyId} onClose={close} />
+    </SubagentCallContext.Provider>
+  );
 
   return (
     // Delegated work is a higher-level transcript unit than an ordinary tool:
@@ -972,7 +960,8 @@ function SubagentSingleBlock({
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
       </div>
       <StatusIndicator status={status} errorDetail={errorDetail} />
-      {!renderBody && (
+      <div ref={previewMotion.wrapperRef} class="tool-call-preview-space"><div ref={previewMotion.contentRef} class="tool-call-preview-content">
+      {!open && (
         <div class="subagent-live-preview">
           <SubagentTaskPreview task={singleResult.task} agent={singleResult.agent} />
           {hasPendingAskUser && <button type="button" class="subagent-pending-prompt" onClick={(event) => { event.stopPropagation(); setOpen(true); }}>Response needed — open subagent transcript</button>}
@@ -995,58 +984,11 @@ function SubagentSingleBlock({
           {settledExcerpt && <SubagentPreviewMarkdown class="subagent-outcome" text={settledExcerpt} />}
         </div>
       )}
+      </div></div>
       {renderBody && (
-        <div
-          class="collapsible-body-wrap"
-          data-closing={!open && closing ? 'true' : undefined}
-          onTransitionEnd={onBodyTransitionEnd}
-        >
-          <div class="collapsible-body-clip">
-            {detailPending || detailFailed ? (
-              <div id={bodyId} class="subagent-messages p-3" role="status">
-                {detailFailed ? (
-                  <div>
-                    <div>{detailErrorMessage ?? 'Failed to load subagent detail.'}</div>
-                    {detailRetryable && (
-                      <button type="button" class="mt-2 text-accent underline" onClick={retryDetail}>Retry</button>
-                    )}
-                  </div>
-                ) : (
-                  <span>{detailLoadingLabel}</span>
-                )}
-              </div>
-            ) : (
-              <SubagentCallContext.Provider
-                value={{
-                  id: subagentCallId,
-                  agent: singleResult.agent,
-                  depth: subagentDepth,
-                  ...(detailAddress
-                    ? { detailRoot: {
-                        sessionPath: detailAddress.sessionPath,
-                        turnId: detailAddress.turnId,
-                        rootToolCallId: detailAddress.rootToolCallId,
-                        rootAttemptId: detailAddress.rootAttemptId,
-                      } }
-                    : {}),
-                }}
-              >
-                <SubagentMessages
-                  singleResult={renderResult}
-                  toolCall={toolCall}
-                  index={index}
-                  prefs={prefs}
-                  workingDirectory={workingDirectory}
-                  onOpenFile={onOpenFile}
-                  onContextMenu={onContextMenu}
-                  onNestedContextMenu={onNestedContextMenu}
-                  renderToolCall={renderToolCall}
-                  isNested={isNested}
-                  bodyId={bodyId}
-                  onClose={close}
-                />
-              </SubagentCallContext.Provider>
-            )}
+        <div class="collapsible-body-wrap" ref={disclosure.bodyRef} inert={!open} aria-hidden={!open}>
+          <div ref={disclosure.contentRef} class="collapsible-body-clip">
+            {lastOpenBody.current}
             {/* Left gutter collapse hitbox (border / indentation area). Only
               while actually open (not during the close animation). */}
             {open && <CollapsibleGutter onCollapse={close} />}

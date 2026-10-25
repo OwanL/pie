@@ -2,6 +2,8 @@
 /** @jsxImportSource preact */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import type { ComponentChildren } from 'preact';
+import { useToolPreviewMotion } from '../tool-call-card/use-tool-preview-motion';
 
 import { renderMarkdown, reasoningPreview } from '../markdown';
 import { Collapsible } from '../../lib/components/collapsible';
@@ -60,6 +62,19 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
   const [hasOverflow, setHasOverflow] = useState(false);
   const collapsible = Boolean(detailRef) || hasOverflow;
   const open = !collapsible || disclosureOpen;
+  // Only the inline→disclosure structure change owns this outer animation.
+  // Ordinary disclosure/live-body motion stays with its inner owner.
+  const structure = useRef({ collapsible, text, changedText: false, revision: 0 });
+  if (structure.current.text !== text) structure.current.changedText = true;
+  if (structure.current.collapsible !== collapsible) {
+    // Initial history is measured before first paint; it must not replay an
+    // inline→collapsed animation merely because that first measure overflowed.
+    if (structure.current.changedText) structure.current.revision++;
+    structure.current.collapsible = collapsible;
+    structure.current.changedText = false;
+  }
+  structure.current.text = text;
+  const structureMotion = useToolPreviewMotion(String(structure.current.revision), false);
   const lazyDetail = useLazyDetail(detailRef, collapsible && disclosureOpen);
   const displayText = lazyDetail.state.status === 'loaded' && typeof lazyDetail.state.value === 'string'
     ? lazyDetail.state.value
@@ -221,8 +236,13 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
   const commitEvidence = reasoningCommitEvidence(detailRef ? text : (open ? rendered.text : text), open);
   useCommittedReasoningLeaf(messageId, partIndex, commitEvidence.text, commitEvidence.policy);
 
+  const wrap = (body: ComponentChildren) => (
+    <div ref={structureMotion.wrapperRef} class="reasoning-space tool-call-preview-space">
+      <div ref={structureMotion.contentRef} class="tool-call-preview-content">{body}</div>
+    </div>
+  );
   if (!collapsible) {
-    return (
+    return wrap(
       <div
         class="reasoning-block reasoning-inline"
         data-streaming={streaming ? 'true' : undefined}
@@ -239,7 +259,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
     );
   }
 
-  return (
+  return wrap(
     <Collapsible
       open={open}
       onToggle={setOpen}

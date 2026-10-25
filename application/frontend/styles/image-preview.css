@@ -1,7 +1,16 @@
 /* Local Markdown hydration is layout content, but bytes stay renderer-local. */
+.inline-markdown-image {
+  display: block;
+}
+
+.inline-markdown-image[data-height-moving] {
+  overflow: hidden;
+}
 .inline-markdown-image img {
   display: block;
   max-width: 100%;
+  width: auto;
+  height: auto;
   max-height: 480px;
   object-fit: contain;
   border-radius: var(--panel-radius-md);

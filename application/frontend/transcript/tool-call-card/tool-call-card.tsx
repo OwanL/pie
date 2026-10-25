@@ -82,7 +82,7 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
         <pre style={{ '--tool-preview-lines': preview.lines }} data-truncated={preview.truncated ? 'true' : undefined}>{preview.text}</pre>
       </div>}
       </div></div>}
-      {disclosure.mounted && <div ref={disclosure.bodyRef} id={bodyId} class={cx('tool-call-body-wrap', !isSubagent && 'tool-call-disclosure-body')} inert={!open} aria-hidden={!open}><div class={cx('tool-call-body-inner', !isSubagent && 'tool-call-inspector-body')}>
+      {disclosure.mounted && <div ref={disclosure.bodyRef} id={bodyId} class={cx('tool-call-body-wrap', !isSubagent && 'tool-call-disclosure-body')} inert={!open} aria-hidden={!open}><div ref={disclosure.contentRef} class={cx('tool-call-body-inner', !isSubagent && 'tool-call-inspector-body')}>
         {renderDetails && !isProvisional ? renderDetails(renderedCall) : <ToolCallBody toolCall={renderedCall} prefs={prefs} headerPath={headerPath} workingDirectory={workingDirectory} onOpenFile={onOpenFile} />}
         {toolCall.detailRef && detail.state.status !== 'loaded' && <div class="tool-call-detail-status" role="status">
           {detail.state.status === 'loading' || detail.state.status === 'idle' ? 'Loading details…' : <><span>{detail.state.message}</span><button type="button" onClick={detail.retry}>Retry</button></>}

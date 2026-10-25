@@ -218,6 +218,10 @@ test('expanded shell details retain options and the header can close them while 
 test('measured manual disclosure retains only the closing body and cancels rapid reversals', async () => {
   const prototype = window.HTMLElement.prototype;
   const original = prototype.animate;
+  const originalRect = prototype.getBoundingClientRect;
+  prototype.getBoundingClientRect = function () {
+    return { height: this.style.getPropertyValue('--disclosure-height') === '0px' ? 0 : 200 } as DOMRect;
+  };
   const animations: Array<{ finish: () => void; cancelled: boolean; frames: unknown; options: unknown }> = [];
   prototype.animate = function (frames, options) {
     let finish!: () => void;
@@ -250,7 +254,7 @@ test('measured manual disclosure retains only the closing body and cancels rapid
     toggle();
     act(() => render(null, container));
     assert.equal(animations[4].cancelled, true, 'unmount cancels pending motion');
-  } finally { prototype.animate = original; }
+  } finally { prototype.animate = original; prototype.getBoundingClientRect = originalRect; }
 });
 
 test('reduced motion opens and removes details instantly without starting animations', () => {

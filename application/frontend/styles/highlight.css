@@ -185,26 +185,14 @@
 }
 
 /* ── Collapsible body open/close animation ─────────────────────────────────── */
-/* The body is wrapped in a grid track that animates `1fr → 0fr` on close so
-   the section collapses smoothly instead of vanishing in one frame. Opening
-   mounts the body at `1fr` instantly (animating `0fr → 1fr` against freshly
-   laid-out content stuttered as the 1fr reference shifted mid-animation).
-   `.collapsible-body-clip` is the grid item: `min-height: 0` lets the track
-   shrink below content, and `overflow: hidden` clips the collapsing content
-   so it never spills outside the shrinking track.
-
-   Keep the `transition` duration in sync with COLLAPSIBLE_CLOSE_MS in
-   components/collapsible.tsx (the JS fallback timer that unmounts the body
-   when `transitionend` doesn't fire). */
-
+/* Height motion owns only the outer box; the observed inner box stays natural. */
 .collapsible-body-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 200ms var(--panel-ease-out);
+  min-height: 0;
 }
 
-.collapsible-body-wrap[data-closing="true"] {
-  grid-template-rows: 0fr;
+.collapsible-body-clip,
+.tool-call-body-inner {
+  display: flow-root;
 }
 
 .collapsible-body-clip {
