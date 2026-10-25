@@ -16,12 +16,14 @@ import type { SystemPromptEntry } from '../../../lib/protocol/index.js';
 import { NoticeContext } from '../../lib/hooks/notice-context';
 
 let container: HTMLElement;
+let originalClipboard: PropertyDescriptor | undefined;
 
 type TestOnSetToggles = (ids: string[]) => unknown;
 type ToggleApplyResult = void | boolean | Promise<void | boolean>;
 
 beforeEach(() => {
   DOMPurify.sanitize = sanitizer.sanitize;
+  originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   container = document.createElement('div');
   document.body.appendChild(container);
 });
@@ -30,6 +32,8 @@ afterEach(() => {
   DOMPurify.sanitize = originalSanitize;
   render(null, container);
   container.remove();
+  if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+  else Reflect.deleteProperty(navigator, 'clipboard');
 });
 
 function providerEntry(): SystemPromptEntry {

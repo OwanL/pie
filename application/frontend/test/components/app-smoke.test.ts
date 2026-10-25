@@ -21,8 +21,9 @@ import type { ViewState, ChatMessage, HostToWebviewMessage, ExtensionUIRequestPa
 import { DEFAULT_CHAT_PREFS, EMPTY_TRANSCRIPT_WINDOW } from '../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../lib/build-identity.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
-import { buildIdleSessionCapabilities } from '../../../../harness/agent-processes/workers/session-activity.js';
 import type { ClientTransport } from '../../transport/client-transport';
+
+const fakeTransports: ClientTransport[] = [];
 
 /** Minimal in-memory transport: records outbound, forwards inbound. Mirrors
  *  the real VS Code transport's `window` message channel so tests can keep
@@ -35,7 +36,7 @@ function makeFakeTransport(): ClientTransport & { deliver: (msg: HostToWebviewMe
     for (const handler of handlers) handler(event.data as HostToWebviewMessage);
   };
   window.addEventListener('message', onWindowMessage);
-  return {
+  const transport: ClientTransport & { deliver: (msg: HostToWebviewMessage) => void } = {
     postMessage: () => true,
     subscribe: (handler) => {
       handlers.add(handler);
@@ -55,6 +56,8 @@ function makeFakeTransport(): ClientTransport & { deliver: (msg: HostToWebviewMe
       for (const handler of handlers) handler(msg);
     },
   };
+  fakeTransports.push(transport);
+  return transport;
 }
 
 function makeAdapter(): AppAdapter & { messages: any[] } {
@@ -139,7 +142,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  render(null, container);
+  act(() => {
+    render(null, container);
+    for (const transport of fakeTransports) transport.dispose();
+    fakeTransports.length = 0;
+  });
   container.remove();
 });
 
@@ -378,7 +385,14 @@ for (const tail of [
     const adapter = makeAdapter();
     const idle = sessionViewState({
       sessionCapabilitiesBySession: {
-        '/session/a': buildIdleSessionCapabilities([{ role: 'user', content: 'work' }, tail]),
+        // The backend authorizes continuation for each nonempty idle tail
+        // above; this frontend fixture consumes facts, not SDK classification.
+        '/session/a': {
+          billableActivity: false,
+          canInterrupt: false,
+          canCompact: true,
+          canContinue: true,
+        } satisfies ViewState['sessionCapabilitiesBySession'][string],
       },
     });
     adapter.initialState = idle;
