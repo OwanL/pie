@@ -296,30 +296,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(userRule, /border-color:\s*var\(--panel-user-border\)/);
   assert.match(userRule, /color:\s*var\(--panel-user-foreground\)/);
   assert.match(userRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
-  const promptContextShellRule = transcriptCss.match(/\.transcript-prompt-context\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(promptContextShellRule, /min-height:\s*34px/);
-  assert.match(promptContextShellRule, /padding:\s*var\(--panel-gap-xs\)/);
-  const compactPromptContextRule = transcriptCss.match(/\.transcript-prompt-context\.is-compact\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(compactPromptContextRule, /min-height:\s*26px/);
-  assert.match(compactPromptContextRule, /padding-block:\s*1px/);
-  const promptContextMetaRule = transcriptCss.match(/\.transcript-prompt-context-meta\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(promptContextMetaRule, /flex:\s*0 1 auto/);
-  assert.match(promptContextMetaRule, /max-width:\s*40%/);
-  assert.match(promptContextMetaRule, /overflow:\s*hidden/);
-  const promptContextRule = transcriptCss.match(/\.transcript-prompt-context-preview\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(promptContextRule, /padding:\s*3px var\(--panel-gap-sm\)/);
-  assert.match(promptContextRule, /white-space:\s*nowrap/);
-  assert.match(promptContextRule, /border:\s*1px solid var\(--panel-user-border\)/);
-  assert.match(promptContextRule, /border-radius:\s*var\(--panel-radius-lg\)/);
-  assert.match(promptContextRule, /background:\s*var\(--panel-user-surface\)/);
-  assert.match(promptContextRule, /color:\s*var\(--panel-user-foreground\)/);
-  assert.match(promptContextRule, /box-shadow:\s*inset 0 1px 0 var\(--panel-user-highlight\)/);
   assert.match(transcriptCss, /\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body code\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(transcriptCss, /\.message-user-image-caption\s*\{\s*color:\s*color-mix\(in srgb, var\(--panel-user-foreground\) 78%, var\(--panel-user-surface\)\)/);
   assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(messageShell, /role === 'assistant' && 'self-start w-full max-w-full px-1 py-2'/);
   assert.match(messageShell, /role === 'user' && 'w-fit max-w-\[88%\] self-end rounded-lg px-2 py-1\.5/);
-  assert.match(promptContextRule, /max-width:\s*88%/);
   assert.doesNotMatch(messageShell, /message-assistant-width|uiMessageWidth/);
   assert.doesNotMatch(transcriptCss, /message-assistant-width/);
   assert.doesNotMatch(composerCss, /\.pref-toggle(?:-icon|-check)?\b/);
@@ -386,6 +367,44 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.doesNotMatch(aggregateCss, /aggregate-strip-status-cluster/);
   assert.match(tabsCss, /@media \(max-width: 520px\)[\s\S]*?--session-tabs-scrollbar-height:\s*5px/);
   assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
+});
+
+test('sticky prompt is quiet right-aligned text with stable row-hover navigation and a conditional fade', async () => {
+  const css = await readStyleSource('transcript.css');
+  const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`)).match(/\{([^}]*)\}/)?.[1] ?? '';
+  const shell = rule('.transcript-prompt-context');
+  assert.match(shell, /position:\s*relative/);
+  assert.match(shell, /height:\s*28px/);
+  assert.doesNotMatch(css, /transcript-prompt-context\.is-compact|transcript-prompt-context-meta|transcript-prompt-navigation-position|\.transcript-prompt-navigation\s*\{/);
+  const row = rule('.transcript-prompt-context-row');
+  assert.match(row, /width:\s*fit-content/);
+  assert.match(row, /max-width:\s*100%/);
+  assert.match(row, /margin-left:\s*auto/);
+  assert.match(row, /gap:\s*2px/);
+  const preview = rule('.transcript-prompt-context-preview');
+  for (const pattern of [/background:\s*transparent/, /border:\s*0/, /box-shadow:\s*none/, /padding:\s*0/, /text-align:\s*right/, /text-overflow:\s*ellipsis/, /white-space:\s*nowrap/, /cursor:\s*pointer/]) {
+    assert.match(preview, pattern);
+  }
+  assert.match(rule('.transcript-prompt-context-preview:hover'), /text-decoration:\s*underline/);
+  const navigation = rule('.transcript-prompt-navigation-button');
+  assert.match(navigation, /opacity:\s*0/);
+  assert.match(navigation, /flex:\s*0 0 24px/);
+  assert.doesNotMatch(navigation, /visibility:|display:\s*none|pointer-events:\s*none/);
+  assert.match(css, /\.transcript-prompt-context-row:hover \.transcript-prompt-navigation-button,\s*\.transcript-prompt-context-row:focus-within \.transcript-prompt-navigation-button\s*\{\s*opacity:\s*1/);
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)\s*\{\s*\.transcript-prompt-navigation-button\s*\{[^}]*width:\s*32px;[^}]*height:\s*28px;[^}]*opacity:\s*1/);
+  for (const selector of ['.transcript-prompt-navigation-button:focus-visible', '.transcript-prompt-context-preview:focus-visible']) {
+    assert.match(rule(selector), /outline:\s*1px solid var\(--panel-accent\)/);
+  }
+  const fade = rule('.transcript-prompt-context::after');
+  assert.match(fade, /top:\s*100%/);
+  assert.match(fade, /height:\s*8px/);
+  assert.match(fade, /linear-gradient\(to bottom, var\(--panel-surface\), transparent\)/);
+  assert.match(fade, /pointer-events:\s*none/);
+  assert.match(rule('.transcript-viewport::after'), /linear-gradient\(to bottom, transparent, var\(--panel-surface\)\)/);
+  assert.doesNotMatch(css, /\.transcript-viewport::before/);
+  assert.match(rule('.transcript-prompt-context.is-hidden'), /visibility:\s*hidden/);
+  assert.doesNotMatch(fade, /visibility:\s*visible/);
+  assert.match(css, /@media \(forced-colors: active\)\s*\{\s*\.transcript-prompt-context::after\s*\{\s*display:\s*none/);
 });
 
 test('global cost pair stays intrinsic and unwrapped while standalone measurements stay inert', async () => {
