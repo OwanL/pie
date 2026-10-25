@@ -24,7 +24,10 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const TEST_FILE_PATTERN = /\.test\.(?:ts|tsx|mjs|js)$/u;
 const EXPLICIT_E2E_PATTERN = /\.e2e\.ts$/u;
-export const DEFAULT_TEST_CONCURRENCY = 4;
+export function resolveDefaultTestConcurrency(parallelism = os.availableParallelism()) {
+  return Math.max(1, Math.min(8, Math.floor(parallelism / 2)));
+}
+export const DEFAULT_TEST_CONCURRENCY = resolveDefaultTestConcurrency();
 // Reserved CLI status for unconfirmed child-tree teardown; ordinary test failures normalize to 1.
 export const TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE = 125;
 const DEFAULT_TSCONFIG = 'application/hosts/vscode/tsconfig.json';
@@ -594,7 +597,7 @@ function printHelp() {
     'Usage: node scripts/verification/test-node.mjs [--tsconfig <repo config>] [--sdk-path <SDK package>] [--include <repo-relative glob>...] [--exclude <repo-relative glob>...] <repo-relative directory-or-file>... [-- <Node test flags>]\n\n' +
     'Discover tracked and nonignored .test.{ts,tsx,mjs,js} files in directories, or run explicit test files.\n' +
     'Repeat --include to select files matching any include glob; repeat --exclude to filter matching files from directory discovery and explicit selections. Excludes take precedence.\n' +
-    'Explicit .e2e.ts files are supported. Tests run with native node:test process isolation and concurrency 4.\n' +
+    'Explicit .e2e.ts files are supported. Tests run with native node:test process isolation and concurrency set to half the available CPUs, capped at 8 (current default: ' + DEFAULT_TEST_CONCURRENCY + ').\n' +
     'TypeScript files use private temporary CJS entries; .js and .mjs files keep native Node loading.\n' +
     'Optional tsconfig/SDK aliases use a temporary config overlay; --sdk-path verifies an already compiled package and never acquires a runtime.\n' +
     'Runner options precede selectors; Node test flags are forwarded after --.',

@@ -9,6 +9,7 @@ import test from 'node:test';
 import {
   assertCoverageQualification,
   buildNodeArgs,
+  DEFAULT_TEST_CONCURRENCY,
   createRunnerTsconfigOverlay,
   createTestEnvironment,
   discoverTrackedTests,
@@ -23,11 +24,19 @@ import {
   runNodeTests,
   runNodeTestsWithOverlay,
   runNodeTestsWithOverlayLocal,
+  resolveDefaultTestConcurrency,
   TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE,
 } from '../test-node.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const testEnvironmentPreload = pathToFileURL(path.join(repoRoot, 'scripts', 'verification', 'test-environment.mjs')).href;
+
+test('default test concurrency scales conservatively with available CPU', () => {
+  for (const [parallelism, expected] of [[1, 1], [2, 1], [4, 2], [8, 4], [16, 8], [32, 8]]) {
+    assert.equal(resolveDefaultTestConcurrency(parallelism), expected);
+  }
+  assert.equal(DEFAULT_TEST_CONCURRENCY, resolveDefaultTestConcurrency());
+});
 
 test('runner heap defaults cover both loaders and preserve explicit heap settings', () => {
   const heapFlags = args => args.filter(arg => /^--max[-_]old[-_]space[-_]size(?:=|$)/u.test(arg));
@@ -316,7 +325,7 @@ test('CLI separates selectors and forwards Node test flags after --', () => {
     '--test-coverage-include=src/**', '--test-coverage-exclude=src/ignored/**',
   ]), {
     options: {
-      concurrency: 4, timeout: 250, globalSetupPath: 'setup.mjs', rerunFailuresFilePath: 'failed.json',
+      concurrency: DEFAULT_TEST_CONCURRENCY, timeout: 250, globalSetupPath: 'setup.mjs', rerunFailuresFilePath: 'failed.json',
       shard: { index: 1, total: 3 }, randomSeed: 17, only: true, forceExit: true,
       randomize: true, coverage: true, lineCoverage: 90, branchCoverage: 80, functionCoverage: 70,
       coverageIncludeGlobs: ['src/**'], coverageExcludeGlobs: ['src/ignored/**'],
