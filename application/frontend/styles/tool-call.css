@@ -398,9 +398,13 @@
 .tool-call-diff { padding-inline: 0; }
 .tool-call-diff code > span { padding-inline: 10px; }
 
-.tool-call-list {
+.tool-call-list,
+.tool-call-list-content {
   display: flex;
   flex-direction: column;
+}
+.tool-call-list-content {
+  flex: 0 0 auto;
   gap: 4px;
 }
 

@@ -19,6 +19,7 @@ import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
 import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from '../file-path-interactions';
 import { ReasoningBlock } from './reasoning-block';
 import { ToolCallEntrance, useAppendedToolCalls } from '../tool-call-entrance';
+import { ToolCallRunMotion } from '../tool-call-run-motion';
 
 interface AssistantPartsProps {
   messageId: string;
@@ -155,7 +156,13 @@ function AssistantParts({
           }
 
           return (
-            <div class="tool-call-list" key={`tool-run-${firstCall.id}`}>
+            <ToolCallRunMotion
+              key={`tool-run-${firstCall.id}`}
+              appending={item.items.some(({ part }) => appendedToolCalls.has(part.toolCall.id))}
+              layoutKey={JSON.stringify(item.items.map(({ part: { toolCall } }) => [
+                toolCall.id, toolCall.status, Boolean(toolCall.result),
+              ]))}
+            >
               {item.items.map(({ part }, childIndex) => {
                 const annotation = annotations[childIndex];
                 const childClasses = [
@@ -181,7 +188,7 @@ function AssistantParts({
                   </ToolCallEntrance>
                 );
               })}
-            </div>
+            </ToolCallRunMotion>
           );
         }
 
