@@ -103,7 +103,8 @@ test('toolbar keeps a provisional model picker usable without additive loading c
   });
 
   assert.match(html, /aria-label="Model"/);
-  assert.match(html, /aria-label="Reasoning level"/);
+  assert.match(html, /class="model-picker-reasoning-suffix">high<\/sup>/);
+  assert.match(html, /aria-description="Reasoning: high"/);
   assert.doesNotMatch(html, /Models (?:loading|updating)…/);
 });
 

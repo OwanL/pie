@@ -246,6 +246,37 @@
   white-space: normal;
 }
 
+/* Composer-only combined picker. */
+.model-picker-reasoning-suffix {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--panel-muted);
+}
+.model-picker-combined .model-picker-row { position: relative; padding-right: 18px; }
+.model-picker-combined .model-picker-header { padding-right: 18px; }
+.model-picker-nested-chevron { position: absolute; right: 5px; color: var(--panel-muted); font-size: 12px; }
+.model-picker-reasoning-menu { z-index: 301; padding: 2px; overflow: visible; }
+.model-picker-reasoning-menu::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: var(--reasoning-pointer-y);
+  width: 8px;
+  height: 8px;
+  transform: translateY(-50%) rotate(45deg);
+  border-left: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--panel-overlay-surface);
+}
+.model-picker-reasoning-menu[data-side="left"]::before {
+  left: auto; right: -5px; transform: translateY(-50%) rotate(225deg);
+}
+.model-picker-reasoning-menu .choice-picker-option { min-height: 28px; }
+.model-picker-reasoning-options { max-height: var(--reasoning-max-height); overflow-y: auto; }
+
 /* ── Compact choice picker (reasoning) ──────────────────────────────────── */
 
 .choice-picker-dropdown {

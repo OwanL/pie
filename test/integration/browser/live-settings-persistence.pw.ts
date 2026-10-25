@@ -330,8 +330,9 @@ test.describe('pie no-spend live settings durability', () => {
     await exerciseCompactSettingsPicker(page);
     expect(await noSpendCommandCounts(page)).toEqual(noSpendBaseline);
     const modelButton = page.getByRole('button', { name: 'Model' });
-    const reasoningButton = page.getByRole('button', { name: 'Reasoning level' });
-    const originalModelLabel = (await modelButton.innerText()).trim();
+    const modelLabel = modelButton.locator('.model-picker-trigger-label');
+    const reasoningButton = modelButton.locator('.model-picker-reasoning-suffix');
+    const originalModelLabel = (await modelLabel.innerText()).trim();
     const originalReasoningLabel = (await reasoningButton.innerText()).trim();
     let originalModelOptionId: string | null = null;
     let changedModelLabel: string | null = null;
@@ -352,28 +353,32 @@ test.describe('pie no-spend live settings durability', () => {
       const alternateModel = candidates.find((candidate) => /Luna|Sol/iu.test(candidate.text)) ?? candidates[0];
       if (!alternateModel) throw new Error('At least two configured models are required for the live persistence check.');
       const modelCommandCount = await frameCount(page, 'outgoing', 'setModel');
-      await modelOptions.nth(alternateModel.index).click();
+      await modelOptions.nth(alternateModel.index).click({ position: { x: 16, y: 12 } });
+      const modelReasoning = page.locator('[data-model-reasoning-submenu]');
+      if (await modelReasoning.isVisible()) await modelReasoning.getByRole('option').first().click();
       // UX contract: the picker is optimistic. A cold SDK open/commit may take
       // longer, but the visible choice must never wait for that I/O.
-      await expect(modelButton).not.toHaveText(originalModelLabel, { timeout: 1_000 });
+      await expect(modelLabel).not.toHaveText(originalModelLabel, { timeout: 1_000 });
       await waitForAcceptedCommandAfter(page, 'setModel', modelCommandCount);
       await expect.poll(async () => {
         const state = await authoritativeConfiguration(page);
         return state?.activeModelId !== initialConfiguration.activeModelId;
       }, { timeout: 30_000 }).toBe(true);
-      changedModelLabel = (await modelButton.innerText()).trim();
+      changedModelLabel = (await modelLabel.innerText()).trim();
 
       const reasoningBeforeExplicitChange = (await reasoningButton.innerText()).trim();
       const reasoningBeforeExplicitConfiguration = await authoritativeConfiguration(page);
       if (!reasoningBeforeExplicitConfiguration) throw new Error('No authoritative state after model change.');
-      await reasoningButton.click();
-      const reasoningOptions = page.getByRole('option');
-      const selectedReasoning = page.getByRole('option', { selected: true });
-      const selectedReasoningText = (await selectedReasoning.innerText()).trim();
+      await modelButton.click();
+      await page.locator('.model-picker-rows').getByRole('option', { selected: true }).click({ position: { x: 16, y: 12 } });
+      const reasoningMenu = page.locator('[data-model-reasoning-submenu]');
+      const reasoningOptions = reasoningMenu.getByRole('option');
+      const selectedReasoning = reasoningMenu.getByRole('option', { selected: true });
+      await expect(selectedReasoning).toBeVisible();
       let alternateReasoning: Locator | null = null;
       for (let index = 0; index < await reasoningOptions.count(); index += 1) {
         const option = reasoningOptions.nth(index);
-        if ((await option.innerText()).trim() !== selectedReasoningText && !await option.isDisabled()) {
+        if (await option.getAttribute('aria-selected') !== 'true' && !await option.isDisabled()) {
           alternateReasoning = option;
           break;
         }
@@ -393,8 +398,8 @@ test.describe('pie no-spend live settings durability', () => {
 
       await page.reload();
       await expectReady(page);
-      await expect(page.getByRole('button', { name: 'Model' })).toHaveText(changedModelLabel);
-      await expect(page.getByRole('button', { name: 'Reasoning level' })).toHaveText(changedReasoningLabel);
+      await expect(page.locator('.composer-pinned-controls .model-picker-trigger-label')).toHaveText(changedModelLabel);
+      await expect(page.locator('.composer-pinned-controls .model-picker-reasoning-suffix')).toHaveText(changedReasoningLabel);
 
       const otherTab = page.locator('.session-tab[data-tab-path]').filter({
         has: page.getByRole('tab', { selected: false }),
@@ -405,8 +410,8 @@ test.describe('pie no-spend live settings durability', () => {
         await expect(otherTab.getByRole('tab')).toHaveAttribute('aria-selected', 'true');
         await restoredTab.click();
         await expect(restoredTab).toHaveAttribute('aria-selected', 'true');
-        await expect(page.getByRole('button', { name: 'Model' })).toHaveText(changedModelLabel);
-        await expect(page.getByRole('button', { name: 'Reasoning level' })).toHaveText(changedReasoningLabel);
+        await expect(page.locator('.composer-pinned-controls .model-picker-trigger-label')).toHaveText(changedModelLabel);
+        await expect(page.locator('.composer-pinned-controls .model-picker-reasoning-suffix')).toHaveText(changedReasoningLabel);
       }
     } finally {
       // Restore the user's original per-session choices even if an assertion
@@ -417,18 +422,21 @@ test.describe('pie no-spend live settings durability', () => {
         await expectReady(page).catch(() => undefined);
         const currentModel = page.getByRole('button', { name: 'Model' });
         if (await currentModel.isVisible().catch(() => false)
-          && (await currentModel.innerText()).trim() !== originalModelLabel) {
+          && (await currentModel.locator('.model-picker-trigger-label').innerText()).trim() !== originalModelLabel) {
           await currentModel.click();
           const originalModel = await optionByStableId(page, originalModelOptionId);
           const restoreModelCount = await frameCount(page, 'outgoing', 'setModel');
-          await originalModel.click();
+          await originalModel.click({ position: { x: 16, y: 12 } });
+          const restoreMenu = page.locator('[data-model-reasoning-submenu]');
+          if (await restoreMenu.isVisible()) await restoreMenu.getByRole('option').first().click();
           await waitForAcceptedCommandAfter(page, 'setModel', restoreModelCount);
         }
-        const currentReasoning = page.getByRole('button', { name: 'Reasoning level' });
+        const currentReasoning = currentModel.locator('.model-picker-reasoning-suffix');
         if (await currentReasoning.isVisible().catch(() => false)
           && (await currentReasoning.innerText()).trim() !== originalReasoningLabel) {
-          await currentReasoning.click();
-          const originalReasoning = page.getByRole('option', { name: originalReasoningLabel, exact: true });
+          await currentModel.click();
+          await page.locator('.model-picker-rows').getByRole('option', { selected: true }).click({ position: { x: 16, y: 12 } });
+          const originalReasoning = page.locator('[data-model-reasoning-submenu]').getByRole('option', { name: originalReasoningLabel, exact: true });
           const restoreReasoningCount = await frameCount(page, 'outgoing', 'setModel');
           await originalReasoning.click();
           await waitForAcceptedCommandAfter(page, 'setModel', restoreReasoningCount);
@@ -448,8 +456,8 @@ test.describe('pie no-spend live settings durability', () => {
         await restartBackendAndWait(page);
         await page.reload();
         await expectReady(page);
-        await expect(page.getByRole('button', { name: 'Model' })).toHaveText(originalModelLabel);
-        await expect(page.getByRole('button', { name: 'Reasoning level' })).toHaveText(originalReasoningLabel);
+        await expect(page.locator('.composer-pinned-controls .model-picker-trigger-label')).toHaveText(originalModelLabel);
+        await expect(page.locator('.composer-pinned-controls .model-picker-reasoning-suffix')).toHaveText(originalReasoningLabel);
         await waitForAuthoritativeConfiguration(page, {
           activeModelId: initialConfiguration.activeModelId,
           activeProvider: initialConfiguration.activeProvider,

@@ -26,7 +26,7 @@ test.describe('pie live provider safety configuration', () => {
     await expect(selectedModel).toContainText('DeepSeek V4 Flash 0731');
     await expect(selectedModel).toHaveAttribute('id', /ollama-deepseek-v4-flash:0731-cloud/u);
     await page.keyboard.press('Escape');
-    await expect(page.getByRole('button', { name: 'Reasoning level' })).toContainText('Max');
+    await expect(model.locator('.model-picker-reasoning-suffix')).toHaveText('max');
 
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Settings' });
@@ -71,6 +71,6 @@ test.describe('pie live provider safety configuration', () => {
     if (await autonomousMode.getAttribute('aria-pressed') === 'true') await autonomousMode.click();
     await expect(autonomousMode).toHaveAttribute('aria-pressed', 'false');
     await expect(model).toContainText('DeepSeek V4 Flash 0731');
-    await expect(page.getByRole('button', { name: 'Reasoning level' })).toContainText('Max');
+    await expect(model.locator('.model-picker-reasoning-suffix')).toHaveText('max');
   });
 });

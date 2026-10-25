@@ -5,6 +5,8 @@ import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, us
 import { RemovedProvidersContext } from './removed-providers';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
+import type { ThinkingLevel } from '../../lib/protocol/index.js';
+import { ReasoningSubmenu, reasoningLevels } from './reasoning-submenu';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
 import { focusAdjacentControl, useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { CollapsibleChevron } from '../lib/components/chevron';
@@ -25,6 +27,8 @@ interface ModelPickerProps {
   onChange: (modelSpec: string) => void;
   /** Optional compact width for use inside settings rows. */
   compact?: boolean;
+  /** Composer-only combined selection; other callers retain standalone behavior. */
+  reasoning?: { value: ThinkingLevel; onChange: (spec: string, level: ThinkingLevel) => void };
   /** Disable the trigger and prevent the dropdown from opening. */
   disabled?: boolean;
   /** Existing description ID to reference from the closed trigger. */
@@ -118,6 +122,7 @@ function useClickOutside(
   setOpen: (value: boolean) => void,
   triggerRef: { current: HTMLButtonElement | null },
   listRef: { current: HTMLDivElement | null },
+  submenuRef: { current: HTMLDivElement | null },
 ) {
   useEffect(() => {
     if (!open) return;
@@ -126,6 +131,7 @@ function useClickOutside(
       const outside =
         listRef.current &&
         !listRef.current.contains(target) &&
+        !submenuRef.current?.contains(target) &&
         triggerRef.current &&
         !triggerRef.current.contains(target);
       if (outside) {
@@ -179,13 +185,13 @@ function useScrollActiveItem(
 }
 
 function useHandleSelect(
-  onChange: (modelId: string) => void,
+  onChange: (modelId: string) => void | boolean,
   setOpen: (value: boolean) => void,
   triggerRef: { current: HTMLButtonElement | null },
 ) {
   return useCallback(
     (modelId: string) => {
-      onChange(modelId);
+      if (onChange(modelId) === false) return;
       setOpen(false);
       triggerRef.current?.focus();
     },
@@ -273,7 +279,7 @@ function useModelPicker({
 }: {
   value: string;
   entries: ModelPickerEntry[];
-  onChange: (modelId: string) => void;
+  onChange: (modelId: string) => void | boolean;
   dropdownDirection: 'up' | 'down';
   compact?: boolean;
 }) {
@@ -289,6 +295,7 @@ function useModelPicker({
   }, []);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const submenuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
   const idBase = useId();
@@ -326,7 +333,7 @@ function useModelPicker({
   useFocusOnOpen(open, selectedIndex, (index) => {
     setActiveSpec(entries[index] ? formatModelSpec(entries[index].model) : null);
   }, inputRef, setQuery, resetNavigation);
-  useClickOutside(open, setOpen, triggerRef, listRef);
+  useClickOutside(open, setOpen, triggerRef, listRef, submenuRef);
   useDropdownPosition(open, dropdownDirection, listRef, triggerRef, compact);
   useScrollActiveItem(open, activeIndex, itemRefs);
 
@@ -362,6 +369,7 @@ function useModelPicker({
     setActiveIndex,
     triggerRef,
     listRef,
+    submenuRef,
     inputRef,
     itemRefs,
     idBase,
@@ -388,6 +396,7 @@ interface ModelPickerTriggerProps {
   ariaLabel: string;
   title: string;
   label: string;
+  reasoning?: ThinkingLevel;
   open: boolean;
   disabled?: boolean;
   ariaDescribedBy?: string;
@@ -401,6 +410,7 @@ function ModelPickerTrigger({
   ariaLabel,
   title,
   label,
+  reasoning,
   open,
   disabled,
   ariaDescribedBy,
@@ -412,7 +422,7 @@ function ModelPickerTrigger({
   // content while the dropdown is open so it doesn't collide with the
   // (upward-opening) dropdown list.
   return (
-    <Tooltip content={open ? null : title} placement="top">
+    <Tooltip content={open ? null : reasoning ? `${title}\nReasoning: ${reasoning}` : title} placement="top">
       <button
         ref={triggerRef}
         type="button"
@@ -421,11 +431,13 @@ function ModelPickerTrigger({
         aria-expanded={open}
         aria-label={ariaLabel}
         aria-describedby={ariaDescribedBy}
+        aria-description={reasoning ? `Reasoning: ${reasoning}` : undefined}
         disabled={disabled}
         onClick={onClick}
         onKeyDown={onKeyDown}
       >
         <span class="model-picker-trigger-label">{label}</span>
+        {reasoning && <sup class="model-picker-reasoning-suffix">{reasoning}</sup>}
         <CollapsibleChevron open={open} />
       </button>
     </Tooltip>
@@ -441,6 +453,7 @@ interface ModelPickerRowProps {
   onMouseEnter: () => void;
   onMouseDown: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
   onClick: () => void;
+  nested?: boolean;
 }
 
 function ModelPickerRow({
@@ -452,6 +465,7 @@ function ModelPickerRow({
   onMouseEnter,
   onMouseDown,
   onClick,
+  nested,
 }: ModelPickerRowProps) {
   return (
     <div
@@ -461,6 +475,7 @@ function ModelPickerRow({
       class={getRowClass(isSelected, isActive, entry.ineligible)}
       role="option"
       aria-selected={isSelected}
+      aria-haspopup={nested ? 'listbox' : undefined}
       aria-label={`${entry.label}, ${entry.model.provider}/${entry.model.id}, input price ${entry.tokenInPrice ? `${entry.tokenInPrice} per million tokens` : 'unavailable'}, output price ${entry.tokenOutPrice ? `${entry.tokenOutPrice} per million tokens` : 'unavailable'}, ${entry.supportsImages ? 'supports images' : 'text only'}`}
       title={entry.title}
       onMouseEnter={onMouseEnter}
@@ -480,6 +495,7 @@ function ModelPickerRow({
       <span class="model-picker-col model-picker-col-images" aria-label={entry.supportsImages ? 'Supports images' : 'Text only'}>
         {entry.supportsImages ? '✓' : '—'}
       </span>
+      {nested && <span class="model-picker-nested-chevron" aria-hidden="true">›</span>}
     </div>
   );
 }
@@ -489,6 +505,7 @@ interface ModelPickerDropdownProps {
   listId: string;
   dropdownDirection: 'up' | 'down';
   compact?: boolean;
+  combined?: boolean;
   ariaLabel: string;
   activeDescendant: string | undefined;
   onKeyDown: (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => void;
@@ -511,6 +528,7 @@ function ModelPickerDropdown({
   listId,
   dropdownDirection,
   compact,
+  combined,
   ariaLabel,
   activeDescendant,
   onKeyDown,
@@ -526,7 +544,7 @@ function ModelPickerDropdown({
   inputRef,
 }: ModelPickerDropdownProps) {
   return (
-    <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)}>
+    <div ref={listRef} class={`${getDropdownClass(dropdownDirection, compact)}${combined ? ' model-picker-combined' : ''}`}>
       <div class="model-picker-searchbar">
         <svg class="model-picker-search-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="7" cy="7" r="4.5" />
@@ -569,6 +587,7 @@ function ModelPickerDropdown({
               <ModelPickerRow
                 key={formatModelSpec(entry.model)}
                 entry={entry}
+                nested={combined && reasoningLevels(entry.model).length > 1}
                 isSelected={isSelected}
                 isActive={isActive}
                 optionId={optionId}
@@ -600,6 +619,7 @@ export function ModelPicker({
   entries: catalogEntries,
   onChange,
   compact,
+  reasoning,
   disabled,
   ariaDescribedBy,
   dropdownDirection = 'up',
@@ -608,7 +628,44 @@ export function ModelPicker({
   const entries = useMemo(() => catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider)), [catalogEntries, removedProviderIds]);
   const provider = value.includes('/') ? value.slice(0, value.indexOf('/')) : '';
   const label = removedProviderIds.includes(provider) ? `${value} · Unavailable (removed provider)` : currentLabel;
-  const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
+  const [nestedSpec, setNestedSpec] = useState<string | null>(null);
+  const [nestedFocus, setNestedFocus] = useState(false);
+  const selectedEntry = entries.find(entry => formatModelSpec(entry.model) === value || entry.model.id === value);
+  const displayedReasoning = reasoning && selectedEntry && reasoningLevels(selectedEntry.model).some(level => level !== 'off')
+    ? reasoning.value : undefined;
+  const orderedEntries = useMemo(() => {
+    if (!reasoning || !selectedEntry) return entries;
+    return [selectedEntry, ...entries.filter(entry => entry !== selectedEntry)];
+  }, [entries, selectedEntry, !!reasoning]);
+  const selectModel = (spec: string) => {
+    const entry = entries.find(entry => formatModelSpec(entry.model) === spec);
+    if (reasoning && entry) {
+      const levels = reasoningLevels(entry.model);
+      if (levels.length > 1) { setNestedSpec(spec); setNestedFocus(true); return false; }
+      reasoning.onChange(spec, levels[0] ?? 'off');
+    } else onChange(spec);
+  };
+  const state = useModelPicker({ value, entries: orderedEntries, onChange: selectModel, dropdownDirection, compact });
+  const nestedIndex = state.filteredEntries.findIndex(entry => formatModelSpec(entry.model) === nestedSpec);
+  const nestedCandidate = nestedIndex >= 0 ? state.filteredEntries[nestedIndex] : undefined;
+  const nestedEntry = reasoning && nestedCandidate && reasoningLevels(nestedCandidate.model).length > 1
+    ? nestedCandidate : undefined;
+  const openNested = (spec: string, focus: boolean) => {
+    const entry = entries.find(entry => formatModelSpec(entry.model) === spec);
+    setNestedSpec(entry && reasoningLevels(entry.model).length > 1 ? spec : null);
+    setNestedFocus(focus);
+  };
+  const choose = (spec: string) => {
+    const entry = entries.find(entry => formatModelSpec(entry.model) === spec);
+    if (reasoning && entry && reasoningLevels(entry.model).length > 1) openNested(spec, true);
+    else state.handleSelect(spec);
+  };
+  useLayoutEffect(() => {
+    if (!state.open || !nestedEntry) {
+      setNestedSpec(null);
+      if (state.open && !disabled && nestedSpec && nestedFocus) state.inputRef.current?.focus();
+    }
+  }, [state.open, nestedEntry, nestedSpec, nestedFocus, disabled]);
 
   useLayoutEffect(() => {
     if (disabled) state.setOpen(false);
@@ -627,18 +684,33 @@ export function ModelPicker({
       listId={state.listId}
       dropdownDirection={dropdownDirection}
       compact={compact}
+      combined={!!reasoning}
       ariaLabel={ariaLabel}
       activeDescendant={state.activeDescendant}
-      onKeyDown={state.onListKeyDown}
+      onKeyDown={(event) => {
+        if (reasoning && event.key === 'ArrowRight' && state.activeIndex >= 0) {
+          event.preventDefault();
+          openNested(formatModelSpec(state.filteredEntries[state.activeIndex].model), true);
+        } else if (reasoning && event.key === 'Enter') {
+          // Let the existing explicit-highlight guard decide whether Enter is safe.
+          state.onListKeyDown(event);
+        } else {
+          if (event.key !== 'Escape') setNestedSpec(null);
+          state.onListKeyDown(event);
+        }
+      }}
       entries={state.filteredEntries}
       value={value}
       activeIndex={state.activeIndex}
       idBase={state.idBase}
-      handleSelect={state.handleSelect}
-      onRowPointerEnter={state.onRowPointerEnter}
+      handleSelect={choose}
+      onRowPointerEnter={(index) => {
+        state.onRowPointerEnter(index);
+        if (reasoning) openNested(formatModelSpec(state.filteredEntries[index].model), false);
+      }}
       itemRefs={state.itemRefs}
       query={state.query}
-      onSearchInput={state.onSearchInput}
+      onSearchInput={(event) => { setNestedSpec(null); state.onSearchInput(event); }}
       inputRef={state.inputRef}
     />
   );
@@ -651,6 +723,7 @@ export function ModelPicker({
         ariaLabel={ariaLabel}
         title={title}
         label={label}
+        reasoning={displayedReasoning}
         open={state.open}
         disabled={disabled}
         ariaDescribedBy={ariaDescribedBy}
@@ -660,6 +733,23 @@ export function ModelPicker({
         onKeyDown={state.onTriggerKeyDown}
       />
       {dropdown && (usePortal ? createPortal(dropdown, document.body) : dropdown)}
+      {state.open && !disabled && reasoning && nestedEntry && createPortal(
+        <ReasoningSubmenu
+          menuRef={state.submenuRef}
+          entry={nestedEntry}
+          anchor={() => state.itemRefs.current[nestedIndex]}
+          root={state.listRef.current}
+          selected={formatModelSpec(nestedEntry.model) === value ? reasoning.value : undefined}
+          focus={nestedFocus}
+          onBack={() => { setNestedSpec(null); state.inputRef.current?.focus(); }}
+          onTab={(backwards) => { state.setOpen(false); focusAdjacentControl(state.triggerRef.current, backwards); }}
+          onSelect={(level) => {
+            reasoning.onChange(formatModelSpec(nestedEntry.model), level);
+            state.setOpen(false);
+            state.triggerRef.current?.focus();
+          }}
+        />, document.body,
+      )}
     </div>
   );
 }

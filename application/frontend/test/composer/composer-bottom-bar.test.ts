@@ -136,7 +136,7 @@ test('composer controls render in the agreed bottom-bar order', () => {
 
   assertOrdered(html, [
     'aria-label="Model"',
-    'aria-label="Reasoning level"',
+    'class="model-picker-reasoning-suffix"',
     'aria-label="Subagent providers:',
     'aria-label="Compact context',
     'aria-label="More composer options"',

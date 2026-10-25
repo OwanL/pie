@@ -127,7 +127,7 @@ async function sessionChildProvenance(sessionPath: string): Promise<ChildProvena
 
 async function assertProviderGate(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Model' })).toContainText('DeepSeek V4 Flash 0731');
-  await expect(page.getByRole('button', { name: 'Reasoning level' })).toContainText('Max');
+  await expect(page.locator('.composer-pinned-controls .model-picker-reasoning-suffix')).toHaveText('max');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Settings' });
   // Provider preferences are a section within Models, not a standalone tab.

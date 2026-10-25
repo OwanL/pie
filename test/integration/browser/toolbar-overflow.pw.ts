@@ -30,7 +30,8 @@ async function openComposer(page: Page, width: number, height: number): Promise<
   await expect(page.getByRole('button', { name: 'More composer options', exact: true })).toBeVisible();
   await expect(page.locator('.composer-pinned-controls [aria-label="Settings"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Model' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Reasoning level' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reasoning level', exact: true })).toHaveCount(0);
+  await expect(page.locator('.model-picker-reasoning-suffix')).toHaveText('medium');
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -138,8 +139,8 @@ test.describe('composer toolbar overflow in Chromium', () => {
       expect(metrics.leftGap).toBeGreaterThan(metrics.rightGap);
       expect(metrics.fontSize).toBe(8);
       expect(metrics.fontSize).toBeLessThan(metrics.sessionFontSize);
-      // Model, reasoning, session cost, context, and BOTH global cost labels.
-      expect(metrics.baselines).toHaveLength(6);
+      // Model, session cost, context, and BOTH global cost labels; reasoning is a superscript.
+      expect(metrics.baselines).toHaveLength(5);
       const reference = metrics.baselines[0]!.baseline;
       for (const label of metrics.baselines) {
         expect(Math.abs(label.baseline - reference), `${label.text} baseline at ${width}px`).toBeLessThan(0.05);
@@ -162,7 +163,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
         // The fixture model name is short, so temporarily stress the real
         // label with long text instead of assuming truncation must occur for
         // every selected model. The UI contract is min-width:0
-        // plus ellipsis while Reasoning and More stay separate.
+        // plus ellipsis while the reasoning suffix and More stay separate.
         const originalText = (await modelLabel.textContent()) ?? '';
         try {
           await modelLabel.evaluate((element, text) => {
@@ -191,7 +192,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
         }
       }
       expect(await page.getByRole('button', { name: 'Model' }).evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(28);
-      expect(await page.getByRole('button', { name: 'Reasoning level' }).evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(42);
+      await expect(page.locator('.model-picker-reasoning-suffix')).toBeVisible();
       expect(await getToolbarHitboxOverlaps(page), `toolbar hitboxes at ${width}px`).toEqual([]);
     }
   });
@@ -200,7 +201,7 @@ test.describe('composer toolbar overflow in Chromium', () => {
     await openComposer(page, 240, 640);
     // Once secondary items have overflowed, model text may yield fully;
     // the mandatory controls must still retain separate, usable hitboxes.
-    for (const name of ['Model', 'Reasoning level', 'More composer options']) {
+    for (const name of ['Model', 'More composer options']) {
       const control = page.getByRole('button', { name, exact: true });
       await expect(control).toBeVisible();
       await expect(control).toBeEnabled();
@@ -215,14 +216,16 @@ test.describe('composer toolbar overflow in Chromium', () => {
     const fixtureChoice = page.getByRole('option').filter({ hasText: 'Offline fixture model' });
     await expect(fixtureChoice).toBeVisible();
     await expect(fixtureChoice).toHaveAttribute('aria-selected', 'true');
-    await fixtureChoice.click();
+    await page.mouse.move(0, 0);
+    await fixtureChoice.hover({ position: { x: 12, y: 12 } });
+    await page.locator('[data-model-reasoning-submenu]').getByRole('option', { selected: true }).click();
     await expect(fixtureChoice).toBeHidden();
     await page.getByRole('button', { name: 'Model', exact: true }).click();
     await expect(fixtureChoice).toBeVisible();
     await expect(fixtureChoice).toHaveAttribute('aria-selected', 'true');
   });
 
-  test('keeps Settings permanently in More and the global pair in one measured section', async ({ page }) => {
+  test('keeps Settings in the header and the global pair in one measured section', async ({ page }) => {
     await openComposer(page, 1400, 700);
     const global = page.locator('.composer-global-indicators');
     await expect(global).toBeVisible();
@@ -233,22 +236,23 @@ test.describe('composer toolbar overflow in Chromium', () => {
       next: element.nextElementSibling?.className,
       wrap: getComputedStyle(element).flexWrap,
     }))).toEqual({ previous: 'composer-controls', next: 'composer-indicators', wrap: 'nowrap' });
-    await page.getByRole('button', { name: 'More composer options' }).click();
-    const more = page.getByRole('dialog', { name: 'Additional composer options' });
-    await expect(more.getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
-    await more.getByRole('button', { name: 'Settings', exact: true }).click();
+    const headerSettings = page.getByRole('button', { name: 'Settings', exact: true });
+    await expect(headerSettings).toBeVisible();
+    await headerSettings.click();
     await expect(page.locator('.toolbar-settings-menu')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('.toolbar-settings-menu')).toBeHidden();
+    await page.getByRole('button', { name: 'More composer options' }).click();
+    const more = page.getByRole('dialog', { name: 'Additional composer options' });
     await expect(more).toBeVisible();
-    await expect(more.getByRole('button', { name: 'Settings', exact: true })).toBeFocused();
+    await expect(more.getByRole('button', { name: 'Settings', exact: true })).toHaveCount(0);
     await page.keyboard.press('Escape');
     await expect(more).toBeHidden();
     await page.setViewportSize({ width: 240, height: 700 });
     await expect(page.locator('.composer-global-indicators')).toHaveCount(0);
     await page.getByRole('button', { name: 'More composer options' }).click();
     await expect(more.locator('[data-toolbar-item="global-costs"] .aggregate-strip-cost')).toHaveCount(2);
-    await expect(more.getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
+    await expect(more.getByRole('button', { name: 'Settings', exact: true })).toHaveCount(0);
   });
 
   test('overflow remains usable while disconnected and does not disable status indicators', async ({ context, page }) => {

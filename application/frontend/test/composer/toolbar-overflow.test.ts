@@ -623,7 +623,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   const pinned = container.querySelector('.composer-pinned-controls');
   assert.ok(!pinned?.querySelector('[aria-label="Settings"]'));
   assert.ok(pinned?.querySelector('[aria-label="Model"]'));
-  assert.ok(pinned?.querySelector('[aria-label="Reasoning level"]'));
+  assert.equal(pinned?.querySelector('.model-picker-reasoning-suffix')?.textContent, 'high');
 
   const popover = openOverflow();
   const hiddenKeys = Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]'))
@@ -759,7 +759,7 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
   const disconnectedSwitch = disconnectedPopover?.querySelector<HTMLButtonElement>('[aria-label="Allow trusted LAN access"]');
   assert.equal(disconnectedSwitch?.disabled, true);
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls .model-picker-trigger')?.disabled, true);
-  assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Reasoning level"]')?.disabled, true);
+  assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Model"]')?.disabled, true);
   assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="working-time"]'), 'duration remains visible ahead of lower-priority status indicators');
   assert.equal(container.querySelector('.composer-toolbar-overflow-popover')?.getAttribute('aria-hidden'), 'false');
   assert.match(container.querySelector('.composer-toolbar-overflow-popover')?.textContent ?? '', /LIVE/, 'overflowed status indicators remain visible while controls are disabled');
@@ -795,7 +795,7 @@ test('disconnection closes a portaled model picker and disables pinned menu trig
   rerender({ ...toolbarProps, commandsAvailable: false });
   assert.equal(!!document.body.querySelector('.model-picker-dropdown'), false, 'a portaled model chooser cannot remain interactive outside the disabled fieldset');
   assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls .model-picker-trigger')?.disabled, true);
-  assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Reasoning level"]')?.disabled, true);
+  assert.equal(container.querySelector<HTMLButtonElement>('.composer-pinned-controls [aria-label="Model"]')?.disabled, true);
   assert.equal(container.querySelector<HTMLButtonElement>('[aria-label="Settings"]')?.disabled, true);
 });
 
