@@ -306,28 +306,42 @@ test('start captures selection, flushes draft and prevents duplicate intents', (
   render(null, root);
 });
 
-test('a null-path start preserves edits made before its resolved-session acknowledgement', async () => {
+test('a null-path start preserves edits made before its resolved-session acknowledgement', () => {
   const root = document.createElement('div');
-  const messages: any[] = [];
-  const idle = { ...recording, phase: 'idle' as const, recordingId: null };
-  function StartHarness({ sessionPath, draft, view }: { sessionPath: string | null; draft: string; view: DictationView }) {
-    const input = useComposerInput({ busy: false, dictation: view, onSend() {}, onRetrySend() {}, pendingComposerInputsLength: 0, initialRows: 1, sessionPath, draftText: draft, postMessage(message) { messages.push(message); }, onAddInput() {}, supportsImageInputs: false });
-    return h('div', {}, h('textarea', { value: input.text, ref: input.textareaRef, onInput: input.handleInput, onKeyDown: input.handleKeyDown }), h('button', { onClick: input.toggleDictation }));
+  let checkpoint: (() => void) | null = null;
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: any[]) => {
+    if (delay === 500 && typeof callback === 'function') {
+      checkpoint = () => callback(...args);
+      return 1 as any;
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  }) as typeof setTimeout;
+  try {
+    const messages: any[] = [];
+    const idle = { ...recording, phase: 'idle' as const, recordingId: null };
+    function StartHarness({ sessionPath, draft, view }: { sessionPath: string | null; draft: string; view: DictationView }) {
+      const input = useComposerInput({ busy: false, dictation: view, onSend() {}, onRetrySend() {}, pendingComposerInputsLength: 0, initialRows: 1, sessionPath, draftText: draft, postMessage(message) { messages.push(message); }, onAddInput() {}, supportsImageInputs: false });
+      return h('div', {}, h('textarea', { value: input.text, ref: input.textareaRef, onInput: input.handleInput, onKeyDown: input.handleKeyDown }), h('button', { onClick: input.toggleDictation }));
+    }
+    act(() => render(h(StartHarness, { sessionPath: null, draft: '', view: idle }), root));
+    act(() => root.querySelector('button')!.click());
+    const start = messages.find(message => message.type === 'dictationStart');
+    const textareaAfterStart = root.querySelector('textarea')!;
+    act(() => { textareaAfterStart.value = 'manual draft'; textareaAfterStart.dispatchEvent(new Event('input', { bubbles: true })); });
+    const acknowledged = { ...recording, phase: 'preparing' as const, sessionPath: '/new-session', recordingId: start.recordingId, detail: 'Downloading model…' };
+    act(() => render(h(StartHarness, { sessionPath: '/new-session', draft: '', view: acknowledged }), root));
+    assert.equal(root.querySelector('textarea')!.value, 'manual draft');
+    assert.equal(messages.filter(message => message.type === 'dictationCancel' && message.recordingId === start.recordingId).length, 1);
+    assert.ok(messages.some(message => message.type === 'setComposerDraft' && message.sessionPath === '/new-session' && message.text === 'manual draft'));
+    assert.ok(checkpoint, 'undo checkpoint timer was scheduled');
+    act(() => checkpoint!());
+    act(() => { root.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true })); });
+    assert.equal(root.querySelector('textarea')!.value, '');
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    render(null, root);
   }
-  act(() => render(h(StartHarness, { sessionPath: null, draft: '', view: idle }), root));
-  act(() => root.querySelector('button')!.click());
-  const start = messages.find(message => message.type === 'dictationStart');
-  const textareaAfterStart = root.querySelector('textarea')!;
-  act(() => { textareaAfterStart.value = 'manual draft'; textareaAfterStart.dispatchEvent(new Event('input', { bubbles: true })); });
-  const acknowledged = { ...recording, phase: 'preparing' as const, sessionPath: '/new-session', recordingId: start.recordingId, detail: 'Downloading model…' };
-  act(() => render(h(StartHarness, { sessionPath: '/new-session', draft: '', view: acknowledged }), root));
-  assert.equal(root.querySelector('textarea')!.value, 'manual draft');
-  assert.equal(messages.filter(message => message.type === 'dictationCancel' && message.recordingId === start.recordingId).length, 1);
-  assert.ok(messages.some(message => message.type === 'setComposerDraft' && message.sessionPath === '/new-session' && message.text === 'manual draft'));
-  await new Promise(resolve => setTimeout(resolve, 510));
-  act(() => { root.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true })); });
-  assert.equal(root.querySelector('textarea')!.value, '');
-  render(null, root);
 });
 
 test('manual edits reverted before a start acknowledgement still cancel and protect the local draft', () => {
