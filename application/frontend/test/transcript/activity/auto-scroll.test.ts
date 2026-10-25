@@ -134,6 +134,20 @@ test('advanceSmoothScrollTop does not accumulate an ever-growing streaming backl
   assert.equal(current, target, 'the loop settles after generation stops');
 });
 
+test('smooth follow uses elapsed time consistently at 30, 60, and 120Hz', () => {
+  const positions = [30, 60, 120].map(hz => {
+    let current = 0;
+    for (let frame = 0; frame < hz / 10; frame += 1) {
+      current = advanceSmoothScrollTop(current, 80, 1_000 / hz);
+    }
+    return current;
+  });
+  assert.ok(Math.max(...positions) - Math.min(...positions) < 1, `refresh rates drifted: ${positions}`);
+  assert.equal(advanceSmoothScrollTop(0, 80, 0), 0);
+  assert.equal(advanceSmoothScrollTop(0, 80, Number.NaN), advanceSmoothScrollTop(0, 80));
+  assert.ok(advanceSmoothScrollTop(0, 2_000, 10_000) < 500, 'long gaps must not snap to the target');
+});
+
 test('advanceSmoothScrollTop snaps only the final sub-pixel remainder', () => {
   assert.equal(advanceSmoothScrollTop(999.5, 1_000), 1_000);
   assert.equal(advanceSmoothScrollTop(1_000, 1_000), 1_000);

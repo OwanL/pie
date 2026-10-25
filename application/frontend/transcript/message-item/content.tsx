@@ -18,6 +18,7 @@ import {
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
 import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from '../file-path-interactions';
 import { ReasoningBlock } from './reasoning-block';
+import { ToolCallEntrance, useAppendedToolCalls } from '../tool-call-entrance';
 
 interface AssistantPartsProps {
   messageId: string;
@@ -86,6 +87,7 @@ function AssistantParts({
   getMessageRaw,
   deferHistoricalToolCalls = false,
 }: AssistantPartsProps) {
+  const appendedToolCalls = useAppendedToolCalls(parts, isCurrentlyStreaming);
   // Keep every consecutive tool-call run under one parent from its first
   // provisional card onward. Verified parallel batches are child annotations,
   // never replacement parents: mixed adjacent batches therefore stay under the
@@ -163,9 +165,10 @@ function AssistantParts({
                   annotation?.end && 'tool-call-parallel-end',
                 ].filter(Boolean).join(' ');
                 return (
-                  <div
-                    class={childClasses}
-                    data-parallel-group-id={annotation?.groupId}
+                  <ToolCallEntrance
+                    className={childClasses}
+                    parallelGroupId={annotation?.groupId}
+                    enter={appendedToolCalls.has(part.toolCall.id)}
                     key={`tool-${part.toolCall.id}`}
                   >
                     {deferHistoricalToolCalls ? (
@@ -175,7 +178,7 @@ function AssistantParts({
                         onContextMenu={onContextMenu}
                       />
                     ) : renderToolCall(part.toolCall, onContextMenu)}
-                  </div>
+                  </ToolCallEntrance>
                 );
               })}
             </div>

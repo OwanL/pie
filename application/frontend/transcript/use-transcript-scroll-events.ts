@@ -93,6 +93,15 @@ export function useScrollEventsEffect(
       beginManualInteraction();
       scheduleManualIdleReset();
     };
+    const onDisclosureClick = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.('button.tool-call-toggle[aria-expanded="false"]')) return;
+      // Read the pre-toggle state in capture, including keyboard activation.
+      // Inspecting a tool gives the reader ownership before its body grows.
+      navigationActiveRef.current = false;
+      programmaticScrollTargetRef.current = null;
+      setAutoFollow(false);
+    };
     const onScroll = () => {
       const next = el.scrollTop;
       const previous = lastScrollTopRef.current;
@@ -135,6 +144,7 @@ export function useScrollEventsEffect(
       }
     };
 
+    el.addEventListener('click', onDisclosureClick, true);
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('pointerdown', onPointerDown, { passive: true });
     el.addEventListener('wheel', onWheel, { passive: true });
@@ -148,6 +158,7 @@ export function useScrollEventsEffect(
     window.addEventListener('pointercancel', onPointerEnd, { passive: true });
 
     return () => {
+      el.removeEventListener('click', onDisclosureClick, true);
       el.removeEventListener('scroll', onScroll);
       el.removeEventListener('pointerdown', onPointerDown);
       el.removeEventListener('wheel', onWheel);

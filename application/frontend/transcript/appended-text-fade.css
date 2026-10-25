@@ -1,0 +1,12 @@
+@keyframes pie-stream-text-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+[data-stream-text-fade] {
+  animation: pie-stream-text-fade 170ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-stream-text-fade] { animation: none; }
+}

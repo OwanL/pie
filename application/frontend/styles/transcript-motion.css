@@ -1,0 +1,13 @@
+/* Presentation only: never transition virtualizer positioning or measured row height. */
+@keyframes transcript-tool-enter {
+  from { opacity: 0.45; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.tool-call-run-child[data-tool-entered="true"] {
+  animation: transcript-tool-enter 180ms var(--panel-ease-out-expo, ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-call-run-child[data-tool-entered="true"] { animation: none; }
+}

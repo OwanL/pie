@@ -8,6 +8,8 @@
 @import './system-prompts.css';
 @import './inline-editor.css';
 @import './tool-call.css';
+@import './transcript-motion.css';
+@import '../transcript/appended-text-fade.css';
 @import './highlight.css';
 @import './composer.css';
 @import './model-picker.css';

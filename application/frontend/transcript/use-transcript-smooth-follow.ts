@@ -4,6 +4,7 @@ import type { ChatMessage } from '../../lib/protocol/index.js';
 import {
   advanceSmoothScrollTop,
   isNearBottom,
+  SMOOTH_SCROLL_FRAME_MS,
   SMOOTH_SCROLL_SNAP_EPSILON_PX,
 } from './auto-scroll';
 
@@ -136,6 +137,7 @@ export function useAutoFollow(
 
     const ownerDocument = el.ownerDocument;
     let frame: number | null = null;
+    let previousFrameTime: number | null = null;
     let disposed = false;
 
     const isVisible = () => !ownerDocument.hidden;
@@ -149,6 +151,7 @@ export function useAutoFollow(
       }
     };
     const cancelFrame = () => {
+      previousFrameTime = null;
       if (frame === null) return;
       cancelAnimationFrame(frame);
       frame = null;
@@ -171,8 +174,11 @@ export function useAutoFollow(
       return actual;
     };
 
-    const tick = () => {
+    const tick = (time?: number) => {
       frame = null;
+      const elapsedMs = time !== undefined && previousFrameTime !== null && time > previousFrameTime
+        ? time - previousFrameTime : SMOOTH_SCROLL_FRAME_MS;
+      previousFrameTime = time ?? null;
       if (
         disposed
         || !isVisible()
@@ -198,7 +204,7 @@ export function useAutoFollow(
         return;
       }
 
-      writeScrollTop(advanceSmoothScrollTop(current, target));
+      writeScrollTop(advanceSmoothScrollTop(current, target, elapsedMs));
       // While follow ownership is active, suppress a transient Bottom button
       // during the bounded catch-up. It represents user detachment, not the
       // short visual easing interval between two host snapshots.

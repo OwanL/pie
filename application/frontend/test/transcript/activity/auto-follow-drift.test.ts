@@ -250,6 +250,35 @@ test('steady streaming growth: auto-follow stays engaged and tracks the bottom',
   }
 });
 
+test('opening tool details pauses follow before layout grows, but ordinary clicks do not', () => {
+  mountProbe(true);
+  settle();
+  const button = document.createElement('button');
+  button.className = 'tool-call-toggle';
+  button.setAttribute('aria-expanded', 'false');
+  const label = document.createElement('span');
+  label.textContent = 'Inspect tool';
+  button.append(label);
+  el.append(button);
+  act(() => label.click());
+  assert.equal(capture.r!.autoFollowRef.current, false, 'nested label activation transfers ownership before expansion');
+  const before = scrollTopValue;
+  scrollHeightValue += 300;
+  rerender(true, 20, []);
+  assert.equal(scrollTopValue, before, 'opening details must not pull their header upwards');
+
+  act(() => capture.r!.jumpToLatest());
+  rerender(true, 20, []);
+  assert.equal(capture.r!.autoFollowRef.current, true, 'explicit latest restores follow');
+  button.setAttribute('aria-expanded', 'true');
+  act(() => label.click());
+  assert.equal(capture.r!.autoFollowRef.current, true, 'closing details does not detach');
+  button.className = 'unrelated-control';
+  button.setAttribute('aria-expanded', 'false');
+  act(() => label.click());
+  assert.equal(capture.r!.autoFollowRef.current, true, 'unrelated expanded controls do not detach');
+});
+
 test('manual scroll-up disables follow even while the agent is busy', () => {
   mountProbe(true);
   settle();

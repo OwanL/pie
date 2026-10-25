@@ -1329,9 +1329,10 @@
   will-change: transform;
 }
 
-/* Manual disclosure is immediate. No completion timer changes the user's
-   inspector state or briefly mounts a terminal during a fast command. */
+/* Logical disclosure remains manual. Ordinary cards opt into measured pixel
+   height motion locally; never animate fresh grid layout or scale content. */
 .tool-call-body-wrap { display: grid; grid-template-rows: 1fr; }
+.tool-call-body-wrap.tool-call-disclosure-body { display: block; overflow: hidden; }
 
 .tool-call-body-wrap > .tool-call-body-inner {
   overflow: hidden;

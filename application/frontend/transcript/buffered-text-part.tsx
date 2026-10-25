@@ -5,6 +5,7 @@ import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { renderMarkdown } from './markdown';
+import { annotateAppendedText } from './appended-text-fade';
 import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from './file-path-interactions';
 import type { TranscriptContextMenuHandler } from './types';
 import { useCommittedTextLeaf } from './commit-registry';
@@ -73,6 +74,15 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   const pendingHtmlRef = useRef<{ html: string; text: string } | null>(null);
   const deferTimerRef = useRef<number | null>(null);
 
+  function publish(candidate: { html: string; text: string }) {
+    setRendered(previous => ({
+      ...candidate,
+      html: streamGenerationRef.current.streaming && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+        ? annotateAppendedText(previous.html, candidate.html, document)
+        : candidate.html,
+    }));
+  }
+
   /** Apply `nextHtml` now unless a selection overlaps the body, in which case
    *  retain only the latest candidate until the selection clears. */
   function applyHtml(nextHtml: string, representedText: string) {
@@ -81,7 +91,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
     // pending html when it fires, so don't schedule another.
     if (deferTimerRef.current !== null) return;
     if (!hasSelectionOverlapping(bodyRef.current)) {
-      setRendered({ html: nextHtml, text: representedText });
+      publish({ html: nextHtml, text: representedText });
       pendingHtmlRef.current = null;
       return;
     }
@@ -93,7 +103,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
       deferTimerRef.current = null;
       if (pendingHtmlRef.current === null) return;
       if (!hasSelectionOverlapping(bodyRef.current)) {
-        setRendered(pendingHtmlRef.current);
+        publish(pendingHtmlRef.current);
         pendingHtmlRef.current = null;
         return;
       }

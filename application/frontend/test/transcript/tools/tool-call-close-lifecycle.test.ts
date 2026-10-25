@@ -12,8 +12,13 @@ import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open'
 import { DEFAULT_CHAT_PREFS, type ToolCall } from '../../../../lib/protocol/index.js';
 
 let container: HTMLElement;
-beforeEach(() => { clearCollapsibleCache(); container = document.createElement('div'); document.body.appendChild(container); });
-afterEach(() => { render(null, container); container.remove(); });
+const nativeAnimate = window.HTMLElement.prototype.animate;
+beforeEach(() => {
+  // The DOM shim has no layout clock; lifecycle motion is driven explicitly below.
+  window.HTMLElement.prototype.animate = undefined as unknown as typeof nativeAnimate;
+  clearCollapsibleCache(); container = document.createElement('div'); document.body.appendChild(container);
+});
+afterEach(() => { render(null, container); container.remove(); window.HTMLElement.prototype.animate = nativeAnimate; });
 const noop = () => undefined;
 function call(name: string, status: ToolCall['status'], id = name): ToolCall {
   return { id, name, input: name === 'bash' ? { command: 'pnpm test', timeout: 60 } : { path: '/repo/a.ts' }, result: { content: [{ type: 'text', text: 'first\nsecond\nthird\n' }] }, status };
@@ -210,6 +215,57 @@ test('expanded shell details retain options and the header can close them while 
   assert.ok(container.querySelector('.tool-call-body-wrap') === null, 'completion does not undo a manual header close');
 });
 
+test('measured manual disclosure retains only the closing body and cancels rapid reversals', async () => {
+  const prototype = window.HTMLElement.prototype;
+  const original = prototype.animate;
+  const animations: Array<{ finish: () => void; cancelled: boolean; frames: unknown; options: unknown }> = [];
+  prototype.animate = function (frames, options) {
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    const entry = { finish, cancelled: false, frames, options };
+    animations.push(entry);
+    return { finished, cancel: () => { entry.cancelled = true; } } as unknown as Animation;
+  };
+  try {
+    paint(call('read', 'completed'));
+    assert.equal(animations.length, 0, 'initial history does not animate');
+    toggle();
+    assert.equal(animations.length, 1);
+    assert.equal((animations[0].options as KeyframeAnimationOptions).duration, 200);
+    const body = container.querySelector('.tool-call-body-wrap')!;
+    toggle();
+    assert.equal(animations[0].cancelled, true);
+    assert.ok(container.querySelector('.tool-call-body-wrap') === body);
+    assert.equal(body.getAttribute('aria-hidden'), 'true');
+    assert.equal(container.querySelector('.tool-call-toggle')?.getAttribute('aria-controls'), body.id);
+    toggle();
+    await act(async () => { animations[1].finish(); await Promise.resolve(); });
+    assert.ok(container.querySelector('.tool-call-body-wrap') === body, 'stale close cannot remove reopened details');
+    paint(call('read', 'running'));
+    assert.equal(animations.length, 3, 'detail updates never restart motion');
+    toggle();
+    await act(async () => { animations[3].finish(); await Promise.resolve(); });
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+    assert.equal(container.querySelector('.tool-call-toggle')?.getAttribute('aria-controls'), null);
+    toggle();
+    act(() => render(null, container));
+    assert.equal(animations[4].cancelled, true, 'unmount cancels pending motion');
+  } finally { prototype.animate = original; }
+});
+
+test('reduced motion opens and removes details instantly without starting animations', () => {
+  const original = window.matchMedia;
+  window.matchMedia = (() => ({ matches: true })) as unknown as typeof window.matchMedia;
+  window.HTMLElement.prototype.animate = (() => { throw new Error('reduced motion must not animate'); }) as typeof nativeAnimate;
+  try {
+    paint(call('read', 'completed'));
+    toggle();
+    assert.ok(container.querySelector('.tool-call-body-wrap'));
+    toggle();
+    assert.equal(container.querySelector('.tool-call-body-wrap'), null);
+  } finally { window.matchMedia = original; }
+});
+
 test('subagent fallback retains the close footer and collapsible gutter', () => {
   paint(call('subagent', 'completed'));
   assert.ok(container.querySelector('.tool-call-body-wrap'), 'auto-expand remains available for subagent fallback');
@@ -217,6 +273,30 @@ test('subagent fallback retains the close footer and collapsible gutter', () => 
   assert.ok(container.querySelector('.collapsible-gutter'));
   act(() => (container.querySelector('.collapsible-close-footer') as HTMLButtonElement).click());
   assert.ok(container.querySelector('.tool-call-body-wrap') === null);
+});
+
+test('only appended live tool calls enter, never initial history, updates, or virtualized remounts', () => {
+  const renderToolCall = (toolCall: ToolCall) => h('span', { 'data-call': toolCall.id }, toolCall.name);
+  const paintParts = (ids: string[], streaming = true) => act(() => render(h(MessageContent, {
+    messageId: 'entrance', role: 'assistant',
+    combinedParts: ids.map(id => ({ kind: 'toolCall' as const, toolCall: call('read', 'running', id) })),
+    renderableUserParts: undefined, html: '', isCurrentlyStreaming: streaming,
+    messageBodyRef: { current: null }, workingDirectory: '/repo', onOpenFile: noop,
+    prefs: DEFAULT_CHAT_PREFS, renderToolCall, onContextMenu: noop, getMessageRaw: () => '',
+  }), container));
+  paintParts(['existing']);
+  assert.equal(container.querySelectorAll('[data-tool-entered]').length, 0);
+  paintParts(['existing', 'new']);
+  const row = container.querySelector('[data-call="new"]')!.parentElement!;
+  assert.equal(row.getAttribute('data-tool-entered'), 'true');
+  assert.equal(container.querySelector('[data-call="existing"]')!.parentElement!.getAttribute('data-tool-entered'), null);
+  paintParts(['existing', 'new']);
+  assert.ok(container.querySelector('[data-call="new"]')!.parentElement === row, 'status updates preserve the animated element');
+  paintParts(['existing', 'new', 'historical'], false);
+  assert.equal(container.querySelector('[data-call="historical"]')!.parentElement!.getAttribute('data-tool-entered'), null);
+  act(() => render(null, container));
+  paintParts(['existing', 'new', 'historical']);
+  assert.equal(container.querySelectorAll('[data-tool-entered]').length, 0, 'remounting a live row does not replay entrances');
 });
 
 test('completed parallel sibling retains its accessible status without a check or dimming while another sibling runs', () => {

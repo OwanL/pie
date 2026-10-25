@@ -15,6 +15,7 @@ const SCROLL_ANCHOR_VISIBILITY_EPSILON_PX = 1;
  * handles small updates without a visible stutter. Large backlogs relax the
  * ordinary cap so a fast producer cannot outrun follow indefinitely.
  */
+export const SMOOTH_SCROLL_FRAME_MS = 1_000 / 60;
 export const SMOOTH_SCROLL_INTERPOLATION = 0.35;
 export const SMOOTH_SCROLL_MIN_STEP_PX = 2;
 export const SMOOTH_SCROLL_MAX_STEP_PX = 48;
@@ -128,18 +129,24 @@ export function resolveScrollAnchorDelta(
 export function advanceSmoothScrollTop(
   currentScrollTop: number,
   targetScrollTop: number,
+  elapsedMs = SMOOTH_SCROLL_FRAME_MS,
   interpolation = SMOOTH_SCROLL_INTERPOLATION,
   minStepPx = SMOOTH_SCROLL_MIN_STEP_PX,
   maxStepPx = SMOOTH_SCROLL_MAX_STEP_PX,
   snapEpsilonPx = SMOOTH_SCROLL_SNAP_EPSILON_PX,
 ): number {
+  // Preserve the existing 60Hz feel across refresh rates. Cap long/background
+  // gaps rather than turning a dropped frame into a full viewport jump.
+  const frames = Math.min(4, Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs / SMOOTH_SCROLL_FRAME_MS : 1));
+  if (frames === 0) return currentScrollTop;
   const delta = targetScrollTop - currentScrollTop;
   if (Math.abs(delta) <= snapEpsilonPx) return targetScrollTop;
 
   // Preserve gentle ordinary bursts, but catch up proportionally when a
   // producer adds content faster than the ordinary per-frame cap can follow.
-  const catchUpCap = Math.max(maxStepPx, Math.abs(delta) / 16);
-  const step = Math.min(catchUpCap, Math.max(minStepPx, Math.abs(delta) * interpolation));
+  const catchUpCap = Math.max(maxStepPx * frames, Math.abs(delta) * (1 - (15 / 16) ** frames));
+  const easedFraction = 1 - (1 - interpolation) ** frames;
+  const step = Math.min(catchUpCap, Math.max(minStepPx * frames, Math.abs(delta) * easedFraction));
   const next = currentScrollTop + Math.sign(delta) * step;
   return delta > 0
     ? Math.min(next, targetScrollTop)
