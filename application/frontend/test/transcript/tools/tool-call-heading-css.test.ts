@@ -51,7 +51,7 @@ test('coarse-pointer tools gain touch hitboxes and font floors without wrapping 
 
 test('ordinary headers remain arrow-free while preserving the native toggle', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
-  const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {}, onOpenFile: () => {} }));
+  const html = renderToString(h(ToolCallHeader, { open: true, name: 'read', status: 'completed', summary: 'a.ts', summaryPath: '/repo/a.ts', onToggle: () => {} }));
   assert.doesNotMatch(html, /tool-call-disclosure|collapsible-chevron/);
   assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
   assert.match(html, /Collapse details/);
@@ -60,7 +60,7 @@ test('ordinary headers remain arrow-free while preserving the native toggle', as
 
 test('subagent headers retain the collapsible chevron', async () => {
   const { ToolCallHeader } = await import('../../../transcript/tool-call-card.tsx');
-  const html = renderToString(h(ToolCallHeader, { open: true, name: 'subagent', status: 'running', summary: 'task', onToggle: () => {}, onOpenFile: () => {} }));
+  const html = renderToString(h(ToolCallHeader, { open: true, name: 'subagent', status: 'running', summary: 'task', onToggle: () => {} }));
   assert.match(html, /tool-call-disclosure/);
   assert.match(html, /collapsible-chevron/);
   assert.match(html, /<button type="button" class="tool-call-toggle" aria-expanded="true"/);
@@ -151,21 +151,19 @@ test('collapsed tool-call headers use the shared path hierarchy', async () => {
     summary: 'src/example.ts',
     summaryPath: '/repo/src/example.ts',
     prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
-    sizeHint: '+3 lines',
     onToggle: () => {},
-    onOpenFile: () => {},
   }));
 
   assert.match(html, /tool-call-toggle/);
   assert.match(html, /tool-call-kind-icon/);
   assert.match(html, /aria-label="read tool call, Completed\. \/repo\/src\/example\.ts\. Expand details"/);
   assert.doesNotMatch(html, /transcript-header-title-mono/);
-  assert.match(html, /aria-label="Open file \/repo\/src\/example.ts"/);
+  assert.doesNotMatch(html, /aria-label="Open file/);
   assert.doesNotMatch(html, /transcript-header-path-prefix/);
   assert.match(html, /transcript-header-path-target/);
   assert.match(html, /data-pie-file-path="\/repo\/src\/example\.ts"/);
-  assert.match(html, /tool-call-size/);
-  assert.match(html, /tool-call-actions/);
+  assert.doesNotMatch(html, /tool-call-size/);
+  assert.doesNotMatch(html, /tool-call-actions/);
 });
 
 test('tool-call path labels show filenames regardless of depth while retaining the full path', async () => {
@@ -178,7 +176,6 @@ test('tool-call path labels show filenames regardless of depth while retaining t
     summaryPath: '/repo/dira/dirb/dirc/example.ts',
     prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
     onToggle: () => {},
-    onOpenFile: () => {},
   }));
 
   assert.match(html, />example\.ts</);
@@ -195,9 +192,7 @@ test('collapsed bash headers emphasize the shell verb over the path context', as
     status: 'completed',
     summary: 'rm somepath/somefile.txt',
     prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
-    sizeHint: '+3 lines',
     onToggle: () => {},
-    onOpenFile: () => {},
   }));
 
   assert.match(html, /transcript-header-summary-command">rm</);
@@ -215,7 +210,6 @@ test('collapsed bash headers keep surrounding quotes separate from the emphasize
     summary: 'rm "some dir/file name.txt"',
     prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
     onToggle: () => {},
-    onOpenFile: () => {},
   }));
 
   assert.doesNotMatch(html, /transcript-header-path-prefix[^>]*>&quot;some dir\//);
@@ -234,7 +228,6 @@ test('expanded bash headers keep the command target visible for orientation', as
     status: 'running',
     summary: 'rm somepath/somefile.txt',
     onToggle: () => {},
-    onOpenFile: () => {},
   }));
 
   assert.match(html, /aria-label="bash tool call, Running/);

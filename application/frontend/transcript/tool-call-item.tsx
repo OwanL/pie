@@ -446,14 +446,14 @@ function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentS
 export function subagentElapsed(result: SubagentSingleResult, now: number, live: boolean): string | undefined {
   const start = knownNonNegative(result.startedAt);
   const end = knownNonNegative(result.completedAt) ?? (live ? now : undefined);
-  if (start === undefined || end === undefined || end < start) return undefined;
+  if (start === undefined || end === undefined || end - start < 10_000) return undefined;
   const seconds = Math.floor((end - start) / 1000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
 function ElapsedTelemetry({ result, now, live }: { result: SubagentSingleResult; now: number; live: boolean }) {
   const elapsed = subagentElapsed(result, now, live);
-  return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={elapsed ? `Total elapsed: ${elapsed}` : 'Elapsed unavailable'}>{elapsed ?? '—'}</span>;
+  return elapsed ? <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span> : null;
 }
 
 function RuntimeTelemetry({ displayCost }: { displayCost?: SubagentDisplayCost }) {

@@ -10,14 +10,14 @@ import { act } from 'preact/test-utils';
 import { ComposerAttachments } from '../../composer/attachments';
 import type { ComposerInput } from '../../../lib/protocol/index.js';
 
-for (const owner of ['composer', 'inline-editor']) {
-  test(`${owner} attachment removal keeps focus on next, previous, then owning textarea`, () => {
+for (const owner of ['composer', 'inline-editor']) for (const kind of ['filesystemPathRef', 'imageBlob'] as const) {
+  test(`${owner} ${kind} attachment removal keeps focus on next, previous, then owning textarea`, () => {
     const container = document.createElement('div');
     document.body.append(container);
     function Harness() {
-      const [inputs, setInputs] = useState<ComposerInput[]>(['one', 'two', 'three'].map(id => ({
-        id, kind: 'filesystemPathRef', path: `/${id}.txt`,
-      } as ComposerInput)));
+      const [inputs, setInputs] = useState<ComposerInput[]>(['one', 'two', 'three'].map((id): ComposerInput => kind === 'imageBlob'
+        ? { id, kind, name: `${id}.txt`, mimeType: 'image/png', dataBase64: 'abc', sizeBytes: 3, source: 'paste' }
+        : { id, kind, path: `/${id}.txt`, name: `${id}.txt`, source: 'picker' }));
       return <><textarea aria-label="Other composer" /><div class={owner}>
         <ComposerAttachments pendingComposerInputs={inputs} attachmentSummary="Files"
           onRemoveInput={id => setInputs(previous => previous.filter(input => input.id !== id))} />

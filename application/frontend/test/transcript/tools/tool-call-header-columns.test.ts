@@ -24,7 +24,7 @@ afterEach(() => { render(null, container); container.remove(); clearLazyDetailCa
 function paint(call: ToolCall, open = false) {
   act(() => render(h(ToolCallHeader, {
     open, name: call.name, status: call.status, summary: 'a.ts', summaryPath: '/repo/a.ts', toolCall: call,
-    onOpenFile: noop, onToggle: noop,
+    onToggle: noop,
   }), container));
 }
 
@@ -39,52 +39,51 @@ test('raw inspection lives on the left tool icon, beside rather than inside the 
   assert.ok(toggle.querySelector('button, [role="button"]') === null);
   assert.ok(header.querySelector('.tool-call-actions .tool-call-raw-action') === null);
   assert.equal(header.querySelectorAll('[aria-label="Inspect read model exchange"]').length, 1);
-  assert.ok(header.querySelector('.tool-call-actions [aria-label="Open file /repo/a.ts"]'));
+  assert.equal(header.querySelector('.tool-call-actions'), null);
 });
 
-test('only present metadata and file actions render; empty completed calls reserve no placeholders', () => {
+test('only present metadata renders; empty completed calls reserve no placeholders', () => {
   const calls: ToolCall[] = [base, { ...base, status: 'running' }, { ...base, status: 'failed' }, { ...base, name: 'custom', input: {} }];
   act(() => render(h('div', {}, calls.map((call, index) => h(ToolCallHeader, {
     key: index, open: false, name: call.name, status: call.status, summary: index === 3 ? null : 'a.ts',
     summaryPath: index === 3 ? undefined : '/repo/a.ts', toolCall: call,
-    sizeHint: index === 0 ? '2 KB' : undefined, durationMs: index === 0 || index === 2 ? 1250 : undefined,
+    durationMs: index === 0 || index === 2 ? 10000 : undefined,
     errorDetail: index === 2 ? 'Read denied' : undefined,
-    onOpenFile: noop, onToggle: noop,
+    onToggle: noop,
   }))), container));
   const rows = [...container.querySelectorAll('.tool-call-header')];
   assert.equal(rows.length, 4);
   assert.deepEqual([...rows[0].querySelector('.tool-call-header-meta')!.children].map((item) => item.className), [
-    'tool-call-size', 'tool-call-duration',
+    'tool-call-duration',
   ]);
-  assert.equal(rows[0].querySelector('.tool-call-size')?.textContent, '2 KB');
+  assert.equal(rows[0].querySelector('.tool-call-size'), null);
   assert.ok(rows[0].querySelector('.tool-call-duration')?.textContent);
-  assert.ok(rows[0].querySelector('.tool-call-actions [aria-label="Open file /repo/a.ts"]'));
+  assert.equal(rows[0].querySelector('.tool-call-actions'), null);
   assert.deepEqual([...rows[1].querySelector('.tool-call-header-meta')!.children].map((item) => item.className), [
     'tool-call-status-spinner',
   ]);
   assert.deepEqual([...rows[2].querySelector('.tool-call-header-meta')!.children].map((item) => item.className), [
     'tool-call-duration', 'status-chip status-chip-failed has-error-detail',
   ]);
-  assert.ok(rows[2].querySelector('.tool-call-actions [aria-label="Open file /repo/a.ts"]'));
+  assert.equal(rows[2].querySelector('.tool-call-actions'), null);
   assert.ok(rows[3].querySelector('.tool-call-header-meta') === null);
   assert.ok(rows[3].querySelector('.tool-call-actions') === null);
   assert.ok(rows[3].querySelector('.tool-call-context, .tool-call-activity, .tool-call-state-column') === null);
 });
 
-test('file actions precede metadata so they cannot reserve space after the visible trailing item', () => {
+test('removed file actions never reserve trailing space', () => {
   for (const status of ['completed', 'failed', 'running', 'ready'] as const) {
     for (const summaryPath of ['/repo/a.ts', undefined]) {
       act(() => render(h(ToolCallHeader, {
         open: false, name: summaryPath ? 'read' : 'bash', status, summary: 'target', summaryPath,
-        durationMs: 1250, onOpenFile: noop, onToggle: noop,
+        durationMs: 10000, onToggle: noop,
       }), container));
       const header = container.querySelector('.tool-call-header')!;
       const metadata = header.querySelector('.tool-call-header-meta')!;
       assert.ok(header.lastElementChild === metadata);
       assert.ok(metadata.nextElementSibling === null, 'no hidden action after duration or activity');
       const actions = header.querySelector('.tool-call-actions');
-      if (summaryPath) assert.ok(actions?.nextElementSibling === metadata);
-      else assert.ok(actions === null, 'no empty action slot');
+      assert.ok(actions === null, 'no file action slot');
     }
   }
 });
@@ -92,12 +91,12 @@ test('file actions precede metadata so they cannot reserve space after the visib
 test('pending markers and running wheel render directly in metadata without stale duration', () => {
   for (const status of ['drafting', 'ready', 'running', 'completed'] as const) {
     act(() => render(h(ToolCallHeader, {
-      open: false, name: base.name, status, summary: 'a.ts', durationMs: 1250,
-      onOpenFile: noop, onToggle: noop,
+      open: false, name: base.name, status, summary: 'a.ts', durationMs: 10000,
+      onToggle: noop,
     }), container));
     const meta = container.querySelector('.tool-call-header-meta')!;
     if (status === 'completed') {
-      assert.equal(meta.querySelector('.tool-call-duration')?.textContent, '1.3s');
+      assert.equal(meta.querySelector('.tool-call-duration')?.textContent, '10.0s');
       assert.ok(meta.querySelector('[role="img"]') === null, 'no completion check');
     } else {
       assert.ok(meta.querySelector('.tool-call-duration') === null);
@@ -107,23 +106,23 @@ test('pending markers and running wheel render directly in metadata without stal
   }
 });
 
-test('rightmost metadata follows failure, activity, duration, pruning, then size precedence', () => {
+test('rightmost metadata follows failure, activity, duration, then pruning precedence', () => {
   const cases: [ToolCall['status'], number | undefined, string][] = [
-    ['failed', 1250, '.status-chip-failed'],
+    ['failed', 10000, '.status-chip-failed'],
     ['failed', undefined, '.status-chip-failed'],
     ['failed', 0, '.status-chip-failed'],
-    ['running', 1250, '.tool-call-status-spinner'],
-    ['ready', 1250, '.tool-call-status-draft'],
-    ['drafting', 1250, '.tool-call-status-draft'],
-    ['completed', 1250, '.tool-call-duration'],
-    ['completed', 0, '.tool-call-duration'],
+    ['running', 10000, '.tool-call-status-spinner'],
+    ['ready', 10000, '.tool-call-status-draft'],
+    ['drafting', 10000, '.tool-call-status-draft'],
+    ['completed', 10000, '.tool-call-duration'],
+    ['completed', 0, '.tool-result-pruning-badge'],
     ['completed', undefined, '.tool-result-pruning-badge'],
   ];
   for (const [status, durationMs, rightmost] of cases) {
     act(() => render(h(ToolCallHeader, {
       open: false, name: 'read', status, summary: 'a.ts', summaryPath: '/repo/a.ts',
-      durationMs, sizeHint: '2 KB', pruningBadge: { rules: ['strip-ansi'], tokensSaved: 42 },
-      onOpenFile: noop, onToggle: noop,
+      durationMs, pruningBadge: { rules: ['strip-ansi'], tokensSaved: 42 },
+      onToggle: noop,
     }), container));
     const header = container.querySelector('.tool-call-header')!;
     const meta = header.querySelector('.tool-call-header-meta')!;
@@ -131,17 +130,17 @@ test('rightmost metadata follows failure, activity, duration, pruning, then size
     assert.ok(meta.lastElementChild?.matches(rightmost), `${status} with duration ${durationMs}: ${rightmost} wins`);
   }
   act(() => render(h(ToolCallHeader, {
-    open: false, name: 'read', status: 'completed', summary: 'a.ts', sizeHint: '2 KB',
-    onOpenFile: noop, onToggle: noop,
+    open: false, name: 'read', status: 'completed', summary: 'a.ts',
+    onToggle: noop,
   }), container));
-  assert.ok(container.querySelector('.tool-call-header-meta')?.lastElementChild?.matches('.tool-call-size'));
+  assert.equal(container.querySelector('.tool-call-header-meta'), null);
 });
 
 test('failure remains rightmost alongside execution time, and keeps its accessible copy control', () => {
   act(() => render(h(ToolCallHeader, {
-    open: false, name: base.name, status: 'failed', summary: 'a.ts', sizeHint: '2 KB', durationMs: 1250,
+    open: false, name: base.name, status: 'failed', summary: 'a.ts', durationMs: 10000,
     errorDetail: 'Read denied', pruningBadge: { rules: ['strip-ansi'], tokensSaved: 42 },
-    onOpenFile: noop, onToggle: noop,
+    onToggle: noop,
   }), container));
   const meta = container.querySelector('.tool-call-header-meta')!;
   const failure = meta.querySelector<HTMLElement>('.status-chip-failed')!;
@@ -158,11 +157,67 @@ test('failure remains rightmost alongside execution time, and keeps its accessib
   assert.ok(meta.querySelector('.tool-call-size, .tool-result-pruning-badge') === null);
 });
 
+test('settled duration threshold is inclusive for completed and failed calls', () => {
+  for (const status of ['completed', 'failed'] as const) {
+    for (const durationMs of [9999, 10000]) {
+      act(() => render(h(ToolCallHeader, {
+        open: false, name: 'read', status, summary: null, durationMs, onToggle: noop,
+      }), container));
+      assert.equal(container.querySelector('.tool-call-duration')?.textContent ?? null, durationMs === 10000 ? '10.0s' : null);
+    }
+  }
+});
+
+test('live elapsed uses the start epoch, ticks, and releases its clock on settle and unmount', () => {
+  const originalNow = Date.now;
+  const originalSet = globalThis.setInterval;
+  const originalClear = globalThis.clearInterval;
+  let now = 20000;
+  const ticks = new Map<number, () => void>();
+  let nextId = 0;
+  Date.now = () => now;
+  globalThis.setInterval = ((callback: () => void) => {
+    ticks.set(++nextId, callback);
+    return nextId;
+  }) as unknown as typeof setInterval;
+  globalThis.clearInterval = ((id: number) => { ticks.delete(id); }) as unknown as typeof clearInterval;
+  try {
+    paint({ ...base, status: 'running', startedAt: 18000, durationMs: 999000 });
+    assert.ok(container.querySelector('.tool-call-duration') === null);
+    assert.equal(ticks.size, 1);
+    now = 27999;
+    act(() => ticks.forEach((tick) => tick()));
+    assert.ok(container.querySelector('.tool-call-duration') === null);
+    now = 28000;
+    act(() => ticks.forEach((tick) => tick()));
+    assert.equal(container.querySelector('.tool-call-duration')?.textContent, '10.0s');
+    now += 1000;
+    act(() => ticks.forEach((tick) => tick()));
+    assert.equal(container.querySelector('.tool-call-duration')?.textContent, '11.0s');
+    act(() => render(h(ToolCallHeader, { open: false, name: 'read', status: 'completed', summary: null, durationMs: 10000, onToggle: noop }), container));
+    assert.equal(ticks.size, 0);
+    now += 10000;
+    act(() => ticks.forEach((tick) => tick()));
+    assert.equal(container.querySelector('.tool-call-duration')?.textContent, '10.0s');
+    paint({ ...base, status: 'running', durationMs: 999000 });
+    assert.equal(container.querySelector('.tool-call-duration'), null);
+    assert.equal(ticks.size, 0);
+    paint({ ...base, status: 'running', startedAt: 18000 });
+    assert.equal(ticks.size, 1);
+    act(() => render(null, container));
+    assert.equal(ticks.size, 0);
+  } finally {
+    Date.now = originalNow;
+    globalThis.setInterval = originalSet;
+    globalThis.clearInterval = originalClear;
+  }
+});
+
 test('pruning icon exposes its accessible savings label', () => {
   act(() => render(h(ToolCallHeader, {
     open: false, name: base.name, status: base.status, summary: 'a.ts', toolCall: base,
     pruningBadge: { rules: ['strip-ansi'], tokensSaved: 12345 },
-    onOpenFile: noop, onToggle: noop,
+    onToggle: noop,
   }), container));
   const badge = container.querySelector<HTMLElement>('.tool-call-header-meta .tool-result-pruning-badge')!;
   assert.equal(badge.textContent?.trim(), '✂');

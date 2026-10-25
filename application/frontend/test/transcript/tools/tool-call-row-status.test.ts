@@ -25,7 +25,7 @@ test('completion has no glyph but retains the accessible Completed row label', (
   assert.equal(renderToString(h(ToolCallStatusGlyph, { status: 'completed' })), '');
   const html = renderToString(h(ToolCallHeader, {
     open: false, name: 'read', status: 'completed', summary: 'a.ts',
-    onOpenFile: () => {}, onToggle: () => {},
+    onToggle: () => {},
   }));
   assert.match(html, /aria-label="read tool call, Completed\./);
   assert.doesNotMatch(html, /tool-call-status-completed|role="img"/);
@@ -34,7 +34,7 @@ test('completion has no glyph but retains the accessible Completed row label', (
 test('failure retains the visible error-copy control instead of a quiet success mark', () => {
   const html = renderToString(h(ToolCallHeader, {
     open: false, name: 'bash', status: 'failed', summary: 'pnpm test', errorDetail: 'Command failed',
-    onOpenFile: () => {}, onToggle: () => {},
+    onToggle: () => {},
   }));
   assert.match(html, /status-chip-failed/);
   assert.match(html, /Copy tool-call error detail/);

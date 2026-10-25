@@ -382,7 +382,7 @@ test('header metrics remain grouped without status or activity decoration', () =
   const metrics = header.querySelector('.subagent-header-metrics')!;
   assert.equal(metrics.querySelector('.subagent-inline-context')?.textContent, '1.5k/200k');
   assert.equal(metrics.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
-  assert.equal(metrics.querySelector('.subagent-telemetry-elapsed')?.textContent, '0:02');
+  assert.ok(metrics.querySelector('.subagent-telemetry-elapsed') === null, 'short elapsed stays hidden');
   for (const selector of ['.subagent-activity', '.subagent-activity-dot', '.status-chip']) assert.ok(header.querySelector(selector) === null);
 });
 
@@ -416,12 +416,12 @@ test('responsive inline usage omits unknown and invalid values without inventing
   assert.ok(container.querySelector('.subagent-inline-turns') === null);
 });
 
-test('completed legacy subagent keeps model, elapsed and cost inline while recovery and reasoning stay in the tooltip', async () => {
+test('completed legacy subagent keeps model and cost inline without short elapsed while recovery and reasoning stay in the tooltip', async () => {
   mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
   const header = container.querySelector<HTMLElement>('.subagent-header');
   assert.ok(header);
   assert.equal(header?.getAttribute('aria-expanded'), 'false');
-  assert.match(header?.querySelector('.subagent-telemetry-elapsed')?.textContent ?? '', /^0:02$/);
+  assert.ok(header?.querySelector('.subagent-telemetry-elapsed') === null);
   assert.ok(container.querySelector('.subagent-footer') === null);
   assert.match(header.querySelector('.subagent-model-label')?.textContent ?? '', /worker-model/);
   assert.ok(header.querySelector('.subagent-reasoning-label') === null);
@@ -1102,7 +1102,7 @@ test('role icons preserve full accessible inspector names and stable unknown met
     const cells = container.querySelector('.subagent-header-metrics');
     assert.equal(cells?.children.length, 3);
     assert.equal(cells?.children[0]?.textContent, '—/—');
-    assert.equal(cells?.children[2]?.textContent, '—');
+    assert.ok(cells?.querySelector('.subagent-telemetry-elapsed') === null, 'unknown elapsed stays hidden');
     assert.ok(container.querySelector('.subagent-header .status-chip') === null);
   }
 });

@@ -49,17 +49,36 @@ test('attachment sizes preserve bytes below one KB and rounded KB above it', () 
   }
 });
 
-test('attachment cards retain their accessible summary and show the included attachment count', () => {
+test('attachment cards retain their accessible summary without visible summary text', () => {
   const html = renderToString(h(ComposerAttachments, {
     pendingComposerInputs: [imageInput, pathInput],
     attachmentSummary: '2 attachments',
     onRemoveInput: () => {},
   }));
   assert.match(html, /role="group" aria-label="Pending attachments: 2 attachments"/);
-  assert.match(html, /composer-attachments-summary">Included: 2 attachments<\/div>/);
+  assert.doesNotMatch(html, /Included:|composer-attachments-summary/);
   assert.match(html, /image.png/);
   assert.match(html, /panel.tsx/);
   assert.equal(renderToString(h(ComposerAttachments, { pendingComposerInputs: [], attachmentSummary: '', onRemoveInput: () => {} })), '');
+});
+
+test('image cards contain only the preview and accessible removal control, without metadata tooltips', () => {
+  const html = renderToString(h(ComposerAttachments, {
+    pendingComposerInputs: [imageInput], attachmentSummary: '1 image', onRemoveInput: () => {},
+  }));
+  assert.match(html, /attachment-card--image/);
+  assert.match(html, /<img[^>]+alt="image.png"/);
+  assert.match(html, /aria-label="Remove image.png"/);
+  assert.doesNotMatch(html, /title=|attachment-card-meta|attachment-card-name|attachment-card-detail|1440|41 KB|tabindex=|role="button"/);
+});
+
+test('file cards retain visible metadata and their full-path tooltip', () => {
+  const html = renderToString(h(ComposerAttachments, {
+    pendingComposerInputs: [pathInput], attachmentSummary: '1 path', onRemoveInput: () => {},
+  }));
+  assert.match(html, /title="panel.tsx · \/workspace\/src\/panel.tsx"/);
+  assert.match(html, /attachment-card-detail">src\/panel.tsx/);
+  assert.match(html, /attachment-card-name-prefix">panel.tsx/);
 });
 
 test('filesystem detail shows the immediate parent while title preserves the full native path', () => {

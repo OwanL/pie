@@ -404,7 +404,7 @@ test.describe('subagent layout under constrained touch widths', () => {
       }
       await expect(header(unknown)).toContainText('—/—');
       await expect(unknown.locator('.subagent-telemetry-cost')).toHaveText('—');
-      await expect(unknown.locator('.subagent-telemetry-elapsed')).toHaveText('—');
+      await expect(unknown.locator('.subagent-telemetry-elapsed')).toHaveCount(0);
       await expectContained(unknown);
       await parent.locator('.collapsible-chevron').first().click();
       const nested = parent.locator('.tool-call-subagent');

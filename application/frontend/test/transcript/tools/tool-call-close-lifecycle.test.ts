@@ -140,13 +140,14 @@ test('whole-row disclosure stays a focusable native button with accurate aria wi
   assert.equal(header.getAttribute('aria-controls'), null);
 });
 
-test('file opening and raw inspection are distinct sibling actions, not children of the toggle', () => {
+test('file paths retain context-menu identity without an open action and inspection stays outside the toggle', () => {
   let opened = '';
   act(() => render(h(ToolCallCard, { toolCall: call('read', 'completed'), workingDirectory: '/repo', onOpenFile: (path) => { opened = path; }, onContextMenu: noop }), container));
   const expand = container.querySelector('.tool-call-toggle')!;
   assert.ok(expand.querySelector('button, [role="button"]') === null);
-  act(() => (container.querySelector('[aria-label="Open file /repo/a.ts"]') as HTMLButtonElement).click());
-  assert.equal(opened, '/repo/a.ts');
+  assert.equal(container.querySelector('[aria-label="Open file /repo/a.ts"]'), null);
+  assert.equal(expand.getAttribute('data-pie-file-path'), '/repo/a.ts');
+  assert.equal(opened, '');
   assert.equal(expand.getAttribute('aria-expanded'), 'false');
   act(() => (container.querySelector('[aria-label="Inspect read model exchange"]') as HTMLButtonElement).click());
   assert.equal(expand.getAttribute('aria-expanded'), 'false');
@@ -176,7 +177,7 @@ test('ordinary tool rail collapses, returns focus to its header, and exposes an 
   assert.ok(document.activeElement === header, 'focus returns to the owning disclosure button');
 });
 
-test('expanded Model exchange reuses inspection without closing details and Escape restores its trigger', () => {
+test('expanded tools omit the Model exchange footer while icon inspection preserves disclosure and focus', () => {
   const original = window.setTimeout;
   const pending: Array<() => void> = [];
   window.setTimeout = ((fn: () => void) => { pending.push(fn); return pending.length; }) as typeof window.setTimeout;
@@ -184,8 +185,8 @@ test('expanded Model exchange reuses inspection without closing details and Esca
     paint(call('read', 'completed'));
     assert.ok(container.querySelector('.tool-call-exchange-action') === null);
     toggle();
-    const trigger = container.querySelector('.tool-call-exchange-action') as HTMLButtonElement;
-    assert.equal(trigger.textContent, 'Model exchange');
+    assert.equal(container.querySelector('.tool-call-exchange-action'), null);
+    const trigger = container.querySelector('[aria-label="Inspect read model exchange"]') as HTMLButtonElement;
     assert.ok(container.querySelector('[aria-label="Inspect read model exchange"]'), 'header shortcut remains');
     act(() => trigger.focus());
     act(() => pending.splice(0).forEach((fn) => fn()));

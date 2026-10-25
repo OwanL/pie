@@ -20,7 +20,6 @@ function renderHeader(toolCall?: ToolCall, options: { name?: string; summary?: s
     summaryPath: options.summaryPath ?? '/repo/src/example.ts',
     toolCall,
     onToggle: noop,
-    onOpenFile: noop,
   }));
 }
 

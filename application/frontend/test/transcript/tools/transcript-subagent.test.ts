@@ -906,6 +906,10 @@ test('subagentSingleResultToChatMessages returns no rows for running results wit
 
 test('elapsed uses padded clock time and terminal observations rather than remount time', () => {
   const child = { agent: 'worker', task: 't', exitCode: -1, messages: [], startedAt: 1000, runningTools: ['read'] } as any;
+  assert.equal(subagentElapsed(child, 10999, true), undefined);
+  assert.equal(subagentElapsed(child, 11000, true), '0:10');
+  assert.equal(subagentElapsed({ ...child, completedAt: 10999 }, 999000, false), undefined);
+  assert.equal(subagentElapsed({ ...child, completedAt: 11000 }, 999000, false), '0:10');
   assert.equal(subagentElapsed(child, 59000, true), '0:58');
   assert.equal(subagentElapsed(child, 103000, true), '1:42');
   assert.equal(subagentElapsed(child, 139000, true), '2:18');

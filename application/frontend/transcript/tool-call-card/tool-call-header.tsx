@@ -13,7 +13,7 @@ import type { ToolCallHeaderSummaryModel } from './types';
 import { ToolResultPruningBadge, type ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
 import { ToolIcon, toolIconKind } from './tool-icon';
 import { RawToolInspector } from './raw-tool-inspector';
-import { splitSummaryPath } from '../../file-changes/file-path';
+import { useToolElapsed } from './use-tool-elapsed';
 import { normalizeToolCallName } from '../tool-call-summary-model';
 import { toolHeaderDetail } from './header-details';
 import { readOutputPreview } from './read-output-preview';
@@ -27,18 +27,16 @@ interface ToolCallHeaderProps {
   summary: string | null;
   summaryPath?: string;
   summaryModel?: ToolCallHeaderSummaryModel;
-  sizeHint?: string;
   errorDetail?: string;
   pruningBadge?: ToolResultPruningBadgeData | null;
   durationMs?: number;
   ariaControls?: string;
   prefs?: ChatPrefs;
   toolCall?: ToolCall;
-  onOpenFile: (path: string) => void;
   onToggle: () => void;
 }
 
-export function ToolCallHeader({ open, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, prefs = DEFAULT_CHAT_PREFS, toolCall, onOpenFile, onToggle }: ToolCallHeaderProps) {
+export function ToolCallHeader({ open, name, nameTitle, status, summary, summaryPath, summaryModel, errorDetail, pruningBadge, durationMs, ariaControls, prefs = DEFAULT_CHAT_PREFS, toolCall, onToggle }: ToolCallHeaderProps) {
   const kind = toolIconKind(toolCall?.name ?? name);
   const accessibleStatus = status === 'drafting' ? 'Drafting' : status === 'ready' ? 'Ready' : status === 'running' ? 'Running' : status === 'failed' ? 'Failed' : 'Completed';
   const model = summaryModel ?? buildToolCallHeaderSummaryModel(name, summary, summaryPath);
@@ -46,18 +44,17 @@ export function ToolCallHeader({ open, name, nameTitle, status, summary, summary
   const isSubagent = normalizeToolCallName(toolCall?.name ?? name) === 'subagent';
   const filenameOnly = model?.kind === 'path' && !isSubagent;
   const filePath = filenameOnly ? summaryPath ?? model.title ?? model.text : undefined;
-  const duration = (status === 'completed' || status === 'failed') && typeof durationMs === 'number' && durationMs >= 0 ? formatDuration(durationMs) : null;
+  const elapsed = useToolElapsed(status, toolCall?.startedAt, durationMs);
+  const duration = elapsed !== null ? formatDuration(elapsed) : null;
   const failureTiming = duration ? `Tool execution time: ${duration}` : undefined;
   const detail = toolCall && !isSubagent ? toolHeaderDetail(toolCall) : null;
   const preview = toolCall && !open ? readOutputPreview(toolCall) : null;
   const active = status === 'drafting' || status === 'ready' || status === 'running';
-  const showSize = status !== 'failed' && !!sizeHint;
   const showPruning = status !== 'failed' && !!pruningBadge && pruningBadge.tokensSaved > 0;
-  const hasMetadata = showSize || showPruning || duration || active || status === 'failed';
-  const canOpenFile = !!summaryPath && !!splitSummaryPath(summaryPath).fileSection;
+  const hasMetadata = showPruning || duration || active || status === 'failed';
   return (
     <div class="tool-call-header">
-      {/* Icon inspection, disclosure and file/error actions are siblings.
+      {/* Icon inspection, disclosure and error actions are siblings.
           Never nest another interactive target inside the native toggle. */}
       {toolCall ? <RawToolInspector toolCall={toolCall} /> : <span class="tool-call-kind-icon"><ToolIcon kind={kind} /></span>}
       <button type="button" class="tool-call-toggle" aria-expanded={open} aria-controls={ariaControls} data-pie-file-path={status !== 'drafting' && status !== 'ready' ? filePath : undefined}
@@ -73,13 +70,8 @@ export function ToolCallHeader({ open, name, nameTitle, status, summary, summary
         </span>
         {isSubagent && <CollapsibleChevron open={open} class="tool-call-disclosure" />}
       </button>
-      {canOpenFile && <div class="tool-call-actions">
-        <button type="button" class="tool-call-action" aria-label={`Open file ${summaryPath}`} title="Open file" onClick={() => onOpenFile(summaryPath!)}><ToolIcon kind="open" /></button>
-      </div>}
-      {/* Right-edge priority: failure > live/pending state > duration > pruning > size.
-          Keep low-priority metadata first and file actions outside the trailing edge. */}
+      {/* Right-edge priority: failure > live/pending state > duration > pruning. */}
       {hasMetadata && <div class="tool-call-header-meta">
-        {showSize && <span class="tool-call-size" title={sizeHint}>{sizeHint}</span>}
         {showPruning && <ToolResultPruningBadge badge={pruningBadge} compact />}
         {duration && <span class="tool-call-duration" title="Tool execution time">{duration}</span>}
         {status === 'failed' && <StatusChip tone="failed" label="Failed" copyText={errorDetail}

@@ -510,11 +510,9 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
     status: 'failed',
     summary: 'src/example.ts',
     summaryPath: '/repo/src/example.ts',
-    sizeHint: '+3 lines',
     errorDetail: 'boom',
-    durationMs: 1500,
+    durationMs: 10000,
     onToggle: noop,
-    onOpenFile: noop,
   }));
 
   assert.match(headerHtml, /title="\/repo\/src\/example.ts"/);
@@ -525,7 +523,7 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(headerHtml, /Copy tool-call error detail/);
   assert.doesNotMatch(headerHtml, /\+3 lines/, 'failure takes priority over size in the context column');
   assert.match(headerHtml, /Tool execution time/);
-  assert.match(headerHtml, /1\.5s/);
+  assert.match(headerHtml, /10\.0s/);
 
   const expandedToolHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall(),

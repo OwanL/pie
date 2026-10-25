@@ -18,7 +18,6 @@ import { formatToolCallResultForDisplay } from './format';
 import { buildToolCallHeaderSummaryModel } from './summary-model';
 import { ToolCallBody } from './tool-call-body';
 import { ToolCallHeader } from './tool-call-header';
-import { RawToolInspector } from './raw-tool-inspector';
 import { provisionalToolSummary } from './provisional';
 import { liveToolPreview } from './display-model';
 import type { ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
@@ -68,9 +67,9 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
       role="group" aria-label={`${presentation.name} tool call, ${isProvisional ? (toolCall.status === 'drafting' ? 'Drafting' : 'Ready') : toolCall.status}`}
       onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}>
       <ToolCallHeader open={open} name={presentation.name} status={toolCall.status} summary={headerSummary} summaryPath={headerPath}
-        summaryModel={summaryModel ?? undefined} sizeHint={presentation.sizeHint} errorDetail={errorDetail} pruningBadge={pruningBadge}
+        summaryModel={summaryModel ?? undefined} errorDetail={errorDetail} pruningBadge={pruningBadge}
         durationMs={toolCall.durationMs} ariaControls={open ? bodyId : undefined} prefs={prefs} toolCall={toolCall}
-        onOpenFile={onOpenFile} onToggle={() => setOpen((value) => !value)} />
+        onToggle={() => setOpen((value) => !value)} />
       {preview && <div class="tool-call-live-preview" role="group" aria-label={`${presentation.name} ${preview.provisional ? 'draft input' : 'live result'} preview`}>
         {preview.truncated && <span class="tool-call-preview-truncation" title="Recent content only. Expand for all available details."><span aria-hidden="true">…</span><span class="sr-only">Earlier preview content omitted.</span></span>}
         {preview.provisional && preview.editIndex !== undefined && <span class="tool-call-preview-label">replacement {preview.editIndex}</span>}
@@ -80,11 +79,6 @@ export function ToolCallCard({ toolCall, autoExpand = false, activityTailLines, 
         {renderDetails && !isProvisional ? renderDetails(renderedCall) : <ToolCallBody toolCall={renderedCall} prefs={prefs} headerPath={headerPath} workingDirectory={workingDirectory} onOpenFile={onOpenFile} />}
         {toolCall.detailRef && detail.state.status !== 'loaded' && <div class="tool-call-detail-status" role="status">
           {detail.state.status === 'loading' || detail.state.status === 'idle' ? 'Loading details…' : <><span>{detail.state.message}</span><button type="button" onClick={detail.retry}>Retry</button></>}
-        </div>}
-        {!isSubagent && <div class="tool-call-inspection-actions">
-          <RawToolInspector toolCall={toolCall} triggerClassName="tool-call-exchange-trigger">
-            <button type="button" class="tool-call-exchange-action" onClick={(e) => e.stopPropagation()}>Model exchange</button>
-          </RawToolInspector>
         </div>}
         <CollapsibleCloseFooter onCollapse={collapse} label={isSubagent ? 'Collapse' : 'Collapse details'} />
         <CollapsibleGutter onCollapse={collapse} label={isSubagent ? 'Collapse' : `Collapse ${presentation.name} details`} class={!isSubagent ? 'tool-call-collapse-rail' : undefined} />

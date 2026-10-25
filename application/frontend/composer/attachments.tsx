@@ -46,7 +46,6 @@ export function ComposerAttachments({
 
   return (
     <div ref={groupRef} class="composer-attachments" role="group" aria-label={`Pending attachments: ${attachmentSummary}`}>
-      <div class="composer-attachments-summary">Included: {attachmentSummary}</div>
       <div class="composer-attachments-strip">
         {pendingComposerInputs.map((input) => {
           const displayName = composerInputDisplayName(input);
@@ -54,10 +53,10 @@ export function ComposerAttachments({
           const nameParts = composerInputNameParts(displayName);
 
           return (
-            <div key={input.id} class="attachment-card" title={composerInputTitle(input)}>
+            <div key={input.id} class={`attachment-card${input.kind === 'imageBlob' ? ' attachment-card--image' : ''}`} title={input.kind === 'imageBlob' ? undefined : composerInputTitle(input)}>
               {input.kind === 'imageBlob' ? (
                 <div class="attachment-card-thumb">
-                  <img tabIndex={0} role="button" class="attachment-card-image" src={imagePreviewSrc(input)} alt={displayName} />
+                  <img class="attachment-card-image" src={imagePreviewSrc(input)} alt={displayName} />
                 </div>
               ) : (
                 <div class="attachment-card-icon" aria-hidden="true">
@@ -69,13 +68,13 @@ export function ComposerAttachments({
                   </svg>
                 </div>
               )}
-              <div class="attachment-card-meta">
+              {input.kind !== 'imageBlob' && <div class="attachment-card-meta">
                 <span class="attachment-card-name" aria-label={displayName}>
                   <span class="attachment-card-name-prefix">{nameParts.prefix}</span>
                   {nameParts.suffix && <span class="attachment-card-name-suffix">{nameParts.suffix}</span>}
                 </span>
                 <span class="attachment-card-detail">{detail}</span>
-              </div>
+              </div>}
               <button
                 class="attachment-card-remove"
                 type="button"
