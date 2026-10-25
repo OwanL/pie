@@ -566,7 +566,7 @@ export class SessionCollaborationCoordinator {
     if (!Number.isSafeInteger(afterRevision) || (afterRevision as number) < 0) throw new Error('afterRevision must be a non-negative record version.');
     const records = () => {
       if (ids) return ids.flatMap(id => this.tasks.inspect(owner, id));
-      return this.tasks.inspect(owner).sort((left, right) => right.version - left.version).slice(0, 16);
+      return [...this.tasks.inspect(owner)].sort((left, right) => right.version - left.version).slice(0, 16);
     };
     const result = (reason: string) => {
       const tasks = records();

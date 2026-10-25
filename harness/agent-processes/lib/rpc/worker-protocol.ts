@@ -1713,10 +1713,11 @@ function validateHeartbeat(value: Record<string, unknown>, requireSeq: boolean):
   if (!isSafeNonNegativeInteger(value.heartbeat.eventLoopDelayMs)) return 'heartbeat.eventLoopDelayMs must be a non-negative safe integer.';
   if (value.heartbeat.lastDurableAppendId !== undefined && !boundedString(value.heartbeat.lastDurableAppendId, MAX_ID_BYTES)) return 'heartbeat.lastDurableAppendId must be a bounded non-empty string.';
   if (value.heartbeat.memory !== undefined) {
-    if (!isRecord(value.heartbeat.memory)) return 'heartbeat.memory must be an object.';
+    const memory = value.heartbeat.memory;
+    if (!isRecord(memory)) return 'heartbeat.memory must be an object.';
     const memoryKeys = ['observedAt', 'rssBytes', 'heapUsedBytes', 'externalBytes'];
-    const extraMemory = exactKeys(value.heartbeat.memory, memoryKeys);
-    if (extraMemory || memoryKeys.some(key => !isSafeNonNegativeInteger(value.heartbeat.memory[key]))) return 'heartbeat.memory must contain non-negative safe integer measurements.';
+    const extraMemory = exactKeys(memory, memoryKeys);
+    if (extraMemory || memoryKeys.some(key => !isSafeNonNegativeInteger(memory[key]))) return 'heartbeat.memory must contain non-negative safe integer measurements.';
   }
   return undefined;
 }

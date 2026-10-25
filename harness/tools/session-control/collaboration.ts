@@ -52,7 +52,6 @@ export function createSessionCollaborationTools(request: SessionControlToolReque
   const legacy = createSessionControlTool(request);
   const properties = Object.fromEntries(Object.entries(SessionControlParameters.properties)
     .filter(([key]) => !['replyTo', 'expectReply', 'fulfills'].includes(key)));
-  properties.action = StringEnum(['list', 'create', 'read', 'settings.get', 'settings.set', 'interrupt', 'close', 'cleanup', 'operation.status'] as const);
   properties.address = Type.Optional(target);
   properties.self = Type.Optional(Type.Boolean({ description: 'Use true to target the authenticated calling primary session, including when unnamed. For subagent read, this is its owning primary session. Not valid for list, create, cleanup, or operation.status; mutually exclusive with title and address.' }));
   properties.settings = Type.Optional(Type.Object(SessionControlParameters.properties.settings.properties, {
@@ -80,8 +79,8 @@ export function createSessionCollaborationTools(request: SessionControlToolReque
       'Creation/configuration/assignment may partially succeed. If an acknowledgement is lost, inspect operation.status using the returned requestKey. Never automatically recreate or repeat an uncertain operation.',
       'Task/mailbox/resource records last for this coordinator lifetime. After restart unavailable does not mean work never happened. No replay is performed.',
     ],
-    parameters: Type.Object(properties, { additionalProperties: false }),
-    async execute(id, raw, signal, onUpdate) {
+    parameters: Type.Object({ ...properties, action: StringEnum(['list', 'create', 'read', 'settings.get', 'settings.set', 'interrupt', 'close', 'cleanup', 'operation.status'] as const) }, { additionalProperties: false }),
+    async execute(id, raw, signal, onUpdate, ctx) {
       const args = raw as WorkerJsonObject;
       if (!['list', 'create', 'read', 'settings.get', 'settings.set', 'interrupt', 'close', 'cleanup', 'operation.status'].includes(String(args.action))) throw new Error('Unknown session lifecycle operation. Use session_send for information or session_assign for work.');
       if (args.action === 'interrupt' || args.address !== undefined) {
@@ -89,7 +88,7 @@ export function createSessionCollaborationTools(request: SessionControlToolReque
         if (typeof action !== 'string' || !['read', 'settings.get', 'settings.set', 'interrupt', 'close'].includes(action)) throw new Error('address is supported only for an explicit existing-session operation.');
         return call(action as WorkerSessionControlAction, payload, signal, ['settings.set', 'interrupt', 'close'].includes(action));
       }
-      return legacy.execute(id, raw, signal, onUpdate);
+      return legacy.execute(id, raw, signal, onUpdate, ctx);
     },
   };
   return [control, {

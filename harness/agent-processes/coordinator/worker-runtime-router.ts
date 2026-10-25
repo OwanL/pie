@@ -669,7 +669,9 @@ export class WorkerRuntimeRouter {
     if (existing) return existing;
 
     for (const key of keys) this.releasingSessionPaths.add(key);
-    const barrier: Promise<void> = (async () => {
+    // Defer retirement until the barrier is assigned and registered, including
+    // when retirement throws synchronously.
+    const barrier: Promise<void> = Promise.resolve().then(async () => {
       try {
         await this.retireSessionRuntime(sessionPath, 'session closed');
       } finally {
@@ -678,7 +680,7 @@ export class WorkerRuntimeRouter {
           this.releasingSessionPaths.delete(key);
         }
       }
-    })();
+    });
     for (const key of keys) this.sessionReleaseBarriers.set(key, barrier);
     return barrier;
   }
