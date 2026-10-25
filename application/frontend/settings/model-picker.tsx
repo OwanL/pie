@@ -11,6 +11,7 @@ import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
 import { focusAdjacentControl, useAnchoredOverlay } from '../lib/components/anchored-overlay';
 import { CollapsibleChevron } from '../lib/components/chevron';
 import { Tooltip } from '../lib/components/tooltip';
+import { modelMotionCatalogKey, useModelFavoriteMotion } from './use-model-favorite-motion';
 
 interface ModelPickerProps {
   /** Current selected model spec: either `id` or `provider/id` (when the caller can disambiguate duplicates). */
@@ -170,13 +171,16 @@ function useDropdownPosition(
 function useScrollActiveItem(
   open: boolean,
   activeIndex: number,
+  activeSpec: string | null,
   itemRefs: { current: (HTMLDivElement | null)[] },
 ) {
   useEffect(() => {
     if (!open) return;
     if (activeIndex < 0) return;
     itemRefs.current[activeIndex]?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex, open]);
+    // Reordering a favorite preserves the highlighted identity; do not scroll
+    // merely because its index moved. Explicit keyboard navigation still scrolls.
+  }, [activeSpec, open]);
 }
 
 function useHandleSelect(
@@ -319,7 +323,7 @@ function useModelPicker({
   }, inputRef, setQuery, resetNavigation);
   useClickOutside(open, setOpen, triggerRef, listRef);
   useDropdownPosition(open, dropdownDirection, listRef, triggerRef, compact);
-  useScrollActiveItem(open, activeIndex, itemRefs);
+  useScrollActiveItem(open, activeIndex, activeSpec, itemRefs);
 
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
@@ -452,6 +456,7 @@ function ModelPickerRow({
     <div
       key={formatModelSpec(entry.model)}
       id={optionId}
+      data-model-key={formatModelSpec(entry.model)}
       ref={setItemRef}
       class={getRowClass(isSelected, isActive, entry.ineligible)}
       role="option"
@@ -483,6 +488,8 @@ function ModelPickerRow({
 }
 
 interface ModelPickerDropdownProps {
+  motionCatalog: string;
+  motionFavorites: readonly string[];
   listRef: { current: HTMLDivElement | null };
   listId: string;
   dropdownDirection: 'up' | 'down';
@@ -508,6 +515,8 @@ interface ModelPickerDropdownProps {
 }
 
 function ModelPickerDropdown({
+  motionCatalog,
+  motionFavorites,
   listRef,
   listId,
   dropdownDirection,
@@ -530,8 +539,19 @@ function ModelPickerDropdown({
   onLeave,
 }: ModelPickerDropdownProps) {
   const favorites = useContext(ModelFavoritesContext);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  const captureFavoriteMotion = useModelFavoriteMotion(rowsRef, {
+    catalog: motionCatalog, query, sort: `${sort.key}/${sort.descending}`,
+    // Context consumers can render before their parent recomputes sorted rows.
+    // Pair favorites with the entries from that same parent render for FLIP.
+    keys: entries.map(entry => formatModelSpec(entry.model)), favorites: motionFavorites,
+  });
   const toggleFavorite = (entry: ModelPickerEntry | undefined) => {
-    if (entry && !favorites.disabled) favorites.onToggle(formatModelSpec(entry.model));
+    if (entry && !favorites.disabled) {
+      const key = formatModelSpec(entry.model);
+      captureFavoriteMotion(key);
+      favorites.onToggle(key);
+    }
   };
   return (
     <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)} onKeyDown={(e) => {
@@ -587,7 +607,7 @@ function ModelPickerDropdown({
           </span>
         ))}
       </div>
-      <div id={listId} role="listbox" aria-label={ariaLabel} class="model-picker-rows">
+      <div ref={rowsRef} id={listId} role="listbox" aria-label={ariaLabel} class="model-picker-rows">
         {entries.length === 0 ? (
           <div class="model-picker-empty">{query.trim() ? `No models match "${query}"` : 'No models available'}</div>
         ) : (
@@ -644,6 +664,7 @@ export function ModelPicker({
   const favorites = useContext(ModelFavoritesContext);
   const [sort, setSort] = useState<ModelSort>({ key: 'name', descending: false });
   const entries = useMemo(() => sortModelPickerEntries(catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider)), favorites.favorites, sort), [catalogEntries, removedProviderIds, favorites.favorites, sort]);
+  const motionCatalog = useMemo(() => modelMotionCatalogKey(catalogEntries, removedProviderIds), [catalogEntries, removedProviderIds]);
   const provider = value.includes('/') ? value.slice(0, value.indexOf('/')) : '';
   const label = removedProviderIds.includes(provider) ? `${value} · Unavailable (removed provider)` : currentLabel;
   const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
@@ -661,6 +682,8 @@ export function ModelPicker({
 
   const dropdown = state.open && (
     <ModelPickerDropdown
+      motionCatalog={motionCatalog}
+      motionFavorites={favorites.favorites}
       listRef={state.listRef}
       sort={sort}
       onSort={(key) => setSort((previous) => ({ key, descending: previous.key === key ? !previous.descending : false }))}

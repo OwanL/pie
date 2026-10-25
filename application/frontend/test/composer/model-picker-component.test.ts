@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
+import { useState } from 'preact/hooks';
+import { ModelFavoritesContext } from '../../settings/model-favorites';
 import renderToString from 'preact-render-to-string';
 
 import { installDom } from '../helpers/dom';
@@ -31,6 +33,55 @@ function entry(id: string, overrides: Partial<ModelPickerEntry> = {}): ModelPick
     supportsImages: overrides.supportsImages ?? false,
   };
 }
+
+test('favoriting preserves combobox focus, active identity, selection and does not scroll the reordered highlight', async () => {
+  const container = document.createElement('div'); document.body.appendChild(container);
+  const entries = [entry('a'), entry('b')];
+  // Providers rerender around stable children in the real application.
+  const picker = h(ModelPicker, { value: 'test/a', label: 'a', ariaLabel: 'Model', title: 'Model', entries,
+    onChange: () => assert.fail('favorite must not select a model'),
+  });
+  function Harness() {
+    const [favorites, setFavorites] = useState<string[]>([]);
+    return h(ModelFavoritesContext.Provider, { value: { favorites, disabled: false,
+      onToggle: (spec: string) => setFavorites(previous => previous.includes(spec) ? [] : [spec]),
+    }, children: picker });
+  }
+  try {
+    act(() => render(h(Harness, {}), container));
+    act(() => container.querySelector<HTMLButtonElement>('button')!.click());
+    const input = document.querySelector<HTMLInputElement>('.model-picker-search')!;
+    input.focus();
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })); });
+    const active = input.getAttribute('aria-activedescendant');
+    let scrolls = 0;
+    let animations = 0;
+    const rows = document.querySelector<HTMLElement>('.model-picker-rows')!;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height }) as DOMRect;
+    rows.getBoundingClientRect = () => rect(0, 100);
+    for (const row of document.querySelectorAll<HTMLElement>('[role=option]')) {
+      row.scrollIntoView = () => { scrolls++; };
+      row.getBoundingClientRect = () => rect(Array.from(rows.children).indexOf(row) * 20, 20);
+      row.animate = (() => {
+        animations++;
+        return { cancel() {}, onfinish: null } as unknown as Animation;
+      }) as typeof row.animate;
+    }
+    // Exercise context subscribers through the real microtask render queue,
+    // including the dropdown's context-only render before its parent updates.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(input.getAttribute('aria-activedescendant'), active);
+    assert.ok(document.activeElement === input);
+    assert.equal(document.querySelector('[role=option]')?.getAttribute('data-model-key'), 'test/b');
+    assert.equal(document.querySelector('[aria-selected=true]')?.getAttribute('data-model-key'), 'test/a');
+    assert.equal(scrolls, 0);
+    assert.equal(animations, 2, 'context favorite updates must not consume First before the parent sorts keyed rows');
+    assert.equal(document.querySelector('[data-model-key="test/b"]')?.getAttribute('data-model-moving'), '');
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
+    assert.equal(scrolls, 1, 'intentional keyboard navigation still scrolls');
+  } finally { act(() => render(null, container)); container.remove(); }
+});
 
 test('host tombstones filter stale picker entries and retain unavailable selected identity', () => {
   const container = document.createElement('div'); document.body.appendChild(container);

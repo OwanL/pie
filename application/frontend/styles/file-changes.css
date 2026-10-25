@@ -24,6 +24,24 @@
   color: var(--panel-foreground);
 }
 
+/* Only a pin transition clips the rail: idle peek/menu/resize affordances
+   must remain free to escape its layout footprint. */
+.file-changes-rail[data-layout-moving] {
+  min-width: 0;
+  overflow: clip;
+}
+.file-changes-rail[data-layout-moving] .file-changes-drawer-inner {
+  width: var(--file-changes-motion-width) !important;
+  min-width: var(--file-changes-motion-width);
+}
+.file-changes-rail[data-layout-closing] .file-changes-drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--file-changes-motion-width);
+  opacity: 1;
+  transform: none;
+}
+
 /* Hide when there is nothing to show. The component itself also returns null
  * in this case; this rule is a defensive guard. */
 .file-changes-rail:has(.file-changes-list:empty) {
@@ -86,6 +104,11 @@
    intentional rail rather than accidental transcript indentation. Tighten
    only the content gap beside the collapsed rail; pinned drawers retain the
    normal transcript inset. */
+.panel-main:has(> .file-changes-rail) > .panel-content .transcript {
+  /* The compact sliver and pinned drawer use different insets. Move that
+     small difference with the rail instead of snapping text at either end. */
+  transition: padding-inline-start 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
 .panel-main:has(> .file-changes-rail:not(.is-pinned)) > .panel-content .transcript {
   padding-inline-start: var(--panel-gap-sm);
 }
@@ -289,8 +312,8 @@
   background: var(--panel-black);
   transform: translateX(-6px);
   transition:
-    opacity var(--panel-transition-fast),
-    transform var(--panel-transition-fast),
+    opacity 120ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 120ms cubic-bezier(0.16, 1, 0.3, 1),
     border-color var(--panel-transition-fast),
     box-shadow var(--panel-transition-fast);
 }

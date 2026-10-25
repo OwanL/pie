@@ -212,6 +212,19 @@
 
 .model-picker-row-ineligible { opacity: 0.7; }
 
+/* FLIP uses the real keyed rows; only moving rows need an opaque surface. */
+[data-model-moving] {
+  position: relative;
+  z-index: 1;
+  background: var(--panel-overlay-surface);
+  transition: none;
+}
+
+[data-model-motion-primary] {
+  position: relative;
+  z-index: 2;
+}
+
 .model-picker-selection {
   width: 12px;
   flex: 0 0 12px;

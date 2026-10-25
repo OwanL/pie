@@ -13,6 +13,7 @@ import { FileChangeContextMenu } from './file-changes-context-menu';
 import type { FileChangeContextMenuState } from './file-changes-context-menu';
 import { computeDiffTotals, computeKindStats, KIND_ORDER, KIND_LABEL } from './file-changes-stats';
 import { formatPathWithParentDepth } from './file-path';
+import { useFileChangesMotion } from './use-file-changes-motion';
 
 // Re-export the public surface previously bundled in this module so existing
 // import paths (`./file-changes-panel`) keep resolving unchanged.
@@ -37,7 +38,7 @@ interface FileChangesPanelProps {
 // Hover-intent / dismiss delays for the peek overlay (STATE_CONTRACT
 // § Webview-Local State — peek/hover overlays). Tunable; see
 // the changed-files-rail design (decision D9).
-const PEEK_OPEN_DELAY = 160;
+const PEEK_OPEN_DELAY = 80;
 const PEEK_CLOSE_DELAY = 120;
 
 export function FileChangesPanel({
@@ -135,8 +136,9 @@ export function FileChangesPanel({
     </div>
   );
 
+  const cancelLayoutMotion = useFileChangesMotion(railRef, pinned, fileChanges.length > 0);
   const { elRef, width: dragWidth, minWidth, maxWidth, startResize, resizeBy, reset } =
-    useResizableWidth<HTMLDivElement>({ minWidth: 180, maxWidth: 520 });
+    useResizableWidth<HTMLDivElement>({ minWidth: 180, maxWidth: 520, onResizeStart: cancelLayoutMotion });
 
   // hasNewChanges: pulse while unpinned and the count grows; clears on pin.
   useEffect(() => {
