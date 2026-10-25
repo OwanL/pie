@@ -140,7 +140,7 @@ test('composer controls render in the agreed bottom-bar order', () => {
     'aria-label="Subagent providers:',
     'aria-label="Compact context',
     'aria-label="More composer options"',
-    'aria-label="Toggle system prompts"',
+    'aria-label="System instructions"',
     'aria-label="Enable autonomous mode',
     'class="composer-indicators"',
   ]);

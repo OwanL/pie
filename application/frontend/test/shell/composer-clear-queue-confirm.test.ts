@@ -110,7 +110,8 @@ test('primary intent is visible and dispatches busy, attachment-only, and author
     assert.ok(button.querySelector('svg'), 'submit intent is represented by its icon');
     assert.equal(button.disabled, false);
     if (intent !== 'Continue') {
-      assert.equal(container.querySelector('.composer-attachments-summary')?.textContent, 'Included: 1 path');
+      assert.equal(container.querySelector('.composer-attachments')?.getAttribute('aria-label'), 'Pending attachments: 1 path');
+      assert.equal(container.querySelector('.attachment-card-name')?.textContent, 'included.txt');
     }
     act(() => button.click());
     assert.equal(sends, 1);

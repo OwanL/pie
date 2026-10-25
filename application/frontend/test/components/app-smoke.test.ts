@@ -656,14 +656,17 @@ test('App receives host state, renders the active session, and sends composer in
   // The transcript scroll container exists even when the virtualizer has no
   // real layout, and the composer remains available after applying host state.
   assert.ok(container.querySelector('.panel-main'), 'Should render panel-main after state message');
-  assert.ok(container.querySelector('textarea'), 'Composer should render after state message');
+  // The first envelope establishes hostInstanceId and remounts the keyed
+  // provider subtree, so the initial textarea is no longer the live composer.
+  const activeTextarea = container.querySelector('textarea');
+  assert.ok(activeTextarea, 'Composer should render after state message');
 
   act(() => {
-    textarea.value = 'test message';
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    activeTextarea.value = 'test message';
+    activeTextarea.dispatchEvent(new Event('input', { bubbles: true }));
   });
   act(() => {
-    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    activeTextarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   });
 
   const sendMsg = adapter.messages.find((message) => message.type === 'send');

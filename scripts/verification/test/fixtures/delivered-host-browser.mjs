@@ -103,12 +103,14 @@ try {
   const { expect } = playwright;
   await expect(page.locator('body > #app')).not.toBeEmpty({ timeout: 25_000 });
   // A private profile has no open tabs. PanelMain paints its empty surface;
-  // BottomSection intentionally omits the composer AND Settings in this state.
+  // the composer is absent, while Settings remains in the empty tab bar.
   await expect(page.locator('.empty-state-title')).toHaveText('Start a session', { timeout: 25_000 });
   await expect(page.locator('.empty-state-title')).toBeVisible();
   await expect(page.getByRole('button', { name: 'New Session', exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message composer' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toHaveCount(0);
+  const settingsButton = page.getByRole('button', { name: 'Settings', exact: true });
+  await expect(settingsButton).toBeVisible();
+  await expect(page.locator('.session-tabs-actions').getByRole('button', { name: 'Settings', exact: true })).toHaveCount(1);
   // AppBody enables New session only when transport is connected AND backendReady.
   // Do not click: startup/handshake only, no prompt or model request.
   await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeEnabled({ timeout: 25_000 });
