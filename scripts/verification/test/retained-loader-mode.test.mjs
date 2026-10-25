@@ -16,7 +16,9 @@ test('internal retained loader preserves original entries and owner startup with
     assert.deepEqual(config.files, files);
     assert.deepEqual(config.sourceFileByEntry, {});
     assert.equal(config.waitForOwnership, false);
-    assert.deepEqual(invocation.args.slice(0, 2), ['pinned-tsx-cli', '--tsconfig=owner-overlay']);
+    const startupIndex = invocation.args.indexOf('pinned-tsx-cli');
+    assert.ok(startupIndex >= 0);
+    assert.deepEqual(invocation.args.slice(startupIndex, startupIndex + 2), ['pinned-tsx-cli', '--tsconfig=owner-overlay']);
     assert.equal(invocation.args.includes('--import'), false);
     assert.equal(existsSync(path.join(invocation.configRoot, 'entries')), false);
   } finally { invocation.dispose(); }

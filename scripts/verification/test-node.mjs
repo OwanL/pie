@@ -383,8 +383,10 @@ export function buildNodeArgs(configPath, nodeFlags = [], concurrency = DEFAULT_
   const { processFlags } = parseNodeTestFlags(nodeFlags, concurrency);
   return [
     ...defaultHeapArgs(processFlags, env),
-    '--import', TEST_ENVIRONMENT_PRELOAD,
-    '--import', 'tsx',
+    // Inline values match Node's inherited flag representation. Split values
+    // are otherwise forwarded again as unrecognized process.execArgv entries.
+    `--import=${TEST_ENVIRONMENT_PRELOAD}`,
+    '--import=tsx',
     ...processFlags,
     RUNNER_MODULE,
     configPath,

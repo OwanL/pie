@@ -56,29 +56,6 @@ function reporterEventTransform(sourceFileByEntry) {
   });
 }
 
-function workerExecArgv() {
-  const args = [];
-  const runnerFlagsWithValues = new Set([
-    '--test-concurrency', '--test-name-pattern', '--test-skip-pattern', '--test-timeout',
-    '--test-reporter', '--test-reporter-destination', '--test-coverage-lines',
-    '--test-coverage-branches', '--test-coverage-functions', '--test-coverage-include',
-    '--test-coverage-exclude', '--test-isolation', '--experimental-test-isolation',
-    '--test-global-setup', '--test-rerun-failures', '--test-shard', '--test-random-seed',
-  ]);
-  for (let index = 0; index < process.execArgv.length; index += 1) {
-    const arg = process.execArgv[index];
-    const name = arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg;
-    if (name === '--experimental-test-module-mocks' || name === '--test-update-snapshots') {
-      args.push(arg);
-    } else if (name === '--test' || name === '--experimental-test-coverage' || name.startsWith('--test-') || name.startsWith('--experimental-test-')) {
-      if (!arg.includes('=') && runnerFlagsWithValues.has(name)) index += 1;
-    } else {
-      args.push(arg);
-    }
-  }
-  return args;
-}
-
 // Keep this root child-free until the live ownership census explicitly authorizes it.
 if (waitForOwnership) await waitForOwnershipAuthorization(process.stdin);
 
@@ -94,7 +71,7 @@ const testStream = run({
   files,
   cwd,
   isolation: options.isolation ?? 'process',
-  execArgv: workerExecArgv(),
+  // Node inherits process runtime flags; execArgv would append them again.
 });
 const fileNames = new Set(files);
 const activeFiles = new Map();

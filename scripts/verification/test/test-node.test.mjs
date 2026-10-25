@@ -299,7 +299,7 @@ test('CLI separates selectors and forwards Node test flags after --', () => {
     '--test-name-pattern=worker', '--test-reporter=spec', '--test-concurrency=2', '--experimental-test-module-mocks',
   ], 4, {});
   assert.deepEqual(args, [
-    '--max-old-space-size=1024', '--import', testEnvironmentPreload, '--import', 'tsx', '--experimental-test-module-mocks',
+    '--max-old-space-size=1024', `--import=${testEnvironmentPreload}`, '--import=tsx', '--experimental-test-module-mocks',
     path.join(repoRoot, 'scripts', 'verification', 'test-node-runner.mjs'), '/tmp/runner.json',
   ]);
   assert.deepEqual(parseNodeTestFlags(['--test-name-pattern', 'worker', '--test-reporter', 'dot', '--test-concurrency=2']), {
@@ -963,8 +963,13 @@ test('native sibling test files receive separate process fixtures and preserve u
       '  const pidRoot = path.join(env.PIE_TEST_FIXTURE_ROOT, `process-${process.pid}`);',
       '  const directories = [env.HOME, env.USERPROFILE, env.APPDATA, env.LOCALAPPDATA, env.XDG_CONFIG_HOME, env.XDG_DATA_HOME, env.XDG_CACHE_HOME, env.PI_CONFIG_DIR, env.PI_CODING_AGENT_AUTH_DIR, env.PI_CODING_AGENT_DIR, env.PI_CODING_AGENT_SESSION_DIR, env.PIE_DATA_DIR, env.PIE_CACHE_DIR];',
       '  assert.ok(directories.every((directory) => directory.startsWith(pidRoot + path.sep)));',
-      "  assert.ok(process.execArgv.includes('--experimental-test-module-mocks'), 'module-mock flag reaches the isolated test process');",
-      "  assert.ok(process.execArgv.includes('--max-old-space-size=1024'), 'default heap cap reaches the isolated test process');",
+      "  const importCount = (preload) => process.execArgv.reduce((count, arg, index) => count + Number(arg === `--import=${preload}` || (arg === '--import' && process.execArgv[index + 1] === preload)), 0);",
+      `  assert.equal(importCount(${JSON.stringify(testEnvironmentPreload)}), 1, 'test-environment preload reaches the isolated process exactly once');`,
+      "  assert.equal(importCount('tsx'), 1, 'tsx preload reaches the isolated process exactly once');",
+      "  const heapFlags = process.execArgv.filter((arg) => /^--max[-_]old[-_]space[-_]size(?:=|$)/u.test(arg));",
+      "  assert.equal(heapFlags.length, 1, 'heap cap reaches the isolated process exactly once');",
+      "  assert.equal(heapFlags[0], '--max-old-space-size=1024');",
+      "  assert.equal(process.execArgv.filter((arg) => arg === '--experimental-test-module-mocks').length, 1, 'module-mock flag reaches the isolated test process exactly once');",
       "  writeFileSync(path.join(env.PIE_DATA_DIR, 'state.txt'), String(process.pid));",
       `  writeFileSync(path.join(env.PIE_TEST_FIXTURE_ROOT, 'observations', '${label}.json'), JSON.stringify({ pid: process.pid, data: env.PIE_DATA_DIR, home: env.HOME }));`,
       '});',
