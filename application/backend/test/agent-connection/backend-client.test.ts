@@ -573,3 +573,30 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     else process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] = previousCutoffAuthorization;
   }
 });
+
+test('BackendClient.request rejects unstarted calls with a typed error and settles transport once', async () => {
+  const { BackendClient, BackendNotRunningError } = await import('../../agent-connection/client');
+  const client = new BackendClient();
+  let transportSettledCount = 0;
+  let correlatedResponseCount = 0;
+
+  try {
+    await assert.rejects(
+      client.request('session.open', { sessionPath: '/mock/session.jsonl' }, {
+        onTransportSettled: () => { transportSettledCount += 1; },
+        onCorrelatedResponse: () => { correlatedResponseCount += 1; },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof BackendNotRunningError);
+        assert.equal(error.name, 'BackendNotRunningError');
+        assert.equal(error.code, 'PIE_BACKEND_NOT_RUNNING');
+        assert.equal(error.method, 'session.open');
+        return true;
+      },
+    );
+    assert.equal(transportSettledCount, 1);
+    assert.equal(correlatedResponseCount, 0);
+  } finally {
+    client.dispose();
+  }
+});

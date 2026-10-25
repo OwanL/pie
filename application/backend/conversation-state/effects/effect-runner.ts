@@ -11,7 +11,7 @@
  */
 
 import { stat } from 'node:fs/promises';
-import { BackendRpcError } from '../../agent-connection/client';
+import { BackendNotRunningError, BackendRpcError } from '../../agent-connection/client';
 import type {
   Effect,
   ReplaceQueueRpcEffect,
@@ -1862,9 +1862,9 @@ export class EffectRunner {
             durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
             error: toErrorMessage(err),
           });
-          // Only a correlated backend rejection establishes failure. A local
-          // timeout or transport error cannot establish whether open committed.
-          const ambiguous = !(err instanceof BackendRpcError);
+          // A correlated rejection or a typed pre-dispatch rejection proves
+          // failure. Timeouts and post-dispatch transport errors remain unknown.
+          const ambiguous = !(err instanceof BackendRpcError || err instanceof BackendNotRunningError);
           if (!ambiguous) {
             // RPC codes alone are not filesystem evidence: SESSION_NOT_FOUND
             // also means "being forgotten". Transport failures and permission

@@ -145,6 +145,17 @@ export class BackendRpcError extends Error {
   }
 }
 
+/** Local rejection before a request ID or write exists. Unlike a transport
+ * failure, this is definitive evidence that this request was never sent. */
+export class BackendNotRunningError extends Error {
+  readonly code = 'PIE_BACKEND_NOT_RUNNING';
+
+  constructor(readonly method: string) {
+    super('Backend is not running');
+    this.name = 'BackendNotRunningError';
+  }
+}
+
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
 const STDERR_BUFFER_LIMIT = 64 * 1024;
 // Retain enough raw prefix context that a ring-buffer trim cannot normally
@@ -787,7 +798,7 @@ export class BackendClient implements Disposable {
   ): Promise<TResult> {
     if (!this.proc?.stdin) {
       options?.onTransportSettled?.();
-      throw new Error('Backend is not running');
+      throw new BackendNotRunningError(method);
     }
 
     const id = `req-${++this.requestCounter}`;

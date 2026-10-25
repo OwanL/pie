@@ -25,6 +25,7 @@ import { NOOP_RUN_OBSERVER } from '../../../analytics-views';
 import { createInitialArchState } from '../../../conversation-state/arch-state';
 import type { ArchState } from '../../../conversation-state/arch-state';
 import { reducer } from '../../../conversation-state/reducer';
+import { projectSessionCapabilities } from '../../../conversation-state/projections/projection';
 import { SessionServiceState } from '../../../session-actions/state';
 import { SessionTabActions } from '../../../session-actions/tab-actions';
 import { attach } from '../../../session-actions/handlers/attach';
@@ -276,6 +277,85 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
   assert.equal(archState.sessions.openTabPaths.includes(NEW), false);
   assert.equal(NEW in archState.composer.activeRunSummaryBySession, false);
   assert.equal(archState.settings.notice, 'Failed to open session: boom');
+});
+
+test('opening a restored tab before backend startup cannot leave a reconciliation lock after preload', async () => {
+  const sessionPath = '/workspace/restored.jsonl';
+  const summary: SessionSummary = {
+    path: sessionPath, name: 'Restored', cwd: '/workspace', modifiedAt: '', messageCount: 1,
+  };
+  let archState = createInitialArchState();
+  archState = { ...archState, sessions: { ...archState.sessions,
+    sessions: [summary], openTabPaths: [sessionPath], activeSessionPath: sessionPath,
+  } };
+  const backend = new BackendClient(); // Real pre-dispatch failure, not a mocked transport timeout.
+  const timers: Array<() => void> = [];
+  const effects: string[] = [];
+  let completion!: Promise<void>;
+  const dispatchArch = (event: Event): void => {
+    const result = reducer(archState, event);
+    archState = result.state;
+    for (const effect of result.effects) {
+      effects.push(effect.kind);
+      runner.run(effect);
+    }
+  };
+  const state = new SessionServiceState(backend, () => undefined, () => archState, dispatchArch, 0);
+  state.adoptBackendGeneration(1);
+  const tabs = new SessionTabActions({ state, getArchState: () => archState, dispatchArch,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER });
+  const { deps } = makeEffectRunnerDeps({
+    backend,
+    queues: {
+      enqueueLifecycle: (task) => {
+        const result = task();
+        completion = result.then(() => undefined);
+        return result;
+      },
+      enqueueSessionOperation: (_path, task) => task(),
+    },
+    timer: { schedule: (callback) => { timers.push(callback); return callback; }, cancel: () => undefined },
+    serviceOverrides: {
+      getBackendGeneration: () => state.getBackendGeneration(),
+      handleSelectionFailure: (...args) => state.handleSelectionFailure(...args),
+    },
+    dispatch: dispatchArch,
+    dispatchEvent: dispatchArch,
+  });
+  const runner = new EffectRunner(deps);
+  tabs.openSession(sessionPath);
+  await completion;
+
+  // Before the fix these three fake-time polls exhaust recovery against a
+  // backend that never received the open. No sleeps or live processes needed.
+  for (let poll = 0; poll < 3 && timers.length; poll += 1) {
+    timers.shift()!();
+    await completion;
+  }
+
+  // Startup later succeeds and hydrates this tab in the background, without
+  // correlation to the earlier unsent operation (the reported failure pattern).
+  dispatchArch({ kind: 'BackendReadyChanged', ready: true });
+  dispatchArch({ kind: 'SessionOpened', sessionPath, backendGeneration: 1,
+    modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    payload: {
+      session: summary, transcript: [], busy: false, runtimeReady: false,
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0,
+        hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      capabilities: { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+    },
+  });
+  state.markSessionSnapshotKnown(sessionPath);
+  const openCount = effects.filter((kind) => kind === 'OpenSession').length;
+  tabs.openSession(sessionPath); // Warm selection must not need another RPC to unlock sending.
+  assert.equal(effects.filter((kind) => kind === 'OpenSession').length, openCount);
+  assert.equal(projectSessionCapabilities(archState)[sessionPath]?.primaryOperation, undefined);
+  assert.equal(projectSessionCapabilities(archState)[sessionPath]?.canContinue, true);
+  const operation = Object.values(archState.operations).find((candidate) => candidate.kind === 'session.open')!;
+  assert.equal(operation.terminal?.outcome, 'failed', 'a request rejected before dispatch has a definitive outcome');
+  assert.equal(operation.commit, 'not-committed');
+  assert.equal(effects.includes('ScheduleOpenSessionReconciliation'), false);
+  assert.deepEqual(archState.sessions.openTabPaths, [sessionPath], 'startup failure must not remove a restored tab');
 });
 
 // Exercise restored Loading tabs through the real ingress/reducer/effect/failure
