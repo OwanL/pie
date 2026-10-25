@@ -671,7 +671,7 @@
   max-width: 100%;
   border-radius: var(--panel-radius-sm);
   color: var(--panel-foreground);
-  font: 600 13px/18px var(--panel-font-sans);
+  font: 400 12px/18px var(--panel-font-sans);
   cursor: help;
 }
 .subagent-model-qualified { display: none; }
@@ -1080,7 +1080,7 @@
 /* ── Subagent model label ─────────────────────────────────────────────────── */
 
 .subagent-model-label { min-width: 0; max-width: 100%; font: inherit; color: inherit; white-space: normal; overflow-wrap: anywhere; }
-.subagent-model-reasoning { position: static; margin-left: 2px; font-size: 0.7em; font-weight: 400; line-height: 1; vertical-align: text-top; white-space: nowrap; }
+.subagent-model-reasoning { white-space: nowrap; }
 
 /* ── Subagent model selection detail panel ───────────────────────────────── */
 /* Shown when model selection reasoning is available */

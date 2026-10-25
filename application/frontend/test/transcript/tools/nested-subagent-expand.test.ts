@@ -627,7 +627,7 @@ test('agent-name raw inspection works when the model is unavailable', async () =
   delete child.selectedModel;
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }), undefined, captureSession);
   assert.equal(container.querySelector('.subagent-model-short')?.textContent, 'Model unavailable');
-  assert.equal(container.querySelector('.subagent-model-label sup')?.textContent, 'off');
+  assert.equal(container.querySelector('.subagent-model-reasoning')?.textContent, 'off');
   assert.match(container.querySelector('.subagent-model-details-trigger')?.getAttribute('aria-label') ?? '', /unavailable model/);
   assert.equal(messages.length, 0);
   settleCapture(messages, toolCall, await openDetailsTooltip(agentName()));
@@ -1062,7 +1062,7 @@ test('depth-3 subagent: every level ≥ 2 is nested (non-detaching header, free-
   assert.ok(scrolls[1].classList.contains('subagent-messages-scroll-nested'), 'depth-2 body flows');
   assert.ok(scrolls[2].classList.contains('subagent-messages-scroll-nested'), 'depth-3 body flows');
 });
-test('completed model indicators show only recorded reasoning as semantic superscript', () => {
+test('completed model indicators append recorded reasoning as plain text', () => {
   for (const thinkingLevel of [undefined, 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
     const call = telemetrySubagentToolCall('legacy');
     Object.assign((call.result as any).details.results[0], {
@@ -1071,8 +1071,18 @@ test('completed model indicators show only recorded reasoning as semantic supers
     });
     mount(call, prefsWith({ autoExpandSubagentCalls: false }));
     const label = container.querySelector('.subagent-model-label');
-    assert.equal(label?.querySelector('.subagent-model-short')?.textContent, 'Selected Model');
-    assert.equal(label?.querySelector('sup')?.textContent, thinkingLevel);
+    const model = label?.querySelector<HTMLElement>('.subagent-model-short');
+    const reasoning = label?.querySelector<HTMLElement>('.subagent-model-reasoning');
+    assert.equal(model?.textContent, 'Selected Model');
+    assert.equal(label?.querySelector('sup'), null);
+    if (thinkingLevel) {
+      assert.equal(reasoning?.tagName, 'SPAN');
+      assert.equal(reasoning?.textContent, thinkingLevel);
+      assert.equal(reasoning?.previousSibling?.textContent, ' ', 'reasoning follows the model with a literal space');
+      assert.ok(model && reasoning && (model.compareDocumentPosition(reasoning) & Node.DOCUMENT_POSITION_FOLLOWING));
+    } else {
+      assert.equal(reasoning, null, 'undefined reasoning is omitted');
+    }
     assert.ok(!label?.textContent?.includes('^'));
     const trigger = container.querySelector('.subagent-model-details-trigger');
     assert.ok(trigger?.getAttribute('aria-label')?.includes('fixture/Selected Model'));
@@ -1086,7 +1096,7 @@ test('role icons preserve full accessible inspector names and stable unknown met
     Object.assign((call.result as any).details.results[0], { agent, usage: undefined, contextWindow: undefined, startedAt: undefined, completedAt: undefined });
     mount(call, prefsWith({ autoExpandSubagentCalls: false }));
     assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('data-role-icon'), agent.startsWith('custom') ? 'generic' : agent);
-    assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('stroke-width'), '1.4');
+    assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('stroke-width'), '1.2');
     assert.equal(container.querySelector('.subagent-role-icon')?.getAttribute('aria-hidden'), 'true');
     assert.equal(container.querySelector('.subagent-agent-name')?.getAttribute('aria-label'), 'Inspect ' + agent + ' model exchange');
     const cells = container.querySelector('.subagent-header-metrics');

@@ -50,6 +50,16 @@ function state(results = children, seq = 0, normalized = false) {
 const card = (root: Locator, role: string) => root.locator('.tool-call-subagent').filter({ has: root.page().getByRole('button', { name: `Toggle ${role} subagent`, exact: true }) });
 const header = (root: Locator) => root.locator('.subagent-header');
 
+async function textFragments(locator: Locator) {
+  return locator.evaluateAll((elements) => elements.flatMap((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return Array.from(range.getClientRects(), (rect) => ({
+      left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+    })).filter((rect) => rect.right > rect.left && rect.bottom > rect.top);
+  }));
+}
+
 async function expectContained(root: Locator) {
   const overflow = await root.evaluate((element) => {
     const rect = element.getBoundingClientRect();
@@ -89,14 +99,18 @@ test.describe('subagent redesign in the real isolated renderer', () => {
           await item.scrollIntoViewIfNeeded();
           for (const text of expected) await expect(header(item)).toContainText(text);
           await expect(item.locator('.subagent-role-icon')).toHaveAttribute('data-role-icon', children[index]!.agent);
-          await expect(item.locator('.subagent-role-icon')).toHaveAttribute('stroke-width', '1.4');
-          const reasoning = item.locator('.subagent-model-label sup');
+          await expect(item.locator('.subagent-role-icon')).toHaveAttribute('stroke-width', '1.2');
+          const model = item.locator('.subagent-model-short');
+          const reasoning = item.locator('.subagent-model-reasoning');
+          await expect(model).toHaveCSS('font-size', '12px');
+          await expect(model).toHaveCSS('font-weight', '400');
+          await expect(model).toHaveCSS('line-height', '18px');
           const level = children[index]!.thinkingLevel;
           if (level) {
             await expect(reasoning).toHaveText(level);
-            await expect(reasoning).toHaveCSS('vertical-align', 'text-top');
-            // Tailwind's sup reset otherwise raises the glyph via relative top.
-            await expect(reasoning).toHaveCSS('position', 'static');
+            for (const property of ['font-size', 'font-weight', 'line-height', 'vertical-align']) {
+              await expect(reasoning).toHaveCSS(property, await model.evaluate((element, property) => getComputedStyle(element).getPropertyValue(property), property));
+            }
           }
           else await expect(reasoning).toHaveCount(0);
           await expectContained(item);
@@ -372,24 +386,21 @@ test.describe('subagent layout under constrained touch widths', () => {
       await expectContained(parent);
       const unknown = card(page.locator('body'), 'custom-auditor');
       await expect(header(unknown)).toContainText('Model unavailable');
-      await expect(header(unknown).locator('sup')).toHaveCount(0);
-      const reasoning = parent.locator('.subagent-model-label sup').first();
+      await expect(header(unknown).locator('.subagent-model-reasoning')).toHaveCount(0);
+      const reasoning = parent.locator('.subagent-model-reasoning').first();
       await expect(reasoning).toHaveText('xhigh');
       await page.evaluate(() => document.fonts.ready);
-      const reasoningBounds = (await reasoning.boundingBox())!;
-      const modelBounds = (await parent.locator('.subagent-model-label').first().boundingBox())!;
-      const metricsBounds = (await parent.locator('.subagent-header-metrics').first().boundingBox())!;
-      if (metricsBounds.y > modelBounds.y && metricsBounds.x < modelBounds.x + modelBounds.width) {
-        expect(reasoningBounds.y + reasoningBounds.height, `full reasoning box must clear the next metrics row at ${width}px`).toBeLessThanOrEqual(metricsBounds.y);
-      }
-      expect(reasoningBounds.height).toBeGreaterThan(0);
-      // Check the full superscript ink box, not its zero-height inline line box.
-      // Metrics can be alongside the identity or on the next grid row.
+      // Inline bounding boxes union wrapped lines, including empty space between
+      // fragments. Compare rendered text instead, for both identity spans.
+      const identityFragments = await textFragments(parent.locator('.subagent-header').first().locator('.subagent-model-short, .subagent-model-reasoning'));
+      expect(identityFragments.length).toBeGreaterThan(0);
       for (const metric of await parent.locator('.subagent-header').first().locator('.subagent-inline-context, .subagent-telemetry-cost, .subagent-telemetry-elapsed').all()) {
-        const bounds = (await metric.boundingBox())!;
-        const intersects = reasoningBounds.x < bounds.x + bounds.width && reasoningBounds.x + reasoningBounds.width > bounds.x
-          && reasoningBounds.y < bounds.y + bounds.height && reasoningBounds.y + reasoningBounds.height > bounds.y;
-        expect(intersects, `reasoning must clear ${await metric.getAttribute('class')} at ${width}px`).toBe(false);
+        const metricFragments = await textFragments(metric);
+        expect(metricFragments.length).toBeGreaterThan(0);
+        const intersects = identityFragments.some((identity) => metricFragments.some((bounds) =>
+          identity.left < bounds.right && identity.right > bounds.left
+          && identity.top < bounds.bottom && identity.bottom > bounds.top));
+        expect(intersects, `identity text must clear ${await metric.getAttribute('class')} at ${width}px`).toBe(false);
       }
       await expect(header(unknown)).toContainText('—/—');
       await expect(unknown.locator('.subagent-telemetry-cost')).toHaveText('—');
