@@ -140,11 +140,11 @@ test('composer controls render in the agreed bottom-bar order', () => {
     'aria-label="Subagent providers:',
     'aria-label="Compact context',
     'aria-label="More composer options"',
-    'aria-label="Settings"',
     'aria-label="Toggle system prompts"',
     'aria-label="Enable autonomous mode',
     'class="composer-indicators"',
   ]);
+  assert.doesNotMatch(html, /aria-label="Settings"/, 'Settings belongs beside New Session, not in the bottom bar');
   assert.match(html, /aria-pressed="false"/);
   assert.match(html, /autonomous-mode-trigger/);
   // Throughput is not a bottom-bar control; the toolbar exposes working

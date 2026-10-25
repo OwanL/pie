@@ -19,6 +19,7 @@ import { DeferredTriggersIndicator } from '../../analytics/aggregate-stats-strip
 import { DeferredTriggersMenu } from '../../analytics/aggregate-stats-strip/deferred-triggers-menu';
 import { ComposerActions } from '../../composer/actions';
 import { ComposerToolbar } from '../../composer/toolbar';
+import { ComposerSettingsMenu } from '../../settings/settings-menu';
 import { SkillPrunerSettings } from '../../settings/settings-menu-skill-pruner';
 import { allocateComposerOverflow, allocateComposerToolbar } from '../../composer/toolbar-overflow-allocation';
 
@@ -178,9 +179,15 @@ function actions() {
 function mount(toolbarProps = props()): void {
   act(() => {
     render(
-      h('div', { class: 'composer-bottom-bar' },
-        h(ComposerToolbar, toolbarProps),
-        actions(),
+      h('div', null,
+        h('div', { class: 'session-actions' },
+          h('button', { type: 'button' }, 'New Session'),
+          h(ComposerSettingsMenu, toolbarProps),
+        ),
+        h('div', { class: 'composer-bottom-bar' },
+          h(ComposerToolbar, toolbarProps),
+          actions(),
+        ),
       ),
       container,
     );
@@ -191,9 +198,15 @@ function mount(toolbarProps = props()): void {
 function rerender(toolbarProps: Parameters<typeof ComposerToolbar>[0]): void {
   act(() => {
     render(
-      h('div', { class: 'composer-bottom-bar' },
-        h(ComposerToolbar, toolbarProps),
-        actions(),
+      h('div', null,
+        h('div', { class: 'session-actions' },
+          h('button', { type: 'button' }, 'New Session'),
+          h(ComposerSettingsMenu, toolbarProps),
+        ),
+        h('div', { class: 'composer-bottom-bar' },
+          h(ComposerToolbar, toolbarProps),
+          actions(),
+        ),
       ),
       container,
     );
@@ -616,7 +629,7 @@ test('overflow keeps pinned controls visible and places hidden controls and indi
   const hiddenKeys = Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]'))
     .map((element) => element.dataset.toolbarItem);
   assert.deepEqual(hiddenKeys, [
-    'settings', 'subagent-providers', 'subagent-buckets', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
+    'subagent-providers', 'subagent-buckets', 'system-prompts', 'mcp', 'compact-context', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh',
     'run-status',
   ]);
   assert.equal(container.querySelectorAll('[data-toolbar-item="autonomous-mode"]').length, 1, 'moved controls are mounted once');
@@ -640,7 +653,7 @@ test('ResizeObserver moves controls back when room returns and reallocates for d
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
-    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
+    ['subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
   );
 
   rowWidth = 900;
@@ -771,7 +784,7 @@ test('disconnection closes a portaled model picker and disables pinned menu trig
   rowWidth = 265;
   const toolbarProps = props();
   mount(toolbarProps);
-  click(openOverflow().querySelector('[aria-label="Settings"]'));
+  click(container.querySelector('.session-actions [aria-label="Settings"]'));
   assert.ok(document.body.querySelector('.toolbar-settings-menu'), 'settings render in their existing portal');
   rerender({ ...toolbarProps, commandsAvailable: false });
   assert.equal(!!document.body.querySelector('.toolbar-settings-menu'), false, 'the settings portal closes before it can bypass fieldset disabled state');
@@ -827,7 +840,7 @@ test('narrow rows compact the model label, then yield items, and only an empty r
   assert.deepEqual(
     Array.from(container.querySelectorAll<HTMLElement>('.composer-toolbar-overflow-popover [data-toolbar-item]'))
       .map((element) => element.dataset.toolbarItem),
-    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
+    ['subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'],
     'permanent overflow controls stay hidden while duration remains visible',
   );
   assert.ok(container.querySelector('.composer-indicators [data-toolbar-item="working-time"]'), 'the duration metric is retained, not hidden behind the model label');
@@ -896,7 +909,7 @@ test('the bare unknown-cost dash moves into More at a width where a valued cost 
   const popover = openOverflow();
   assert.deepEqual(
     Array.from(popover.querySelectorAll<HTMLElement>('[data-toolbar-item]')).map((element) => element.dataset.toolbarItem),
-    ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh', 'session-cost'],
+    ['subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh', 'session-cost'],
     'the bare dash yields ahead of the built-in control order',
   );
   const costChip = popover.querySelector<HTMLElement>('[data-toolbar-item="session-cost"] [role="img"]')!;
@@ -932,7 +945,6 @@ test('overflowed controls show short action names beside their icons while the r
     assert.equal(label?.getAttribute('aria-hidden'), 'true', `${item.dataset.toolbarItem} keeps a single accessible name`);
   });
   assert.deepEqual(labelsByItem, {
-    settings: 'Settings',
     'subagent-providers': 'Subagents',
     'subagent-buckets': 'Buckets',
     'system-prompts': 'Prompts',
@@ -964,7 +976,7 @@ test('global pair is an intrinsic measured section and permanent controls never 
   assert.ok(global.querySelector('[data-toolbar-item="global-costs"]'));
   assert.deepEqual(Array.from(container.querySelectorAll('.composer-controls > [data-toolbar-item]'))
     .map((element) => element.getAttribute('data-toolbar-item')), ['subagent-providers', 'compact-context']);
-  const permanent = ['settings', 'subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'];
+  const permanent = ['subagent-buckets', 'system-prompts', 'mcp', 'autonomous-mode', 'privacy-mode', 'browser-network', 'pruning-refresh'];
   const hidden = () => Array.from(container.querySelectorAll('.composer-toolbar-overflow-popover > [data-toolbar-item]'))
     .map((element) => element.getAttribute('data-toolbar-item'));
   assert.deepEqual(hidden(), permanent);
@@ -988,7 +1000,7 @@ test('overflow-only items reserve More even when their widths are zero and all o
     availableWidth: 200, pinnedNaturalWidth: 50, modelNaturalWidth: 0, actionsWidth: 20,
     controlGap: 2, indicatorGap: 2, sectionGap: 4, overflowTriggerWidth: 26,
     items: [
-      { key: 'settings', kind: 'control', width: 0, overflowOnly: true },
+      { key: 'mcp', kind: 'control', width: 0, overflowOnly: true },
       { key: 'global-costs', kind: 'global', width: 100 },
     ],
   }), { visibleItemKeys: [], modelWidthBudget: 0 });
@@ -999,7 +1011,7 @@ test('centre allocation charges all section gaps and only the permanent trigger 
     availableWidth: 200, pinnedNaturalWidth: 50, modelNaturalWidth: 0, actionsWidth: 20,
     controlGap: 2, indicatorGap: 3, sectionGap: 4, overflowTriggerWidth: 26,
     items: [
-      { key: 'settings', kind: 'control' as const, width: 1000, overflowOnly: true },
+      { key: 'mcp', kind: 'control' as const, width: 1000, overflowOnly: true },
       { key: 'global-costs', kind: 'global' as const, width: 60 },
       { key: 'context-window', kind: 'indicator' as const, width: 30 },
     ],
@@ -1010,19 +1022,25 @@ test('centre allocation charges all section gaps and only the permanent trigger 
   assert.deepEqual(allocateComposerToolbar({ ...input, availableWidth: 135 }).visibleItemKeys, []);
 });
 
-test('settings portal focus and first Escape remain inside More', () => {
+test('settings beside New Session closes More and restores its own trigger on Escape', () => {
   mount();
   const popover = openOverflow();
-  const trigger = popover.querySelector<HTMLButtonElement>('[aria-label="Settings"]')!;
+  const trigger = container.querySelector<HTMLButtonElement>('.session-actions [aria-label="Settings"]')!;
+  assert.ok(trigger);
+  assert.equal(trigger.closest('.composer-controls'), null);
+  assert.equal(trigger.closest('.session-actions')?.firstElementChild?.textContent, 'New Session');
+  assert.equal(container.querySelectorAll('[aria-label="Settings"]').length, 1);
+  assert.equal(popover.querySelector('[aria-label="Settings"]'), null);
+  act(() => trigger.focus());
   click(trigger);
   const settings = document.querySelector<HTMLElement>('.toolbar-settings-menu')!;
   assert.ok(settings);
   const button = settings.querySelector<HTMLButtonElement>('button:not(:disabled)')!;
   act(() => button.focus());
-  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  assert.equal(popover.getAttribute('aria-hidden'), 'true');
   act(() => { button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   assert.ok(!document.querySelector('.toolbar-settings-menu'));
-  assert.equal(popover.getAttribute('aria-hidden'), 'false');
+  assert.equal(popover.getAttribute('aria-hidden'), 'true');
   assert.ok(document.activeElement === trigger);
 });
 

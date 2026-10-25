@@ -351,8 +351,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(toolCallCss, /\.tool-call-header\s*\{[^}]*background:\s*transparent/);
   assert.match(toolCallCss, /\.tool-call-header \.status-chip\s*\{[^}]*background:\s*transparent/);
   assert.match(toolCallCss, /\.tool-call\.tool-call-subagent,[\s\S]*?\.tool-call-card\.tool-call-subagent\s*\{[^}]*border:\s*1px solid var\(--panel-border-subtle\);[^}]*background:\s*var\(--panel-card-surface\)/);
-  assert.match(toolCallCss, /\.tool-call\.tool-call-subagent \.subagent-header\[aria-expanded="false"\]\s*\{[^}]*background:\s*var\(--panel-subagent-header-surface\)/);
-  assert.match(toolCallCss, /\.subagent-header \.status-chip,[\s\S]*?background:\s*var\(--panel-control-surface\)/);
+  // Disclosure does not change the quiet header surface; active work has its
+  // own state treatment rather than a collapsed-only panel.
+  assert.match(toolCallCss, /\.subagent-header\s*\{[^}]*background:\s*var\(--panel-subtle-surface\)/);
+  assert.match(toolCallCss, /\.subagent-header:hover\s*\{[^}]*background:\s*var\(--panel-card-surface\)/);
+  assert.match(toolCallCss, /\.subagent-pending-prompt\s*\{[^}]*background:\s*var\(--panel-control-surface\)/);
   assert.match(toolCallCss, /\.subagent-messages\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
   assert.match(toolCallCss, /\.tool-call-status-draft\s*\{[^}]*border:\s*1px dashed var\(--panel-muted\)/);
   assert.doesNotMatch(toolCallCss, /\.tool-call-card\[data-provisional="true"\]\s*\{[^}]*(?:background|border-inline-start)/);
@@ -374,10 +377,9 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   }
   assert.doesNotMatch(toolCallCss, /filter:\s*blur/);
 
-  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*height:\s*20px;[^}]*font-size:\s*9\.5px/);
-  // The measured strict-priority row allocates complete items instead of
-  // horizontally scrolling an overflowing line: the footer never scrolls.
-  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*overflow:\s*hidden/);
+  // Global costs are an intrinsic, muted inline pair, not a fixed footer.
+  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*display:\s*inline-flex/);
+  assert.match(aggregateCss, /\.aggregate-strip\s*\{[^}]*color:\s*var\(--panel-muted\)/);
   assert.doesNotMatch(aggregateCss, /overflow-x:\s*auto|scrollbar-width/);
   assert.match(aggregateCss, /\.aggregate-strip-metrics\s*\{[^}]*display:\s*flex/);
   assert.match(aggregateCss, /\.aggregate-strip-measurements\s*\{[^}]*visibility:\s*hidden/);
@@ -386,26 +388,27 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.doesNotMatch(tabsCss, /\.session-tab-shell::before/);
 });
 
-test('aggregate footer allocates one measured priority row at every width instead of scrolling', async () => {
+test('global cost pair stays intrinsic and unwrapped while standalone measurements stay inert', async () => {
   const css = await readStyleSource('aggregate-stats-strip.css');
   const strip = css.match(/\.aggregate-strip\s*\{([^}]*)\}/)?.[1] ?? '';
   const measurements = css.match(/\.aggregate-strip-measurements\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(strip, /height:\s*20px/);
-  assert.match(strip, /font-size:\s*9\.5px/);
+  assert.match(strip, /display:\s*inline-flex/);
+  assert.match(strip, /flex-shrink:\s*0/);
+  assert.match(strip, /font-family:\s*var\(--panel-font-mono\)/);
   assert.match(strip, /white-space:\s*nowrap/);
-  assert.match(strip, /overflow:\s*hidden/);
-  // Portraits have no separate stacked or scrolled layout: measured
-  // strict-priority allocation (allocation.ts) applies at every width.
+  assert.doesNotMatch(strip, /(?:^|;)\s*(?:height|min-height|width|min-width|background|border|overflow)\s*:/,
+    'costs use their intrinsic size without a footer shell or clipping');
+  // Narrow panels retain the same intrinsic pair, not a stacked or scrolled layout.
   assert.doesNotMatch(css, /@media \(max-width: 520px\)/,
-    'the footer keeps one compact row in narrow panels; allocation owns narrow widths');
+    'the cost pair keeps one compact row in narrow panels');
   assert.doesNotMatch(css, /overflow-x:\s*auto|scrollbar-width|::-webkit-scrollbar/,
-    'metrics are allocated, never scrolled');
+    'global costs never introduce a horizontal scroller');
   // The inert measurement row is invisible by construction.
   assert.match(measurements, /position:\s*absolute/);
   assert.match(measurements, /visibility:\s*hidden/);
   assert.match(measurements, /pointer-events:\s*none/);
   assert.doesNotMatch(css, /aggregate-strip-(?:cost|tokens|providers|deferred|user-input|counts)[^{]*\{[^}]*display:\s*none/,
-    'no statistics are hidden by CSS: allocation priority owns visible retention');
+    'no statistics are hidden by CSS');
 });
 
 test('the session tab context menu is viewport-capped and scrolls tall dynamic group lists', async () => {

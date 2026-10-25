@@ -205,17 +205,25 @@ test('card task stays stable as live activity settles; transcript control activa
   assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
 });
 
-test('settled outcome preserves exact paragraph separators without parsing prose', () => {
-  const answer = 'First **literal** paragraph.\nA single line break.\n\nSecond paragraph.\r\n \r\nThird <literal> paragraph.';
+test('settled outcome renders compact Markdown with paragraphs and single line breaks', () => {
+  const answer = 'First **formatted** paragraph.\nA single line break.\n\nSecond paragraph.\r\n \r\nThird `literal` paragraph.';
   mount({ id: 'paragraph-outcome', name: 'subagent', status: 'completed', input: {},
     result: { details: { results: [{ agent: 'worker', task: 'Inspect', exitCode: 0,
       messages: [{ role: 'assistant', content: answer }],
     }] } },
   }, prefsWith({ autoExpandSubagentCalls: false }));
   const outcome = container.querySelector('.subagent-outcome')!;
-  assert.equal(outcome.textContent, answer);
-  assert.equal(outcome.querySelectorAll('p').length, 3);
-  assert.ok(outcome.querySelector('strong') === null);
+  const paragraphs = Array.from(outcome.querySelectorAll('p'));
+  assert.deepEqual(paragraphs.map((paragraph) => paragraph.textContent?.trim()), [
+    'First formatted paragraph.A single line break.',
+    'Second paragraph.',
+    'Third literal paragraph.',
+  ], 'blank lines, including CRLF whitespace-only lines, delimit paragraphs');
+  assert.equal(paragraphs[0].querySelector('strong')?.textContent, 'formatted');
+  assert.equal(paragraphs[0].querySelectorAll('br').length, 1, 'single newline stays a visible line break');
+  assert.equal(paragraphs[2].querySelector('code')?.textContent, 'literal');
+  assert.equal(container.querySelector('.subagent-header')?.getAttribute('aria-expanded'), 'false');
+  assert.ok(container.querySelector('.subagent-messages') === null, 'formatted outcome needs no expanded transcript');
 });
 
 test('compact current input retains raw content without stale output or duplicate expanded preview', () => {
