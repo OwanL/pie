@@ -31,8 +31,13 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Normal VS Code and standalone share personal provider configuration. Development/test profiles remain private and cannot fall through to installed settings, credentials or history.
 - Provider configuration is UI-first with optional schema-validated YAML at `%LOCALAPPDATA%/pie/config/providers.yaml`; discovery caches live beneath `<resolved data root>/cache/provider-models/`. Secrets remain separate from YAML, chat and ordinary view snapshots.
 - Initially support one configured account/endpoint per provider. Preserve `(provider, model ID)` attribution; do not add speculative multi-account machinery.
-- First-run setup guides users through connecting providers and choosing models, then assigning models to title generation, subagents, history compaction and other model-powered features. Explain each job and its extra usage, and prompt the user to assign a model; do not recommend particular models, maintain recommendation lists or automatically rank models for these assignments. The user chooses from their configured models. Separate model assignments are optional: title generation and tool/skill selection use the main session model when no separate model is assigned, rather than remaining off.
-- Assign an initial main session model automatically from the user's enabled, configured models; do not require a separate main-model selection step during setup. Users can change it through the normal model picker. Preserve existing users' saved selections.
+
+### First-run setup
+
+- Guide users through connecting providers and choosing models, then offer model assignments for title generation, subagents, history compaction and tool/skill selection. Explain each job and its extra usage.
+- Prompt users to assign models, but do not recommend particular models, maintain recommendation lists or automatically rank models for these assignments. Users choose from their configured models.
+- Assign an initial main session model automatically from the user's enabled, configured models; no separate main-model selection step is required. Users can change it through the normal model picker. Preserve existing users' saved selections.
+- Separate model assignments are optional: title generation and tool/skill selection use the main session model when no separate model is assigned, rather than remaining off.
 
 ### Provider and request behavior
 
@@ -44,8 +49,9 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Preserve the human's selected model when it disappears from a listing; listing absence alone is not proof it cannot serve requests. Warn and use valid last-known request settings where authorization and metadata permit. Do not silently replace models or clamp the saved thinking preference; unsupported effective modes require a choice before dispatch.
 - Unknown pricing is usable target behavior, not zero/free. Keep token usage and historical attribution, identify partially unpriced totals, and exclude unknown rates from cheapest-model ranking. Do not reprice past requests after refresh.
 
-### Windows installation
+### Windows installation and release direction
 
+- Separate source from user-installable builds. Normal users install prebuilt releases without cloning the repository, compiling Pie or installing the development toolchain. Source builds remain a contributor workflow. Publish build artifacts separately from Git-tracked source; this does not require a separate source repository.
 - Reuse a compatible installed Node runtime. When none is available, download a release-compatible Node runtime into Pie-managed user-local storage. Node binaries do not belong in Git; acquisition must not replace the user's Node installation or alter global PATH. Both hosts need a startup route that can acquire Node without requiring Node to run that route.
 
 ### Safety and scope
@@ -84,7 +90,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Make first launch provision the user profile and lead an unconfigured user to provider setup instead of stale-path or empty-model troubleshooting. Installation must not rewrite unrelated VS Code preferences or global development configuration.
 - Define update, deliberate rollback, repair and uninstall behavior. User configuration/history must outlive application replacement; data removal must be a separate explicit action.
 
-**Decide first:** release channel/artifact, Node acquisition/offline UX, supported Windows/storage baseline, and standalone distribution form. Do not add macOS/Linux packaging to this milestone.
+**Release design remains open and needs further brainstorming.** GitHub Releases was proposed, not selected; neither ZIP nor Windows installer distribution has been chosen. Decide the release channel/artifacts, build/publication ownership, update/rollback delivery, Node acquisition/offline UX and supported Windows/storage baseline before implementation. Reuse existing delivery machinery; do not add macOS/Linux packaging to this milestone.
 
 **Acceptance:** use the actual release on a clean Windows profile/device with no checkout, global Pi, inherited provider credentials or development toolchain. Install, launch each supported host, authenticate, complete a task, restart/resume, update and recover to the prior compatible release using disposable data. Verify loaded identity, not just files on disk. Reinstallation preserves user data.
 
