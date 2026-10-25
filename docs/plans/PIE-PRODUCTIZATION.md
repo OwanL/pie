@@ -31,6 +31,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Normal VS Code and standalone share personal provider configuration. Development/test profiles remain private and cannot fall through to installed settings, credentials or history.
 - Provider configuration is UI-first with optional schema-validated YAML at `%LOCALAPPDATA%/pie/config/providers.yaml`; discovery caches live beneath `<resolved data root>/cache/provider-models/`. Secrets remain separate from YAML, chat and ordinary view snapshots.
 - Initially support one configured account/endpoint per provider. Preserve `(provider, model ID)` attribution; do not add speculative multi-account machinery.
+- First-run setup guides users through connecting providers and choosing models, then assigning models to title generation, subagents, history compaction and other model-powered features. Offer these features during setup instead of assuming access to the maintainer's models. Required versus skippable assignments and suggested selections remain to be decided.
 
 ### Provider and request behavior
 
