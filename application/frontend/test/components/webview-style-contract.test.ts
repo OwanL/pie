@@ -430,6 +430,17 @@ test('global cost pair stays intrinsic and unwrapped while standalone measuremen
     'no statistics are hidden by CSS');
 });
 
+test('global cost tooltip targets expose padded pills on hover and keyboard focus', async () => {
+  const css = await readStyleSource('aggregate-stats-strip.css');
+  const cost = css.match(/\.aggregate-strip-cost\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(cost, /min-height:\s*24px/);
+  assert.match(cost, /padding:\s*0 6px/);
+  assert.match(cost, /border-radius:\s*var\(--status-chip-radius\)/);
+  assert.match(cost, /background:\s*transparent/);
+  assert.match(cost, /transition:\s*background var\(--panel-transition-fast\)/);
+  assert.match(css, /\.aggregate-strip-cost:hover,\s*\.aggregate-strip-cost:focus-visible\s*\{[^}]*background:\s*var\(--panel-control-hover\)/);
+});
+
 test('the session tab context menu is viewport-capped and scrolls tall dynamic group lists', async () => {
   const composerCss = await readStyleSource('composer.css');
   const rule = composerCss.match(/\.session-tab-context-menu\s*\{([^}]*)\}/)?.[1] ?? '';

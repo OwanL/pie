@@ -221,11 +221,10 @@
   justify-content: flex-end;
 }
 
-/* Centering the 8px mono line puts its baseline 2.5px above the 11px
-   model, reasoning and session labels. Align those text baselines, not their
-   font-descent boxes, without moving controls or changing pointer targets. */
-.composer-global-indicators .aggregate-strip {
-  top: 2.5px;
+/* Lower the 8px mono text baseline by 2.5px to meet the 11px labels,
+   while keeping the cost pills centered with the other 24px controls. */
+.composer-global-indicators .aggregate-strip-cost {
+  padding-block-start: 5px;
 }
 
 .composer-indicators {
