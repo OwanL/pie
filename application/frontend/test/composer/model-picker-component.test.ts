@@ -93,9 +93,9 @@ test('ModelPicker option names describe prices per million tokens and image supp
     assert.match(options[1].getAttribute('aria-label') ?? '', /Local: Text Model, local\/local-model/);
     assert.match(options[1].getAttribute('aria-label') ?? '', /input price unavailable/);
     assert.match(options[1].getAttribute('aria-label') ?? '', /text only/);
-    assert.match(options[0].textContent ?? '', /OpenAI: GPT-5/);
+    assert.match(options[0].textContent ?? '', /gpt-5/);
     assert.match(options[0].textContent ?? '', /\$1\.25/);
-    assert.equal(options[0].title, 'Pricing diagnostics', 'native title diagnostics remain available');
+    assert.match(options[0].title, /Pricing diagnostics/, 'native title diagnostics remain available');
   } finally {
     act(() => render(null, container));
     container.remove();
@@ -131,7 +131,7 @@ test('ModelPicker retains long provider-qualified identity and announces zero pr
     }), container));
     act(() => container.querySelector<HTMLButtonElement>('button')!.click());
     const option = document.querySelector<HTMLElement>('[role="option"]')!;
-    assert.equal(option.querySelector('.model-picker-name')?.textContent, `long-provider · ${name}`);
+    assert.equal(option.querySelector('.model-picker-name')?.textContent, name);
     assert.match(option.getAttribute('aria-label')!, /input price \$0\.00 per million tokens, output price \$0\.00 per million tokens/);
     assert.match(option.title, new RegExp(name));
     assert.equal(option.querySelectorAll('.model-picker-col-price')[0].textContent?.trim(), '$0.00');

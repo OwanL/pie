@@ -503,7 +503,8 @@ function withPendingBucket(run: (ui: {
   };
   const pick = (name: string) => {
     act(() => { (container.querySelector('[aria-label="Choose model for Small bucket"]') as HTMLButtonElement).click(); });
-    const row = [...document.querySelectorAll('.model-picker-row')].find((entry) => entry.textContent?.includes(name));
+    const row = [...document.querySelectorAll('.model-picker-row')].find((entry) =>
+      entry.textContent?.includes(name) || entry.getAttribute('aria-label')?.includes(name));
     assert.ok(row);
     act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
   };
@@ -581,7 +582,7 @@ test('pending bucket preserves provider-disambiguated choice beside an ambiguous
   withPendingBucket(({ container, calls, rerender, pick }) => {
     const models = [...AVAILABLE_MODELS, { ...AVAILABLE_MODELS[1], provider: 'other', name: 'Other Sonnet' }];
     act(() => rerender(emptyBucketPrefs(), models));
-    pick('anthropic · Sonnet');
+    pick('anthropic/sonnet');
     act(() => rerender(prefsWith({ subagentBuckets: { small: [{ model: 'sonnet', thinkingLevel: 'high' }], medium: [], frontier: [] } }), models));
     assert.ok(container.querySelector('.toolbar-settings-bucket-add-row'));
     act(() => { (container.querySelector('.toolbar-settings-bucket-add-btn') as HTMLButtonElement).click(); });

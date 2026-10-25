@@ -151,12 +151,13 @@ test('Escape closes only the ModelPicker, leaving the settings menu open', () =>
   mount();
   const dropdown = openPrepassPicker();
 
-  // Simulate the post-rAF focus that useFocusOnOpen moves into the dropdown.
-  act(() => { dropdown.focus(); });
-  assert.ok(document.activeElement === dropdown, 'dropdown should hold focus');
+  // Simulate the post-rAF focus that useFocusOnOpen moves into search.
+  const search = dropdown.querySelector<HTMLInputElement>('.model-picker-search')!;
+  act(() => { search.focus(); });
+  assert.ok(document.activeElement === search, 'search should hold focus');
 
   act(() => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 
   assert.ok(

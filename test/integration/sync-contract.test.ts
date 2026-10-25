@@ -494,6 +494,16 @@ test('PROTOCOL_VERSION is a positive integer', () => {
   assert.ok(PROTOCOL_VERSION >= 1);
 });
 
+test('shared model favorites use a typed host-owned setPrefs patch', async () => {
+  assert.deepEqual(DEFAULT_CHAT_PREFS.modelFavorites, []);
+  const patch: WebviewToHostMessage = {
+    type: 'setPrefs',
+    prefs: { modelFavorites: ['openai/gpt-5', 'provider/model/id'] },
+  };
+  const { validateWebviewToHostMessage } = await import('../../application/lib/validation/protocol-validation.js');
+  assert.equal(validateWebviewToHostMessage(patch).ok, true);
+});
+
 test('DEFAULT_CHAT_PREFS shape', () => {
   assert.equal(typeof DEFAULT_CHAT_PREFS.autoExpandReasoning, 'boolean');
   assert.equal(typeof DEFAULT_CHAT_PREFS.autoExpandToolCalls, 'boolean');

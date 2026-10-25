@@ -12,10 +12,24 @@ import {
   mergeChatPrefs,
   normalizeBooleanMap,
   normalizeNestedAllowedBuckets,
+  normalizeModelFavorites,
   normalizeSubagentBucketCanSpawn,
   normalizeSubagentBuckets,
   resolveChatPrefs,
 } from '../index.js';
+
+test('shared model favorites default empty and normalize malformed identities without catalog lookup', () => {
+  assert.deepEqual(DEFAULT_CHAT_PREFS.modelFavorites, []);
+  assert.deepEqual(resolveChatPrefs().modelFavorites, []);
+  assert.deepEqual(normalizeModelFavorites([
+    'openai/gpt-5', 'openai/gpt-5', 'provider/model/with/slashes',
+    'bare-model', '/missing-provider', 'provider/', '  provider/model', 42, null,
+  ]), ['openai/gpt-5', 'provider/model/with/slashes']);
+  assert.deepEqual(resolveChatPrefs({
+    // @ts-expect-error intentionally malformed stored preference
+    modelFavorites: 'openai/gpt-5',
+  }).modelFavorites, []);
+});
 
 test('subagent provider defaults are empty and malformed stored values are normalized', () => {
   assert.deepEqual(DEFAULT_CHAT_PREFS.subagentProviderDefaults, {});

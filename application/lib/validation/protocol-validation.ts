@@ -47,6 +47,7 @@ import {
   COMPOSER_INITIAL_ROWS_MIN,
   UI_PATH_PARENT_DEPTH_MAX,
   UI_PATH_PARENT_DEPTH_MIN,
+  isCanonicalModelFavorite,
 } from '../protocol/settings.js';
 import {
   PROVIDER_MAX_AFTERBURN_SECONDS,
@@ -427,6 +428,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     const v = (value as Record<string, unknown>)[key];
     if (key === 'uiDensity') {
       if (v !== undefined && !validDensities.has(v as string)) return false;
+      continue;
+    }
+    if (key === 'modelFavorites') {
+      if (v !== undefined && (!Array.isArray(v) || !v.every(isCanonicalModelFavorite))) return false;
       continue;
     }
     if (key === 'subagentMaxInflight') {

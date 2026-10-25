@@ -3,6 +3,8 @@
 
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { RemovedProvidersContext } from './removed-providers';
+import { ModelFavoritesContext } from './model-favorites';
+import { sortModelPickerEntries, type ModelSort, type ModelSortKey } from './model-picker-order';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
@@ -64,7 +66,7 @@ function getRowClass(isSelected: boolean, isActive: boolean, ineligible?: boolea
   ].filter(Boolean).join(' ');
 }
 
-type ListKeyAction = 'next' | 'prev' | 'first' | 'last' | 'select' | 'close';
+type ListKeyAction = 'next' | 'prev' | 'first' | 'last' | 'select';
 
 function resolveListKeyAction(key: string): ListKeyAction | null {
   switch (key) {
@@ -78,8 +80,6 @@ function resolveListKeyAction(key: string): ListKeyAction | null {
       return 'last';
     case 'Enter':
       return 'select';
-    case 'Tab':
-      return 'close';
     default:
       return null;
   }
@@ -133,17 +133,18 @@ function useClickOutside(
       }
     };
     const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && (listRef.current?.contains(e.target as Node) || triggerRef.current?.contains(e.target as Node))) {
         e.preventDefault();
+        e.stopPropagation();
         setOpen(false);
         triggerRef.current?.focus();
       }
     };
     document.addEventListener('mousedown', down);
-    document.addEventListener('keydown', key);
+    document.addEventListener('keydown', key, true);
     return () => {
       document.removeEventListener('mousedown', down);
-      document.removeEventListener('keydown', key);
+      document.removeEventListener('keydown', key, true);
     };
   }, [open]);
 }
@@ -160,7 +161,7 @@ function useDropdownPosition(
     triggerRef,
     overlayRef: listRef,
     preferredDirection: dropdownDirection,
-    preferredWidth: compact ? 360 : 420,
+    preferredWidth: 520,
     minHeight: 140,
     maxHeight: 400,
   });
@@ -209,9 +210,7 @@ function useListKeyDown(
   entries: ModelPickerEntry[],
   activeIndex: number,
   handleSelect: (modelId: string) => void,
-  setOpen: (value: boolean) => void,
   setActiveIndex: (updater: (prev: number) => number) => void,
-  triggerRef: { current: HTMLButtonElement | null },
   /** True once the user explicitly moved the highlight (arrows/Home/End or
    *  pointer hover). Enter may also commit a typed-filter match. */
   explicitHighlightRef: { current: boolean },
@@ -221,14 +220,6 @@ function useListKeyDown(
     (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
       const action = resolveListKeyAction(e.key);
       if (!action) return;
-      // Tab must close even when the current search has no results; otherwise
-      // focus leaves while the portaled dropdown remains visibly stranded.
-      if (action === 'close') {
-        e.preventDefault();
-        setOpen(false);
-        focusAdjacentControl(triggerRef.current, e.shiftKey);
-        return;
-      }
       if (entries.length === 0) return;
       e.preventDefault();
       switch (action) {
@@ -332,7 +323,7 @@ function useModelPicker({
 
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
-  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex, triggerRef, explicitHighlightRef, query);
+  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setActiveIndex, explicitHighlightRef, query);
   const onSearchInput = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
     const nextQuery = e.currentTarget.value;
     setQuery(nextQuery);
@@ -462,15 +453,16 @@ function ModelPickerRow({
       role="option"
       aria-selected={isSelected}
       aria-label={`${entry.label}, ${entry.model.provider}/${entry.model.id}, input price ${entry.tokenInPrice ? `${entry.tokenInPrice} per million tokens` : 'unavailable'}, output price ${entry.tokenOutPrice ? `${entry.tokenOutPrice} per million tokens` : 'unavailable'}, ${entry.supportsImages ? 'supports images' : 'text only'}`}
-      title={entry.title}
+      title={`${entry.label}\n${entry.model.provider}/${entry.model.id}\n${entry.title}`}
       onMouseEnter={onMouseEnter}
       onMouseDown={onMouseDown}
       onClick={onClick}
     >
       <span class="model-picker-col model-picker-col-name">
         <span class="model-picker-selection" aria-hidden="true">{isSelected ? '✓' : ''}</span>
-        <span class="model-picker-name">{entry.label}</span>
+        <span class="model-picker-name">{entry.selectedLabel}</span>
       </span>
+      <span class="model-picker-col model-picker-col-provider">{entry.model.provider}</span>
       <span class="model-picker-col model-picker-col-price">
         {entry.tokenInPrice || '—'}
       </span>
@@ -504,6 +496,9 @@ interface ModelPickerDropdownProps {
   query: string;
   onSearchInput: (e: JSX.TargetedEvent<HTMLInputElement>) => void;
   inputRef: { current: HTMLInputElement | null };
+  sort: ModelSort;
+  onSort: (key: ModelSortKey) => void;
+  onLeave: (backward: boolean) => void;
 }
 
 function ModelPickerDropdown({
@@ -524,9 +519,28 @@ function ModelPickerDropdown({
   query,
   onSearchInput,
   inputRef,
+  sort,
+  onSort,
+  onLeave,
 }: ModelPickerDropdownProps) {
+  const favorites = useContext(ModelFavoritesContext);
+  // Moving keyed rows can blur their focused button. Restore that same node,
+  // never a replacement candidate, after the reorder has committed.
+  const focusedControl = typeof document !== 'undefined' && listRef.current?.contains(document.activeElement)
+    ? document.activeElement as HTMLElement : null;
+  useLayoutEffect(() => {
+    if (focusedControl?.isConnected && document.activeElement !== focusedControl) focusedControl.focus();
+  });
   return (
-    <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)}>
+    <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)} onKeyDown={(e) => {
+      if (e.key !== 'Tab') return;
+      const controls = Array.from(listRef.current?.querySelectorAll<HTMLElement>('input, button:not(:disabled)') ?? []);
+      const index = controls.indexOf(e.target as HTMLElement);
+      e.preventDefault();
+      const next = index + (e.shiftKey ? -1 : 1);
+      if (next < 0 || next >= controls.length) onLeave(e.shiftKey);
+      else controls[next]?.focus();
+    }}>
       <div class="model-picker-searchbar">
         <svg class="model-picker-search-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="7" cy="7" r="4.5" />
@@ -551,13 +565,21 @@ function ModelPickerDropdown({
           onKeyDown={onKeyDown}
         />
       </div>
-      <div class="model-picker-header" aria-hidden="true">
-        <span class="model-picker-col model-picker-col-name">Model</span>
-        <span class="model-picker-col model-picker-col-price" title="Input price per million tokens">In</span>
-        <span class="model-picker-col model-picker-col-price" title="Output price per million tokens">Out</span>
-        <span class="model-picker-col model-picker-col-images" title="Image input capability">Img</span>
+      <div class="model-picker-header">
+        <span title="Favorites first" aria-label="Favorites first">★</span>
+        {([['name', 'Model'], ['provider', 'Provider'], ['input', 'In'], ['output', 'Out'], ['images', 'Img']] as const).map(([key, text]) => (
+          <span>
+            <button type="button" onClick={() => onSort(key)} aria-label={`Sort by ${text}`}
+              aria-pressed={sort.key === key} aria-describedby={`${idBase}-sort-${key}`}>
+              {text}<span aria-hidden="true">{sort.key === key ? (sort.descending ? ' ↓' : ' ↑') : ''}</span>
+            </button>
+            <span id={`${idBase}-sort-${key}`} hidden>{sort.key === key ? `Sorted ${sort.descending ? 'descending' : 'ascending'}` : 'Not sorted by this column'}</span>
+          </span>
+        ))}
       </div>
-      <div id={listId} class="model-picker-rows" role="listbox" aria-label={ariaLabel}>
+      <div id={listId} role="listbox" aria-label={ariaLabel}
+        aria-owns={entries.map(entry => `${idBase}-option-${entry.model.provider}-${entry.model.id}`).join(' ') || undefined} />
+      <div class="model-picker-rows">
         {entries.length === 0 ? (
           <div class="model-picker-empty">{query.trim() ? `No models match "${query}"` : 'No models available'}</div>
         ) : (
@@ -566,8 +588,14 @@ function ModelPickerDropdown({
             const isActive = i === activeIndex;
             const optionId = `${idBase}-option-${entry.model.provider}-${entry.model.id}`;
             return (
+              <div class="model-picker-row-wrap" key={formatModelSpec(entry.model)} role="presentation">
+                <button type="button" class="model-picker-star" disabled={favorites.disabled}
+                  aria-pressed={favorites.favorites.includes(formatModelSpec(entry.model))}
+                  aria-label={`Favorite ${entry.model.provider}/${entry.model.id}`}
+                  onClick={() => favorites.onToggle(formatModelSpec(entry.model))}>
+                  {favorites.favorites.includes(formatModelSpec(entry.model)) ? '★' : '☆'}
+                </button>
               <ModelPickerRow
-                key={formatModelSpec(entry.model)}
                 entry={entry}
                 isSelected={isSelected}
                 isActive={isActive}
@@ -580,6 +608,7 @@ function ModelPickerDropdown({
                 }}
                 onClick={() => handleSelect(formatModelSpec(entry.model))}
               />
+              </div>
             );
           })
         )}
@@ -605,7 +634,9 @@ export function ModelPicker({
   dropdownDirection = 'up',
 }: ModelPickerProps) {
   const removedProviderIds = useContext(RemovedProvidersContext);
-  const entries = useMemo(() => catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider)), [catalogEntries, removedProviderIds]);
+  const favorites = useContext(ModelFavoritesContext);
+  const [sort, setSort] = useState<ModelSort>({ key: 'name', descending: false });
+  const entries = useMemo(() => sortModelPickerEntries(catalogEntries.filter(entry => !removedProviderIds.includes(entry.model.provider)), favorites.favorites, sort), [catalogEntries, removedProviderIds, favorites.favorites, sort]);
   const provider = value.includes('/') ? value.slice(0, value.indexOf('/')) : '';
   const label = removedProviderIds.includes(provider) ? `${value} · Unavailable (removed provider)` : currentLabel;
   const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
@@ -624,6 +655,12 @@ export function ModelPicker({
   const dropdown = state.open && (
     <ModelPickerDropdown
       listRef={state.listRef}
+      sort={sort}
+      onSort={(key) => setSort((previous) => ({ key, descending: previous.key === key ? !previous.descending : false }))}
+      onLeave={(backward) => {
+        state.setOpen(false);
+        focusAdjacentControl(state.triggerRef.current, backward);
+      }}
       listId={state.listId}
       dropdownDirection={dropdownDirection}
       compact={compact}

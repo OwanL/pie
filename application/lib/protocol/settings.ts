@@ -256,6 +256,8 @@ export interface ChatPrefs {
    * active tool set, so MCP servers stay configured in their mcp.json files
    * but the model never sees the tools. Mirrored via PIE_MCP_ENABLED. */
   mcpEnabled: boolean;
+  /** Host-owned shared favorites, retained even when absent from the catalog. */
+  modelFavorites: string[];
   /** When true, sub-agents always use the parent's active model (skip bucket selection). */
   subagentAlwaysParentModel: boolean;
   /** When true, bucket selection softly routes around enabled providers whose
@@ -461,6 +463,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   showPruningMessages: true,
   autonomousMode: false,
   mcpEnabled: true,
+  modelFavorites: [],
   subagentAlwaysParentModel: false,
   subagentRouteAroundSaturatedProviders: false,
   subagentFallbackOnProviderFailure: true,
@@ -773,6 +776,30 @@ export function normalizeSubagentBucketCanSpawn(value: unknown): SubagentBucketC
   };
 }
 
+/** A canonical provider-qualified identity. The first slash separates the
+ * provider from a non-empty model id, which may itself contain slashes. */
+export function isCanonicalModelFavorite(value: unknown): value is string {
+  if (typeof value !== 'string' || value !== value.trim()) return false;
+  const separator = value.indexOf('/');
+  return separator > 0
+    && separator < value.length - 1
+    && value.slice(0, separator).trim().length > 0
+    && value.slice(separator + 1).trim().length > 0;
+}
+
+/** Normalize stored favorites without consulting the current model catalog. */
+export function normalizeModelFavorites(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const favorites: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isCanonicalModelFavorite(entry) || seen.has(entry)) continue;
+    seen.add(entry);
+    favorites.push(entry);
+  }
+  return favorites;
+}
+
 export function normalizeComposerInitialRows(value: unknown): number {
   return typeof value === 'number'
     && Number.isInteger(value)
@@ -825,6 +852,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     mcpEnabled: typeof storedPrefs.mcpEnabled === 'boolean'
       ? storedPrefs.mcpEnabled
       : DEFAULT_CHAT_PREFS.mcpEnabled,
+    modelFavorites: normalizeModelFavorites(storedPrefs.modelFavorites),
     composerInitialRows: normalizeComposerInitialRows(storedPrefs.composerInitialRows),
     uiPathParentDepth: normalizeUiPathParentDepth(storedPrefs.uiPathParentDepth),
     extensionToggles: {

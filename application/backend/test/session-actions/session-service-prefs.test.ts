@@ -288,6 +288,21 @@ test('setPrefs persists prefs without dispatching a recursive SetPrefs command',
   assert.equal(persisted?.subagentMaxInflightSource, 'configured-default');
 });
 
+test('setPrefs persists shared model favorites and preserves unknown identities through unrelated writes', async () => {
+  const { service, context } = makeHarness();
+  context.globalState.values.set('chatPrefs', {
+    modelFavorites: ['openai/gpt-5', 'retired-provider/model:latest/variant'],
+  });
+
+  await service.setPrefs({ autoExpandReasoning: true });
+
+  const persisted = context.globalState.get('chatPrefs') as ChatPrefs;
+  assert.deepEqual(persisted.modelFavorites, ['openai/gpt-5', 'retired-provider/model:latest/variant']);
+  await service.setPrefs({ modelFavorites: [] });
+  assert.deepEqual((context.globalState.get('chatPrefs') as ChatPrefs).modelFavorites, []);
+  service.dispose();
+});
+
 test('setPrefs marks explicit subagent concurrency saved and preserves provenance on unrelated writes', async () => {
   const { service, backend, context, archState } = makeHarness();
   archState.settings.backendReady = true;

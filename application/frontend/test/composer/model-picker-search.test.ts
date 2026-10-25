@@ -133,7 +133,7 @@ test('ModelPicker dropdown renders a search input when opened', () => {
   assert.match(dropdown.querySelector('.model-picker-header')?.textContent ?? '', /Img/);
   assert.match(dropdown.textContent ?? '', /\$1\.00/);
   assert.match(dropdown.textContent ?? '', /\$2\.00/);
-  assert.equal(dropdown.querySelectorAll('.model-picker-col-images').length, MODELS.length + 1);
+  assert.equal(dropdown.querySelectorAll('[role="option"] .model-picker-col-images').length, MODELS.length);
 });
 
 test('typing into the search input filters the visible rows', () => {
@@ -188,7 +188,12 @@ test('a query with no matches shows an empty state and no rows', () => {
   assert.match(empty!.textContent ?? '', /No models match/);
 
   keydown(input, 'Tab');
-  assert.ok(document.querySelector('.model-picker-dropdown') === null, 'Tab should close an empty result list');
+  assert.ok(document.querySelector('.model-picker-dropdown'), 'Tab reaches sortable headers even with no results');
+  assert.equal(document.activeElement?.getAttribute('aria-label'), 'Sort by Model');
+  for (let i = 0; i < 5; i++) {
+    act(() => { document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })); });
+  }
+  assert.equal(document.querySelector('.model-picker-dropdown'), null, 'Tab after final header dismisses an empty result list');
 });
 
 test('Enter selects the top filtered match', () => {
@@ -280,8 +285,8 @@ test('Enter commits after explicit keyboard navigation', () => {
 
   const dropdown = openDropdown();
   const input = searchInput(dropdown);
-  // Entries are ordered by name; the second row is Claude Opus 4.
-  keydown(input, 'ArrowDown');
+  // Default name sorting places Claude Opus first regardless of catalog order.
+  keydown(input, 'Home');
   keydown(input, 'Enter');
   assert.equal(selected, 'anthropic/claude-opus');
   assert.equal(dropdown.isConnected, false);
@@ -304,7 +309,7 @@ test('when the current model is missing from the list, Enter does not commit the
   // Explicit navigation still commits: ArrowDown highlights the first row.
   keydown(searchInput(dropdown), 'ArrowDown');
   keydown(searchInput(dropdown), 'Enter');
-  assert.equal(selected, 'openai/gpt-5');
+  assert.equal(selected, 'anthropic/claude-opus');
 });
 
 for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty'] as const) {
@@ -315,7 +320,7 @@ for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty']
     renderPicker('gpt-5', onChange, catalog);
     const dropdown = openDropdown();
     const input = searchInput(dropdown);
-    keydown(input, 'ArrowDown');
+    keydown(input, 'Home');
     const next = scenario === 'remove preceding' ? catalog.slice(1)
       : scenario === 'reorder' ? [catalog[1], catalog[0], catalog[2], catalog[3]]
       : scenario === 'remove active' ? [catalog[0], catalog[2], catalog[3]] : [];
@@ -330,7 +335,7 @@ for (const scenario of ['remove preceding', 'reorder', 'remove active', 'empty']
       if (next.length) {
         keydown(input, 'ArrowDown');
         keydown(input, 'Enter');
-        assert.deepEqual(commits, ['openai/gpt-5']);
+        assert.deepEqual(commits, ['anthropic/claude-sonnet']);
       }
     } else {
       assert.ok(activeId);

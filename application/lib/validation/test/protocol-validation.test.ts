@@ -474,6 +474,17 @@ test('validateWebviewToHostMessage validates setModel and rejects invalid thinki
   );
 });
 
+test('validateWebviewToHostMessage validates shared model favorite patches', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'setPrefs', prefs: {
+    modelFavorites: ['openai/gpt-5', 'provider/model/id'],
+  } }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'setPrefs', prefs: { modelFavorites: [] } }).ok, true);
+  for (const modelFavorites of [null, 'openai/gpt-5', ['gpt-5'], ['/model'], ['provider/'], [' provider/model'], [3]]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPrefs', prefs: { modelFavorites } }).ok, false,
+      `invalid favorites patch should reject: ${JSON.stringify(modelFavorites)}`);
+  }
+});
+
 test('validateWebviewToHostMessage validates setPrefs patches and rejects unknown keys', () => {
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { autoExpandReasoning: true } }).ok,

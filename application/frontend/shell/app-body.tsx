@@ -22,6 +22,7 @@ import { PanelMain } from './panel-main';
 import { BottomSection } from '../composer/bottom-section';
 import { useNoticeAction } from '../notifications/use-notice-action';
 import { useChatPrefsCss } from '../settings/use-chat-prefs-css';
+import { ModelFavoritesProvider } from '../settings/model-favorites';
 import { useWarmupAudio } from '../notifications/use-warmup-audio';
 import { TranscriptCommitProvider } from '../transcript/commit-registry';
 import { InlineConfirmDialog } from '../notifications/inline-confirm-dialog';
@@ -259,6 +260,12 @@ export function AppBody({ adapter }: AppBodyProps) {
     <NoticeContext.Provider value={derived.noticeValue}>
     <TranscriptCommitProvider target={commitTarget} postMessage={postMessage} appSurface={appCommitSurface}>
     <AskUserContext.Provider value={derived.askUserContextValue}>
+    <ModelFavoritesProvider
+      key={hostInstanceId}
+      favorites={viewState.prefs.modelFavorites ?? []}
+      onChange={(modelFavorites) => handlers.handleSetPrefs({ modelFavorites })}
+      disabled={connectionState !== 'connected'}
+    >
     <div id="app">
       {connectionState !== 'connected' && (
         <ConnectionBanner state={connectionState} />
@@ -445,6 +452,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         />
       )}
     </div>
+    </ModelFavoritesProvider>
     </AskUserContext.Provider>
     </TranscriptCommitProvider>
     </NoticeContext.Provider>
