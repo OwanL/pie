@@ -241,6 +241,7 @@ export async function terminateProcessTree(child, {
   if (!Number.isInteger(pid) || pid <= 0) {
     return { gone: true, survivors: [], ownedPids: [], ownedProcesses: [], survivorProcesses: [], diagnostics: [] };
   }
+  const closedBeforeCapture = childClosed(child);
   const capture = captureProcessTree(pid, { platform, spawnSyncImpl, child });
   const owned = capture.owned;
   const unknown = capture.unknown ?? [];
@@ -352,7 +353,15 @@ export async function terminateProcessTree(child, {
     survivors = await waitForExtinction(survivors, forceDeadline == null ? forceMs : Math.max(0, forceDeadline - Date.now()), killImpl);
   }
   if (platform === 'win32') {
-      const verification = queryProcessRows(platform, spawnSyncImpl);
+      // Only a previously proven tree that was already closed and wholly
+      // absent from the successful cleanup census can reuse that census.
+      // Dead PID probes alone cannot exclude late or unproven descendants.
+      const canReuseCapture = closedBeforeCapture && survivors.length === 0
+        && capture.enumeration.available && !capture.ownershipUnknown && unknown.length === 0
+        && owned.some((entry) => entry.pid === pid && entry.identity != null)
+        && owned.every((entry) => entry.identity != null
+          && !capture.enumeration.rows.some((row) => row.pid === entry.pid));
+      const verification = canReuseCapture ? capture.enumeration : queryProcessRows(platform, spawnSyncImpl);
       if (!verification.available) {
         finalEnumerationAvailable = false;
         diagnostics.push(`Windows process enumeration failed during final identity verification (${verification.reason}); live PIDs remain unconfirmed`);

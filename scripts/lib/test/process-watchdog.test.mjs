@@ -321,6 +321,36 @@ test('killProcessTree may target a captured Windows child only when its creation
   assert.deepEqual(result.survivors, []);
 });
 
+test('Windows closed watchdog reuses only a census proving every retained generation absent', async (t) => {
+  for (const scenario of ['absent', 'present-despite-dead-probe', 'final-failure']) {
+    await t.test(scenario, async () => {
+      const child = new ChildProcess();
+      child.pid = 4321;
+      const rows = '4321|1|20261009170000.000000+780\n7654|4321|20261009170001.000000+780\n';
+      let closed = false;
+      let cleanupQueries = 0;
+      const watchdog = watchChildProcess(child, {
+        timeoutMs: 0, platform: 'win32', gracefulMs: 1, forceMs: 1,
+        spawnSyncImpl: (command) => {
+          assert.equal(command, 'powershell.exe');
+          if (!closed) return { status: 0, stdout: `${rows}PIE_ROOT_CHECK\n4321|1|20261009170000.000000+780\n` };
+          cleanupQueries += 1;
+          if (scenario === 'final-failure' && cleanupQueries === 2) return { status: 1, stdout: '' };
+          return { status: 0, stdout: scenario === 'absent' ? '' : rows };
+        },
+        killImpl: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+      });
+      assert.equal(watchdog.ownershipReady, true);
+      child.exitCode = 0;
+      closed = true;
+      const result = await watchdog.settle();
+      assert.equal(cleanupQueries, scenario === 'absent' ? 1 : 2);
+      assert.equal(result.gone, scenario !== 'final-failure');
+      assert.deepEqual(result.ownedPids, [4321, 7654]);
+    });
+  }
+});
+
 test('Windows watchdog retains live-captured leaks, skips reuse, and fails closed on census failure', async (t) => {
   for (const scenario of ['leak', 'reuse', 'failed-census', 'unseen-newer', 'older-ghost']) {
     await t.test(scenario, async () => {
@@ -476,6 +506,8 @@ test('Windows watchdog cannot recover failed live ownership capture from an empt
   assert.equal(result.gone, false);
   assert.ok(result.diagnostics.some((message) => message.includes('failed live capture')));
   assert.ok(!calls.includes('taskkill'));
+  assert.equal(calls.filter((command) => command === 'powershell.exe').length, 3,
+    'failed live capture still requires both cleanup censuses');
 });
 
 test('Windows watchdog retains an observed unproven descendant after root exit and reparenting', async () => {
@@ -557,6 +589,8 @@ test('Windows cleanup reports unseen descendants in pre-force and final censuses
       assert.equal(result.gone, false);
       assert.deepEqual(result.ownedPids, [4321]);
       assert.ok(result.survivors.includes(7654));
+      assert.equal(queries, stage === 'pre-force' ? 4 : 3,
+        'live roots and late descendants still require final enumeration');
     });
   }
 });
