@@ -615,7 +615,7 @@ test('restored untitled live titles survive a new coordinator and normal generat
 });
 
 test('title handleRequest assigns candidates and fail-open snippets but fences invalidated inference', async (t) => {
-  for (const outcome of ['generated', 'model-failed', 'disabled', 'invalidated'] as const) {
+  for (const outcome of ['generated', 'model-failed', 'invalid-output', 'disabled', 'invalidated'] as const) {
     await t.test(outcome, async (t) => {
       const dir = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'title-request-'));
       t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -638,6 +638,7 @@ test('title handleRequest assigns candidates and fail-open snippets but fences i
           inferenceCalls += 1;
           if (outcome === 'model-failed') throw new Error('model unavailable');
           if (outcome === 'invalidated') { started(); await blocked; }
+          if (outcome === 'invalid-output') return { generated: false, reason: 'invalid-output' };
           return { generated: true, name: 'Fix Login' };
         },
       };
@@ -653,8 +654,10 @@ test('title handleRequest assigns candidates and fail-open snippets but fences i
       }
       assert.deepEqual(await pending, outcome === 'invalidated'
         ? { generated: false, reason: 'cancelled' }
-        : { generated: true, name: outcome === 'generated' ? 'Fix Login' : 'Investigate login',
-          ...(outcome === 'generated' ? {} : { reason: outcome }) });
+        : outcome === 'invalid-output'
+          ? { generated: true, reason: 'invalid-output', name: 'Investigate login' }
+          : { generated: true, name: outcome === 'generated' ? 'Fix Login' : 'Investigate login',
+            ...(outcome === 'generated' ? {} : { reason: outcome }) });
       assert.equal(inferenceCalls, outcome === 'disabled' ? 0 : 1);
       assert.equal(writes.length, outcome === 'invalidated' ? 1 : 2);
       const internal = server as unknown as {

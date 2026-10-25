@@ -22,7 +22,7 @@ export const SESSION_TITLE_MAX_OUTPUT_TOKENS = 48;
 export const SESSION_TITLE_SYSTEM_PROMPT = `Write a short title for a coding-agent session from its first user request.
 
 Return only the title, with no quotes, label, punctuation, or explanation.
-- Write a complete title of at most 25 characters. Prefer 2 or 3 short words when appropriate for the language.
+- Write a complete title of at most 25 characters, including spaces. Aim for 15–20 characters to leave room; prefer 2 or 3 short words when appropriate for the language.
 - Put the primary action and subject first; omit secondary details to fit the character budget.
 - Capture the primary task, problem, or question, not the conversational framing.
 - Ignore workflow instructions such as using subagents, reading files first, asking questions, being read-only, or making the smallest change.
@@ -430,6 +430,7 @@ async function generateSessionTitleWithinDeadline(
   };
   const startedAt = new Date((deps.now ?? Date.now)()).toISOString();
   let attempt = 0;
+  let rejectedOutput = '';
   let attemptStartedAt = startedAt;
   let settled = false;
   /** True once this attempt's provider invocation was actually dispatched; a
@@ -446,7 +447,9 @@ async function generateSessionTitleWithinDeadline(
       dispatched = false;
       timeoutController.signal.throwIfAborted();
       if (hasExplicitSessionName(session)) return { generated: false, reason: 'explicit-name' };
-      const requestPrompt = attempt === 0 ? prompt : compactSessionTitleInput(`${prompt}\n\nThe previous response was invalid. Write a complete replacement title, one line only, at most 25 characters. Do not truncate a longer title or add explanation.`);
+      // A correction needs the rejected output, not just the original request:
+      // otherwise the model cannot tell what failed and may repeat an oversize title.
+      const requestPrompt = attempt === 0 ? prompt : compactSessionTitleInput(`${prompt}\n\nThe previous response was invalid (${rejectedOutput.length} characters): ${JSON.stringify(rejectedOutput.slice(0, 500))}\nWrite a complete replacement title, one line only, at most 25 characters including spaces. Aim for 15–20 characters. Remove secondary details or use shorter words; do not truncate a longer title or add explanation.`);
       let completion: TitleCompletion;
       if (model.provider === 'ollama') {
         dispatchAttempt();
@@ -464,7 +467,10 @@ async function generateSessionTitleWithinDeadline(
         attempt,
       });
       const candidate = sanitizeGeneratedSessionTitle(completion.text);
-      if (!candidate) continue;
+      if (!candidate) {
+        rejectedOutput = completion.text;
+        continue;
+      }
 
       // A manual rename racing inference always wins; generation never persists.
       if (hasExplicitSessionName(session)) return { generated: false, reason: 'explicit-name' };

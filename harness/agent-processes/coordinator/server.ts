@@ -5568,6 +5568,15 @@ export class BackendServer {
             const generation = routed && typeof routed === 'object'
               ? (routed as { generated?: unknown; name?: unknown; reason?: unknown })
               : { generated: false };
+            if (generation.generated === false
+              && (generation.reason === 'invalid-output'
+                || generation.reason === 'model-unavailable'
+                || generation.reason === 'auth-unavailable'
+                || generation.reason === 'unsupported-runtime')) {
+              backendWarn('backend-live-titles', 'title generation failed; finalizing snippet', {
+                sessionPath, reason: generation.reason,
+              });
+            }
             let generationPrompt = '';
             try {
               const titleParams = validateSessionTitleGenerate(request.params);

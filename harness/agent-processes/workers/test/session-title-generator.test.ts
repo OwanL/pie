@@ -353,6 +353,38 @@ test('a corrective request returns a complete replacement', async () => {
   assert.equal(calls, 2);
 });
 
+for (const provider of ['ollama', 'openai-codex']) {
+  test(`${provider} correction includes the rejected output and measured length within the input budget`, async () => {
+    const rejected = 'Replace Bespoke Pies Image Viewer';
+    const fake = fakeContext({ auth: async () => ({ apiKey: 'test-key' }) });
+    const requests: string[] = [];
+    const reply = (request: string) => {
+      requests.push(request);
+      return requests.length === 2 && request.includes(JSON.stringify(rejected))
+        && request.includes(`${rejected.length} characters`)
+        ? 'Replace Image Viewer' : rejected;
+    };
+    const result = await generateSessionTitle(fake.context, {
+      sdkPath: '/sdk', provider, model: 'title-model',
+      prompt: `Replace the bespoke image viewer. ${'Context '.repeat(900)}Use an existing viewer.`,
+    }, {
+      fetchFn: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+        return new Response(JSON.stringify({ message: { content: reply(body.messages[1]!.content) } }));
+      },
+      completeSimple: async (_model, context) => ({
+        content: [{ type: 'text', text: reply(context.messages[0]!.content[0]!.text) }],
+      }),
+    });
+    assert.deepEqual(result, { generated: true, name: 'Replace Image Viewer' });
+    assert.equal(requests.length, 2);
+    for (const request of requests) {
+      assert.ok(request.length <= SESSION_TITLE_MAX_INPUT_CHARS + '<request>\n\n</request>'.length);
+    }
+    assert.equal(fake.writtenName, undefined);
+  });
+}
+
 test('a runtime load that resumes after abort never dispatches or settles a provider attempt', async () => {
   const fake = fakeContext({ auth: async () => ({ apiKey: 'test-key' }) });
   let resolveLoad!: (completeSimple: NonNullable<SessionTitleGeneratorDeps['completeSimple']>) => void;
