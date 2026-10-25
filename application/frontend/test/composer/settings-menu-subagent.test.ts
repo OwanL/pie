@@ -6,6 +6,7 @@ import renderToString from 'preact-render-to-string';
 import { act } from 'preact/test-utils';
 
 import { installDom } from '../helpers/dom';
+import { focusSettingsHelp } from '../helpers/settings-help';
 installDom();
 
 import { SubagentModelAssignments as SubagentSection, SubagentSection as SubagentBehaviorSection } from '../../settings/settings-menu-subcomponents';
@@ -20,10 +21,7 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
 async function focusedTooltip(container: HTMLElement, label: string): Promise<string> {
   const trigger = container.querySelector(`[aria-label="About ${label}"]`) as HTMLButtonElement | null;
   assert.ok(trigger, `help button for ${label} exists`);
-  await act(async () => {
-    trigger!.focus();
-    await new Promise((resolve) => setTimeout(resolve, 180));
-  });
+  focusSettingsHelp(trigger);
   const hostId = trigger!.getAttribute('aria-describedby')?.split(' ').at(-1);
   const host = hostId ? document.getElementById(hostId) : null;
   assert.ok(host, `focused ${label} help appears`);

@@ -4,6 +4,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { installDom } from '../helpers/dom';
+import { focusSettingsHelp } from '../helpers/settings-help';
 installDom();
 
 import { DEFAULT_CHAT_PREFS, EMPTY_PROVIDER_GATE_STATS } from '../../../lib/protocol/index.js';
@@ -27,10 +28,7 @@ function pausedOpenaiMetrics(pausedUntilMs: number, strikeCount = 2): ProviderGa
 async function maxConcurrencyHelp(container: HTMLElement): Promise<string> {
   const help = container.querySelector<HTMLButtonElement>('[aria-label="About Max concurrent"]');
   assert.ok(help);
-  await act(async () => {
-    help.focus();
-    await new Promise((resolve) => setTimeout(resolve, 180));
-  });
+  focusSettingsHelp(help);
   const id = help.getAttribute('aria-describedby');
   assert.ok(id);
   return document.getElementById(id)?.textContent ?? '';

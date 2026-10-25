@@ -3,6 +3,7 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installDom } from '../helpers/dom';
+import { focusSettingsHelp } from '../helpers/settings-help';
 installDom();
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -30,7 +31,7 @@ afterEach(() => {
 async function showHelp() {
   const help = document.querySelector<HTMLButtonElement>('button[aria-label="About Generate session titles"]');
   assert.ok(help);
-  await act(async () => { help.focus(); await new Promise((resolve) => setTimeout(resolve, 180)); });
+  focusSettingsHelp(help);
   const id = help.getAttribute('aria-describedby');
   assert.ok(id);
   const tooltip = document.getElementById(id)!;

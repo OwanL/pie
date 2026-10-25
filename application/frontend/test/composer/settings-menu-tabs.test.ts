@@ -2,6 +2,7 @@ import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
+import { focusSettingsHelp } from '../helpers/settings-help';
 installDom();
 
 import { h, render } from 'preact';
@@ -261,10 +262,7 @@ test('extension-backed settings route to Models, Context, and Subagents', async 
   ] as const) {
     const help = body.querySelector<HTMLButtonElement>(`[aria-label="About ${label}"]`);
     assert.ok(help);
-    await act(async () => {
-      help.focus();
-      await new Promise((resolve) => setTimeout(resolve, 180));
-    });
+    focusSettingsHelp(help);
     const id = help.getAttribute('aria-describedby');
     assert.ok(id);
     assert.match(document.getElementById(id)?.textContent ?? '', message);
