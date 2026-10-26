@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -12,6 +12,8 @@ import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { abortOnProcessSignals, resolveChildProcessTimeoutMs, watchChildProcess, withProcessTreeIsolation } from '../lib/process-watchdog.mjs';
 import { verificationChildEnv } from './verification-runtime.mjs';
 import { createOwnerRequire } from '../lib/package-resolution.mjs';
+import { copyPackageSkeleton } from '../lib/delivery-package.mjs';
+export { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 
 import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity } from './lib/vsix-candidate.mjs';
 
@@ -51,26 +53,6 @@ export function qualificationStages(root, packageRoot, artifactDir, browserExecu
       env: { PIE_RUN_DELIVERED_HOST_TESTS: '1', PIE_RUN_DELIVERED_BROWSER_TESTS: '1', PIE_DELIVERED_HOST_ROOT: packageRoot,
         ...(browserExecutable === undefined ? {} : { PIE_DELIVERED_BROWSER_EXECUTABLE: browserExecutable }) } },
   ];
-}
-
-export async function copyPackageSkeleton(root, packageRoot) {
-  const source = path.join(root, 'application/hosts/vscode');
-  await mkdir(path.join(packageRoot, 'runtime'));
-  await mkdir(path.join(packageRoot, 'media'));
-  await copyFile(path.join(source, 'package.json'), path.join(packageRoot, 'package.json'));
-  await copyFile(path.join(source, 'media/icon.svg'), path.join(packageRoot, 'media/icon.svg'));
-  for (const entry of await readdir(path.join(source, 'runtime'), { withFileTypes: true })) {
-    if (entry.isFile() && entry.name.endsWith('.cjs')) {
-      // Source windows-runtime-lock.cjs is a checkout-relative forwarding
-      // adapter, not packageable bytes. Packaged startup loaders ship the
-      // standalone neutral owner bytes (the same authority installRuntimeBootstrap
-      // packages), so a relocated delivery package stays self-contained.
-      const copySource = entry.name === 'windows-runtime-lock.cjs'
-        ? path.join(root, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')
-        : path.join(source, 'runtime', entry.name);
-      await copyFile(copySource, path.join(packageRoot, 'runtime', entry.name));
-    }
-  }
 }
 
 /** Outer completion alone is insufficient: nested failure/125 or cancellation retains evidence. */
