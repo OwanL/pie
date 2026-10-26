@@ -163,7 +163,7 @@ async function collectInitialContextInventoryInsideBoundary(
         // Mirror the main-session loaders (runtime-factory): attach Pie's
         // centralized appended prompt so inventories estimate the same
         // context real sessions build.
-        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir),
+        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, { cwd }),
         agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
           agentsFiles: prepareContextFiles(base.agentsFiles).map((contextFile) => ({
             path: contextFile.path,

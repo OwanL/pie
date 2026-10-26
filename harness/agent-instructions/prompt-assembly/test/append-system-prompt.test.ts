@@ -3,7 +3,7 @@ import test from 'node:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+
 
 import {
   CENTRAL_APPEND_SYSTEM_PROMPT_RELATIVE_PATH,
@@ -25,28 +25,16 @@ function writeCentralAppend(agentDir: string, content: string): void {
  *  worker does, so discovery tests run against the real loader logic. */
 async function loadPinnedResourceLoader(): Promise<{
   DefaultResourceLoader: new (options: Record<string, unknown>) => {
-    reload(): Promise<void> | void;
+    reload(options?: { resolveProjectTrust: () => Promise<boolean> }): Promise<void> | void;
     getAppendSystemPrompt(): string[];
+    getSystemPrompt(): string | undefined;
   };
 }> {
-  // Resolve against this file, not `process.cwd()`: test packages execute
-  // under different working directories.
-  const modulePath = path.join(
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..'),
-    'application',
-    'hosts',
-    'vscode',
-    'node_modules',
-    '@earendil-works',
-    'pi-coding-agent',
-    'dist',
-    'core',
-    'resource-loader.js',
-  );
-  return await import(pathToFileURL(modulePath).href) as unknown as {
+  return await import('@earendil-works/pi-coding-agent') as unknown as {
     DefaultResourceLoader: new (options: Record<string, unknown>) => {
-      reload(): Promise<void> | void;
+      reload(options?: { resolveProjectTrust: () => Promise<boolean> }): Promise<void> | void;
       getAppendSystemPrompt(): string[];
+      getSystemPrompt(): string | undefined;
     };
   };
 }
@@ -81,32 +69,29 @@ test('readCentralAppendSystemPrompt returns undefined when the file is absent, b
   }
 });
 
-test('centralAppendSystemPromptOverride preserves natively discovered appends and adds the central one only on an empty base', () => {
+test('centralAppendSystemPromptOverride retains default additions before a native personal append', () => {
   const agentDir = makeTempAgentDir();
   try {
     writeCentralAppend(agentDir, 'Central append');
     const override = centralAppendSystemPromptOverride(agentDir);
     assert.ok(override);
-    // A trusted project's own `.pi/APPEND_SYSTEM.md` keeps winning, matching
-    // the previous single-file discovery semantics.
-    assert.deepEqual(override(['Project append']), ['Project append']);
-    // Otherwise the centralized maintainer append is attached.
+    assert.deepEqual(override(['Personal append']), ['Central append', 'Personal append']);
     assert.deepEqual(override([]), ['Central append']);
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
 });
 
-test('centralAppendSystemPromptOverride is undefined without a central file so loaders keep native behavior', () => {
+test('missing default guidance retains native additions', () => {
   const agentDir = makeTempAgentDir();
   try {
-    assert.equal(centralAppendSystemPromptOverride(agentDir), undefined);
+    assert.deepEqual(centralAppendSystemPromptOverride(agentDir)(['Personal']), ['Personal']);
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
 });
 
-test('the relocated APPEND_SYSTEM.md is outside every native discovery path, including the empty role-instructions subagent fallback', async () => {
+test('native main additions and base replacements remain isolated from empty and nonempty child roles', async () => {
   const { DefaultResourceLoader } = await loadPinnedResourceLoader();
   const agentDir = makeTempAgentDir();
   const cwd = makeTempAgentDir();
@@ -116,11 +101,16 @@ test('the relocated APPEND_SYSTEM.md is outside every native discovery path, inc
     // global append; assert the relocated layout is not.
     assert.ok(!fs.existsSync(path.join(agentDir, 'APPEND_SYSTEM.md')));
 
-    // Subagent loader shape (runner.ts) with empty role instructions: no
-    // explicit append and no Pie override, so no append may be discovered.
+    fs.writeFileSync(path.join(agentDir, 'APPEND_SYSTEM.md'), 'Personal append');
+    fs.mkdirSync(path.join(cwd, '.pi'));
+    fs.writeFileSync(path.join(cwd, '.pi', 'APPEND_SYSTEM.md'), 'Project append');
+
+    // The runner supplies an explicit array even for empty roles. Native main
+    // appends must not leak into children in that case.
     const emptyRoleLoader = new DefaultResourceLoader({
       cwd,
       agentDir,
+      appendSystemPrompt: [],
       noExtensions: true,
     });
     await emptyRoleLoader.reload();
@@ -138,15 +128,37 @@ test('the relocated APPEND_SYSTEM.md is outside every native discovery path, inc
     assert.deepEqual(roleLoader.getAppendSystemPrompt(), ['Role instructions']);
 
     // Main-session loader shape (runtime-factory / initial-context inventory):
-    // the override attaches the centralized append.
+    // all applicable additions compose without changing native base discovery.
     const mainLoader = new DefaultResourceLoader({
       cwd,
       agentDir,
-      appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir),
+      appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {
+        cwd, isProjectTrusted: () => true,
+      }),
       noExtensions: true,
     });
     await mainLoader.reload();
-    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append']);
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+
+    await mainLoader.reload({ resolveProjectTrust: async () => true });
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+
+    // An explicit native SYSTEM.md replaces only the base, not additions.
+    fs.writeFileSync(path.join(cwd, '.pi', 'SYSTEM.md'), 'Project base replacement');
+    await mainLoader.reload();
+    assert.equal(mainLoader.getSystemPrompt(), 'Project base replacement');
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+
+    // Use the SDK trust gate, not merely a fabricated empty project array.
+    const untrusted = new DefaultResourceLoader({
+      cwd, agentDir, noExtensions: true,
+      appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {
+        cwd, isProjectTrusted: () => false,
+      }),
+    });
+    await untrusted.reload({ resolveProjectTrust: async () => false });
+    assert.equal(untrusted.getSystemPrompt(), undefined);
+    assert.deepEqual(untrusted.getAppendSystemPrompt(), ['Central append', 'Personal append']);
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
     fs.rmSync(cwd, { recursive: true, force: true });
