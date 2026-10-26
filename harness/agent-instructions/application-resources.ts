@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readBundledManagedResources } from '../../lib/managed-packages/bundled-resources.mjs';
 import { BUNDLED_EXTENSIONS, bundledExtensionsForContext } from '../tools/catalog/bundled-extensions.js';
 import type { ToolContext } from '../tools/catalog/index.js';
 import { getInstructionResourcePaths, type InstructionResourceRootOptions } from './resource-roots.js';
@@ -20,6 +21,7 @@ export interface ApplicationResourceOptions extends InstructionResourceRootOptio
   agentDir: string;
   cwd: string;
   context: ToolContext;
+  expectedRuntimeIdentity?: string;
 }
 
 function runtimeDirectory(options: InstructionResourceRootOptions): string {
@@ -65,11 +67,20 @@ export function getApplicationResourceLoaderOptions(options: ApplicationResource
   const moduleDir = runtimeDirectory(options);
   const bundledSkills = getInstructionResourcePaths(options).skillsDir;
   const installed = validateInventory(moduleDir);
+  const managed = readBundledManagedResources(moduleDir, { expectedRuntimeIdentity: options.expectedRuntimeIdentity });
+  if (managed && !installed) throw new Error('Bundled managed resources require a valid bundled extension inventory');
   return {
-    defaultExtensions: installed ? bundledExtensionsForContext(options.context).map(entry => ({
+    defaultExtensions: [...(installed ? bundledExtensionsForContext(options.context).map(entry => ({
       path: path.join(moduleDir, entry.outputFile),
       legacyPaths: entry.legacyPaths.map(legacy => path.resolve(options.agentDir, legacy)),
-    })) : [],
+    })) : []), ...(managed?.packages.map(entry => ({
+      path: entry.extensionPath,
+      legacyPaths: [
+        path.resolve(options.agentDir, 'npm', 'node_modules', entry.name),
+        path.resolve(options.agentDir, 'npm', 'node_modules', entry.name, 'index.ts'),
+      ],
+      legacyPackageSources: [`npm:${entry.name}`],
+    })) ?? [])],
     additionalUserSkillPaths: [path.resolve(options.agentDir, 'harness', 'agent-instructions', 'skills'), bundledSkills],
     additionalProjectSkillPaths: [path.resolve(options.cwd, 'skills')],
     skillPathPriority: (entry: Readonly<{ path: string; sourceInfo: Readonly<{ scope: string }> }>): number =>

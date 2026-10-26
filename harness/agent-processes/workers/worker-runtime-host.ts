@@ -1025,6 +1025,8 @@ export class WorkerRuntimeHost {
     const guardedManager = this.fenceSessionManager(manager);
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        sdkRuntimeIdentity: this.options.sdkRuntime.kind === 'source-artifact'
+          ? this.options.sdkRuntime.descriptor.identity : undefined,
         ...this.capturedProviderServices(authStorage),
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
@@ -1917,6 +1919,8 @@ export class WorkerRuntimeHost {
     const authStorage = this.sdk.AuthStorage.create(this.syncedAuthPath ?? resolveAuthPath(this.agentDir));
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        sdkRuntimeIdentity: this.options.sdkRuntime.kind === 'source-artifact'
+          ? this.options.sdkRuntime.descriptor.identity : undefined,
         ...this.capturedProviderServices(authStorage),
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({

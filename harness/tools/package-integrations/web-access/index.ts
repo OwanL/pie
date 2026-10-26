@@ -32,7 +32,10 @@
  *   3. Repairs `.DELETE.<hash>` corruption — renaming each artifact back to
  *      its original name only when no real file occupies that name.
  *
- * It is idempotent and forward-compatible: if upstream rewrites a workflow
+ * Delivered managed payloads are validated read-only relative to this module;
+ * invalid payloads throw before any legacy discovery or mutation.
+ *
+ * The legacy source route is idempotent and forward-compatible: if upstream rewrites a workflow
  * site, that source transform becomes a no-op. It registers no tools. It never
  * throws — a failure here must not break the rest of extension loading — but
  * every failure is logged
@@ -49,6 +52,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchWorkflowClampInSource, patchWorkflowDescriptionInSource, patchMcpCachePathInSource, patchWebFetchCachePathInSource, classifyManagedPackageSources, classifyMcpScriptSource, patchMcpScriptLoadingInSource, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../../../lib/managed-packages/managed-package-contract.mjs";
+import { readBundledManagedResources } from "../../../../lib/managed-packages/bundled-resources.mjs";
 import { resolvePieDataPaths } from "../../../../lib/data-root/pie-data-root-core.mjs";
 
 export { patchMcpScriptLoadingInSource, patchWorkflowClampInSource, patchWorkflowDescriptionInSource, patchMcpCachePathInSource, patchWebFetchCachePathInSource };
@@ -515,7 +519,8 @@ export interface PackageRootLookupDeps {
 	pathExists(p: string): Promise<boolean>;
 }
 
-const SOURCE_AGENT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const MODULE_DIR = typeof __dirname === "string" ? __dirname : path.dirname(fileURLToPath(import.meta.url));
+const SOURCE_AGENT_DIR = path.resolve(MODULE_DIR, "..", "..", "..", "..");
 const PRODUCTION_LOOKUP_DEPS: PackageRootLookupDeps = {
 	getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || SOURCE_AGENT_DIR,
 	getHomeDir: homedir,
@@ -638,7 +643,8 @@ export async function runSelfHeal(
 	}
 }
 
-/** pi extension factory — runs the self-heal at load time, before pi-web-access loads. */
+/** Validate delivered payloads read-only; only absent markers select legacy self-heal. */
 export default async function (_pi: ExtensionAPI): Promise<void> {
+	if (readBundledManagedResources(MODULE_DIR)) return;
 	await runSelfHeal();
 }

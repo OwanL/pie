@@ -30,6 +30,8 @@ interface RuntimeFactoryArgs {
 }
 
 export interface RuntimeFactoryOptions {
+  /** Identity retained by the verified artifact-selection owner; absent for workspace development. */
+  sdkRuntimeIdentity?: string;
   /** Wrap every manager received from the SDK, including replacements. */
   wrapSessionManager?: (manager: SdkSessionManager) => SdkSessionManager;
   /** Custom tools are constructed inside the isolated runtime so their
@@ -245,7 +247,9 @@ export function createRuntimeFactory(
       ...(providerServices ? { modelRegistry: providerServices.modelRegistry } : {}),
       editorVersion: resolveEditorVersion(),
       resourceLoaderOptions: {
-        ...getApplicationResourceLoaderOptions({ agentDir, cwd, context: 'primary' }),
+        ...getApplicationResourceLoaderOptions({
+          agentDir, cwd, context: 'primary', expectedRuntimeIdentity: options.sdkRuntimeIdentity,
+        }),
         // Main-only default/personal/project additions. Child loaders never
         // receive this policy. Keep inventory on the same composition path.
         appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {

@@ -92,6 +92,9 @@ export type InitialContextEstimateWorkerOutput =
       timings?: InitialContextEstimateWorkerTimings;
     };
 
+type ContextInventoryInput = Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>
+  & Partial<Pick<InitialContextEstimateWorkerInput, 'sdkRuntime'>>;
+
 interface RuntimeFactoryArgs {
   cwd: string;
   agentDir: string;
@@ -119,7 +122,7 @@ interface PromptStateLike {
 export async function collectInitialContextInventory(
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
-  input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
+  input: ContextInventoryInput,
   onTiming?: (
     stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs',
     durationMs: number,
@@ -142,7 +145,7 @@ export async function collectInitialContextInventory(
 async function collectInitialContextInventoryInsideBoundary(
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
-  input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
+  input: ContextInventoryInput,
   assertNoProviderAttempts: () => void,
   onTiming?: (
     stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs',
@@ -162,7 +165,11 @@ async function collectInitialContextInventoryInsideBoundary(
       agentDir,
       authStorage,
       resourceLoaderOptions: {
-        ...getApplicationResourceLoaderOptions({ agentDir, cwd, context: 'inventory' }),
+        ...getApplicationResourceLoaderOptions({
+          agentDir, cwd, context: 'inventory',
+          expectedRuntimeIdentity: input.sdkRuntime?.kind === 'source-artifact'
+            ? input.sdkRuntime.descriptor.identity : undefined,
+        }),
         // Mirror the main-session loaders (runtime-factory): attach Pie's
         // centralized appended prompt so inventories estimate the same
         // context real sessions build.

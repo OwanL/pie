@@ -1,10 +1,76 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
+// @ts-expect-error Public JavaScript fixture helper has no declaration file.
+import { pristineSources as s } from '../../../../lib/managed-packages/bundled-resources-fixture.mjs';
+import { adaptManagedPackageSources, MANAGED_PACKAGE_REQUIREMENTS } from '../../../../lib/managed-packages/managed-package-contract.mjs';
+import { createBundledManagedInventory, BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../../lib/managed-packages/bundled-resources.mjs';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { CORE_EXTENSIONS, BUNDLED_EXTENSIONS, bundledExtensionsForContext } from '../../../tools/catalog/bundled-extensions.js';
 import { createBundledExtensionInventory, getApplicationResourceLoaderOptions, BUNDLED_EXTENSION_INVENTORY_RELATIVE_PATH } from '../../application-resources.js';
+
+function managedFixture(t: TestContext) {
+  const moduleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-managed-options-'));
+  t.after(() => fs.rmSync(moduleDir, { recursive: true, force: true }));
+  const root = path.join(moduleDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH);
+  const write = (relative: string, value: string) => {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, value);
+  };
+  const runtimeIdentity = 'a'.repeat(64);
+  write('manifest.json', JSON.stringify(createBundledManagedInventory({ runtimeIdentity, closureInventorySha256: 'b'.repeat(64), qualificationRecipeSha256: 'c'.repeat(64), target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules! } })));
+  for (const pin of MANAGED_PACKAGE_REQUIREMENTS) {
+    const files = pin.name === 'pi-web-access' ? { index: s.webIndex, storage: s.storage } : { index: s.mcpIndex, agentDir: s.agentDir };
+    const adapted = adaptManagedPackageSources(pin.name, files);
+    for (const relative of pin.requiredFiles.filter((file: string) => !file.startsWith('node_modules/'))) write(`node_modules/${pin.name}/${relative}`, '// fixture');
+    write(`node_modules/${pin.name}/package.json`, JSON.stringify({ name: pin.name, version: pin.version }));
+    write(`node_modules/${pin.name}/index.ts`, adapted.index!);
+    write(`node_modules/${pin.name}/${pin.name === 'pi-web-access' ? 'storage.ts' : 'agent-dir.ts'}`, adapted.storage ?? adapted.agentDir!);
+  }
+  write('node_modules/@mozilla/readability/Readability.js', '// hoist');
+  const coreMarker = path.join(moduleDir, BUNDLED_EXTENSION_INVENTORY_RELATIVE_PATH);
+  const inventory = createBundledExtensionInventory();
+  fs.writeFileSync(coreMarker, JSON.stringify(inventory));
+  for (const entry of inventory.extensions) fs.writeFileSync(path.join(moduleDir, entry.entry), '// fixture');
+  return { root, coreMarker, write, options: { moduleDir, agentDir: path.join(moduleDir, 'absent-profile'), cwd: moduleDir, context: 'primary' as const, expectedRuntimeIdentity: runtimeIdentity } };
+}
+
+test('managed defaults append exact native aliases in all contexts without MCP skill injection', t => {
+  const f = managedFixture(t);
+  for (const context of ['primary', 'inventory', 'subagent'] as const) {
+    const result = getApplicationResourceLoaderOptions({ ...f.options, context });
+    assert.equal(result.defaultExtensions.length, context === 'subagent' ? 13 : 14);
+    assert.equal(result.defaultExtensions.some(entry => entry.path.endsWith('deferred-triggers.js')), context !== 'subagent');
+    assert.ok(!result.defaultExtensions.some(entry => entry.path.endsWith('cwd-skills.js')));
+    for (const [index, name] of ['pi-web-access', 'pi-mcp-adapter'].entries()) {
+      assert.deepEqual(result.defaultExtensions.at(-2 + index), {
+        path: path.join(f.root, 'node_modules', name, 'index.ts'),
+        legacyPaths: [path.join(f.options.agentDir, 'npm', 'node_modules', name), path.join(f.options.agentDir, 'npm', 'node_modules', name, 'index.ts')],
+        legacyPackageSources: [`npm:${name}`],
+      });
+    }
+    assert.ok(result.additionalUserSkillPaths.every(file => !file.includes('managed-integrations')));
+    assert.equal(fs.existsSync(f.options.agentDir), false);
+  }
+  for (const expectedRuntimeIdentity of ['bad', 'd'.repeat(64)]) assert.throws(() => getApplicationResourceLoaderOptions({ ...f.options, expectedRuntimeIdentity }), /runtime identity mismatch/);
+});
+
+for (const mutation of ['no-core', 'invalid-core', 'malformed', 'incomplete', 'pristine-web', 'mixed-storage', 'pristine-mcp', 'mixed-agent']) {
+  test(`managed payload fails before loader: ${mutation}`, t => {
+    const f = managedFixture(t);
+    if (mutation === 'no-core') fs.unlinkSync(f.coreMarker);
+    if (mutation === 'invalid-core') fs.writeFileSync(f.coreMarker, '{}');
+    if (mutation === 'malformed') f.write('manifest.json', '{');
+    if (mutation === 'incomplete') fs.unlinkSync(path.join(f.root, 'node_modules/pi-mcp-adapter/mcp-code.ts'));
+    if (mutation === 'pristine-web') f.write('node_modules/pi-web-access/index.ts', s.webIndex);
+    if (mutation === 'mixed-storage') f.write('node_modules/pi-web-access/storage.ts', s.storage);
+    if (mutation === 'pristine-mcp') f.write('node_modules/pi-mcp-adapter/index.ts', s.mcpIndex);
+    if (mutation === 'mixed-agent') f.write('node_modules/pi-mcp-adapter/agent-dir.ts', s.agentDir);
+    assert.throws(() => getApplicationResourceLoaderOptions(f.options));
+  });
+}
 
 test('curated metadata covers owned adapters with stable output IDs and exact aliases', () => {
   assert.deepEqual(CORE_EXTENSIONS.map(entry => entry.id), ['ask-user', 'computer-use', 'copilot-model-discovery', 'cwd-skills', 'deferred-triggers', 'playwright', 'safeguard', 'session-changes', 'skill-pruner', 'subagent', 'tool-result-pruner', 'warm-bash', 'web-access-guard']);
