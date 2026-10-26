@@ -97,6 +97,10 @@ test('native main additions and base replacements remain isolated from empty and
   const cwd = makeTempAgentDir();
   try {
     writeCentralAppend(agentDir, 'Central append');
+    const bundledRoot = path.join(cwd, 'relocated-runtime', 'resources', 'agent-instructions');
+    fs.mkdirSync(bundledRoot, { recursive: true });
+    const bundledFile = path.join(bundledRoot, 'APPEND_SYSTEM.md');
+    fs.writeFileSync(bundledFile, 'Bundled append');
     // The old agentDir-root location would be natively discovered as the
     // global append; assert the relocated layout is not.
     assert.ok(!fs.existsSync(path.join(agentDir, 'APPEND_SYSTEM.md')));
@@ -133,21 +137,33 @@ test('native main additions and base replacements remain isolated from empty and
       cwd,
       agentDir,
       appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {
-        cwd, isProjectTrusted: () => true,
+        cwd, instructionsRoot: bundledRoot, isProjectTrusted: () => true,
       }),
       noExtensions: true,
     });
     await mainLoader.reload();
-    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Bundled append', 'Central append', 'Personal append', 'Project append']);
 
     await mainLoader.reload({ resolveProjectTrust: async () => true });
-    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Bundled append', 'Central append', 'Personal append', 'Project append']);
 
     // An explicit native SYSTEM.md replaces only the base, not additions.
     fs.writeFileSync(path.join(cwd, '.pi', 'SYSTEM.md'), 'Project base replacement');
     await mainLoader.reload();
     assert.equal(mainLoader.getSystemPrompt(), 'Project base replacement');
+    assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Bundled append', 'Central append', 'Personal append', 'Project append']);
+
+    const inventoryLoader = new DefaultResourceLoader({
+      cwd, agentDir, noExtensions: true,
+      appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, { cwd, instructionsRoot: bundledRoot }),
+    });
+    await inventoryLoader.reload();
+    assert.deepEqual(inventoryLoader.getAppendSystemPrompt(), mainLoader.getAppendSystemPrompt());
+    fs.rmSync(bundledFile);
+    await mainLoader.reload();
+    await inventoryLoader.reload();
     assert.deepEqual(mainLoader.getAppendSystemPrompt(), ['Central append', 'Personal append', 'Project append']);
+    assert.deepEqual(inventoryLoader.getAppendSystemPrompt(), mainLoader.getAppendSystemPrompt());
 
     // Use the SDK trust gate, not merely a fabricated empty project array.
     const untrusted = new DefaultResourceLoader({

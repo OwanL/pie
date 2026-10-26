@@ -60,6 +60,18 @@ test('explicit default path deduplicates file routes, not identical intentional 
   })(['Same guidance']), ['Same guidance', 'Same guidance', 'Same guidance']);
 }));
 
+test('bundled additions preserve legacy user guidance and observe removal on reload', () => fixture((root, put) => {
+  const bundled = put('runtime/resources/agent-instructions/APPEND_SYSTEM.md', 'Bundled');
+  const legacy = put(CENTRAL_APPEND_SYSTEM_PROMPT_RELATIVE_PATH, 'Legacy user');
+  put('APPEND_SYSTEM.md', 'Personal');
+  const compose = centralAppendSystemPromptOverride(root, { defaultPromptPath: bundled });
+  assert.deepEqual(compose(['Personal']), ['Bundled', 'Legacy user', 'Personal']);
+  fs.rmSync(legacy);
+  assert.deepEqual(compose(['Personal']), ['Bundled', 'Personal']);
+  fs.rmSync(bundled);
+  assert.deepEqual(compose(['Personal']), ['Personal']);
+}));
+
 test('same file reached through a source junction is included once', () => fixture((root, put) => {
   const personal = put('APPEND_SYSTEM.md', 'Personal');
   // Directory junctions also work on Windows without symlink privileges.

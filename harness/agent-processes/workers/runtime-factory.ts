@@ -6,6 +6,7 @@
 import { selectAdmittedInitialModel } from '../lib/sdk-integration/sdk';
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files';
 import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt';
+import { getInstructionResourcePaths } from '../../agent-instructions/resource-roots.js';
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
 import { recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
@@ -245,7 +246,9 @@ export function createRuntimeFactory(
       resourceLoaderOptions: {
         // Main-only default/personal/project additions. Child loaders never
         // receive this policy. Keep inventory on the same composition path.
-        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, { cwd }),
+        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {
+          cwd, defaultPromptPath: getInstructionResourcePaths().appendSystemPath,
+        }),
         // Real resource-loader boundary: the SDK invokes this callback during
         // `resourceLoader.reload()`. It observes only the agents-files override
         // step; extension loading has no callback boundary and is deliberately

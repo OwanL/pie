@@ -1,33 +1,46 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getInstructionResourcePaths, type InstructionResourceRootOptions } from "../../agent-instructions/resource-roots.js";
 
 export const SUBAGENT_SYSTEM_RELATIVE_PATH = path.join("harness", "agent-instructions", "SUBAGENT_SYSTEM.md");
 
-// Registration warms this cache before any child runs. Direct runner consumers
-// initialize their configured root once on first SDK startup. Missing config is
-// cached too, preserving source-only consumers without a configured prompt.
-// Native extension loaders may evaluate this module again for nested children.
-// Keep their registration snapshots shared in the same process.
-const cacheKey = Symbol.for("pie.subagent-system-prompts.v1");
-const shared = globalThis as unknown as Record<symbol, Map<string, string | undefined> | undefined>;
-const prompts = shared[cacheKey] ??= new Map<string, string | undefined>();
+// Registration warms the snapshot before any child runs; direct consumers warm
+// it on first use. Missing files stay cached too. Nested extension evaluations
+// share the snapshot in-process. Resource-root seams have independent snapshots.
+const cacheKey = Symbol.for("pie.subagent-system-prompts.v2");
+const shared = globalThis as unknown as Record<symbol, Map<string, string[]> | undefined>;
+const prompts = shared[cacheKey] ??= new Map<string, string[]>();
 
-export function initializeSubagentSystemPrompt(agentDir: string): string | undefined {
-	if (typeof agentDir !== "string" || !agentDir.trim()) return undefined;
-	const root = path.resolve(agentDir);
-	if (!prompts.has(root)) {
-		let content: string | undefined;
-		try {
-			content = fs.readFileSync(path.join(root, SUBAGENT_SYSTEM_RELATIVE_PATH), "utf8").trim() || undefined;
-		} catch {
-			// As with the main append, absent/unreadable configuration is optional.
+function snapshot(agentDir: string, options: InstructionResourceRootOptions): string[] {
+	const bundled = getInstructionResourcePaths(options).subagentSystemPath;
+	const root = typeof agentDir === "string" && agentDir.trim() ? path.resolve(agentDir) : undefined;
+	const key = JSON.stringify([bundled, root]);
+	if (!prompts.has(key)) {
+		const parts: string[] = [];
+		const seen = new Set<string>();
+		const files = [bundled, ...(root ? [path.join(root, SUBAGENT_SYSTEM_RELATIVE_PATH), path.join(root, "SUBAGENT_SYSTEM.md")] : [])];
+		for (const file of files) {
+			try {
+				const identity = fs.realpathSync.native(file);
+				if (seen.has(identity)) continue;
+				seen.add(identity);
+				const content = fs.readFileSync(file, "utf8").trim();
+				if (content) parts.push(content);
+			} catch {
+				// Absent/unreadable guidance is optional, including source-only routes.
+			}
 		}
-		prompts.set(root, content);
+		prompts.set(key, parts);
 	}
-	return prompts.get(root);
+	return prompts.get(key)!;
 }
 
-export function subagentSystemPrompt(agentDir: string, role: string): string[] {
-	const shared = initializeSubagentSystemPrompt(agentDir);
-	return [shared, role.trim() ? role : undefined].filter((part): part is string => part !== undefined);
+/** Preserve the registration API while warming all shared child-only layers. */
+export function initializeSubagentSystemPrompt(agentDir: string, options: InstructionResourceRootOptions = {}): string | undefined {
+	return snapshot(agentDir, options).join("\n\n") || undefined;
+}
+
+export function subagentSystemPrompt(agentDir: string, role: string, options: InstructionResourceRootOptions = {}): string[] {
+	// Always return an explicit array (even empty) to suppress native inheritance.
+	return [...snapshot(agentDir, options), ...(role.trim() ? [role] : [])];
 }
