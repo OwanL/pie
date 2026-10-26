@@ -17,7 +17,8 @@ import {
 	loadExtensionsCached,
 } from "./extensions/loader.ts";
 import type { Extension, ExtensionRuntime, InlineExtension, LoadExtensionsResult } from "./extensions/types.ts";
-import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
+import { type DefaultExtension, DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
+export type { DefaultExtension } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
@@ -33,6 +34,9 @@ export interface ResourceExtensionPaths {
 }
 
 export interface ResourceLoaderReloadOptions {
+	/** Runs with ordinary native bootstrap extensions only. Automatic application defaultExtensions
+	 * are deferred until this resolves, so the callback must not depend on those defaults.
+	 */
 	resolveProjectTrust?: (input: { extensionsResult: LoadExtensionsResult }) => Promise<boolean>;
 }
 
@@ -126,7 +130,24 @@ export interface DefaultResourceLoaderOptions {
 	settingsManager?: SettingsManager;
 	eventBus?: EventBus;
 	additionalExtensionPaths?: string[];
+	/** User-scope application defaults. Eligible exact legacy routes replace these before loading;
+	 * explicit legacy selections never fall back after missing files or load failures.
+	 * User extension overrides also match legacyPaths relative to agentDir. Disabled by noExtensions.
+	 * With resolveProjectTrust, automatic defaults load only after trust resolves (accept or deny);
+	 * explicitly selected default paths remain ordinary native bootstrap inputs.
+	 */
+	defaultExtensions?: readonly DefaultExtension[];
 	additionalSkillPaths?: string[];
+	/** Additional project skill roots, resolved from cwd. Uses native project trust, discovery,
+	 * ignore rules and skill exclusions (relative to cwd/.pi), unlike explicit additionalSkillPaths.
+	 * Omit to preserve native discovery roots. Also disabled by noSkills.
+	 */
+	additionalProjectSkillPaths?: string[];
+	/** Additional user skill roots, resolved from agentDir. Uses native user discovery,
+	 * ignore rules and skill exclusions (relative to agentDir). Also disabled by noSkills.
+	 * Omit to preserve native discovery roots. Independent of project trust.
+	 */
+	additionalUserSkillPaths?: string[];
 	/** Order eligible skill paths before native name deduplication: lower first, stable ties.
 	 * Omit to preserve native path order. This does not change discovery or trust eligibility.
 	 */
@@ -230,6 +251,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 			cwd: this.cwd,
 			agentDir: this.agentDir,
 			settingsManager: this.settingsManager,
+			additionalProjectSkillPaths: options.additionalProjectSkillPaths,
+			additionalUserSkillPaths: options.additionalUserSkillPaths,
+			defaultExtensions: options.defaultExtensions,
+			additionalExtensionPaths: options.additionalExtensionPaths,
 		});
 		this.additionalExtensionPaths = options.additionalExtensionPaths ?? [];
 		this.additionalSkillPaths = options.additionalSkillPaths ?? [];
@@ -503,7 +528,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
-		const resolvedPaths = await this.packageManager.resolve();
+		const resolvedPaths = await this.packageManager.resolve(undefined, { suppressDefaultExtensions: true });
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});

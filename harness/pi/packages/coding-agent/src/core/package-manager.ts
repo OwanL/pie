@@ -116,10 +116,23 @@ export interface PackageManager {
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined;
 }
 
+/** Application-owned extension fallback and its exact legacy routes relative to agentDir. */
+export interface DefaultExtension {
+	path: string;
+	legacyPaths: readonly string[];
+}
+
 interface PackageManagerOptions {
 	cwd: string;
 	agentDir: string;
 	settingsManager: SettingsManager;
+	/** Additional project skill roots, resolved from cwd and subject to native project eligibility. */
+	additionalProjectSkillPaths?: string[];
+	/** Additional user skill roots, resolved from agentDir and subject to native user eligibility. */
+	additionalUserSkillPaths?: string[];
+	defaultExtensions?: readonly DefaultExtension[];
+	/** Explicit CLI routes are considered only when selecting extension fallbacks. */
+	additionalExtensionPaths?: string[];
 }
 
 type SourceScope = "user" | "project" | "temporary";
@@ -698,20 +711,21 @@ function getOverridePatterns(entries: string[]): string[] {
 	return entries.filter((pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));
 }
 
-function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: string): boolean {
+function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: string, aliases: string[] = []): boolean {
+	const paths = [filePath, ...aliases];
 	const overrides = getOverridePatterns(patterns);
 	const excludes = overrides.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
 	const forceIncludes = overrides.filter((pattern) => pattern.startsWith("+")).map((pattern) => pattern.slice(1));
 	const forceExcludes = overrides.filter((pattern) => pattern.startsWith("-")).map((pattern) => pattern.slice(1));
 
 	let enabled = true;
-	if (excludes.length > 0 && matchesAnyPattern(filePath, excludes, baseDir)) {
+	if (excludes.length > 0 && paths.some((path) => matchesAnyPattern(path, excludes, baseDir))) {
 		enabled = false;
 	}
-	if (forceIncludes.length > 0 && matchesAnyExactPattern(filePath, forceIncludes, baseDir)) {
+	if (forceIncludes.length > 0 && paths.some((path) => matchesAnyExactPattern(path, forceIncludes, baseDir))) {
 		enabled = true;
 	}
-	if (forceExcludes.length > 0 && matchesAnyExactPattern(filePath, forceExcludes, baseDir)) {
+	if (forceExcludes.length > 0 && paths.some((path) => matchesAnyExactPattern(path, forceExcludes, baseDir))) {
 		enabled = false;
 	}
 	return enabled;
@@ -796,6 +810,10 @@ export class DefaultPackageManager implements PackageManager {
 	private cwd: string;
 	private agentDir: string;
 	private settingsManager: SettingsManager;
+	private additionalProjectSkillPaths: string[];
+	private additionalUserSkillPaths: string[];
+	private defaultExtensions: readonly DefaultExtension[];
+	private additionalExtensionPaths: string[];
 	private globalNpmRoot: string | undefined;
 	private globalNpmRootCommandKey: string | undefined;
 	private progressCallback: ProgressCallback | undefined;
@@ -804,6 +822,14 @@ export class DefaultPackageManager implements PackageManager {
 		this.cwd = resolvePath(options.cwd);
 		this.agentDir = resolvePath(options.agentDir);
 		this.settingsManager = options.settingsManager;
+		this.defaultExtensions = options.defaultExtensions ?? [];
+		this.additionalExtensionPaths = options.additionalExtensionPaths ?? [];
+		this.additionalProjectSkillPaths = (options.additionalProjectSkillPaths ?? []).map((path) =>
+			this.resolvePath(path),
+		);
+		this.additionalUserSkillPaths = (options.additionalUserSkillPaths ?? []).map((path) =>
+			this.resolvePathFromBase(path, this.agentDir),
+		);
 	}
 
 	setProgressCallback(callback: ProgressCallback | undefined): void {
@@ -898,7 +924,10 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	async resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
+	async resolve(
+		onMissing?: (source: string) => Promise<MissingSourceAction>,
+		options?: { suppressDefaultExtensions?: boolean },
+	): Promise<ResolvedPaths> {
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
@@ -948,6 +977,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
+		// Trust bootstrap may evaluate ordinary user/CLI extensions, but application fallbacks
+		// must wait until the resulting project trust state determines legacy eligibility.
+		if (!options?.suppressDefaultExtensions) {
+			this.addDefaultExtensions(accumulator, globalSettings.extensions ?? [], projectSettings.extensions ?? []);
+		}
 
 		return this.toResolvedPaths(accumulator);
 	}
@@ -2372,14 +2406,16 @@ export class DefaultPackageManager implements PackageManager {
 				projectBaseDir,
 			);
 
-			// Project skills from .pi/
-			addResources(
-				"skills",
-				collectAutoSkillEntries(projectDirs.skills, "pi"),
-				projectMetadata,
-				projectOverrides.skills,
-				projectBaseDir,
-			);
+			// Project skills from .pi/ and application-specified roots share discovery and filtering.
+			for (const skillDir of [projectDirs.skills, ...this.additionalProjectSkillPaths]) {
+				addResources(
+					"skills",
+					collectAutoSkillEntries(skillDir, "pi"),
+					projectMetadata,
+					projectOverrides.skills,
+					projectBaseDir,
+				);
+			}
 		}
 
 		// Project skills from .agents/ (each with its own baseDir)
@@ -2424,14 +2460,16 @@ export class DefaultPackageManager implements PackageManager {
 			globalBaseDir,
 		);
 
-		// User skills from ~/.pi/agent/
-		addResources(
-			"skills",
-			collectAutoSkillEntries(userDirs.skills, "pi"),
-			userMetadata,
-			userOverrides.skills,
-			globalBaseDir,
-		);
+		// User skills from ~/.pi/agent/ and application-specified roots share discovery and filtering.
+		for (const skillDir of [userDirs.skills, ...this.additionalUserSkillPaths]) {
+			addResources(
+				"skills",
+				collectAutoSkillEntries(skillDir, "pi"),
+				userMetadata,
+				userOverrides.skills,
+				globalBaseDir,
+			);
+		}
 
 		// User skills from ~/.agents/ (with its own baseDir)
 		const userAgentsBaseDir = dirname(userAgentsSkillsDir);
@@ -2461,6 +2499,50 @@ export class DefaultPackageManager implements PackageManager {
 			userOverrides.themes,
 			globalBaseDir,
 		);
+	}
+
+	private addDefaultExtensions(
+		accumulator: ResourceAccumulator,
+		userEntries: string[],
+		projectEntries: string[],
+	): void {
+		if (this.defaultExtensions.length === 0) return;
+		const explicitPaths = [
+			...splitPatterns(userEntries).plain.map((path) => this.resolvePathFromBase(path, this.agentDir)),
+			...splitPatterns(projectEntries).plain.map((path) =>
+				this.resolvePathFromBase(path, join(this.cwd, CONFIG_DIR_NAME)),
+			),
+			...this.additionalExtensionPaths.filter((path) => this.parseSource(path).type === "local")
+				.map((path) => this.resolvePath(path)),
+		];
+		for (const descriptor of this.defaultExtensions) {
+			const path = this.resolvePathFromBase(descriptor.path, this.agentDir);
+			const legacyPaths = descriptor.legacyPaths.map((legacy) => this.resolvePathFromBase(legacy, this.agentDir));
+			const legacyKeys = new Set(legacyPaths.map(canonicalizePath));
+			// Match only exact known routes (or their native directory entry points), never basenames.
+			for (const legacy of legacyPaths) {
+				if (existsSync(legacy) && statSync(legacy).isDirectory()) {
+					for (const entry of resolveExtensionEntries(legacy) ?? []) {
+						legacyKeys.add(canonicalizePath(entry));
+					}
+				}
+			}
+			const selectedLegacy = explicitPaths.some((entry) => legacyKeys.has(canonicalizePath(entry))) ||
+				Array.from(accumulator.extensions).some(([entry, resource]) =>
+					// A package filter's disabled entry is still an authoritative legacy selection.
+					(resource.enabled || resource.metadata.origin === "package") && legacyKeys.has(canonicalizePath(entry)),
+				);
+			if (selectedLegacy) continue;
+			const metadata: PathMetadata = {
+				source: "auto", scope: "user", origin: "top-level", baseDir: this.agentDir,
+			};
+			this.addResource(
+				accumulator.extensions,
+				path,
+				metadata,
+				isEnabledByOverrides(path, userEntries, this.agentDir, legacyPaths),
+			);
+		}
 	}
 
 	private collectFilesFromPaths(paths: string[], resourceType: ResourceType): string[] {
