@@ -27,11 +27,11 @@ export interface BackendLaunchPaths {
   };
 }
 
-/** Narrow host-owned backend preflight port. The early development-profile
- * step runs before session settings are loaded; the final environment step
- * runs immediately before spawn. */
+/** Narrow host-owned backend startup port. After host ownership admission,
+ * the early step selects the profile and initializes only a fresh normal home,
+ * before session settings reads. The final step runs immediately before spawn. */
 export interface BackendStartupPlatform {
-  prepareDevelopmentEnvironment(): void;
+  prepareDevelopmentEnvironment(onNotice?: (notice: string) => void): void;
   resolveBackendLaunchPaths(): Promise<BackendLaunchPaths>;
   prepareBackendEnvironment(onNotice: (notice: string) => void): void;
 }

@@ -18,6 +18,7 @@ const ENV_KEYS = [
   'PI_CODING_AGENT_SESSION_DIR',
   'PIE_DATA_DIR',
   'PIE_ALLOW_IN_TREE_AUTH',
+  'LOCALAPPDATA',
 ] as const;
 
 function preserveEnvironment(): () => void {
@@ -68,6 +69,7 @@ test('backend startup ignores the production agentDir setting for an isolated de
   assert.equal(process.env.PIE_DATA_DIR, dataDir);
   assert.equal(process.env.PI_CODING_AGENT_SESSION_DIR, sessionDir);
   assert.notEqual(process.env.PI_CODING_AGENT_DIR, settings.agentDir);
+  assert.deepEqual(await fs.readdir(root), [], 'private startup must not seed settings or other state');
 });
 
 test('backend startup requires the explicit development profile root before loading settings', async (t) => {
@@ -110,3 +112,58 @@ test('backend startup requires the explicit development profile root before load
   assert.equal(rendered, true);
   assert.match(events.find((event) => event.kind === 'NoticeShown')?.notice ?? '', /PIE_DEVELOPMENT_PROFILE_DIR is required/u);
 });
+
+for (const failCreation of [false, true]) {
+  test(`normal profile ${failCreation ? 'failure blocks' : 'initialization precedes'} settings-family reads`, { skip: process.platform !== 'win32' }, async (t) => {
+    const restoreEnvironment = preserveEnvironment();
+    t.after(restoreEnvironment);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-normal-order-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    process.env.LOCALAPPDATA = root;
+    const home = path.join(root, 'pie');
+    if (failCreation) await fs.writeFile(home, 'blocked');
+    const calls: string[] = [];
+    const notices: string[] = [];
+    const stop = new Error('stop after settings reads');
+    const readSettings = (name: string) => async () => {
+      calls.push(name);
+      assert.equal(process.env.PI_CODING_AGENT_DIR, home);
+      assert.equal(await fs.readFile(path.join(home, 'settings.json'), 'utf8'), '{}');
+      throw stop;
+    };
+    const run = startSessionBackend({
+      platform: {
+        getWorkspaceCwd: () => root,
+        storage: { get: () => { calls.push('stored-prefs'); return undefined; } },
+        backendStartup: createBackendStartupPlatform({
+          extensionPath: path.join(root, 'installed-extension'),
+          getRuntimeOutputDirectory: () => root,
+          getSetting: () => undefined,
+        }),
+      },
+      backend: {} as never,
+      scheduleRender: () => undefined,
+      events: {} as never,
+      state: { resetRuntimeState: () => undefined } as never,
+      service: {
+        loadPruningSettings: readSettings('pruning'),
+        loadToolResultPruningSettings: readSettings('tool-results'),
+        loadSessionTitlesSettings: readSettings('titles'),
+      },
+      getArchState: () => { throw new Error('must stop before restore'); },
+      dispatchArch: (event: { kind: string; notice?: string }) => {
+        if (event.notice) notices.push(event.notice);
+      },
+    } as never);
+    if (failCreation) {
+      await run;
+      assert.deepEqual(calls, []);
+      assert.match(notices[0], /pie setup error/);
+      assert.equal(await fs.readFile(home, 'utf8'), 'blocked');
+    } else {
+      await assert.rejects(run, (error) => error === stop);
+      assert.deepEqual(calls, ['stored-prefs', 'pruning', 'tool-results', 'titles']);
+      assert.deepEqual(notices, []);
+    }
+  });
+}

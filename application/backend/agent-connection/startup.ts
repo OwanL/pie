@@ -395,9 +395,11 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   dispatchArch({ kind: 'WorkspaceCwdChanged', workspaceCwd });
 
   try {
-    // The startup settings services can read/write PI_CODING_AGENT_DIR, so
-    // establish the isolated profile before any settings or session work.
-    options.platform.backendStartup.prepareDevelopmentEnvironment();
+    // The admitted host selects/initializes its profile before settings services
+    // can read or write PI_CODING_AGENT_DIR (including private-profile isolation).
+    options.platform.backendStartup.prepareDevelopmentEnvironment((notice) => {
+      dispatchArch({ kind: 'NoticeShown', notice });
+    });
   } catch (error) {
     dispatchArch({ kind: 'NoticeShown', notice: `pie setup error: ${toErrorMessage(error)}` });
     options.scheduleRender();

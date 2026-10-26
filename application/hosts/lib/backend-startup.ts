@@ -5,7 +5,8 @@ import type {
   SessionHostPlatform,
 } from '../../lib/platform-contracts/session-platform.js';
 import { createCommandExecutor } from './command-execution';
-import { resolveAgentDir } from './agent-dir-resolution';
+import { resolveAgentDir, type ResolvedAgentDir } from './agent-dir-resolution';
+import { initializeNormalProfile } from './normal-profile-initialization';
 import {
   probeBackendNodeTarget,
   resolveNodePath,
@@ -49,7 +50,7 @@ export function prepareBackendEnvironment(
   host: BackendStartupHost,
   onNotice: (notice: string) => void,
   env: NodeJS.ProcessEnv,
-): void {
+): ResolvedAgentDir | undefined {
   if (applyDevelopmentProfileEnvironment(env)) return;
 
   const configuredAgentDir = (host.getSetting<string>('agentDir') ?? '').trim();
@@ -85,15 +86,21 @@ export function prepareBackendEnvironment(
   } else {
     delete env.PIE_ALLOW_IN_TREE_AUTH;
   }
+  return result;
 }
 
 /** Compose the concrete host-owned implementation of backend runtime and
  * environment preflight. Both VS Code and standalone provide their actual
  * settings/output-directory adapters here. */
 export function createBackendStartupPlatform(host: BackendStartupHost): BackendStartupPlatform {
+  let environmentPrepared = false;
   return {
-    prepareDevelopmentEnvironment: () => {
-      applyDevelopmentProfileEnvironment(process.env);
+    prepareDevelopmentEnvironment: (onNotice = () => undefined) => {
+      // Both composition roots hold host ownership before shared startup enters
+      // here. Select once, before settings services can observe another root.
+      const selection = prepareBackendEnvironment(host, onNotice, process.env);
+      if (selection) initializeNormalProfile(selection);
+      environmentPrepared = true;
     },
     resolveBackendLaunchPaths: async () => {
       const env = process.env;
@@ -165,7 +172,7 @@ export function createBackendStartupPlatform(host: BackendStartupHost): BackendS
       };
     },
     prepareBackendEnvironment: (onNotice) => {
-      prepareBackendEnvironment(host, onNotice, process.env);
+      if (!environmentPrepared) prepareBackendEnvironment(host, onNotice, process.env);
     },
   };
 }

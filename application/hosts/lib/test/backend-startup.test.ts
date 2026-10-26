@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { prepareBackendEnvironment } from '../backend-startup';
+import { createBackendStartupPlatform, prepareBackendEnvironment } from '../backend-startup';
 
 const host = {
   extensionPath: path.join(os.tmpdir(), 'installed-pie-fixture'),
@@ -47,6 +47,31 @@ test('fresh normal fallback advises clearing the stale setting rather than selec
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('admitted startup initializes the original normal selection once before later spawn preparation', { skip: process.platform !== 'win32' }, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-admitted '));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const keys = ['LOCALAPPDATA', 'PI_CODING_AGENT_DIR', 'PIE_DEVELOPMENT_PROFILE_DIR', 'PIE_HOST_PROFILE', 'PIE_DEVELOPMENT_PI_WORKSPACE', 'PIE_DEVELOPMENT_PI_RUNTIME', 'PIE_ALLOW_IN_TREE_AUTH'] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  t.after(() => { for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });
+  for (const key of keys) delete process.env[key];
+  process.env.LOCALAPPDATA = root;
+  let configured = path.join(root, 'rejected');
+  const notices: string[] = [];
+  const startup = createBackendStartupPlatform({ ...host, getSetting: <T,>(key: string) => key === 'agentDir' ? configured as T : undefined });
+  startup.prepareDevelopmentEnvironment((notice) => notices.push(notice));
+  const selected = path.join(root, 'pie');
+  assert.equal(process.env.PI_CODING_AGENT_DIR, selected);
+  assert.equal(fs.readFileSync(path.join(selected, 'settings.json'), 'utf8'), '{}');
+  assert.equal(fs.existsSync(configured), false);
+  assert.equal(notices.length, 1);
+  configured = path.join(root, 'later-explicit');
+  fs.mkdirSync(configured);
+  fs.writeFileSync(path.join(configured, 'settings.json'), '{broken');
+  startup.prepareBackendEnvironment(() => assert.fail('selection must not run twice'));
+  assert.equal(process.env.PI_CODING_AGENT_DIR, selected);
+  assert.equal(fs.readFileSync(path.join(configured, 'settings.json'), 'utf8'), '{broken');
 });
 
 test('normal startup fails closed when its environment has no application home', () => {
