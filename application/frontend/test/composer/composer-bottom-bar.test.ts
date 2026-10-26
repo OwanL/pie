@@ -196,7 +196,7 @@ test('working-time tooltip breaks total time down by phase and tool', () => {
   assert.match(html, /Subagents[\s\S]*3 attempts/);
   assert.match(html, /Cumulative agent time[\s\S]*≈9s/);
   assert.match(html, /1 additional duration unavailable/);
-  assert.doesNotMatch(html, /Measured phase totals|marks legacy|Tool call time may overlap|parallel, nested|excludes time waiting/);
+  assert.doesNotMatch(html, /Working now|Idle|Measured phase totals|marks legacy|Tool call time may overlap|parallel, nested|excludes time waiting/);
 });
 
 test('working-time tooltip preserves mocked phase totals instead of zeroing later categories', () => {
@@ -274,6 +274,7 @@ test('working-time tooltip attributes a mocked active MCP call to tools', () => 
   assert.match(html, /Tool execution[\s\S]*10s/);
   assert.match(html, /Other work[\s\S]*1s/);
   assert.match(html, /mcp[\s\S]*2×[\s\S]*10s/);
+  assert.doesNotMatch(html, /Working now|Idle|excludes time waiting/);
 });
 
 test('working-time tooltip moves legacy subagent tool timing into its own section', () => {

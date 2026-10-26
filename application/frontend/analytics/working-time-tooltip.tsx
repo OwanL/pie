@@ -32,7 +32,6 @@ export function WorkingTimeTooltip({
   const tools = allTools.filter((tool) => tool.name.trim().toLowerCase() !== 'subagent');
   const hiddenTools = Math.max(0, tools.length - MAX_TOOL_ROWS);
   const shownTools = tools.slice(0, MAX_TOOL_ROWS);
-  const active = state?.activeSince !== null && state?.activeSince !== undefined;
 
   return (
     <div class="rich-tooltip working-time-tooltip">
@@ -40,10 +39,6 @@ export function WorkingTimeTooltip({
         <span>Agent working time</span>
         <span class="rich-tooltip-head-value">{formatTooltipDuration(elapsedMs)}</span>
       </div>
-      <div class="rich-tooltip-sub">
-        {active ? 'Working now' : 'Idle'}
-      </div>
-
       <div
         class="working-time-bar"
         role="img"
