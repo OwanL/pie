@@ -20,6 +20,45 @@ test('all twelve curated wrappers and peer subpaths remain explicit', () => {
   }
 });
 
+test('curated entry facades load as factories through default JITI without losing shared named helpers', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-bundled-facades-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, 'output');
+  for (const entry of BUNDLED_EXTENSIONS) {
+    const file = path.join(root, entry.entryPath);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const mixed = ['safeguard', 'tool-result-pruner'].includes(entry.id);
+    writeFileSync(file, mixed
+      ? `export function namedHelper() { return ${entry.id === 'safeguard' ? 40 : 2}; }\nexport default function factory() { return namedHelper(); }`
+      : `import { combined } from '../shared-consumer';\nexport default function factory() { return { value: combined(), peer: () => import('typebox/fixture') }; }`);
+  }
+  writeFileSync(path.join(root, 'extensions/shared-consumer.ts'), `
+import { namedHelper as safeguard } from './safeguard/index';
+import { namedHelper as pruner } from './tool-result-pruner/index';
+export function combined() { return safeguard() + pruner(); }
+`);
+  await build({ ...bundledExtensionBuildOptions(root, output), configFile: false, logLevel: 'silent' });
+  const relocated = path.join(root, 'relocated');
+  renameSync(output, relocated);
+  // Resolve the real dependency from its declaring owner, not a staged SDK or stub.
+  const jitiOwner = createRequire(path.resolve('harness/pi/packages/coding-agent/package.json'));
+  const jitiPackage = jitiOwner('jiti/package.json');
+  assert.equal(jitiPackage.version, jitiOwner('./package.json').dependencies.jiti);
+  const staticEntry = path.resolve(path.dirname(jitiOwner.resolve('jiti/package.json')), jitiPackage.exports['./static'].import);
+  const { createJiti } = await import(pathToFileURL(staticEntry).href);
+  const jiti = createJiti(import.meta.url); // Default tryNative behavior, like the SDK.
+  for (const entry of BUNDLED_EXTENSIONS) {
+    const file = path.join(relocated, entry.outputFile);
+    const factory = await jiti.import(file, { default: true });
+    assert.equal(typeof factory, 'function', entry.id);
+    assert.equal(typeof ownerRequire(file), 'function', 'CJS entry exposes only the factory');
+    const result = factory();
+    assert.equal(typeof result === 'number' ? result : result.value,
+      entry.id === 'safeguard' ? 40 : entry.id === 'tool-result-pruner' ? 2 : 42);
+  }
+  assert.ok(readFileSync(path.join(relocated, 'ask-user.js'), 'utf8').includes('typebox/fixture'), 'lazy peer remains bare/external');
+});
+
 test('relocated CJS entries and shared chunks preserve module paths and agent-root resources', async t => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-bundled-paths-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

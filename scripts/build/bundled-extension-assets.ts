@@ -39,11 +39,24 @@ export function bundledExtensionPeerAliases() {
 }
 
 export function bundledExtensionBuildOptions(root: string, outDir: string,
-  input = Object.fromEntries(BUNDLED_EXTENSIONS.map(entry => [entry.id, path.join(root, entry.entryPath)])),
+  input?: Record<string, string>,
 ): UserConfig {
+  // Only curated delivered entries get facades. Keep source/custom entry exports
+  // intact so named helpers remain available to other modules in the graph.
+  const facades = new Map(BUNDLED_EXTENSIONS.map(entry => [
+    `\0pie-bundled-default:${entry.id}`, path.resolve(root, entry.entryPath),
+  ]));
+  const entries = input ?? Object.fromEntries(BUNDLED_EXTENSIONS.map(entry => [entry.id, `\0pie-bundled-default:${entry.id}`]));
   return {
     root, publicDir: false,
     plugins: [createBundledExtensionAssetsPlugin(), {
+      name: 'pie-bundled-extension-default-facades',
+      resolveId(id) { return facades.has(id) ? id : null; },
+      load(id) {
+        const source = facades.get(id);
+        return source ? `export { default } from ${JSON.stringify(source)};` : null;
+      },
+    }, {
       name: 'pie-bundled-extension-cjs-module-paths',
       resolveImportMeta(property, { format }) {
         if (format !== 'cjs') return null;
@@ -56,7 +69,7 @@ export function bundledExtensionBuildOptions(root: string, outDir: string,
       target: 'node20', outDir, emptyOutDir: false, manifest: false,
       ssr: true, ssrEmitAssets: true,
       rollupOptions: {
-        input,
+        input: entries,
         external: id => isBundledExtensionPeer(id) || id === 'vscode' || id.startsWith('node:')
           || id === 'bufferutil' || id === 'utf-8-validate'
           || id === '@picovoice/pvrecorder-node' || id === 'whisper-cpp-node' || id.startsWith('@whisper-cpp-node/'),
