@@ -127,6 +127,10 @@ export interface DefaultResourceLoaderOptions {
 	eventBus?: EventBus;
 	additionalExtensionPaths?: string[];
 	additionalSkillPaths?: string[];
+	/** Order eligible skill paths before native name deduplication: lower first, stable ties.
+	 * Omit to preserve native path order. This does not change discovery or trust eligibility.
+	 */
+	skillPathPriority?: (entry: Readonly<{ path: string; sourceInfo: Readonly<SourceInfo> }>) => number;
 	additionalPromptTemplatePaths?: string[];
 	additionalThemePaths?: string[];
 	extensionFactories?: InlineExtension[];
@@ -167,6 +171,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private packageManager: DefaultPackageManager;
 	private additionalExtensionPaths: string[];
 	private additionalSkillPaths: string[];
+	private skillPathPriority?: DefaultResourceLoaderOptions["skillPathPriority"];
+	private skillMetadataByPath = new Map<string, PathMetadata>();
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
 	private extensionFactories: InlineExtension[];
@@ -227,6 +233,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		});
 		this.additionalExtensionPaths = options.additionalExtensionPaths ?? [];
 		this.additionalSkillPaths = options.additionalSkillPaths ?? [];
+		this.skillPathPriority = options.skillPathPriority;
 		this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths ?? [];
 		this.additionalThemePaths = options.additionalThemePaths ?? [];
 		this.extensionFactories = options.extensionFactories ?? [];
@@ -423,7 +430,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: this.mergePaths([...cliEnabledSkills, ...enabledSkills], this.additionalSkillPaths);
 
 		this.lastSkillPaths = skillPaths;
-		this.updateSkillsFromPaths(skillPaths, metadataByPath);
+		this.skillMetadataByPath = metadataByPath;
+		this.updateSkillsFromPaths(skillPaths);
 		for (const p of this.additionalSkillPaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
@@ -630,7 +638,24 @@ export class DefaultResourceLoader implements ResourceLoader {
 		});
 	}
 
-	private updateSkillsFromPaths(skillPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+	private updateSkillsFromPaths(skillPaths: string[]): void {
+		const metadataByPath = this.skillMetadataByPath;
+		const priority = this.skillPathPriority;
+		const orderedPaths = priority
+			? skillPaths
+					.map((path, index) => ({
+						path,
+						index,
+						priority: priority({
+							path,
+							sourceInfo:
+								this.findSourceInfoForPath(path, this.extensionSkillSourceInfos, metadataByPath) ??
+								this.getDefaultSourceInfoForPath(path),
+						}),
+					}))
+					.sort((a, b) => a.priority - b.priority || a.index - b.index)
+					.map((entry) => entry.path)
+			: skillPaths;
 		let skillsResult: { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 		if (this.noSkills && skillPaths.length === 0) {
 			skillsResult = { skills: [], diagnostics: [] };
@@ -638,7 +663,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			skillsResult = loadSkills({
 				cwd: this.cwd,
 				agentDir: this.agentDir,
-				skillPaths,
+				skillPaths: orderedPaths,
 				includeDefaults: false,
 			});
 		}
@@ -800,7 +825,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 			source: "local",
 			scope: "temporary",
 			origin: "top-level",
-			baseDir: statSync(normalizedPath).isDirectory() ? normalizedPath : resolve(normalizedPath, ".."),
+			baseDir:
+				existsSync(normalizedPath) && statSync(normalizedPath).isDirectory()
+					? normalizedPath
+					: dirname(normalizedPath),
 		};
 	}
 
