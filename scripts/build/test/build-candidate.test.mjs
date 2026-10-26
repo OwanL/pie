@@ -24,7 +24,7 @@ async function fixture(t) {
     sourceIdentity: async () => source,
     verifyRuntime: async artifact => { calls.push(['verify-runtime', artifact]); return { identity: 'fixture-runtime' }; },
     stagePackage: async (...args) => { calls.push(['stage', ...args]); await mkdir(args[2]); },
-    verifyIdentity: async stage => { calls.push(['identity', stage]); return identity; },
+    verifyIdentity: async (stage, context) => { calls.push(['identity', stage, context]); return identity; },
     resolveVsce: async () => 'fake-vsce',
     runStage: async (stage, options) => {
       calls.push([stage.name, stage, options]);
@@ -51,6 +51,45 @@ test('candidate arguments require explicit absolute VSIX output and reject ambig
     assert.throws(() => parseCandidateArgs(args));
   }
 });
+
+test('managed candidate CLI requires a paired selection, explicit runtime and no watch', () => {
+  const output = path.resolve('candidate.vsix');
+  const artifactDir = path.resolve('runtime');
+  const stageRoot = path.resolve('private-stage');
+  const receiptPath = path.resolve('private-receipt.json');
+  const pair = ['--managed-stage', stageRoot, '--managed-qualification-receipt', receiptPath];
+  assert.deepEqual(parseCandidateArgs(['--output', output, '--pi-runtime', artifactDir, ...pair]), { output, artifactDir, managedIntegration: { stageRoot, receiptPath } });
+  for (const extra of [pair, ['--pi-runtime', artifactDir, '--managed-stage', stageRoot], ['--pi-runtime', artifactDir, ...pair, '--watch'], ['--pi-runtime', artifactDir, ...pair, '--managed-stage', stageRoot]]) {
+    assert.throws(() => parseCandidateArgs(['--output', output, ...extra]));
+  }
+});
+
+for (const valid of [true, false]) {
+  test(`managed candidate propagates private inputs and ${valid ? 'publishes public evidence only' : 'rejects extracted identity mismatch'}`, async t => {
+    const f = await fixture(t);
+    const managedIntegration = { stageRoot: path.join(f.base, 'private-stage'), receiptPath: path.join(f.base, 'private-receipt.json') };
+    f.deps.verifyCandidate = async (candidate, extracted, context) => {
+      f.calls.push(['verify-candidate', candidate, extracted, context]);
+      return valid ? { ...f.identity } : { ...f.identity, piRuntimeIdentity: 'tampered' };
+    };
+    const operation = buildCandidate({ output: f.output, artifactDir: path.join(f.base, 'runtime'), managedIntegration }, undefined, f.deps);
+    if (!valid) {
+      await assert.rejects(operation, /Packaged candidate identity/);
+      await absent(f.output);
+      await absent(`${f.output}.evidence.json`);
+      return;
+    }
+    const result = await operation;
+    const delivery = f.calls.find(call => call[0] === 'delivery-build')[1];
+    assert.deepEqual(delivery.args.slice(-4), ['--managed-stage', managedIntegration.stageRoot, '--managed-qualification-receipt', managedIntegration.receiptPath]);
+    assert.deepEqual(f.calls.map(call => call[0]), ['verify-runtime', 'delivery-build', 'stage', 'identity', 'candidate-package', 'verify-candidate']);
+    assert.deepEqual(f.calls.find(call => call[0] === 'identity').slice(1), [path.join(f.scratch, 'stage'), { managedIntegration }]);
+    assert.deepEqual(f.calls.at(-1).slice(1), [path.join(f.scratch, 'candidate.vsix'), path.join(f.scratch, 'extracted'), { managedIntegration }]);
+    const evidence = await readFile(result.evidencePath, 'utf8');
+    for (const privatePath of Object.values(managedIntegration)) assert.equal(evidence.includes(privatePath.replaceAll('\\', '\\\\')), false);
+    assert.equal(evidence.includes('managed-qualification-receipt'), false);
+  });
+}
 
 for (const name of ['candidate', 'evidence']) {
   test(`refuses existing ${name} before invoking build dependencies`, async t => {

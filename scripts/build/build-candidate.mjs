@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { constants } from 'node:fs';
 import { copyFile, lstat, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -14,17 +14,23 @@ import { abortOnProcessSignals } from '../lib/process-watchdog.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { verificationChildEnv } from '../verification/verification-runtime.mjs';
 import { runQualificationStage } from '../verification/qualify-delivery.mjs';
-import { fingerprintCandidate, verifyCandidateIdentity } from '../verification/lib/vsix-candidate.mjs';
+import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
+import { extractCandidate, validateCandidateContainer, fingerprintCandidate, verifyCandidateIdentity } from '../verification/lib/vsix-candidate.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const exec = promisify(execFile);
-const HELP = 'Usage: node scripts/build/build-candidate.mjs --output <absolute .vsix> [--pi-runtime <absolute artifact root>]\nLocal development-only candidate; no installation, activation, publication or qualification.';
+const HELP = 'Usage: node scripts/build/build-candidate.mjs --output <absolute .vsix> [--pi-runtime <absolute artifact root>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nLocal development-only candidate; no installation, activation, publication or qualification.';
 
 export function parseCandidateArgs(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
-  const selection = {};
+  const managedIntegration = parseManagedIntegrationSelection(argv);
+  const selection = managedIntegration ? { managedIntegration } : {};
   for (let i = 0; i < argv.length; i += 1) {
     const [flag, ...inline] = argv[i].split('=');
+    if (['--managed-stage', '--managed-qualification-receipt'].includes(flag)) {
+      if (!inline.length) i += 1;
+      continue;
+    }
     const key = flag === '--output' ? 'output' : flag === '--pi-runtime' ? 'artifactDir' : undefined;
     if (!key) throw new Error(`Unknown candidate option: ${argv[i]}`);
     if (selection[key] !== undefined) throw new Error(`${flag} may be specified only once.`);
@@ -33,6 +39,7 @@ export function parseCandidateArgs(argv) {
     selection[key] = path.resolve(value);
   }
   if (!selection.output || !selection.output.endsWith('.vsix')) throw new Error('--output requires an absolute .vsix path.');
+  if (managedIntegration && !selection.artifactDir) throw new Error('Managed candidates require explicit --pi-runtime.');
   return selection;
 }
 
@@ -56,7 +63,8 @@ function resolveVsce(root) {
 /** Build privately, retain scratch on every outcome, and publish only exclusive final files. */
 export async function buildCandidate(selection, signal, deps = {}) {
   // Validate API calls with the same rules as the CLI.
-  selection = parseCandidateArgs(['--output', selection.output, ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir])]);
+  selection = parseCandidateArgs(['--output', selection.output, ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir]),
+    ...(selection.managedIntegration === undefined ? [] : ['--managed-stage', selection.managedIntegration.stageRoot, '--managed-qualification-receipt', selection.managedIntegration.receiptPath])]);
   const root = await realpath(deps.root ?? repositoryRoot);
   const env = verificationChildEnv(withoutPiHarnessEnv(deps.env ?? process.env));
   const status = deps.status ?? (message => console.log(`[build-candidate] ${message}`));
@@ -87,13 +95,24 @@ export async function buildCandidate(selection, signal, deps = {}) {
   if (selection.artifactDir !== undefined) runtime = await (deps.verifyRuntime ?? verifyPiRuntimeArtifact)(selection.artifactDir);
   else await run({ name: 'pi-compile', args: [path.join(root, 'scripts/build/pi-workspace.mjs')] });
   await run({ name: 'delivery-build', args: [path.join(root, 'scripts/build/build.mjs'), '--delivery', '--no-sync', '--output-dir', buildDir,
-    ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir])] });
+    ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir]),
+    ...(selection.managedIntegration === undefined ? [] : ['--managed-stage', selection.managedIntegration.stageRoot, '--managed-qualification-receipt', selection.managedIntegration.receiptPath])] });
   await (deps.stagePackage ?? stageExtensionForPackaging)(root, buildDir, stageRoot);
-  const identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot);
+  const identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot, { managedIntegration: selection.managedIntegration });
   if (typeof identity.target !== 'string') throw new Error('Staged build identity is missing a target; scratch retained.');
   if (runtime && identity.piRuntimeIdentity !== runtime.identity) throw new Error('Staged Pi runtime identity does not match the selected runtime; scratch retained.');
   const vsce = await (deps.resolveVsce ?? resolveVsce)(root);
   await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--target', identity.target, '--out', candidate] }, stageRoot);
+  if (selection.managedIntegration) {
+    const managedContext = { managedIntegration: selection.managedIntegration };
+    const verified = await (deps.verifyCandidate ?? (async (file, destination, context) => {
+      const container = await extractCandidate(file, destination);
+      const extracted = await verifyCandidateIdentity(destination, context);
+      validateCandidateContainer(container, extracted);
+      return extracted;
+    }))(candidate, path.join(scratch, 'extracted'), managedContext);
+    if (!isDeepStrictEqual(verified, identity)) throw new Error('Packaged candidate identity does not match the staged build; scratch retained.');
+  }
   const fingerprint = await (deps.fingerprint ?? fingerprintCandidate)(candidate);
   const evidence = { schema: 1, purpose: 'local-development-only', qualified: false,
     licenseQualified: false, cleanMachineQualified: false, source, runtime: { selection: selection.artifactDir ?? 'workspace', identity: runtime?.identity ?? identity.piRuntimeIdentity },

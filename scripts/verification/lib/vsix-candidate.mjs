@@ -3,9 +3,14 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { createOwnerRequire } from '../../lib/package-resolution.mjs';
 import { verifyPiRuntimeArtifact } from '../../../lib/pi-runtime/artifact.mjs';
+import { verifyManagedIntegrationQualification } from '../managed-qualification-receipt.mjs';
+import { verifyBundledManagedOutput } from '../../build/bundled-managed-resources.mjs';
+import { verifyBundledExtensionOutput } from '../../build/bundled-extension-verification.mjs';
+import { BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../lib/managed-packages/bundled-resources.mjs';
 
 /** Fingerprint one ordinary file without following a final-component symlink. */
 export async function fingerprintCandidate(file) {
@@ -184,13 +189,40 @@ export async function extractCandidate(file, destination) {
 }
 
 /** Verify the extracted extension and return only its release identity. */
-export async function verifyCandidateIdentity(destination) {
+export async function verifyCandidateIdentity(destination, { managedIntegration } = {}, deps = {}) {
   const pkg = JSON.parse(await readFile(path.join(destination, 'package.json'), 'utf8'));
   if (pkg.publisher !== 'pie' || pkg.name !== 'pie' || pkg.main !== './runtime/bootstrap.cjs'
     || typeof pkg.version !== 'string' || !pkg.version.trim()) throw new Error('Invalid candidate package identity');
   const buildId = (await readFile(path.join(destination, 'out/pie-build-id.txt'), 'utf8')).trim();
   const panelBuildId = (await readFile(path.join(destination, 'out/webview/panel/pie-build-id.txt'), 'utf8')).trim();
   if (!/^[a-f0-9]{20}$/.test(buildId) || panelBuildId !== buildId) throw new Error('Candidate build IDs must be matching 20-hex identifiers');
-  const runtime = await verifyPiRuntimeArtifact(path.join(destination, 'out/pi-runtime'));
-  return { extensionId: 'pie.pie', version: pkg.version, target: runtimeTargetPlatform(runtime.manifest.target), buildId, piRuntimeIdentity: runtime.identity };
+  const outDir = path.join(destination, 'out');
+  const artifactDir = path.join(outDir, 'pi-runtime');
+  const runtime = await (deps.verifyPiRuntimeArtifact ?? verifyPiRuntimeArtifact)(artifactDir);
+  let managedPresent = false;
+  try { await lstat(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH)); managedPresent = true; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  let managedBindings;
+  if (managedIntegration !== undefined) {
+    if (!managedIntegration || ![managedIntegration.stageRoot, managedIntegration.receiptPath].every(value => typeof value === 'string' && path.isAbsolute(value))) {
+      throw new Error('Managed candidate requires explicit absolute stageRoot and receiptPath');
+    }
+    const qualification = await (deps.verifyManagedIntegrationQualification ?? verifyManagedIntegrationQualification)({
+      stageRoot: managedIntegration.stageRoot, receiptPath: managedIntegration.receiptPath, artifactDir,
+    });
+    if (qualification.runtime?.identity !== runtime.identity || !isDeepStrictEqual(qualification.runtime?.manifest?.target, runtime.manifest.target)) {
+      throw new Error('Managed qualification runtime identity or target does not match the selected candidate runtime');
+    }
+    await (deps.verifyBundledManagedOutput ?? verifyBundledManagedOutput)(outDir, qualification);
+    await (deps.verifyBundledExtensionOutput ?? verifyBundledExtensionOutput)(outDir, buildId);
+    managedBindings = {
+      runtimeIdentity: qualification.runtime.identity,
+      closureInventorySha256: qualification.stage.receipt.inventorySha256,
+      qualificationRecipeSha256: qualification.qualificationRecipeSha256,
+    };
+  } else if (managedPresent) {
+    throw new Error('Managed candidate payload requires explicit stageRoot and receiptPath');
+  }
+  return { extensionId: 'pie.pie', version: pkg.version, target: runtimeTargetPlatform(runtime.manifest.target), buildId, piRuntimeIdentity: runtime.identity,
+    ...(managedBindings ? { managedIntegration: managedBindings } : {}) };
 }

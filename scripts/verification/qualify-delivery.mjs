@@ -13,19 +13,23 @@ import { abortOnProcessSignals, resolveChildProcessTimeoutMs, watchChildProcess,
 import { verificationChildEnv } from './verification-runtime.mjs';
 import { createOwnerRequire } from '../lib/package-resolution.mjs';
 import { copyPackageSkeleton } from '../lib/delivery-package.mjs';
+import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
 export { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 
 import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity, validateCandidateContainer } from './lib/vsix-candidate.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
-export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>]\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
+export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nManaged build selection requires explicit --pi-runtime; exact VSIX verifies the extracted runtime by payload identity.\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
 
 export function parseQualificationArgs(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
+  const managedIntegration = parseManagedIntegrationSelection(argv);
   let artifactDir;
   let vsix;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === '--managed-stage' || arg === '--managed-qualification-receipt') { index += 1; continue; }
+    if (arg.startsWith('--managed-stage=') || arg.startsWith('--managed-qualification-receipt=')) continue;
     if (arg === '--vsix' || arg.startsWith('--vsix=')) {
       if (vsix !== undefined) throw new Error('--vsix may be specified only once.');
       const value = arg === '--vsix' ? argv[++index] : arg.slice('--vsix='.length);
@@ -40,15 +44,17 @@ export function parseQualificationArgs(argv) {
     artifactDir = path.resolve(value);
   }
   if (vsix !== undefined && artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
-  return vsix === undefined ? { artifactDir } : { vsix };
+  if (managedIntegration && vsix === undefined && artifactDir === undefined) throw new Error('Managed build selection requires explicit --pi-runtime.');
+  return { ...(vsix === undefined ? { artifactDir } : { vsix }), ...(managedIntegration ? { managedIntegration } : {}) };
 }
 
 // This is command composition, not another build graph or test runner.
-export function qualificationStages(root, packageRoot, artifactDir, browserExecutable) {
+export function qualificationStages(root, packageRoot, artifactDir, browserExecutable, managedIntegration) {
   return [
     ...(artifactDir === undefined ? [{ name: 'pi-compile', args: [path.join(root, 'scripts/build/pi-workspace.mjs')] }] : []),
     { name: 'delivery-build', args: [path.join(root, 'scripts/build/build.mjs'), '--delivery', '--no-sync', '--output-dir', path.join(packageRoot, 'out'),
-      ...(artifactDir === undefined ? [] : ['--pi-runtime', artifactDir])] },
+      ...(artifactDir === undefined ? [] : ['--pi-runtime', artifactDir]),
+      ...(managedIntegration ? ['--managed-stage', managedIntegration.stageRoot, '--managed-qualification-receipt', managedIntegration.receiptPath] : [])] },
     { name: 'delivered-hosts', args: [path.join(root, 'scripts/verification/test-node.mjs'), 'scripts/verification/test/delivered-hosts.test.mjs'],
       env: { PIE_RUN_DELIVERED_HOST_TESTS: '1', PIE_RUN_DELIVERED_BROWSER_TESTS: '1', PIE_DELIVERED_HOST_ROOT: packageRoot,
         ...(browserExecutable === undefined ? {} : { PIE_DELIVERED_BROWSER_EXECUTABLE: browserExecutable }) } },
@@ -123,6 +129,10 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
   let completed = false;
   try {
     signal?.throwIfAborted();
+    if (selection.managedIntegration) {
+      parseManagedIntegrationSelection(['--managed-stage', selection.managedIntegration.stageRoot, '--managed-qualification-receipt', selection.managedIntegration.receiptPath]);
+      if (selection.vsix === undefined && selection.artifactDir === undefined) throw new Error('Managed build selection requires explicit --pi-runtime.');
+    }
     if (selection.vsix !== undefined && selection.artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
     if (selection.vsix !== undefined && !path.isAbsolute(selection.vsix)) throw new Error('--vsix requires an absolute candidate path.');
     const fingerprint = selection.vsix === undefined ? undefined
@@ -164,12 +174,12 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     if (selection.vsix !== undefined) {
       const container = await (dependencies.extractCandidate ?? extractCandidate)(selection.vsix, packageRoot);
       signal?.throwIfAborted();
-      candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot);
+      candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot, { managedIntegration: selection.managedIntegration });
       validateCandidateContainer(container, candidateIdentity);
     } else {
       await (dependencies.copySkeleton ?? copyPackageSkeleton)(root, packageRoot);
     }
-    for (const stage of qualificationStages(root, packageRoot, selection.artifactDir, browserExecutable)
+    for (const stage of qualificationStages(root, packageRoot, selection.artifactDir, browserExecutable, selection.managedIntegration)
       .filter(stage => selection.vsix !== undefined ? stage.name === 'delivered-hosts' : stage.name !== 'pi-compile')) {
       signal?.throwIfAborted();
       status(`${stage.name}: started`);
@@ -180,6 +190,7 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
       safeToRemove = result.outerConfirmed === true && result.innerConfirmed === true && result.code === 0 && !signal?.aborted;
       if (!safeToRemove) throw new Error(`${stage.name} failed or completion is unconfirmed (exit ${result.code}); package retained.`);
       signal?.throwIfAborted();
+      if (stage.name === 'delivery-build') candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot, { managedIntegration: selection.managedIntegration });
       status(`${stage.name}: completed`);
     }
     if (selection.vsix !== undefined) {
@@ -194,7 +205,7 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     }
     completed = true;
     status('qualified: private built delivery, both headless adapters and browser first paint; NOT installed/published or real Electron acceptance');
-    return { code: 0, packageRoot };
+    return { code: 0, packageRoot, ...(candidateIdentity?.managedIntegration ? { managedIntegration: candidateIdentity.managedIntegration } : {}) };
   } finally {
     if (packageRoot) {
       if (selection.vsix !== undefined) {

@@ -203,6 +203,7 @@ async function fixture(t, overrides = {}) {
     resolveBrowserExecutable: async () => { events.push('browser-resolve'); return process.execPath; },
     createPackage: async () => { events.push('create'); return packageRoot; },
     verifyRuntime: async artifact => { events.push(`verify:${artifact}`); },
+    verifyCandidateIdentity: async () => ({}),
     copySkeleton: async () => { events.push('copy'); },
     remove: async directory => { assert.equal(directory, packageRoot); events.push('remove'); },
     runStage: async (stage, options) => { stages.push({ stage, options }); events.push(stage.name); return confirmed; },
@@ -210,6 +211,45 @@ async function fixture(t, overrides = {}) {
   };
   return { packageRoot, dependencies, events, stages };
 }
+
+test('managed CLI selection requires an explicit pair and build runtime, but exact VSIX uses extracted runtime', () => {
+  const stageRoot = path.join(os.tmpdir(), 'external-managed-stage');
+  const receiptPath = path.join(os.tmpdir(), 'external-managed-proof.json');
+  const artifactDir = path.join(os.tmpdir(), 'selected-runtime');
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const pair = ['--managed-stage', stageRoot, '--managed-qualification-receipt', receiptPath];
+  assert.deepEqual(parseQualificationArgs(['--pi-runtime', artifactDir, ...pair]), { artifactDir, managedIntegration: { stageRoot, receiptPath } });
+  assert.deepEqual(parseQualificationArgs(['--vsix', vsix, ...pair]), { vsix, managedIntegration: { stageRoot, receiptPath } });
+  for (const args of [pair, ['--pi-runtime', artifactDir, '--managed-stage', stageRoot], ['--vsix', vsix, ...pair, '--managed-stage', stageRoot], ['--vsix', vsix, '--managed-stage', 'relative', '--managed-qualification-receipt', receiptPath]]) assert.throws(() => parseQualificationArgs(args));
+});
+
+test('managed private build forwards proof and verifies payload before delivered-host tests', async t => {
+  const managedIntegration = { stageRoot: path.join(os.tmpdir(), 'managed-stage'), receiptPath: path.join(os.tmpdir(), 'managed-proof.json') };
+  const artifactDir = path.join(os.tmpdir(), 'runtime');
+  const bindings = { runtimeIdentity: 'runtime', closureInventorySha256: 'closure', qualificationRecipeSha256: 'recipe' };
+  const seen = [];
+  const f = await fixture(t, { verifyCandidateIdentity: async (destination, options) => { seen.push({ destination, options }); return { managedIntegration: bindings }; } });
+  const result = await qualifyDelivery({ artifactDir, managedIntegration }, undefined, f.dependencies);
+  const build = f.stages.find(x => x.stage.name === 'delivery-build');
+  assert.deepEqual(build.stage.args.slice(-4), ['--managed-stage', managedIntegration.stageRoot, '--managed-qualification-receipt', managedIntegration.receiptPath]);
+  assert.deepEqual(seen, [{ destination: f.packageRoot, options: { managedIntegration } }]);
+  assert.deepEqual(result.managedIntegration, bindings);
+  assert.equal(JSON.stringify(result).includes(managedIntegration.receiptPath), false);
+});
+
+test('exact managed VSIX forwards external proof and preserves payload rejection', async t => {
+  const managedIntegration = { stageRoot: path.join(os.tmpdir(), 'managed-stage'), receiptPath: path.join(os.tmpdir(), 'managed-proof.json') };
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  let calls = 0;
+  const f = await candidateFixture(t, { verifyCandidateIdentity: async (destination, options) => {
+    calls++;
+    assert.equal(destination, f.packageRoot);
+    assert.deepEqual(options, { managedIntegration });
+    throw Error('managed marker invalid');
+  } });
+  await assert.rejects(qualifyDelivery({ vsix, managedIntegration }, undefined, f.dependencies), /managed marker invalid/);
+  assert.equal(calls, 1);
+});
 
 test('strict options: help, absolute runtime, duplicate/missing/unknown rejection', () => {
   assert.deepEqual(parseQualificationArgs([]), { artifactDir: undefined });
