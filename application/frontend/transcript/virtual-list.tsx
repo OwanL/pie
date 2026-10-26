@@ -603,7 +603,7 @@ export function TranscriptVirtualList({
         />
       </div>
       {latestDock.visible && (
-        <div class="transcript-latest-dock" ref={latestDock.dockRef}>
+        <div class="transcript-latest-dock">
           <button
             type="button"
             class="transcript-jump-latest"

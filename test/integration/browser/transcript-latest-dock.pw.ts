@@ -14,11 +14,12 @@ test.use({
 });
 
 for (const width of [320, 900]) {
-  test(`Latest is a centered icon control at ${width}px`, async ({ page }) => {
+  test(`Latest is a centered icon control at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/');
     const scroll = page.locator('.transcript-virtual');
     await expect(scroll).not.toHaveClass(/transcript-positioning/);
+    const viewportBefore = await scroll.boundingBox();
     await scroll.dispatchEvent('pointerdown', { button: 0 });
     await scroll.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 200; });
     const button = page.getByRole('button', { name: 'Jump to latest' });
@@ -28,8 +29,16 @@ for (const width of [320, 900]) {
     await button.evaluate(async (el) => {
       await Promise.all(el.getAnimations().map(animation => animation.finished));
     });
+    await page.screenshot({ path: testInfo.outputPath('jump-to-latest.png') });
+    expect(await scroll.boundingBox(), 'showing Latest must not shrink the transcript').toEqual(viewportBefore);
     const dock = (await page.locator('.transcript-latest-dock').boundingBox())!;
     const before = (await button.boundingBox())!;
+    expect(before.y).toBeGreaterThan(viewportBefore!.y);
+    expect(before.y + before.height).toBeLessThan(viewportBefore!.y + viewportBefore!.height);
+    // The transparent space beside the floating control must still target the transcript.
+    expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.transcript-virtual'), {
+      x: viewportBefore!.x + 12, y: before.y + before.height / 2,
+    })).toBe(true);
     expect(Math.abs(before.x + before.width / 2 - dock.x - dock.width / 2)).toBeLessThanOrEqual(1);
     expect(before.width).toBe(before.height);
     await button.hover();
@@ -38,10 +47,13 @@ for (const width of [320, 900]) {
     await button.press('Enter');
     await expect(button).toHaveCount(0);
     await expect.poll(() => scroll.evaluate(el => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop))).toBeLessThanOrEqual(1);
+    await page.reload();
+    await expect(scroll).not.toHaveClass(/transcript-positioning/);
+    await expect(button).toHaveCount(0);
   });
 }
 
-test('Latest remains stable around the 24px boundary as its flow dock mounts and resizes', async ({ page }) => {
+test('Latest remains stable around the 24px boundary as its overlay mounts and resizes', async ({ page }) => {
   await page.setViewportSize({ width: 520, height: 900 });
   await page.goto('/');
   const scroll = page.locator('.transcript-virtual');
@@ -55,13 +67,11 @@ test('Latest remains stable around the 24px boundary as its flow dock mounts and
   await scroll.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 100; });
   await expect(dock).toBeVisible();
   const top = await scroll.evaluate(el => {
-    const height = document.querySelector('.transcript-latest-dock')!.getBoundingClientRect().height;
-    el.scrollTop = el.scrollHeight - el.clientHeight - height - 25;
+    el.scrollTop = el.scrollHeight - el.clientHeight - 25;
     return el.scrollTop;
   });
   await expect(dock).toBeVisible();
-  // Real flex layout changes (not stubbed clientHeight) must not feed back
-  // into visibility or move the reader's top position.
+  // Changing the overlay's size must not change scroll geometry or visibility.
   await dock.evaluate(el => { (el as HTMLElement).style.paddingBlock = '12px'; });
   await expect.poll(() => scroll.evaluate(el => el.scrollTop)).toBeCloseTo(top, 0);
   await page.setViewportSize({ width: 520, height: 899 });
@@ -76,7 +86,8 @@ test('Latest remains stable around the 24px boundary as its flow dock mounts and
   await page.setViewportSize({ width: 520, height: 890 });
   await expect(dock).toBeVisible();
   const viewportBottom = await page.locator('.transcript-viewport').evaluate(el => el.getBoundingClientRect().bottom);
-  expect((await dock.boundingBox())!.y).toBeGreaterThanOrEqual(viewportBottom);
+  const dockBounds = (await dock.boundingBox())!;
+  expect(dockBounds.y + dockBounds.height).toBeLessThan(viewportBottom);
   await page.getByRole('button', { name: 'Jump to latest' }).click();
   await expect(dock).toHaveCount(0);
   await expect.poll(() => scroll.evaluate(el => Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop))).toBeLessThanOrEqual(1);

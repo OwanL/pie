@@ -20,7 +20,6 @@ test('Latest uses dock-independent geometry across appearance, removal and near-
   document.body.append(root);
   let top = 700;
   let viewport = 200;
-  let dockHeight = 40;
   let following = false;
   let hasNewer = false;
   let hidden = false;
@@ -36,14 +35,11 @@ test('Latest uses dock-independent geometry across appearance, removal and near-
         if (!el) return;
         Object.defineProperties(el, {
           scrollHeight: { configurable: true, get: () => 1000 },
-          clientHeight: { configurable: true, get: () => viewport - (root.querySelector('#dock') ? dockHeight : 0) },
+          clientHeight: { configurable: true, get: () => viewport },
           scrollTop: { configurable: true, get: () => top },
         });
       } }),
-      dock.visible ? h('div', { id: 'dock', ref: (el: HTMLDivElement | null) => {
-        dock.dockRef.current = el;
-        if (el) el.getBoundingClientRect = () => ({ height: dockHeight }) as DOMRect;
-      } }, 'Latest') : null,
+      dock.visible ? h('div', { id: 'dock' }, 'Latest') : null,
     ]);
   }
   const visible = () => !!root.querySelector('#dock');
@@ -58,9 +54,6 @@ test('Latest uses dock-independent geometry across appearance, removal and near-
     assert.equal(visible(), true);
     for (let i = 0; i < 5; i++) resize();
     assert.equal(visible(), true, 'dock must not oscillate near the 24px boundary');
-    dockHeight = 52; // e.g. coarse pointer / zoom
-    resize();
-    assert.equal(visible(), true);
     viewport = 201; // now exactly 24px from the dock-independent bottom
     resize();
     assert.equal(visible(), false);

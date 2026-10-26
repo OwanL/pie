@@ -248,30 +248,34 @@
 }
 
 /* ── Jump-to-latest button ───────────────────────────────────────────────── */
-/* Conditional normal-flow dock: never covers transcript text, and reserves
-   no space while following the latest content. */
+/* Float above the transcript without reserving a footer row. Only the
+   button intercepts input; content on either side remains interactive. */
 .transcript-latest-dock {
-  flex: 0 0 auto;
+  position: absolute;
+  inset-inline: 0;
+  bottom: 12px;
+  z-index: 7;
   display: flex;
   justify-content: center;
-  padding: 4px 8px;
+  pointer-events: none;
 }
 
 .transcript-jump-latest {
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  border: 1px solid var(--panel-border-subtle);
-  background: var(--panel-control-surface);
-  color: var(--panel-muted);
+  border: 1px solid color-mix(in srgb, var(--panel-foreground) 35%, var(--panel-control-surface));
+  background: var(--panel-hover-surface);
+  color: var(--panel-foreground);
   line-height: 1;
   padding: 0;
   cursor: pointer;
-  box-shadow: var(--panel-shadow-sm);
+  pointer-events: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.65), 0 12px 32px rgba(0, 0, 0, 0.55);
   transition:
     background var(--panel-transition-fast),
     border-color var(--panel-transition-fast),
@@ -286,7 +290,7 @@
 
 .transcript-jump-latest:hover {
   background: var(--panel-control-hover);
-  border-color: var(--panel-border);
+  border-color: var(--panel-foreground);
   color: var(--panel-foreground);
 }
 
