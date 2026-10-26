@@ -1,137 +1,28 @@
 ---
 name: add-provider
-description: Use when the user asks to register a direct API provider, custom OpenAI-compatible endpoint, local model server, or new models for an existing provider.
+description: Use when the user asks to connect a provider, add a custom endpoint, or make models available in Pie.
 ---
 
-# Add a Provider
+# Add a provider or model
 
-`models.yaml` is the single source of truth for providers and model metadata in this repo. `npm run sync-models` validates it and regenerates every derived surface: `models.json`, `model-profiles.yaml`, model-owned fields in `settings.json` (model picker seeds and retry config; existing chat/pruning selections are user-owned and preserved), and `model-pricing-history.json` (pricing/attribution metadata for retired or superseded models, consumed by the analytics loaders — not part of the live picker).
+Start with the installed application's supported workflow. Do not require a Pie checkout, edit source files, run generators, or request an API key in chat for ordinary setup.
 
-Do not edit any of those generated files directly. The old LiteLLM `settings.json.proxy` workflow no longer exists; providers route directly to their upstream endpoint and concurrency is enforced by the host-side provider gate.
+## Installed Pie workflow
 
-## 1. Gather facts before editing
+1. Use **Settings → Providers** in the running Pie version to add or edit a connection, select a supported protocol/authentication method, and connect it. The UI is the preferred path; available choices depend on the installed version and registered capabilities. Do not invent UI steps or imply every provider supports every authentication method.
+2. For a custom endpoint, use the installed version's validated provider configuration YAML only when needed. On Windows the current default is `%LOCALAPPDATA%/pie/config/providers.yaml`; other platform defaults are not yet qualified. Follow that version's schema and preserve unrelated entries. Do not assume a source-checkout schema file describes another installed version.
+3. Enter credentials only through the supported private authentication flow. Never ask the user to paste a key into chat, a command argument, YAML, settings, or a committed file. Pie keeps credentials separate from provider YAML. A configured connection or visible model does not prove entitlement or a successful request.
+4. Refresh or discover models where supported; otherwise use the installed UI/configuration's supported manual model-ID path. Discovery, authentication and inference are distinct. Do not automatically sign in, send a paid test request, or enable models/routing policies. Explain likely network or billing effects before any explicitly requested connection test.
+5. If the protocol or authentication capability is not offered by the running version, do not invent a YAML flag or claim that configuration can add it. Explain that it needs a qualified extension seam or Pie source implementation; load `develop-pie` only if source work is requested.
 
-Read applicable project instructions if present, `models.schema.json`, the closest existing provider in `models.yaml`, and pi's custom-model documentation when needed.
+Settings → Providers is the management home; connection/authentication and model preferences are separate flows. Existing provider behavior and limitations are version-dependent. For Pie source claims, consult the owning provider-management contract (`docs/contracts/STATE_CONTRACT.md#provider-management-state` in the identified Pie source checkout) and implementation, not this bundled skill as authority.
 
-Collect or research:
+## Pie contributor workflow (only when source changes are requested)
 
-- provider key: lowercase and stable
-- direct upstream `baseUrl`
-- API type: `openai-completions`, `openai-responses`, `anthropic-messages`, or `google-generative-ai`
-- desired model IDs and display names
-- input types, reasoning support, context window, maximum output, supported thinking levels, and compatibility flags
-- model input capabilities, including whether image input is supported, from authoritative provider documentation
-- pricing in USD per million tokens, including cache rates
-- host-side concurrency limits
+First identify the Pie source checkout and version. Follow its `AGENTS.md` and model configuration documentation. In the Pie source checkout, `models.yaml` is the catalog source; inspect that checkout's `models.schema.json` and nearest provider entry. The contributor generator procedure below is not an installed-user setup step.
 
-Do not guess model IDs, pricing, or capabilities when authoritative provider documentation or a model-list endpoint is available. Ask the user only for product choices or genuinely unavailable facts.
+Edit `models.yaml` and run the checkout's documented model sync command (currently `proto run pnpm -- run sync-models` from the source root). Do not hand-edit generated `models.json`, `model-profiles.yaml`, model-owned fields in `settings.json`, or `model-pricing-history.json`. Verify drift and the focused model-config test using that checkout's documented wrapper. Do not run source builds or tests for an installed setup request.
 
-## 2. Keep credentials out of chat and source control
+When adding catalog entries, use authoritative provider documentation for endpoint, API shape, model IDs, capabilities, limits and pricing; do not guess. Preserve established authentication, compatibility and concurrency configuration unless the source task changes them. `apiKey` in the catalog is a request-time reference, not a place to store secrets. The literal `oauth` is only a convention for an already OAuth-capable registered provider and does not enable OAuth; do not use it to add authentication support. Provider/model identity is `(provider, id)`; follow that checkout's schema and picker-order requirements.
 
-Never ask the user to paste an API key into chat, a tool argument, `models.yaml`, `settings.json`, or a committed file. Ask them to configure the credential outside the agent transcript and confirm when it is available.
-
-Reference secrets in `models.yaml` with environment interpolation:
-
-```yaml
-apiKey: $ACME_API_KEY
-```
-
-Understand the `apiKey` distinction: in `models.yaml` it is a request-time reference, never a stored secret. `$ENV_VAR`/`${ENV_VAR}` interpolate the environment, a leading `!command ` runs a command for the whole value, and `$$` and `$!` escape literal `$`/`!`. The generic config resolver treats `apiKey: oauth` as a literal; in this catalog it is only a placeholder convention for a provider already registered as OAuth-capable (for example, the SDK's `openai-codex` provider). It is not a generic OAuth sentinel and does not implement or register OAuth or make a provider OAuth-capable: the existing provider registration and `/login` flow must supply the credential in `auth.json`. Do not add it to a new provider as a way to enable OAuth. For a keyless local server, use the existing local-provider placeholder pattern.
-
-Before finishing, inspect the diff/status for accidental secrets. Never print credential values while verifying; check only whether the reference resolves or whether an authenticated request succeeds.
-
-## 3. Add the provider catalog
-
-Match an existing provider with the same API shape. The catalog composes the four built-in streaming APIs — `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai` — so a catalog provider needs no code. Pie does not use pi's `custom-provider` extension mechanism (`pi.registerProvider`), which is a separate, code-based path for proxies, OAuth login flows, and custom streaming implementations; declaring a provider here must not create or depend on an extension.
-
-A direct OpenAI-compatible provider typically looks like:
-
-```yaml
-providers:
-  acme:
-    baseUrl: https://api.acme.example/v1
-    api: openai-completions
-    apiKey: $ACME_API_KEY
-    concurrency:
-      maxConcurrentRequests: 4
-      afterburnSeconds: 15
-      queueWaitSeconds: 30
-    compat:
-      supportsDeveloperRole: false
-      supportsReasoningEffort: false
-      supportsUsageInStreaming: true
-      maxTokensField: max_tokens
-    models:
-      - id: acme-model-id
-        name: "Acme: Model"
-        reasoning: false
-        input:
-          - text
-        contextWindow: 128000
-        maxTokens: 16384
-        pricing:
-          input: 0
-          output: 0
-          cacheRead: 0
-          cacheWrite: 0
-        eligible: true
-        thinking:
-          - minimal
-        disabledReason: null
-```
-
-Important:
-
-- `baseUrl` is the real upstream endpoint, not a local proxy.
-- Every model must include the fields required by `models.schema.json`, including complete pricing, eligibility, thinking levels, and `disabledReason`.
-- Use provider-level `compat` for shared behavior and model-level overrides only when a model differs.
-- `overrideOnly: true` marks a user-authored partial override for a model whose full runtime definition comes from a provider or SDK catalog — for example the `openai-codex` OAuth catalog. Sync routes these entries to `providers.<p>.modelOverrides` in `models.json` instead of `models[]`, where the runtime merges the supported override fields with the built-in model. Override records are not limited to pricing or picker profiles: use supported metadata such as name, input capabilities, cost, context/output limits, reasoning/thinking maps, and compatibility when needed; source-only `eligible`, `thinking`, and `disabledReason` fields still control picker/subagent policy.
-- `concurrency` is an intentional policy enforced by the host-side provider gate at runtime (read from the generated `models.json`): `maxConcurrentRequests` is the provider-wide cap (finite values are 1–128; `0` means Unlimited for capacity throttling), `afterburnSeconds` reserves a recently used slot for session affinity, and `queueWaitSeconds` bounds waiting. Unlimited mode retains circuit breakers, queue/network safety deadlines, stream liveness, and cancellation. Choose the values deliberately for the provider's real rate limits and load profile instead of copying another provider's.
-- Model identity is the pair `(provider, id)`: bare IDs must be unique within a provider, but the same bare ID may exist under several providers (provider-qualified identity).
-- Add each new model identity exactly once to top-level `profileOrder` in the desired picker order, provider-qualifying with `{ provider, id }` whenever the bare ID exists under more than one provider.
-
-For adding models to an existing provider, change only its `models` list and `profileOrder`; preserve its established auth, compatibility, and concurrency configuration unless the task explicitly changes them.
-
-GitHub Copilot models are the one exception to hand-editing: the `copilot-model-discovery` extension reconciles the `github-copilot` provider against the signed-in account's model list (TTL-gated at session start; `/copilot-sync-models` forces a refresh). Auto-discovered Copilot models are full catalog entries in `github-copilot.models`, not `overrideOnly` records; discovery supplies their endpoint metadata and preserves the Pie-owned policy fields. Do not hand-edit endpoint metadata of auto-discovered Copilot models; newly discovered models are ineligible by default with an auto-discovery `disabledReason` until deliberately vetted, and models owned by other providers are never changed by the sync.
-
-## 4. Sync and verify
-
-Run from the repo root:
-
-```bash
-npm run sync-models
-npm run sync-models -- --check
-```
-
-Run the focused model-config test through the root wrapper (never invoke `npx tsx` directly):
-
-```bash
-npm run test:file -- scripts/model-config/test/model-config-sync.test.ts
-```
-
-For runtime-source changes under `application/`, `analytics/`, `harness/`, or `lib/`, follow the [current runtime build requirement](../develop-pie/SKILL.md#common-practices): from the repository root, run:
-
-```bash
-npm run extension:build
-```
-
-Verify:
-
-- generated config has no drift (`npm run sync-models -- --check`)
-- the provider and models appear in `models.json` with the expected endpoint and metadata: full discovered Copilot models are under `models[]`, while only user-authored `overrideOnly` records are under `modelOverrides`
-- `model-profiles.yaml` contains every new model in the intended order
-- `model-pricing-history.json` mirrors the final catalog's pricing for retired entries
-- `settings.json` retains user-owned defaults and contains no legacy provider routing block
-- with auth configured, a minimal model request succeeds without exposing the key
-
-## 5. Safety checklist
-
-- [ ] Only `models.yaml` was edited as model configuration source
-- [ ] No secret value appears in the diff, transcript output, or tracked files
-- [ ] Provider endpoint and API type match the upstream protocol
-- [ ] Model metadata came from authoritative documentation or was explicitly confirmed
-- [ ] Every model ID appears exactly once in `profileOrder`
-- [ ] Concurrency is provider-wide and intentionally chosen
-- [ ] User-authored `overrideOnly` entries land in `modelOverrides` (not `models[]`); full discovered Copilot models remain in `models[]`
-- [ ] `sync-models --check` passes
-- [ ] Focused tests pass, and `npm run extension:build` passes when runtime source changed
+For changes under Pie runtime source, consult [the develop-pie skill](../develop-pie/SKILL.md) and the source checkout's owning contracts. Never treat generated source configuration as installed-user configuration.

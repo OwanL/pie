@@ -2,11 +2,11 @@
 
 ## Updating existing docs
 
-This project uses specific docs for different concerns. Update the right one:
+First identify the target project's owning document and follow its existing structure. The guidance below is Pie-specific and applies only when changing Pie source documentation; it is not a required format for other projects.
 
-### develop-pie — conventions and instructions
+### Pie contributor conventions
 
-Add Pie-specific terminology, conventions, and contributor instructions to the [develop-pie skill](../develop-pie/SKILL.md). Keep it concise — this is the "how we work here" file, not a spec.
+Add Pie-specific source-work terminology, conventions and contributor instructions to the [develop-pie skill](../develop-pie/SKILL.md). Keep it concise — this is the "how we work here" file, not a spec.
 
 When adding a term, use this pattern:
 
@@ -23,7 +23,7 @@ Rules:
 - **Only include terms specific to this project.** General programming concepts don't belong. Before adding a term, ask: is this a concept unique to this project, or a general programming concept? Only the former belongs.
 - **Group terms under subheadings** when natural clusters emerge.
 
-### docs/architecture/ARCHITECTURE.md — system overview and patterns
+### Pie source: `docs/architecture/ARCHITECTURE.md` — system overview and patterns
 
 Add or update architectural concepts, module boundaries, and design patterns here. This is the "how the system fits together" file.
 
@@ -34,7 +34,7 @@ When updating:
 - Update the relevant section — don't create a parallel description
 - Keep diagrams and flow descriptions consistent with the code
 
-### docs/contracts/STATE_CONTRACT.md — state management rules
+### Pie source: `docs/contracts/STATE_CONTRACT.md` — state management rules
 
 Add or update protocol rules, mutation constraints, and session-scoped behaviour here. This is the "what guarantees the state system upholds" file.
 
@@ -44,7 +44,7 @@ When updating:
 - Reference the specific events, actions, or state fields involved
 - Keep the language precise — "must", "never", "always", not "should", "typically", "usually"
 
-### New docs in docs/
+### New Pie source docs in `docs/`
 
 If a decision doesn't fit into an existing doc, create a file in an appropriate existing documentation category directory. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`).
 

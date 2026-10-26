@@ -7,7 +7,7 @@ description: "Use when the user asks for a bug fix, investigation, or similar"
 
 A discipline for hard bugs. Use the phases as a feedback loop, not a mandatory waterfall; hypotheses and reproduction work often inform each other. Explain any material verification limits.
 
-Follow the target repository's `AGENTS.md`, `CONTEXT.md` when present, and documented entry points. For Pie work, load `develop-pie`; do not impose Pie's layout or workflow on other repositories.
+Follow the target project's applicable instructions, context files and documented entry points. For Pie source work, load `develop-pie`; do not impose Pie's architecture, commands or workflow on other projects.
 
 ## Phase 1 — Build a feedback loop
 
@@ -18,7 +18,7 @@ Prioritize a fast, repeatable signal for the reported failure. It supports hypot
 1. **Failing test** at whatever seam reaches the bug — unit, integration, e2e.
 2. **Curl / HTTP script** against a running dev server.
 3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
-4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network. In pie, run the focused offline, isolated provider-feedback check from the repository root with `proto run pnpm -- run extension:test:browser provider-feedback.pw.ts`. The root `extension:test:browser` script configures Playwright; pass the spec as a script argument (without an extra `--`). Live fixtures need explicit opt-in and may send real requests or mutate settings; do not use them as routine diagnostics. Pie's loopback browser server serves the real Preact UI from the VS Code extension host over `127.0.0.1` HTTP/WebSocket (see pie's `docs/architecture/ARCHITECTURE.md`). In another repository, use its configured browser/e2e command and documentation.
+4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network. Use the target project's documented browser/e2e command and environment; do not invent commands or assume a browser harness is installed. For Pie source work, its focused offline provider-feedback browser check is run from the Pie source root with `proto run pnpm -- run extension:test:browser provider-feedback.pw.ts`; the source architecture documentation describes its loopback UI server. Live fixtures in any project need explicit opt-in when they may send real requests or mutate state; do not use them as routine diagnostics.
 5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation. Sanitize before replaying: redact credentials, tokens, and identifiable session paths, stub live endpoints where possible, and run in a disposable environment. If replay could produce side effects (writes, network mutation, session changes), get explicit user confirmation first.
 6. **Throwaway harness.** Spin up a minimal subset of the system (one service, mocked deps) that exercises the bug code path with a single function call.
 7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
@@ -26,7 +26,7 @@ Prioritize a fast, repeatable signal for the reported failure. It supports hypot
 9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with a small shell script that prompts, captures the result, and feeds it back to you so the loop is still structured.
 
-For visible desktop UI bugs, use the repository's supported UI-driving path and observe before acting. Ask before computer control unless the user's request clearly includes it; obtain confirmation for destructive input. In Pie, use its `computer` tool and follow its observation and targeting guidance.
+For visible desktop UI bugs, use the target project's supported UI-driving path and observe before acting. Ask before computer control unless the user's request clearly includes it; obtain confirmation for destructive input. If working in Pie, use the available supported computer tool and follow its observation and targeting guidance; do not assume that tool exists in other projects.
 
 ### Iterate on the loop itself
 

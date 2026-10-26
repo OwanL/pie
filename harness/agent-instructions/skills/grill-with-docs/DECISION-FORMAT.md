@@ -1,46 +1,23 @@
-# Decision Record Format
+# Decision-record guidance
 
-When a grilling session produces a decision worth recording, add it to `docs/` — either in an existing doc (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) if it fits, or as a new file in an appropriate existing category directory.
+When a grilling session produces a decision worth recording, use the target project's decision-record conventions and owning documentation location. Do not create a Pie-style `docs/` structure in another project.
 
-## Template
+## Pie source work
+
+A concise record may use:
 
 ```md
 # {Short title of the decision}
 
-{1-3 sentences: what's the context, what did we decide, and why.}
+{1-3 sentences: context, decision and rationale.}
 ```
 
-That's it. A decision record can be a single paragraph. The value is in recording *that* a decision was made and *why* — not in filling out sections.
+For Pie source decisions, update the owning architecture or contract document in the identified Pie source checkout. Put Pie-specific source-work conventions in the [develop-pie skill](../develop-pie/SKILL.md). Do not create a separate ADR directory; Pie records decisions inline in the relevant docs.
 
-## Optional sections
+Offer a decision record only when all three apply:
 
-Only include these when they add genuine value. Most records won't need them.
+1. **Hard to reverse** — changing course later has meaningful cost.
+2. **Surprising without context** — a future reader would wonder why this choice was made.
+3. **A real trade-off** — credible alternatives existed and one was selected for a reason.
 
-- **Considered Options** — only when the rejected alternatives are worth remembering
-- **Consequences** — only when non-obvious downstream effects need to be called out
-
-## Where to put it
-
-- **Fits an existing doc** (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) → add it there under the relevant section
-- **Standalone concern** → create a new file in `docs/` with a descriptive name (e.g. `PRUNING-DESIGN.md`)
-- **Pie convention or terminology** → add it to the [develop-pie skill](../develop-pie/SKILL.md)
-
-Don't create a separate `docs/adr/` directory — this project records decisions inline in the relevant docs, not in a numbered ADR sequence.
-
-## When to offer a decision record
-
-All three of these must be true:
-
-1. **Hard to reverse** — the cost of changing your mind later is meaningful
-2. **Surprising without context** — a future reader will look at the code and wonder "why on earth did they do it this way?"
-3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
-
-### What qualifies
-
-- **Architectural shape.** "We're using CQRS-shaped Elm/MVI." "The host owns all state; the webview is a passive renderer."
-- **Integration patterns between modules.** "The extension host and webview communicate via message passing, not shared state."
-- **Technology choices that carry lock-in.** Database, message bus, auth provider, deployment target. Not every library — just the ones that would take a quarter to swap out.
-- **Boundary and scope decisions.** "Session state is owned by the host; the webview never mutates it directly." The explicit no-s are as valuable as the yes-s.
-- **Deliberate deviations from the obvious path.** "We're using manual SQL instead of an ORM because X." Anything where a reasonable reader would assume the opposite.
-- **Constraints not visible in the code.** "Response times must be under 200ms because of the partner API contract."
-- **Rejected alternatives when the rejection is non-obvious.** If you considered GraphQL and picked REST for subtle reasons, record it — otherwise someone will suggest GraphQL again in six months.
+Useful examples include architectural shape, module integration boundaries, lock-in-bearing technology choices, explicit scope boundaries, non-obvious deviations and constraints not visible in code. Use the target project's own format and locations for every other project.

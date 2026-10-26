@@ -13,7 +13,7 @@ If a question can be answered by exploring the codebase, explore the codebase in
 
 ## Repository context
 
-Follow the target repository's `AGENTS.md`, `CONTEXT.md` when present, and documented entry points. Read the design sections relevant to the plan and use their terminology. For Pie work, load `develop-pie` for its documentation map; do not impose Pie's layout on another repository.
+Follow the target project's applicable instructions, context files, documentation map and established terminology. Read the design sections relevant to the plan. For Pie source work, load `develop-pie`; resolve its repository references against the identified Pie source checkout, not this bundled skill. Do not impose Pie's documentation layout or workflow on another project.
 
 If an optional document is absent, proceed with available conventions. Update the owning documents as decisions crystallise.
 
@@ -21,12 +21,7 @@ If an optional document is absent, proceed with available conventions. Update th
 
 ### Challenge against existing docs
 
-When the user uses a term that conflicts with the language established in the
-repository's architecture/design docs or `AGENTS.md`/`CONTEXT.md`, call it out
-immediately. In pie, this includes `docs/architecture/ARCHITECTURE.md` and
-`docs/contracts/STATE_CONTRACT.md`: "Your architecture doc defines the pattern as
-'CQRS-shaped Elm/MVI', but you seem to be describing something different — which is
-it?"
+When the user's term conflicts with language in the target project's architecture/design docs or applicable instructions, call it out immediately. For Pie source work, consult `docs/architecture/ARCHITECTURE.md` and `docs/contracts/STATE_CONTRACT.md` in the identified Pie source checkout; for another project, use its owning docs. For example: “Your architecture doc defines the pattern as ‘X’, but you seem to be describing something different—which is it?”
 
 ### Sharpen fuzzy language
 
@@ -44,12 +39,12 @@ When the user states how something works, check whether the code agrees with the
 
 When a term or decision is resolved, update the relevant doc right there. Don't batch these up — capture them as they happen:
 
-- **Terminology or conventions** → update the owning repository guide or design document. In Pie, working conventions belong in `develop-pie`, not the globally loaded `AGENTS.md`.
+- **Terminology or conventions** → update the owning project guide or design document. In Pie, source-work conventions belong in `develop-pie`, not a globally loaded instruction file.
 - **Architectural concepts, module boundaries, patterns** → update its architecture or design doc
 - **State rules, mutation patterns, protocol constraints** → update its state/contract doc
 - **New design decision worth recording** → add to the repository's documented docs location or append to the relevant existing doc
 
-When working in Pie, use its format guidelines in [DOC-FORMAT.md](./DOC-FORMAT.md). When working in another repository, follow that repository's documentation conventions instead; do not impose Pie's docs layout.
+Use [DOC-FORMAT.md](./DOC-FORMAT.md) as a general aid for concise, accurate documentation edits, not as a required format. Follow the target project's existing documentation conventions; do not impose Pie's docs layout.
 
 ### Offer decision records sparingly
 
