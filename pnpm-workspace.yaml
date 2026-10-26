@@ -3,6 +3,7 @@ packages:
   - application/hosts/vscode
   - extensions/computer-use
   - extensions/playwright
+  - lib/managed-packages/integrations
   - harness/pi/packages/ai
   - harness/pi/packages/agent
   - harness/pi/packages/tui
