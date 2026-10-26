@@ -64,6 +64,21 @@ function reconciliationEffect(options: {
   };
 }
 
+test('initial history returns explicit optional results and silently handles unavailable history', async () => {
+  for (const mode of ['present', 'empty', 'absent', 'error']) {
+    const { deps, events } = makeEffectRunnerDeps();
+    const stats = { medianTokens: 90, p25Tokens: 80, p75Tokens: 100 };
+    if (mode !== 'absent') deps.statsService.readInitialContextHistory = async (key) => {
+      assert.equal(key, 'cohort');
+      if (mode === 'error') throw new Error('unavailable');
+      return mode === 'present' ? stats : undefined;
+    };
+    new EffectRunner(deps).run({ kind: 'ReadInitialContextHistory', sessionPath: '/a', cohortKey: 'cohort', backendGeneration: 2, modelWriteFence: 3 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(events, [{ kind: 'InitialContextHistoryResult', sessionPath: '/a', cohortKey: 'cohort', backendGeneration: 2, modelWriteFence: 3, stats: mode === 'present' ? stats : undefined }]);
+  }
+});
+
 test('EffectRunner logs effect.dispatch at debug for normal effect execution', () => {
   const { deps, calls } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);

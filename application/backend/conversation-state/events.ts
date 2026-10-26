@@ -473,6 +473,7 @@ export interface LiveTurnCheckpointResultEvent {
 }
 
 export type EffectResultEvent =
+  | InitialContextHistoryResultEvent
   | LiveTurnCheckpointResultEvent
   | SendResultEvent
   | EditResultEvent
@@ -688,6 +689,16 @@ export interface ErrorEvent {
   error: string;
   /** Full diagnostic retained host-side and redacted at projection. */
   detail?: string;
+}
+
+/** Optional history for a still-current fresh-session estimate. */
+export interface InitialContextHistoryResultEvent {
+  kind: 'InitialContextHistoryResult';
+  sessionPath: string;
+  cohortKey: string;
+  backendGeneration: number;
+  modelWriteFence: number;
+  stats?: { medianTokens: number; p25Tokens: number; p75Tokens: number };
 }
 
 /** Completes only the prompt metadata of a previously hydrated cold open. */

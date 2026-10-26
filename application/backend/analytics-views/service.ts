@@ -60,6 +60,7 @@ import { CanonicalRevisionRefresher } from '../../../analytics/queries/revision-
 import { sessionUsageSnapshotFromCanonicalSettlements } from '../../../analytics/usage-accounting/canonical-usage.js';
 import { buildSubagentUsageSamples } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import { subagentObservationSource } from './subagent-evidence-source.js';
+import { readInitialContextHistory, type InitialContextHistoryStats } from '../../../analytics/queries/initial-context-history.js';
 
 const MAX_CANONICAL_SESSION_CACHE_ENTRIES = 256;
 const MAX_CANONICAL_ACTIVITY_KINDS = 64;
@@ -319,6 +320,19 @@ export class StatsService implements RunObserver {
       subagentObservationSource,
     });
     this.tracker = tracker;
+  }
+
+  /** Optional canonical history only; failures and privacy invalidation stay unknown. */
+  async readInitialContextHistory(cohortKey: string): Promise<InitialContextHistoryStats | undefined> {
+    if (this.disposed || !this.analyticsReadModel || this.canonicalCacheFailClosed) return undefined;
+    const epoch = this.canonicalCacheEpoch;
+    try {
+      const stats = await readInitialContextHistory(this.analyticsReadModel, cohortKey, this.now().getTime());
+      return !this.disposed && epoch === this.canonicalCacheEpoch && !this.canonicalCacheFailClosed
+        ? stats : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** In-memory mirror of canonical startup measurements. */

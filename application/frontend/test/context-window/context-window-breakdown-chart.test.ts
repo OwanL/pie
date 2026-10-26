@@ -125,6 +125,24 @@ test('ContextWindowBreakdownChart header shows percentage, used/total, and remai
   assert.match(html, /rich-tooltip-head-value[^>]*>6% · 23\.4k \/ 400k · 376\.6k left</);
 });
 
+test('ContextWindowBreakdownChart renders fresh-session pruning distribution rows', () => {
+  const breakdown = {
+    ...makeBreakdown(),
+    afterPruning: { medianTokens: 12_345, p25Tokens: 10_000, p75Tokens: 15_678 },
+  };
+  const html = renderToString(h(ContextWindowBreakdownChart, { breakdown }));
+  assert.match(html, /After pruning/);
+  assert.match(html, /Median/);
+  assert.match(html, /12\.3k/);
+  assert.match(html, /Middle 50%/);
+  assert.match(html, /10k–15\.7k/);
+});
+
+test('ContextWindowBreakdownChart omits pruning rows for ordinary breakdowns', () => {
+  const html = renderToString(h(ContextWindowBreakdownChart, { breakdown: makeBreakdown() }));
+  assert.doesNotMatch(html, /After pruning|Middle 50%/);
+});
+
 test('ContextWindowBreakdownChart header keeps unknown usage explicit', () => {
   const html = renderToString(h(ContextWindowBreakdownChart, {
     breakdown: makeBreakdown({ usedTokens: null, usedKind: 'unknown', remainingTokens: null, remainingKind: 'unknown' }),

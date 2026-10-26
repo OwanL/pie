@@ -1196,7 +1196,7 @@ export function handleSessionControlSettingsResult(
   };
 }
 
-export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'BackendRestartResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
+export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'BackendRestartResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' } | { kind: 'InitialContextHistoryResult' }>): ReducerResult {
   switch (event.kind) {
     case 'ContinueResult':
       return handleContinueResult(state, event);

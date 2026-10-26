@@ -244,6 +244,7 @@ export interface SessionServiceLike {
 }
 
 export interface StatsServiceLike {
+  readInitialContextHistory?(cohortKey: string): Promise<{ medianTokens: number; p25Tokens: number; p75Tokens: number } | undefined>;
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string, operationId?: string | null): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
@@ -429,6 +430,14 @@ export class EffectRunner {
       getSendTimerTimeoutMs: deps.getSendTimerTimeoutMs,
     });
     this.handlers = {
+      ReadInitialContextHistory: (effect: Extract<Effect, { kind: 'ReadInitialContextHistory' }>) => {
+        void (async () => {
+          let stats;
+          try { stats = await this.deps.statsService.readInitialContextHistory?.(effect.cohortKey); }
+          catch { /* History is optional; failures must not invent an estimate. */ }
+          this.deps.dispatch({ ...effect, kind: 'InitialContextHistoryResult', stats });
+        })();
+      },
       // Session operations delegate as one domain. Generic truncate, queue,
       // and extension-UI RPCs retain the direct session-FIFO path below.
       SendRpc: (e) => this.sessionOperations.runSendRpc(e),

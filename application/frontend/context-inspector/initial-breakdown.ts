@@ -30,7 +30,7 @@ export function buildInitialContextBreakdown(
   };
   const entries: ContextWindowBreakdownEntry[] = [{
     key: 'initial.configured-catalog',
-    label: 'Discovered initial prompt, tools, and skills',
+    label: 'Before pruning',
     value: formatTokens(estimate.tokens),
     kind: 'estimated',
     tokens: estimate.tokens,
@@ -46,6 +46,7 @@ export function buildInitialContextBreakdown(
     'Includes initially sent prompt text and tool/skill catalog metadata, not provider-hidden instructions, prompt-template bodies, or full skill bodies.',
   ];
   return {
+    ...(estimate.afterPruning ? { afterPruning: estimate.afterPruning } : {}),
     entries,
     footerEntries,
     summary,
@@ -56,6 +57,12 @@ export function buildInitialContextBreakdown(
       '',
       'Breakdown:',
       ...entries.map(line),
+      ...(estimate.afterPruning ? [
+        '',
+        'After pruning:',
+        `Median: ${formatTokens(estimate.afterPruning.medianTokens)}`,
+        `Middle 50%: ${formatTokens(estimate.afterPruning.p25Tokens)}–${formatTokens(estimate.afterPruning.p75Tokens)}`,
+      ] : []),
       '',
       ...notes.map((note) => `Note: ${note}`),
     ].join('\n'),

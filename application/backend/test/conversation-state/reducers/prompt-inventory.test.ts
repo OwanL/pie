@@ -29,6 +29,38 @@ function receive(state: ArchState, token = 'a', systemPrompts = prompts, backend
   return reducer(state, { kind: 'SessionPromptInventory', backendGeneration,
     payload: { sessionPath, token, systemPrompts, initialContextEstimate: estimate } }).state;
 }
+test('cold inline opened estimate emits history lookup but hot snapshots do not', () => {
+  for (const runtimeReady of [false, true]) {
+    const result = reducer(cold(), { kind: 'SessionOpened', sessionPath, backendGeneration: 0, modelWriteFence: 0,
+      modelHydrationRevision: 0, catalogHydrationRevision: 0, payload: {
+        session: { path: sessionPath, cwd: '/workspace', name: 'Cold', modifiedAt: '', messageCount: 0 },
+        transcript: [], busy: false, runtimeReady,
+        initialContextEstimate: { ...estimate, cohortKey: 'inline' },
+      } });
+    assert.equal(result.effects.some((effect) => effect.kind === 'ReadInitialContextHistory'), !runtimeReady);
+    if (runtimeReady) assert.equal(result.state.settings.initialContextEstimateBySession[sessionPath], null);
+  }
+});
+
+test('history lookup emits fresh cohort ownership and rejects stale results', () => {
+  const result = reducer(cold(), { kind: 'SessionPromptInventory', backendGeneration: 0,
+    payload: { sessionPath, token: 'a', systemPrompts: prompts, initialContextEstimate: { ...estimate, cohortKey: 'cohort' } } });
+  assert.deepEqual(result.effects, [{ kind: 'ReadInitialContextHistory', sessionPath, cohortKey: 'cohort', backendGeneration: 0, modelWriteFence: 0 }]);
+  const stats = { medianTokens: 90, p25Tokens: 80, p75Tokens: 100 };
+  const event = { kind: 'InitialContextHistoryResult' as const, sessionPath, cohortKey: 'cohort', backendGeneration: 0, modelWriteFence: 0, stats };
+  assert.deepEqual(reducer(result.state, event).state.settings.initialContextEstimateBySession[sessionPath]?.afterPruning, stats);
+  assert.equal(reducer(result.state, { ...event, stats: undefined }).state, result.state);
+  for (const state of [
+    { ...result.state, settings: { ...result.state.settings, modelWriteFence: 1 } },
+    { ...result.state, settings: { ...result.state.settings, modelBackendGeneration: 1 } },
+    { ...result.state, settings: { ...result.state.settings, initialContextEstimateBySession: { [sessionPath]: null } } },
+    { ...result.state, settings: { ...result.state.settings, initialContextEstimateBySession: { [sessionPath]: { ...estimate, cohortKey: 'new' } } } },
+    { ...result.state, sessions: { ...result.state.sessions, openTabPaths: [] } },
+    { ...result.state, sessions: { ...result.state.sessions, runningSessionPaths: [sessionPath] } },
+    { ...result.state, settings: { ...result.state.settings, contextUsageBySession: { [sessionPath]: { tokens: 1, contextWindow: 100, percent: 1 } } } },
+  ]) assert.equal(reducer(state, event).state, state);
+});
+
 function cold() {
   const state = opened();
   return { ...state, sessions: { ...state.sessions, openTabPaths: [sessionPath] } };

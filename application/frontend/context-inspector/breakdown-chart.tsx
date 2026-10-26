@@ -235,6 +235,21 @@ function ContextWindowBreakdownChartBase({
       />
 
       <ContextLegend segments={allSegments} total={total} />
+      {breakdown.afterPruning && (
+        <div class="working-time-tools">
+          <div class="working-time-section-head"><span>After pruning</span></div>
+          <div class="working-time-tool-row">
+            <span>Median</span><span />
+            <span class="rich-tooltip-legend-val">{formatCompactTokens(breakdown.afterPruning.medianTokens)}</span>
+          </div>
+          <div class="working-time-tool-row">
+            <span>Middle 50%</span><span />
+            <span class="rich-tooltip-legend-val">
+              {formatCompactTokens(breakdown.afterPruning.p25Tokens)}–{formatCompactTokens(breakdown.afterPruning.p75Tokens)}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

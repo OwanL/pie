@@ -519,7 +519,16 @@ export interface DuplicateSessionEffect extends EffectBase {
 }
 
 export type DictationControlEffect = { kind: 'DictationControl'; action: 'start' | 'stop' | 'cancel'; recordingId: string };
+export interface ReadInitialContextHistoryEffect {
+  kind: 'ReadInitialContextHistory';
+  sessionPath: string;
+  cohortKey: string;
+  backendGeneration: number;
+  modelWriteFence: number;
+}
+
 export type Effect =
+  | ReadInitialContextHistoryEffect
   | DictationControlEffect
   | import('../../provider-management/state.js').ProviderManagementEffect
   | SendRpcEffect

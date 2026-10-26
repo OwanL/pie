@@ -43,6 +43,7 @@ import {
   handleSessionListChanged,
   handleSessionOpened,
   handleSessionPromptInventory,
+  handleInitialContextHistoryResult,
   handleSessionNameDerived,
   handleSessionTitleRearm,
   handleAgentSettled,
@@ -420,6 +421,8 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
       return handleSessionTitleRearm(state, event);
     }
 
+    case 'InitialContextHistoryResult':
+      return handleInitialContextHistoryResult(state, event);
     case 'SessionPromptInventory':
       return handleSessionPromptInventory(state, event);
     case 'SessionOpened': {

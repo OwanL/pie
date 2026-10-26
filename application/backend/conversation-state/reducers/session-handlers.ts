@@ -183,6 +183,41 @@ export function handleSessionListChanged(state: ArchState, event: Extract<Event,
   };
 }
 
+function initialHistoryEligible(state: ArchState, sessionPath: string): boolean {
+  return state.sessions.openTabPaths.includes(sessionPath)
+    && !state.sessions.runningSessionPaths.includes(sessionPath)
+    && !state.livePipeline.turnsBySession[sessionPath]
+    && !(state.transcript.bySession[sessionPath] ?? []).some((row) => row.role === 'user')
+    && !state.transcript.windowBySession[sessionPath]?.hasUserMessages
+    && !state.settings.contextUsageBySession[sessionPath]
+    && !state.transcript.sessionUsageBySession?.[sessionPath]?.samples.length
+    && !Object.values(state.operations).some((op) => !op.terminal
+      && (op.session.resolvedPath ?? op.session.pendingPath) === sessionPath
+      && (op.kind === 'session.close' || op.kind.startsWith('message.')))
+    && !Object.values(state.pending.ops).some((op) => op.sessionPath === sessionPath)
+    && !Object.values(state.pending.promoted).some((op) => op.sessionPath === sessionPath);
+}
+
+function initialHistoryEffects(state: ArchState, sessionPath: string): Effect[] {
+  const cohortKey = state.settings.initialContextEstimateBySession[sessionPath]?.cohortKey;
+  return cohortKey && initialHistoryEligible(state, sessionPath) ? [{
+    kind: 'ReadInitialContextHistory', sessionPath, cohortKey,
+    backendGeneration: state.settings.modelBackendGeneration, modelWriteFence: state.settings.modelWriteFence,
+  }] : [];
+}
+
+export function handleInitialContextHistoryResult(state: ArchState, event: Extract<Event, { kind: 'InitialContextHistoryResult' }>): ReducerResult {
+  const estimate = state.settings.initialContextEstimateBySession[event.sessionPath];
+  if (!event.stats || !estimate || estimate.cohortKey !== event.cohortKey
+    || state.settings.modelBackendGeneration !== event.backendGeneration
+    || state.settings.modelWriteFence !== event.modelWriteFence
+    || !initialHistoryEligible(state, event.sessionPath)) return { state, effects: [] };
+  return { state: { ...state, settings: { ...state.settings, initialContextEstimateBySession: {
+    ...state.settings.initialContextEstimateBySession,
+    [event.sessionPath]: { ...estimate, afterPruning: event.stats },
+  } } }, effects: [] };
+}
+
 export function handleSessionPromptInventory(state: ArchState, event: Extract<Event, { kind: 'SessionPromptInventory' }>): ReducerResult {
   const { sessionPath, token } = event.payload;
   const owner = state.transcript.pendingPromptInventoryBySession?.[sessionPath];
@@ -206,7 +241,7 @@ export function handleSessionPromptInventory(state: ArchState, event: Extract<Ev
     && !state.transcript.windowBySession[sessionPath]?.hasUserMessages
     && !state.settings.contextUsageBySession[sessionPath]
     && !(state.transcript.sessionUsageBySession?.[sessionPath]?.samples.length);
-  return { state: {
+  const next = {
     ...consumed,
     transcript: { ...consumed.transcript, systemPromptsBySession: {
       ...state.transcript.systemPromptsBySession, [sessionPath]: event.payload.systemPrompts,
@@ -215,7 +250,8 @@ export function handleSessionPromptInventory(state: ArchState, event: Extract<Ev
       ...state.settings.initialContextEstimateBySession,
       [sessionPath]: canEstimate ? event.payload.initialContextEstimate ?? null : null,
     } },
-  }, effects: [] };
+  };
+  return { state: next, effects: initialHistoryEffects(next, sessionPath) };
 }
 
 export function handleSessionOpened(state: ArchState, event: Extract<Event, { kind: 'SessionOpened' }>): ReducerResult {
@@ -484,7 +520,11 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
       }),
       initialContextEstimateBySession: {
         ...next.settings.initialContextEstimateBySession,
-        [sessionPath]: !pendingColdInventory && payload.runtimeReady === false
+        [sessionPath]: staleModelOwnership ? next.settings.initialContextEstimateBySession[sessionPath] ?? null
+          : !pendingColdInventory && payload.runtimeReady === false
+          && !resolvedWindow?.hasUserMessages
+          && !resolvedTranscript.some((row) => row.role === 'user')
+          && !(payload.contextUsage ?? next.settings.contextUsageBySession[sessionPath])
           && (payload.sessionUsage?.samples.length ?? 0) === 0
           ? payload.initialContextEstimate ?? null
           : null,
@@ -596,6 +636,9 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     }
   }
 
+  if (!staleModelOwnership && !pendingColdInventory && payload.runtimeReady === false) {
+    effects.push(...initialHistoryEffects(next, sessionPath));
+  }
   return { state: next, effects };
 }
 

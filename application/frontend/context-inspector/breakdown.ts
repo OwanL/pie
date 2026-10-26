@@ -67,6 +67,12 @@ export interface ContextWindowSummary {
 }
 
 export interface ContextWindowBreakdown {
+  /** Fresh-session estimate distribution after per-turn pruning, when available. */
+  afterPruning?: {
+    medianTokens: number;
+    p25Tokens: number;
+    p75Tokens: number;
+  };
   /** Top contributor rows, sorted largest first. */
   entries: readonly ContextWindowBreakdownEntry[];
   /** Window summary rows (used / remaining / total). */
