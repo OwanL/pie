@@ -20,6 +20,7 @@
  * guard and the caller drops them with a loud `console.warn`.
  */
 
+import { isInitialContextEstimate } from './initial-context-estimate.js';
 import type {
   AgentMessagePayload,
   AgentSettledPayload,
@@ -154,13 +155,7 @@ function isContextWindowUsage(value: unknown): value is ContextWindowUsage {
 }
 
 function isOptionalInitialContextEstimate(value: unknown): boolean {
-  return value === undefined || (
-    isObject(value)
-    && Number.isSafeInteger(value.tokens)
-    && (value.tokens as number) >= 0
-    && Number.isSafeInteger(value.contextWindow)
-    && (value.contextWindow as number) > 0
-  );
+  return value === undefined || isInitialContextEstimate(value);
 }
 
 function isOptionalLiveTurnRecoveryIdentity(value: unknown): boolean {

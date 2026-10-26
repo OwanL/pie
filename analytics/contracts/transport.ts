@@ -4,6 +4,7 @@ import type {
   AnalyticsCaptureSubject,
   AnalyticsDetailCapture,
   AnalyticsObservation,
+  AnalyticsProducerKind,
   Int64Value,
 } from './contracts.js';
 import { assertValidAnalyticsObservation, parseInt64 } from './contracts.js';
@@ -171,7 +172,7 @@ export interface InstalledAnalyticsRuntimeBridge {
   submitDetail(capture: AnalyticsDetailCapture): void;
   readFactAcknowledgement(generationId: string, stableOriginId: string): Int64Value | undefined;
   isDetailComplete(payloadId: string): boolean;
-  releaseAcknowledgementInterest(generationId: string, stableOriginId: string, payloadId: string): void;
+  releaseAcknowledgementInterest(generationId: string, stableOriginId: string, payloadId: string, producerKind?: AnalyticsProducerKind): void;
   /** Host-owned catalog pricing resolver. Absence keeps subagent provider
    *  settlements unpriced instead of inferring cost. */
   priceSubagentSettlement?: SubagentSettlementPricingResolver;

@@ -1,4 +1,6 @@
 import { claimExplicitFulfillment, delegatedRolePrompt } from './delegated-session.js';
+import { buildInitialContextInventoryProjection } from '../context-inventory/initial-context-estimate-worker.js';
+import { installInitialContextCapture } from './initial-context-capture.js';
 import { clearSessionNoteQueue, deliverSessionNote, observeSessionNoteEvent } from './session-notes.js';
 import { isSubagentBucketChoices } from '../../../lib/subagent-bucket-policy.js';
 import { SUBAGENT_BUCKET_TOGGLES_ENV } from '../../tools/subagent/bucket-toggles.js';
@@ -1262,6 +1264,21 @@ export class WorkerRuntimeHost {
         }));
       },
     });
+    try {
+      const sdk = this.sdk;
+      if (!rolePrompt && sdk) {
+        const systemPromptModule = await this.getSystemPromptModule();
+        installInitialContextCapture({
+          agent: (session as unknown as { agent: Parameters<typeof installInitialContextCapture>[0]['agent'] }).agent,
+          messages: session.messages,
+          branch: session.sessionManager.getBranch(),
+          delegated: Boolean(rolePrompt),
+          resolveCohortKey: (model) => buildInitialContextInventoryProjection(session, sdk, systemPromptModule, {
+            agentDir: this.agentDir, model,
+          }).estimate.cohortKey,
+        });
+      }
+    } catch { /* Initial-context analytics are strictly fail-open. */ }
     installAuxiliaryLlmMeter(
       session,
       sessionPath,

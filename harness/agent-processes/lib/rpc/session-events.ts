@@ -32,6 +32,13 @@ export interface ContextWindowUsage {
 export interface InitialContextEstimate {
   tokens: number;
   contextWindow: number;
+  /** Opaque identity of the unfiltered prompt/catalog, model and pruning policy. */
+  cohortKey?: string;
+  afterPruning?: {
+    medianTokens: number;
+    p25Tokens: number;
+    p75Tokens: number;
+  };
 }
 
 export interface BackendSessionSummary {

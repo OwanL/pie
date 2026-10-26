@@ -272,6 +272,7 @@ export interface AnalyticsCapabilityObservationFields {
 }
 
 export interface AnalyticsFeatureObservationFields {
+  initialContext?: { cohortKey: string; tokens: number };
   feature: 'pruning' | 'resultPruning' | 'warmBash' | 'runtimeHealth' | string;
   decision?: string;
   ruleVersion?: string | null;

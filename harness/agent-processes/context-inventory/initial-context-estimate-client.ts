@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
 import { attachJsonlLineReader } from '../lib/rpc/jsonl.js';
+import { isInitialContextEstimate } from '../lib/rpc/initial-context-estimate.js';
 import type { SystemPromptEntry } from '../lib/rpc/session-events.js';
 import {
   establishWindowsProcessTreeGuardian,
@@ -692,10 +693,7 @@ function isOutput(value: unknown): value is InitialContextEstimateWorkerOutput {
   if (output.ok === false) return typeof output.error === 'string';
   if (output.ok !== true || !output.inventory || typeof output.inventory !== 'object' || Array.isArray(output.inventory)) return false;
   const inventory = output.inventory as Record<string, unknown>;
-  const estimate = inventory.estimate as Record<string, unknown> | undefined;
-  return !!estimate
-    && Number.isSafeInteger(estimate.tokens) && (estimate.tokens as number) >= 0
-    && Number.isSafeInteger(estimate.contextWindow) && (estimate.contextWindow as number) > 0
+  return isInitialContextEstimate(inventory.estimate)
     && Array.isArray(inventory.systemPrompts)
     && inventory.systemPrompts.every(isSystemPromptEntry);
 }

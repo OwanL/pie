@@ -164,8 +164,8 @@ export class AnalyticsWorkerTransport {
         return value;
       },
       isDetailComplete: (payloadId) => this.completeDetails.delete(payloadId),
-      releaseAcknowledgementInterest: (generationId, stableOriginId, payloadId) => {
-        const producerIdentity = analyticsProducerIdentity(generationId, 'subagent', stableOriginId);
+      releaseAcknowledgementInterest: (generationId, stableOriginId, payloadId, producerKind = 'subagent') => {
+        const producerIdentity = analyticsProducerIdentity(generationId, producerKind, stableOriginId);
         this.factWatermarks.delete(producerIdentity);
         this.completeDetails.delete(payloadId);
         const factDeliveryIds = this.factDeliveriesByProducer.get(producerIdentity);

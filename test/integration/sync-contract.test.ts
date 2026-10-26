@@ -1025,6 +1025,23 @@ test('cold opens publish the conversation independently of token-fenced prompt i
   assert.equal(isSessionPromptInventoryPayload({ ...inventory, token: '' }), false);
   assert.equal(isSessionPromptInventoryPayload({ ...inventory, systemPrompts: [{ title: 'Incomplete' }] }), false);
   assert.equal(isSessionPromptInventoryPayload({ ...inventory, initialContextEstimate: { tokens: -1, contextWindow: 200_000 } }), false);
+  const estimate = {
+    ...inventory.initialContextEstimate!,
+    cohortKey: `request-prefix-v1:${'a'.repeat(64)}`,
+    afterPruning: { medianTokens: 8_400, p25Tokens: 7_100, p75Tokens: 10_200 },
+  };
+  assert.equal(isSessionPromptInventoryPayload({ ...inventory, initialContextEstimate: estimate }), true);
+  assert.equal(isSessionOpenedPayload({ ...opened, initialContextEstimate: estimate }), true);
+  for (const invalid of [
+    { ...estimate, cohortKey: 'raw prompt text' },
+    { ...estimate, afterPruning: null },
+    { ...estimate, afterPruning: { ...estimate.afterPruning, medianTokens: Infinity } },
+    { ...estimate, afterPruning: { ...estimate.afterPruning, p25Tokens: 9_000 } },
+    { ...estimate, afterPruning: { ...estimate.afterPruning, p75Tokens: -1 } },
+  ]) {
+    assert.equal(isSessionPromptInventoryPayload({ ...inventory, initialContextEstimate: invalid }), false);
+    assert.equal(isSessionOpenedPayload({ ...opened, initialContextEstimate: invalid }), false);
+  }
 });
 
 test('cold mutation SessionOpenedPayload carries complete prompt catalog, disabled state, and optional estimate together', () => {

@@ -168,6 +168,8 @@ captured facts; old files do not establish canonical coverage. Capture fixes do 
 canonical settlements. Incomplete or cost-only observations remain canonical facts with explicit
 unknown channels, regardless of what a live in-memory projection can display.
 
+Fresh root requests also capture an `initialContext` feature observation after request preparation, containing only an opaque cohort digest and locally estimated system-prompt/tool-definition tokens. Auxiliary summarization, delegated sessions, follow-ups and retries are excluded. The context tooltip reads a bounded comparable-session distribution from these canonical facts; existing history is not backfilled, and ordinary privacy deletion applies.
+
 ## 9. Explicit non-claims
 
 - Analytics activation, the storage cutoff, and cleanup of legacy files are not properties of the

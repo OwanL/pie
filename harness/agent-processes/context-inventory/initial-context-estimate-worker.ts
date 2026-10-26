@@ -6,6 +6,7 @@ import { attachJsonlLineReader } from '../lib/rpc/jsonl.js';
 import type { InitialContextEstimate } from '../lib/rpc/session-events.js';
 import type { SystemPromptEntry } from '../lib/rpc/session-events.js';
 import { estimateRequestPrefixTokens } from '../../../lib/request-token-estimate.js';
+import { loadConfig } from '../../tool-and-skill-selection/settings/config.js';
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files.js';
 import type {
   SdkBuildSystemPromptOptions,
@@ -38,6 +39,8 @@ import {
   captureOriginalSystemPromptOptions,
   normalizePromptText,
 } from '../../agent-instructions/prompt-assembly/system-prompts.js';
+
+import { initialContextCohortKey } from './initial-context-cohort.js';
 
 const IPC_READ_FD = 4;
 const IPC_WRITE_FD = 3;
@@ -233,7 +236,7 @@ function reportInventoryTiming(
   }
 }
 
-function buildInitialContextInventoryProjection(
+export function buildInitialContextInventoryProjection(
   session: SdkSession,
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
@@ -275,7 +278,13 @@ function buildInitialContextInventoryProjection(
     || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {
     throw new Error('Fresh inventory did not resolve a valid token total and context window.');
   }
-  const estimate = { tokens, contextWindow: contextWindow! };
+  const estimate = {
+    tokens,
+    contextWindow: contextWindow!,
+    cohortKey: initialContextCohortKey(
+      fullSystemPrompt, tools, input.model, loadConfig(path.join(input.agentDir, 'settings.json')),
+    ),
+  };
   const systemPrompts = buildSessionSystemPrompts({
     harnessPrompt,
     promptOptions: inventoryPromptOptions,
