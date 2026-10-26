@@ -229,6 +229,19 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.equal(afterRuntimeNode.buildId, afterRuntimeWebview.buildId);
 });
 
+test('qualified managed selection changes all coordinated graph identities', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-managed-identity-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = 'a'.repeat(64);
+  const identity = (managed?: string, file = 'pie-build-id.txt') =>
+    runIdentityPlugin(createBuildIdentityPlugin(root, runtime, file, managed), file).buildId;
+  const first = identity('b'.repeat(64));
+  assert.notEqual(first, identity());
+  assert.notEqual(first, identity('c'.repeat(64)));
+  assert.equal(first, identity('b'.repeat(64)));
+  assert.equal(first, identity('b'.repeat(64), BUNDLED_EXTENSIONS_BUILD_ID));
+});
+
 test('analytics implementation changes coordinate identity and watches without scanning analytics data', (t) => {
   const identityRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-analytics-identity-'));
   t.after(() => rmSync(identityRoot, { recursive: true, force: true }));

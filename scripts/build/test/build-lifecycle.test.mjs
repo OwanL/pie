@@ -80,6 +80,7 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
     );
   }
   write(repo, 'scripts/build/build.mjs', build);
+  write(repo, 'scripts/lib/managed-integration-selection.mjs', readFileSync(path.join(checkout, 'scripts/lib/managed-integration-selection.mjs')));
   write(repo, 'scripts/build/fixture-watch.mjs', fakeOutputWatcher());
   write(repo, 'scripts/build/bundled-extension-verification.mjs', readFileSync(path.join(checkout, 'scripts/build/bundled-extension-verification.mjs')));
   write(repo, 'scripts/build/tool-runtime-assets.mjs', readFileSync(path.join(checkout, 'scripts/build/tool-runtime-assets.mjs')));

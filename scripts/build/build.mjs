@@ -3,6 +3,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, stat } from 'n
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -14,12 +15,13 @@ import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolve
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
 import { verifyBundledExtensionOutput } from './bundled-extension-verification.mjs';
+import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
 
 // Ordinary compilation never constructs a release or discovers installed Pie.
 // The legacy immutable lane remains explicitly selected for delivery/publication.
 const lifecycleArgs = process.argv.slice(2);
-const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir'].includes(arg)
-  || arg.startsWith('--pi-runtime=') || arg.startsWith('--output-dir='));
+const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir', '--managed-stage', '--managed-qualification-receipt'].includes(arg)
+  || ['--pi-runtime=', '--output-dir=', '--managed-stage=', '--managed-qualification-receipt='].some(prefix => arg.startsWith(prefix)));
 if (!deliverySelected) {
   const { buildDevelopment } = await import('./build-development.mjs');
   await buildDevelopment(lifecycleArgs);
@@ -47,7 +49,12 @@ const piRuntimeOption = piRuntimeOptions[0];
 const requestedPiRuntime = piRuntimeOption === '--pi-runtime'
   ? cliArgs[cliArgs.indexOf(piRuntimeOption) + 1]
   : piRuntimeOption?.slice('--pi-runtime='.length);
+const managedSelection = parseManagedIntegrationSelection(cliArgs);
 const watchMode = cliArgs.includes('--watch');
+if (managedSelection && (!requestedPiRuntime || watchMode)) {
+  throw new Error('Managed delivery requires explicit --pi-runtime and does not support --watch.');
+}
+const managedResources = managedSelection ? await import('./bundled-managed-resources.mjs') : undefined;
 const skipTypecheck = cliArgs.includes('--skip-typecheck');
 const noSync = isolatedOutput || cliArgs.includes('--no-sync') || !(cliArgs.includes('--publish') || cliArgs.includes('--activate'));
 const activate = cliArgs.includes('--activate');
@@ -157,6 +164,13 @@ async function validateOutputDirectory(requested) {
 
 let selectedPiRuntime;
 let selectedTooling;
+let managedQualification;
+let managedBuildIdentity;
+function managedIdentity(qualification) {
+  return createHash('sha256').update(JSON.stringify([
+    qualification.stage.receipt.inventorySha256, qualification.qualificationRecipeSha256,
+  ])).digest('hex');
+}
 let retainedRuntimeOutput;
 let selectedInputFingerprint;
 let publicationPaused = false;
@@ -233,6 +247,10 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
     throw new Error(`Host/webview build identity mismatch (${hostBuildId} != ${webviewBuildId}).`);
   }
   await verifyBundledExtensionOutput(buildDir, hostBuildId);
+  if (managedSelection) {
+    if (!managedQualification) throw new Error('Managed output has no verified qualification selection.');
+    managedResources.verifyBundledManagedOutput(buildDir, managedQualification);
+  }
   console.log(`[build] Coordinated host/webview/bundled-extensions identity ${hostBuildId}`);
 }
 
@@ -427,6 +445,7 @@ function spawnLocalCli(cli, args, label) {
       PIE_BUILD_OUTPUT_DIR: isolatedOutput ? outDir : '',
       PIE_BUILD_PI_RUNTIME_SDK_PATH: selectedPiRuntime?.sdkPath ?? '',
       PIE_BUILD_PI_RUNTIME_IDENTITY: selectedPiRuntime?.identity ?? '',
+      PIE_BUILD_MANAGED_IDENTITY: managedBuildIdentity ?? '',
     },
     stdio: 'inherit',
     windowsHide: true,
@@ -626,6 +645,14 @@ async function buildOnce() {
   if (failed) throw failed.reason;
   // Host/resource copies finish first; the dedicated pass must not race them.
   await runViteBuild(['--mode', 'bundled-extensions', '--emptyOutDir=false']);
+  if (managedSelection) {
+    const emitted = await withBuildTiming('qualified managed resource emission', () =>
+      managedResources.emitBundledManagedResources({
+        outDir, ...managedSelection, artifactDir: selectedPiRuntime.artifactDir,
+      }));
+    if (managedIdentity(emitted) !== managedBuildIdentity) throw new Error('Managed qualification changed during the build.');
+    managedQualification = emitted;
+  }
   await withBuildTiming('built output identity verification', () => verifyCoordinatedBuildIdentity());
   await withBuildTiming('publication pipeline', () => publishToInstalledExtension());
 }
@@ -761,6 +788,19 @@ try {
             if ([canonicalRuntime, canonicalTooling].some((role) =>
               containsPath(role, canonicalOutput) || containsPath(canonicalOutput, role))) {
               throw new Error('--output-dir must not overlap the verified --pi-runtime artifact. Runtime and tooling roles are both protected.');
+            }
+            managedQualification = undefined;
+            managedBuildIdentity = undefined;
+            if (managedSelection) {
+              const { verifyManagedIntegrationQualification } = await import('../verification/managed-qualification-receipt.mjs');
+              managedQualification = await verifyManagedIntegrationQualification({
+                ...managedSelection, artifactDir: context.artifactDir,
+              });
+              const inputs = [managedQualification.stage.root, path.dirname(await realpath(managedSelection.receiptPath))];
+              if (inputs.some(input => containsPath(input, canonicalOutput) || containsPath(canonicalOutput, input))) {
+                throw new Error('--output-dir must not overlap the managed stage or qualification evidence.');
+              }
+              managedBuildIdentity = managedIdentity(managedQualification);
             }
             finishSelectionTiming();
             if (watchMode) await watchSelection();
