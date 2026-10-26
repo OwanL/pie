@@ -20,6 +20,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 import { makeRuntimeArtifact, installFakeAcquisition } from './runtime-artifact-fixture.mjs';
+import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest } from '../tool-runtime-assets.mjs';
+import { installBuildResources } from './build-resource-fixture.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const vscodeDependencies = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -48,6 +50,10 @@ async function makeFixture(t) {
   write(owner, 'package.json', '{"name":"pie-output-fixture","version":"1.0.0"}\n');
   write(owner, 'tsconfig.json', '{"compilerOptions":{}}\n');
   write(repo, 'scripts/build/build.mjs', readFileSync(buildEntry));
+  for (const helper of ['bundled-extension-verification.mjs', 'tool-runtime-assets.mjs']) {
+    write(repo, `scripts/build/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/build', helper)));
+  }
+  write(repo, 'scripts/lib/managed-integration-selection.mjs', readFileSync(path.join(repositoryRoot, 'scripts/lib/managed-integration-selection.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-context.mjs')));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-artifact.mjs')));
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'pi-runtime', 'artifact.mjs')));
@@ -124,6 +130,7 @@ async function makeFixture(t) {
     const outDir = process.env.PIE_BUILD_OUTPUT_DIR || path.join(process.cwd(), 'out');
     const modeAt = process.argv.indexOf('--mode');
     const nodeMode = modeAt >= 0 && process.argv[modeAt + 1] === 'node';
+    const bundledMode = modeAt >= 0 && process.argv[modeAt + 1] === 'bundled-extensions';
     fs.mkdirSync(outDir, { recursive: true });
     const record = {
       args: process.argv.slice(2),
@@ -132,7 +139,7 @@ async function makeFixture(t) {
       envPiRuntimeSdkPath: process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH ?? null,
       envPiRuntimeIdentity: process.env.PIE_BUILD_PI_RUNTIME_IDENTITY ?? null,
     };
-    fs.writeFileSync(path.join(outDir, 'fixture-vite-' + (nodeMode ? 'node' : 'webview') + '.json'), JSON.stringify(record, null, 2));
+    fs.writeFileSync(path.join(outDir, 'fixture-vite-' + (nodeMode ? 'node' : bundledMode ? 'bundled-extensions' : 'webview') + '.json'), JSON.stringify(record, null, 2));
     const buildId = '0123456789abcdefabcd';
     if (nodeMode && process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME) {
       fs.writeFileSync(process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME, 'mutated during build');
@@ -144,6 +151,20 @@ async function makeFixture(t) {
         fs.writeFileSync(path.join(outDir, name), 'fixture');
       }
       fs.writeFileSync(path.join(outDir, 'pie-build-id.txt'), buildId + '\\n');
+    } else if (bundledMode) {
+        const resources = path.join(outDir, 'resources');
+        fs.mkdirSync(resources, { recursive: true });
+        const extensions = Array.from({ length: 12 }, (_, index) => ({ id: 'fixture-' + index, entry: 'fixture-' + index + '.js' }));
+        for (const { entry } of extensions) fs.writeFileSync(path.join(outDir, entry), 'fixture');
+        fs.writeFileSync(path.join(resources, 'bundled-extensions.json'), JSON.stringify({ version: 1, extensions }));
+        fs.writeFileSync(path.join(resources, 'bundled-extensions-build-id.txt'), buildId + '\\n');
+        for (const file of ${JSON.stringify(TOOL_RUNTIME_FILES)}) {
+          const asset = path.join(outDir, ${JSON.stringify(TOOL_RUNTIME_DIRECTORY)}, file);
+          fs.mkdirSync(path.dirname(asset), { recursive: true });
+          fs.writeFileSync(asset, 'fixture');
+        }
+        fs.writeFileSync(path.join(outDir, ${JSON.stringify(TOOL_RUNTIME_MANIFEST)}), ${JSON.stringify(JSON.stringify(toolRuntimeManifest()))});
+
     } else {
       const webview = path.join(outDir, 'webview', 'panel');
       fs.mkdirSync(path.join(webview, '.vite'), { recursive: true });
@@ -255,7 +276,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   assert.equal(path.resolve(typecheckRecord.args[projectAt + 1]), path.join(typecheckDirectory, 'tsconfig.overlay.json'));
   assert.ok(existsSync(buildInfo));
 
-  for (const mode of ['node', 'webview']) {
+  for (const mode of ['node', 'webview', 'bundled-extensions']) {
     const record = JSON.parse(readFileSync(path.join(output, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, output);
     assert.equal(record.envOutputDir, output, `${mode} Vite child receives the output override`);
@@ -315,7 +336,7 @@ test('build clears inherited output override for the default child output path',
   assert.ok(existsSync(path.join(defaultOut, 'extension.js')));
   assert.ok(existsSync(path.join(defaultOut, 'webview', 'panel', '.vite', 'manifest.json')));
   assert.equal(existsSync(ignored), false, 'the parent environment cannot redirect a default build');
-  for (const mode of ['node', 'webview']) {
+  for (const mode of ['node', 'webview', 'bundled-extensions']) {
     const record = JSON.parse(readFileSync(path.join(defaultOut, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, defaultOut);
     assert.equal(record.envOutputDir, '', 'default Vite children receive a cleared override');
@@ -667,13 +688,14 @@ test('actual copied Vite config builds a tiny fixture into the override with run
   rmSync(path.join(hostModules, 'vite'), { recursive: true, force: true });
   const actualVite = path.join(vscodeDependencies, 'vite');
   const actualTailwindPostcss = path.join(vscodeDependencies, '@tailwindcss', 'postcss');
-  for (const [name, source] of [['vite', actualVite], ['@tailwindcss/postcss', actualTailwindPostcss]]) {
+  for (const [name, source] of [['vite', actualVite], ['@tailwindcss/postcss', actualTailwindPostcss], ['typescript', path.join(vscodeDependencies, 'typescript')]]) {
     assert.ok(existsSync(source), `installed Vite fixture prerequisite: ${name}`);
     const link = path.join(hostModules, ...name.split('/'));
     mkdirSync(path.dirname(link), { recursive: true });
     symlinkSync(source, link, process.platform === 'win32' ? 'junction' : 'dir');
   }
 
+  installBuildResources(fixture.repo);
   write(fixture.owner, 'vite.config.ts', readFileSync(viteConfig, 'utf8'));
   const entries = [
     'application/hosts/vscode/activation/extension.ts',
@@ -721,5 +743,5 @@ test('actual copied Vite config builds a tiny fixture into the override with run
     assert.equal(existsSync(path.join(hostModules, cacheName)), false, `unexpected Vite cache ${cacheName}`);
   }
   const moduleEntries = readdirSync(hostModules, { withFileTypes: true }).map((entry) => entry.name);
-  assert.deepEqual(moduleEntries.sort(), ['@tailwindcss', 'vite']);
+  assert.deepEqual(moduleEntries.sort(), ['@tailwindcss', 'typescript', 'vite']);
 });

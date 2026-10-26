@@ -16,6 +16,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
+import { installBuildResources } from './build-resource-fixture.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const installedModules = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -124,6 +125,7 @@ function makeBuildFixture(t) {
   }, null, 2) + '\n');
   write(repo, 'source.ts', "import { candidateOnly } from '@earendil-works/pi-coding-agent';\nconst selected: 'candidate-sdk' = candidateOnly();\nexport { selected };\n");
   write(repo, 'scripts/build/build.mjs', readFileSync(path.join(repositoryRoot, 'scripts/build/build.mjs')));
+  installBuildResources(repo);
   write(repo, 'scripts/build/publication.mjs', `
     export async function findCompatibleInstalledExtensionDir() { throw new Error('unexpected installed-extension lookup'); }
     export async function publishRendererGeneration() { throw new Error('unexpected renderer publication'); }
@@ -135,7 +137,7 @@ function makeBuildFixture(t) {
     export async function publishRuntimeGeneration() { throw new Error('unexpected runtime publication'); }
     export async function resolveRuntimeGeneration() { throw new Error('unexpected runtime lookup'); }
   `);
-  for (const helper of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs', 'traversal-policy.mjs']) {
+  for (const helper of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs', 'traversal-policy.mjs', 'managed-integration-selection.mjs']) {
     write(repo, `scripts/lib/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', helper)));
   }
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
@@ -249,7 +251,7 @@ test('explicit delivery source-bound isolated build selects candidate graph and 
   const result = runBuild(fixture, ['--delivery', '--output-dir', output, '--pi-runtime', fixture.artifactDir]);
   assertBuildSucceeded(result);
   assert.match(result.stdout, /Running TypeScript check/);
-  assert.match(result.stdout, /Coordinated host\/webview identity/);
+  assert.match(result.stdout, /Coordinated host\/webview\/bundled-extensions identity/);
 
   const overlay = JSON.parse(readFileSync(path.join(output, '.cache', 'typecheck', 'tsconfig.overlay.json'), 'utf8'));
   assert.equal(
