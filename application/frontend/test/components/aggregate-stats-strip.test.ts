@@ -281,8 +281,45 @@ test('provider legend entries are focusable and expose provider-qualified nested
   assert.match(html, /<button[^>]*rich-tooltip-legend-trigger/);
   assert.match(html, /role="tooltip"/);
   assert.match(html, /aria-describedby="pie-provider-legend-detail-/);
-  assert.match(html, /shared-model/);
-  assert.match(html, /\(copilot\)/);
+  const root = document.createElement('div');
+  root.innerHTML = html;
+  const model = root.querySelector<HTMLElement>('.rich-tooltip-legend-detail-model')!;
+  assert.equal(model.textContent, 'shared-model');
+  assert.equal(model.title, 'shared-model (copilot)');
+});
+
+test('cost breakdowns omit zero-spend models but retain tiny positive values; token breakdowns retain zeroes', () => {
+  const point = {
+    ms: 1_750_000_000_000,
+    byProvider: [{ key: 'alpha', value: 1 }],
+    byModel: [
+      { key: 'zero-model', provider: 'alpha', model: 'zero-model', value: 0 },
+      { key: 'tiny-model', provider: 'alpha', model: 'tiny-model', value: 0.00001 },
+    ],
+  };
+  const stats = {
+    ...EMPTY_AGGREGATE_STATS,
+    ready: true,
+    todayCostByProvider: [{ provider: 'alpha', cost: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }],
+    weekCostByProvider: [{ provider: 'alpha', cost: 1, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }],
+    todayCostSeries: [point],
+    weekCostSeries: [point],
+    todayInputTokenSeries: [point],
+  };
+
+  const legendDetails = (html: string) => {
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    return [...root.querySelectorAll('.rich-tooltip-legend-detail')].map((detail) => detail.textContent).join(' ');
+  };
+  for (const html of [renderToString(todayCostTooltipNode(stats)), renderToString(weekCostTooltipNode(stats))]) {
+    const details = legendDetails(html);
+    assert.doesNotMatch(details, /zero-model/);
+    assert.match(details, /tiny-model/);
+  }
+  const tokenDetails = legendDetails(renderToString(tokensTooltipNode(stats, 'input')));
+  assert.match(tokenDetails, /zero-model/);
+  assert.match(tokenDetails, /tiny-model/);
 });
 
 test('provider legend ids are per-instance pure: identical across renders and never cross-linked', () => {

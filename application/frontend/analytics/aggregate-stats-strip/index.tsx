@@ -231,7 +231,7 @@ export function ProviderLegend({ items }: { items: ProviderLegendItem[] }): JSX.
                 ? it.models.map((model) => (
                     <span class="rich-tooltip-legend-detail-row" key={`${model.provider}\u0000${model.model}`}>
                       <span class="rich-tooltip-legend-detail-model" title={`${model.model} (${model.provider})`}>
-                        {model.model} <span class="rich-tooltip-legend-provider">({model.provider})</span>
+                        {model.model}
                       </span>
                       <span class="rich-tooltip-legend-detail-value">{model.value}</span>
                     </span>
@@ -249,11 +249,12 @@ function modelValuesForProvider(
   series: AggregateSeriesPoint[],
   provider: string,
   format: (value: number) => string,
+  omitZeroValues = false,
 ): ProviderLegendItem['models'] {
   const final = series.at(-1);
   if (!final) return [];
   return final.byModel
-    .filter((entry) => entry.provider === provider)
+    .filter((entry) => entry.provider === provider && (!omitZeroValues || entry.value > 0))
     .map((entry) => ({ provider: entry.provider, model: entry.model, value: format(entry.value) }));
 }
 
@@ -278,7 +279,7 @@ export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
         <ProviderLegend items={s.todayCostByProvider.map((p) => ({
           key: p.provider,
           value: formatCostAdaptive(p.cost),
-          models: modelValuesForProvider(s.todayCostSeries, p.provider, formatCostAdaptive),
+          models: modelValuesForProvider(s.todayCostSeries, p.provider, formatCostAdaptive, true),
         }))} />
       )}
     </div>
@@ -299,7 +300,7 @@ export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
         <ProviderLegend items={s.weekCostByProvider.map((p) => ({
           key: p.provider,
           value: formatCostAdaptive(p.cost),
-          models: modelValuesForProvider(s.weekCostSeries, p.provider, formatCostAdaptive),
+          models: modelValuesForProvider(s.weekCostSeries, p.provider, formatCostAdaptive, true),
         }))} />
       )}
     </div>

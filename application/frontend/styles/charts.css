@@ -35,6 +35,7 @@
 }
 
 .rich-tooltip-legend {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 8px;
@@ -43,7 +44,6 @@
 }
 
 .rich-tooltip-legend-item {
-  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -73,17 +73,27 @@
 .rich-tooltip-legend-detail {
   position: absolute;
   z-index: 4;
-  inset-inline-start: 0;
+  inset-inline-end: 0;
   bottom: calc(100% + 4px);
   display: none;
-  min-width: 170px;
-  max-width: 230px;
-  padding: 5px 6px;
+  box-sizing: border-box;
+  width: 290px;
+  max-width: 100%;
+  padding: 10px 12px;
   border: 1px solid var(--panel-border-subtle);
-  border-radius: var(--panel-radius-sm);
+  border-radius: var(--panel-radius-md);
   background: var(--panel-overlay-surface);
   box-shadow: var(--panel-shadow-overlay);
   color: var(--panel-foreground);
+}
+
+/* Keep the nested surface reachable across its visual gap. */
+.rich-tooltip-legend-detail::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  top: 100%;
+  height: 4px;
 }
 
 .rich-tooltip-legend-item:hover .rich-tooltip-legend-detail,
@@ -96,15 +106,37 @@
 
 .rich-tooltip-legend-detail-head,
 .rich-tooltip-legend-detail-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  column-gap: 20px;
+  align-items: baseline;
 }
 
 .rich-tooltip-legend-detail-head {
-  padding-bottom: 2px;
+  padding-bottom: 7px;
+  margin-bottom: 4px;
   border-bottom: 1px solid var(--panel-border-subtle);
   font-weight: 600;
+}
+
+.rich-tooltip-legend-detail-row {
+  padding-block: 2px;
+}
+
+.rich-tooltip-legend-detail-head > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rich-tooltip-legend-detail-head > :last-child,
+.rich-tooltip-legend-detail-value {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
 }
 
 .rich-tooltip-legend-detail-model {
