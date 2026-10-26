@@ -48,7 +48,7 @@ Reuse Pi/Pie's existing resource and extension mechanisms, not a new configurati
 
 #### Instruction composition
 
-The additive rule is selected target behavior, not a claim about current loading. Today the main `centralAppendSystemPromptOverride` only supplies central preferences when the SDK finds no append; the SDK selects at most one project/global `APPEND_SYSTEM.md`. Qualify the changed composition through existing resource-loader seams, rather than assuming file discovery already implements layering.
+The source implementation now composes central/default guidance, personal additions and the native eligible exact-cwd project append through `centralAppendSystemPromptOverride`; root execution and inventory share this policy. The SDK itself still selects at most one project/global append. The optional explicit default-file seam is not yet forwarded from packaged resources, and source tests do not establish activation in an installed host.
 
 - Main workflow additions compose bundled → user → applicable project guidance. Preserve existing project discovery/eligibility boundaries; do not scan unrelated projects or import another Pi profile.
 - `AGENTS.md`/other supported project context remains separately scoped context, not a same-named agent replacement. Preserve source paths and existing context discovery semantics.
@@ -133,7 +133,16 @@ Retain `query-analytics` as the agent-facing query aid, with installed paths and
 
 **Acceptance:** a private empty profile starts with neutral defaults; connecting one supported provider is enough for the core task flow. Settings survive restart and replacement of application files. VS Code resolves the intended personal configuration; preserve shared configuration authority and existing standalone regressions for the later desktop host. Manual-import instructions are checked on disposable fixtures, preserve a reversible path, and neither lose history nor change retention implicitly. Source and release payload stay unchanged.
 
-#### Checkout-independent slice — bounded first wave authorised
+#### Checkout-independent slice — first-wave foundations completed
+
+The four parallel foundations are reviewed and committed:
+
+- `381ad061`: explicit Windows application-home fallback without filesystem writes; private roots and existing validated explicit/source routes remain isolated. Neutral settings initialization is still pending.
+- `e98b7f26`: additive main instruction composition, shared runtime/inventory policy, file-identity deduplication and preserved child isolation. Bundled resource-path forwarding is still pending.
+- `ab29fa8e`: explicit Node/scanner-entry invocation for duplicate and complexity checks, invalid-report rejection and opt-in live tests. Legacy source defaults still use npx; setup/version/payload authority is not implemented.
+- `f6426966`: `customize-pie`, source-focused `develop-pie` and on-demand source setup, with installed-safe source references and explicit current limitations.
+
+Focused verification passed: 18 path/startup tests, 60 prompt/runtime/inventory tests, 28 scanner tests with the Semgrep live test explicitly skipped, nine prepared scanner CLI checks, and guide/reference checks. Scanner checks used existing Node 24.16.0/Python 3.12.14 and the separately qualified Windows x64 jscpd 5.4.2/Qualitas 0.5.4 payloads. No Pie build or activation was performed; this is not clean-machine, cross-platform or release qualification.
 
 The approved parallel wave covers profile/path handling, additive instruction composition, prepared Node-scanner invocation and the customisation/source-work guides, with focused tests. Remaining resource packaging, integration delivery and setup acquisition need coordinated follow-on work; first-wave completion alone does not prove an independent installation. Keep this slice focused on checkout-independent profiles and resources, rather than the whole public-release project. Technical sequencing must not silently shrink the selected workflow. Use existing prerequisites; the approval does not cover broad helper rewrites or further acquisition:
 
@@ -165,7 +174,7 @@ The source-setup companion should explain obtaining a separate checkout, the pin
 
 Semgrep's engine and registry rules have separate licences. The current remote `p/default` selection requires a rules-rights/version review before promising prepared/bundled checks; pinning the engine neither pins those rules nor establishes redistribution rights or offline readiness. Do not infer clearance from the engine licence or silently remove the skill to avoid that review. Installed-user helper preparation also needs its own application setup caller/path authority: the existing gated contributor pnpm setup is not that owner.
 
-**Confirmed wiring gaps:** normal [agent-dir resolution](../../application/hosts/lib/agent-dir-resolution.ts) can return no directory and leave the SDK's global Pi fallback active; the neutral installed fallback must be explicit. `settings.defaults.json` still selects maintainer models/providers and a checkout-relative skill directory, so it is not a product-ready seed. Agent definitions and the main/child guidance also assume the authored tree beneath `agentDir`; preserve existing project `agents/` discovery rather than silently adopting OMP's folder names.
+**Remaining wiring gaps:** normal [agent-dir resolution](../../application/hosts/lib/agent-dir-resolution.ts) now selects an explicit Windows application home instead of leaving the SDK's global Pi fallback active, but does not initialize it. `settings.defaults.json` still selects maintainer models/providers and a checkout-relative skill directory, so it is not a product-ready seed. Agent definitions and the main/child guidance also assume the authored tree beneath `agentDir`; preserve existing project `agents/` discovery rather than silently adopting OMP's folder names.
 
 The managed web/MCP packages currently live under `<agentDir>/npm/node_modules` and their [load-time guard](../../harness/tools/package-integrations/web-access/README.md) can modify those files. Merely moving that mechanism inside an immutable generation would be wrong. For the selected bundled route, adapt and verify copies before sealing them, then load without runtime mutation while retaining external settings/caches and explicit source/custom routes. Keep these integration versions tied to the tested release rather than independently updating them behind its identity; user-installed add-ons retain their separate support/lifecycle scope. The MCP config-only import is already compiled into the backend; its build-time workspace path is not a reason to ship the whole source tree.
 
