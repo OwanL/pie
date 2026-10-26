@@ -4,9 +4,9 @@
 
 ## Goal and release boundary
 
-A new Windows user can install a release, connect a provider, complete a useful coding task, restart and resume, and update without losing configuration or history. Neither normal setup nor model management requires editing source files, running generators or installing the development toolchain.
+A new user on a qualified desktop platform can install from the VS Code Marketplace, connect a provider, complete a useful coding task, restart and resume, and update without losing configuration or history. Neither normal setup nor model management requires editing source files, running generators or installing the development toolchain.
 
-The first release remains Windows-first, for a single-user desktop with one active Pie host per machine. VS Code and standalone share application, provider and data authorities; their installation and launch instructions must each be explicit. Preserve current platform/storage restrictions until separately qualified.
+Release sequence: **VS Code extension → Electron desktop app → website for desktop discovery/distribution**. Target Windows, macOS and Linux during the VS Code phase, releasing each qualified OS/architecture package independently rather than waiting for all three. A website/domain and standalone installer are not extension-launch prerequisites. Current qualification remains Windows-only; preserve existing platform/storage restrictions until replacements are implemented and qualified. Retain the single-user desktop scope with one active Pie host per machine.
 
 This document authorizes no implementation, credential/session migration, storage cutoff, provider traffic, publication or restart by itself. New product requirements below define the destination; open design choices must be resolved before the affected implementation. Preserve active sessions and unrelated working changes.
 
@@ -27,7 +27,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 ### Adoption, identity and licensing
 
 - Prioritise adoption, repeat use and community before monetisation. Keep the local product free and customisable; optional sponsorship and creator content are funding candidates, not selected services or revenue assumptions.
-- Rename Pie before committing to a public domain/brand. Plan initially around an individual publisher in New Zealand; do not introduce company formation as a publication prerequisite.
+- Rename Pie and settle publisher/extension identifiers before the first public Marketplace listing; defer the domain/site until the desktop distribution phase. Plan initially around an individual publisher in New Zealand; do not introduce company formation as a publication prerequisite.
 - Choose **AGPLv3** for the Pie-owned product. The desired protection is reciprocal access to covered improvements: distributed versions carry source-sharing obligations, and modified versions supporting remote network interaction must offer their Corresponding Source to those users. Commercial use and compliant paid forks remain permitted; required notices remain, but neither prominent marketing credit nor contributions to the upstream repository are guaranteed. Branding rules are separate and still need definition. See the [licence text](https://www.gnu.org/licenses/agpl-3.0.html).
 - This records the licensing direction, not an applied repository-wide grant. Before applying it, establish copyright authority, exact version grant and coverage for source, shipped instructions/skills and assets; review the delivered dependency graph, preserve upstream licences/notices and define user-customisation boundaries. A bounded audit found no top-level Pie licence and permissive declarations for inspected direct dependencies; it is not complete legal/distribution clearance.
 
@@ -56,10 +56,12 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Preserve the human's selected model when it disappears from a listing; listing absence alone is not proof it cannot serve requests. Warn and use valid last-known request settings where authorization and metadata permit. Do not silently replace models or clamp the saved thinking preference; unsupported effective modes require a choice before dispatch.
 - Unknown pricing is usable target behavior, not zero/free. Keep token usage and historical attribution, identify partially unpriced totals, and exclude unknown rates from cheapest-model ranking. Do not reprice past requests after refresh.
 
-### Windows installation and release direction
+### Distribution and runtime direction
 
+- Launch through **one VS Code Marketplace listing with platform-specific packages**. Add Windows, macOS and Linux targets as each passes acceptance; do not publish an unrestricted fallback that offers unqualified platforms a nonfunctional build. The exact supported OS/architecture matrix remains to be defined. See [platform-specific publishing](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platform-specific-extensions).
+- Bundle optional browser access with both the extension and later desktop app, sharing their backend and sessions. Support local access and opt-in trusted private-LAN access; this is not a cloud service or an internet-exposure commitment. Existing LAN access has no authentication/TLS; retain its explicit limitations and do not imply otherwise. The backend/UI are reusable, but there is no standalone Electron application yet; existing Electron acceptance launches VS Code.
 - Separate source from user-installable builds. Normal users install prebuilt releases without cloning the repository, compiling Pie or installing the development toolchain. Source builds remain a contributor workflow. Publish build artifacts separately from Git-tracked source; this does not require a separate source repository.
-- Reuse a compatible installed Node runtime. When none is available, download a release-compatible Node runtime into Pie-managed user-local storage. Node binaries do not belong in Git; acquisition must not replace the user's Node installation or alter global PATH. Both hosts need a startup route that can acquire Node without requiring Node to run that route.
+- Reuse a compatible installed Node runtime. When none is available, download a release-compatible Node runtime into Pie-managed user-local storage. Node binaries do not belong in Git; acquisition must not replace the user's Node installation or alter global PATH. Each release target needs a startup route that can acquire Node without requiring that external Node runtime to run the acquisition.
 
 ### Safety and scope
 
@@ -84,25 +86,27 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 **Decide first:** configuration precedence and instruction-pack boundary; migration/conflict UX; session-location approach and relationship to the gated cutoff.
 
-**Acceptance:** a private empty profile starts with neutral defaults; connecting one supported provider is enough for the core task flow. Settings survive restart and replacement of application files. Both hosts resolve the same intended personal configuration. Existing-user migration is tested on disposable fixtures, can be reversed, and neither loses history nor changes retention implicitly. Source and release payload stay unchanged.
+**Acceptance:** a private empty profile starts with neutral defaults; connecting one supported provider is enough for the core task flow. Settings survive restart and replacement of application files. VS Code resolves the intended personal configuration; preserve shared configuration authority and existing standalone regressions for the later desktop host. Existing-user migration is tested on disposable fixtures, can be reversed, and neither loses history nor changes retention implicitly. Source and release payload stay unchanged.
 
-### 2. Deliver an end-user Windows installation
+### 2. Deliver VS Code Marketplace releases
 
-**Current gap:** the documented entry point requires cloning, an exact Node version and a source build. Packaged runtime delivery exists, but the complete checkout-independent user installation is not qualified.
+**Current gap:** the documented entry point requires cloning, an exact Node version and a source build. Packaged runtime delivery exists, but checkout-independent installation is not qualified. The delivered loader uses a Windows/NTFS-specific lock that rejects other operating systems; macOS/Linux support requires real portability work, not just different package labels. Runtime artifacts are bound to OS, architecture and Node ABI; native dependencies need target-specific qualification.
 
 **Required work**
 
-- Select and document the user-facing release/install route for VS Code and standalone, reusing existing artifact and generation machinery rather than another build pipeline. Support both a normal product-page → installer → launch journey and agent-assisted setup from the same authoritative installation instructions and release identities; neither should fall back to building source.
+- Prepare platform-specific VSIXs under one listing, with clear installation, onboarding, licence, support and supported-target information. Reuse existing artifact/generation machinery. Human and agent-assisted setup use the same authoritative instructions and release identities; neither should fall back to building source.
+- Define and qualify portable equivalents for Windows-specific startup, storage, exclusion and process-lifetime behavior before admitting another platform. Preserve ownership, lease and no-replay guarantees; build and verify native payloads for the actual target.
 - Apply the selected AGPLv3 direction with explicit coverage, required notices and compliant Corresponding Source delivery/offers. Verify the actual packaged files; a successful package build is not licence compliance.
 - Implement compatible installed-Node reuse and on-demand private Node acquisition for users without a build toolchain, preserving runtime version/ABI verification. Report unsupported platforms/storage and missing prerequisites with an actionable remedy.
 - Make first launch provision the user profile and lead an unconfigured user to provider setup instead of stale-path or empty-model troubleshooting. Installation must not rewrite unrelated VS Code preferences or global development configuration.
-- Define update, deliberate rollback, repair and uninstall behavior. User configuration/history must outlive application replacement; data removal must be a separate explicit action.
+- Use VS Code's installation/update mechanisms and respect user update settings. Define deliberate rollback, repair and uninstall behavior; do not interrupt active work to force an update. Configuration/history must outlive application replacement; data removal must be a separate explicit action.
+- Qualify the bundled local/LAN browser interface against the same backend/session authority. Browser access to a running host is not a browser-only VS Code extension; desktop platform support does not automatically qualify WSL, Remote SSH or dev-container execution.
 
-**Release design remains open and needs further brainstorming.** GitHub Releases was proposed, not selected; neither ZIP nor Windows installer distribution has been chosen. Decide the release channel/artifacts, build/publication ownership, update/rollback delivery, Node acquisition/offline UX and supported Windows/storage baseline before implementation. Reuse existing delivery machinery; do not add macOS/Linux packaging to this milestone.
+**Decide first:** renamed publisher/extension identity; exact OS/architecture/storage baseline and optional-native-feature matrix; per-target build/publication ownership; Node acquisition/offline UX; recovery artifact location and remote-workspace scope. Marketplace distribution and phased platform rollout are selected; no publication is authorised by this plan.
 
-**Research shortlist, not approvals (2026-10-26):** an owned domain with a small static website; GitHub Releases for artifacts; a per-user standalone installer and VS Code Marketplace distribution, with versioned VSIX recovery downloads; shared human/Markdown installation guidance and release metadata; user-approved standalone updates without interrupting work. Keep website, artifact hosting and installers as complementary layers. Domain/site provider, signing supplier/budget, channels and update policy remain undecided. [GitHub Pages has commercial-use limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits); [GitHub Releases supports separate binary assets](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases). [Microsoft Artifact Signing currently limits individual Public Trust enrollment to the US/Canada](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart), so NZ individual signing needs another qualified route; do not assume company eligibility or free OSS signing acceptance. No purchase, publication or signing application is authorised.
+**Later stages, not extension-preview gates:** after the cross-platform VS Code phase, add an Electron desktop host reusing the shared application/UI, then a website for its discovery/distribution. Desktop installation, updates, signing, site/domain provider and supplemental artifact hosting remain open. [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) remains an artifact-hosting candidate, not a selected service. [Microsoft Artifact Signing currently limits individual Public Trust enrollment to the US/Canada](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart); retain the NZ individual signing question for desktop delivery rather than making it a Marketplace-preview prerequisite. No purchase or signing application is authorised.
 
-**Acceptance:** use the actual release on a clean Windows profile/device with no checkout, global Pi, inherited provider credentials or development toolchain. Install, launch each supported host, authenticate, complete a task, restart/resume, update and recover to the prior compatible release using disposable data. Verify loaded identity, not just files on disk. Reinstallation preserves user data.
+**Acceptance, per target:** use the actual VSIX on a clean supported OS/architecture profile/device with no checkout, global Pi, inherited provider credentials or development toolchain. Install, activate, authenticate, complete a task, restart/resume, update and recover to the prior compatible release using disposable data. Verify loaded identity, not just files on disk; exercise the bundled browser surface with its access scope explicit. Reinstallation preserves user data. Publish only targets that pass; standalone distribution is not part of this gate.
 
 ### 3. Finish provider-to-request usability
 
@@ -117,7 +121,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 **Decide first:** initial supported provider/auth matrix and handling of incomplete capability metadata. There is no current monetary-budget feature to redesign; any future budget treatment of unpriced work needs its own decision.
 
-**Acceptance:** a supported model with sufficient request metadata runs without manually supplying prices; usage remains visible and cost is explicitly incomplete. Known zero and known tiered prices remain accurate. Both hosts support connection-to-request and recovery flows; selected live checks use explicit consent and bounded traffic. Refresh never changes policy or old accounting. Unsupported combinations explain why rather than silently vanishing.
+**Acceptance:** a supported model with sufficient request metadata runs without manually supplying prices; usage remains visible and cost is explicitly incomplete. Known zero and known tiered prices remain accurate. VS Code and its bundled browser UI support connection-to-request and recovery flows; selected live checks use explicit consent and bounded traffic. Refresh never changes policy or old accounting. Unsupported combinations explain why rather than silently vanishing.
 
 ### 4. Make readiness, delays and recovery understandable
 
@@ -139,23 +143,24 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 **Required work**
 
-- Run the retained release gates plus clean install/connect/task/restart/update/rollback acceptance against one identified candidate. Keep both host adapters in the supported matrix; do not require testing every vendor model.
+- Run the retained release gates plus clean VSIX install/connect/task/restart/update/rollback acceptance against one identified candidate per OS/architecture target. Retain shared/standalone regression checks without making standalone distribution a preview prerequisite; do not require testing every vendor model.
 - Verify the initial provider matrix with mock/native transport tests and explicitly authorized live checks. Record unsupported cases and entitlement limits rather than claiming universal provider compatibility.
 - Run bounded cost-versus-quality experiments against other harnesses before making comparative efficiency claims. Separate matched-model/provider comparisons from realistic configured-workflow comparisons, including Pie's model buckets. Use repeated tasks with independent tests/review; report acceptance rate, time and human intervention alongside total cost of all scored attempts divided by accepted solutions. Include failed attempts, retries, subagents, auxiliary calls and cache pricing; distinguish measured charges from API-equivalent estimates and subscription costs, and leave missing usage unknown. Select tasks, configurations, repetitions and an explicit spend/data-transmission budget before running; this plan authorises no paid experiments. Outperforming competitors is not itself an installation-release gate.
 - Provide short install/getting-started, update/repair and troubleshooting guidance. Explain local data, usage/cost uncertainty, privacy/retention, backup and explicit deletion. Support diagnostics must identify the build and failed stage without exporting secrets or transcripts by default.
 - Define release/update ownership for the Pi fork and integrations: review cadence plus relevant-fix triggers, upstream provenance, local semantic-delta review, focused compatibility gates and a recoverable prior artifact. Preserve licenses/notices.
 
-**Acceptance:** one candidate has reproducible passing evidence for the supported journeys, no unresolved data-loss/secret-exposure/incorrect-accounting blockers, and accurate known limitations. Only then invite a small Windows preview group; observe onboarding and core task completion without maintainer intervention.
+**Acceptance:** each target candidate has reproducible passing evidence for the supported journeys, no unresolved data-loss/secret-exposure/incorrect-accounting blockers, and accurate known limitations. Invite a small preview group on qualified targets; observe onboarding and core task completion without maintainer intervention. Add other platform packages only after the same acceptance, not simply because the Marketplace supports them.
 
 ## Sequencing and completion
 
-Start with **milestone 1's configuration/storage decisions**, then prove **milestones 1–2 as one checkout-independent installation slice**. Provider pricing work can proceed independently once its request/accounting contract is agreed. Establish milestone 4's baseline early; do not turn performance work into another open-ended runtime rewrite. Milestone 5 is the release gate, not a substitute for the preceding engineering work.
+Start with **milestone 1's configuration/storage decisions**, then prove **milestones 1–2 as one checkout-independent VS Code installation slice**. Qualify additional OS/architecture packages independently during the VS Code phase; do not bypass current Windows-only runtime/storage gates to claim portability. Provider pricing work can proceed independently once its request/accounting contract is agreed. Establish milestone 4's baseline early; do not turn performance work into another open-ended runtime rewrite. Milestone 5 is the release gate, not a substitute for the preceding engineering work.
 
-The preview is ready when a fresh user can install → connect → complete a task → restart/resume → update, with neutral defaults, honest model/cost state and preserved data. Record only concise per-milestone status and candidate evidence here as work completes; keep raw logs, temporary paths and experiment histories out of this plan.
+A platform preview is ready when a fresh user can install the extension → connect → complete a task → restart/resume → update, with neutral defaults, honest model/cost state and preserved data. Record only concise per-milestone status and candidate evidence here as work completes; keep raw logs, temporary paths and experiment histories out of this plan.
 
 ## Deferred and non-goals
 
-- macOS/Linux delivery; multi-account providers; public-network or multi-user hosting.
+- Electron desktop distribution and its website/domain are later stages, not prerequisites for the cross-platform VS Code launch.
+- Multi-account providers; public-network or multi-user hosting. Bundled opt-in private-LAN browser access does not expand those boundaries.
 - A wholesale Pi upgrade, agent-engine replacement or new general extension framework.
 - Native TypeScript coverage replacement; retain the existing release coverage gate.
 - Automatic model downloads, background paid inference tests, speculative budget features and broader agent/UI features unrelated to these acceptance gates.
