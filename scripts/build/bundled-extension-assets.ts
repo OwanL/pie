@@ -43,7 +43,15 @@ export function bundledExtensionBuildOptions(root: string, outDir: string,
 ): UserConfig {
   return {
     root, publicDir: false,
-    plugins: [createBundledExtensionAssetsPlugin()],
+    plugins: [createBundledExtensionAssetsPlugin(), {
+      name: 'pie-bundled-extension-cjs-module-paths',
+      resolveImportMeta(property, { format }) {
+        if (format !== 'cjs') return null;
+        if (property === 'dirname') return '__dirname';
+        if (property === 'filename') return '__filename';
+        return null; // Preserve Rollup's native import.meta.url handling.
+      },
+    }],
     build: {
       target: 'node20', outDir, emptyOutDir: false, manifest: false,
       ssr: true, ssrEmitAssets: true,

@@ -13,8 +13,10 @@
 import path from "node:path";
 import { JsonlWriter } from "../../../lib/structured-logging/jsonl-writer.js";
 
-/** Root of the pi-config repo, resolved from this implementation's known position. */
-const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
+/** Explicit agent directory, with the legacy source-relative root as fallback. */
+const CONFIG_ROOT = process.env.PI_CODING_AGENT_DIR
+  ? path.resolve(process.env.PI_CODING_AGENT_DIR)
+  : path.resolve(import.meta.dirname, "..", "..", "..");
 
 const writer = new JsonlWriter({
   defaultLogPath: path.join(CONFIG_ROOT, "data", "tool-result-pruning.jsonl"),
