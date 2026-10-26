@@ -28,8 +28,17 @@ test('canonical envelope query filters window/dimensions, deduplicates roots, an
         return { rows, truncation: { rowLimit: false, byteLimit: false, cellLimit: false } } as AnalyticsReadOnlyQueryResult;
       },
     };
-    for (let i = 0; i < 19; i++) insert(`root-${i}`, i * 10, { time: String(now - 1) });
     assert.equal(await readInitialContextHistory(reader, 'cohort', now), undefined);
+    insert('root-0', 0, { time: String(now - 1) });
+    assert.equal(await readInitialContextHistory(reader, 'cohort', now), undefined);
+    insert('root-0', 9999, { time: now - 5 });
+    insert('invalid-before-gate', -1);
+    assert.equal(await readInitialContextHistory(reader, 'cohort', now), undefined);
+    insert('root-1', 10, { time: String(now - 1) });
+    assert.deepEqual(await readInitialContextHistory(reader, 'cohort', now), {
+      medianTokens: 5, p25Tokens: 3, p75Tokens: 8,
+    });
+    for (let i = 2; i < 19; i++) insert(`root-${i}`, i * 10, { time: String(now - 1) });
     insert('root-19', 190);
     for (let i = 0; i < 50; i++) insert('root-19', 9999, { time: now - 5 });
     insert(null, 9999);
@@ -53,7 +62,7 @@ test('canonical envelope query filters window/dimensions, deduplicates roots, an
 test('truncated results never establish history', async () => {
   for (const flag of ['rowLimit', 'byteLimit', 'cellLimit']) {
     const reader = { executeQuery: async () => ({
-      rows: Array.from({ length: 20 }, (_, i) => ({ root_session_id: String(i), tokens: i })),
+      rows: Array.from({ length: 2 }, (_, i) => ({ root_session_id: String(i), tokens: i })),
       truncation: { rowLimit: false, byteLimit: false, cellLimit: false, [flag]: true },
     } as AnalyticsReadOnlyQueryResult) };
     assert.equal(await readInitialContextHistory(reader, 'cohort'), undefined);

@@ -50,7 +50,7 @@ export async function readInitialContextHistory(
     if (typeof row.tokens !== 'number' || !Number.isSafeInteger(row.tokens) || row.tokens < 0) continue;
     tokens.push(row.tokens);
   }
-  if (tokens.length < 20) return undefined;
+  if (tokens.length < 2) return undefined;
   tokens.sort((a, b) => a - b);
   const quantile = (p: number): number => {
     const index = (tokens.length - 1) * p;
