@@ -28,6 +28,7 @@ import {
   validateWorkerIpcFrameDraft,
 } from '../../lib/rpc/worker-protocol.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
+import { validateRuntimePrefsSet } from '../../lib/rpc/backend-rpc.js';
 import { AUTONOMOUS_MODE_BY_SESSION_ENV } from '../../lib/rpc/settings.js';
 import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/autonomous-mode.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
@@ -365,7 +366,7 @@ test('initial session attach applies a previously synced root-session autonomous
 
   try {
     host.applySync('runtimePrefs', 1, {
-      values: { autonomousMode: false, autonomousModeBySession: { [rootPath]: true } },
+      values: validateRuntimePrefsSet({ autonomousMode: false, autonomousModeBySession: { [rootPath]: true } }),
     });
     const previousPath = '/sessions/previous-root.jsonl';
     const context = {
@@ -404,7 +405,7 @@ test('initial session attach applies a previously synced root-session autonomous
     assert.equal(bridge.hasPendingRequests(), false);
 
     host.applySync('runtimePrefs', 2, {
-      values: { autonomousModeBySession: { [rootPath]: false } },
+      values: validateRuntimePrefsSet({ autonomousModeBySession: { [rootPath]: false } }),
     });
     const interactiveApproval = bridge.confirm('Allow?', 'Approval after opting out');
     assert.equal(lastRequest().timeout, undefined);
@@ -414,7 +415,7 @@ test('initial session attach applies a previously synced root-session autonomous
     assert.equal(await interactiveApproval, false);
 
     host.applySync('runtimePrefs', 3, {
-      values: { autonomousModeBySession: { [rootPath]: true } },
+      values: validateRuntimePrefsSet({ autonomousModeBySession: { [rootPath]: true } }),
     });
     const nextAutonomousApproval = bridge.confirm('Allow?', 'Approval after opting back in');
     assert.equal(lastRequest().timeout, 180_000);
@@ -444,21 +445,21 @@ test('runtime preference sync resolves autonomous mode per current root path and
 
   try {
     host.applySync('runtimePrefs', 1, {
-      values: { autonomousMode: true, autonomousModeBySession: { [context.sessionPath]: false } },
+      values: validateRuntimePrefsSet({ autonomousMode: true, autonomousModeBySession: { [context.sessionPath]: false } }),
     });
     assert.equal(internals.autonomousMode, false);
     assert.equal(process.env[AUTONOMOUS_MODE_ENV], '0');
     assert.ok(activeTools.includes('ask_user'), 'a root-session opt-out keeps ask_user active');
 
     host.applySync('runtimePrefs', 2, {
-      values: { autonomousMode: false, autonomousModeBySession: { [context.sessionPath]: true } },
+      values: validateRuntimePrefsSet({ autonomousMode: false, autonomousModeBySession: { [context.sessionPath]: true } }),
     });
     assert.equal(internals.autonomousMode, true);
     assert.equal(process.env[AUTONOMOUS_MODE_ENV], '1');
     assert.ok(!activeTools.includes('ask_user'), 'a root-session opt-in removes ask_user');
 
     host.applySync('runtimePrefs', 3, {
-      values: { autonomousMode: false, autonomousModeBySession: {} },
+      values: validateRuntimePrefsSet({ autonomousMode: false, autonomousModeBySession: {} }),
     });
     assert.equal(internals.autonomousMode, false, 'clearing the override restores the shared default');
     assert.equal(process.env[AUTONOMOUS_MODE_ENV], '0');

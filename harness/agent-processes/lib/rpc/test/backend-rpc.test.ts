@@ -324,6 +324,25 @@ test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
   assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentBucketCanSpawn: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
 });
 
+test('validateRuntimePrefsSet preserves per-session autonomous overrides, including explicit clearing', () => {
+  const autonomousModeBySession = {
+    'C:/sessions/enabled.jsonl': true,
+    'C:/sessions/disabled.jsonl': false,
+  };
+  assert.deepEqual(
+    validateRuntimePrefsSet({ autonomousMode: false, autonomousModeBySession }).autonomousModeBySession,
+    autonomousModeBySession,
+  );
+  assert.deepEqual(validateRuntimePrefsSet({ autonomousModeBySession: {} }).autonomousModeBySession, {});
+  assert.equal(Object.hasOwn(validateRuntimePrefsSet({}), 'autonomousModeBySession'), false);
+});
+
+test('validateRuntimePrefsSet rejects malformed autonomous override maps', () => {
+  for (const autonomousModeBySession of [null, true, [], 'enabled', { '/sessions/root.jsonl': 'true' }]) {
+    assert.throws(() => validateRuntimePrefsSet({ autonomousModeBySession }), /autonomousModeBySession/);
+  }
+});
+
 test('validateRuntimePrefsSet accepts paired subagent concurrency provenance and enforces its bounds', () => {
   assert.deepEqual(
     validateRuntimePrefsSet({ subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT, subagentMaxInflightSource: 'saved-preference' }),

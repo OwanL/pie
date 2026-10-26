@@ -1059,6 +1059,10 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParamsW
     : typeof rawAutonomousMode === 'boolean'
       ? rawAutonomousMode
       : fail('runtimePrefs.set', 'autonomousMode must be a boolean when provided');
+  const rawAutonomousModeBySession = params['autonomousModeBySession'];
+  const autonomousModeBySession = rawAutonomousModeBySession === undefined
+    ? undefined
+    : validateBooleanMap('runtimePrefs.set', 'autonomousModeBySession', rawAutonomousModeBySession);
   const rawMcpEnabled = (params as Record<string, unknown>)['mcpEnabled'];
   const mcpEnabled = rawMcpEnabled === undefined
     ? undefined
@@ -1120,7 +1124,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParamsW
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
   const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
-  return { providerToggles, ...(subagentBucketTogglesBySession !== undefined ? { subagentBucketTogglesBySession } : {}), ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, ...(subagentMaxInflightSource !== undefined ? { subagentMaxInflightSource } : {}), bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
+  return { providerToggles, ...(subagentBucketTogglesBySession !== undefined ? { subagentBucketTogglesBySession } : {}), ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, ...(autonomousModeBySession !== undefined ? { autonomousModeBySession } : {}), mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, ...(subagentMaxInflightSource !== undefined ? { subagentMaxInflightSource } : {}), bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface McpSetServerEnabledParams {
