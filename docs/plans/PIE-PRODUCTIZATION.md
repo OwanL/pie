@@ -43,6 +43,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 ### First-run setup
 
+- Focus the first preview on **fresh installs**, with documented manual import for existing configuration/history. Do not build a migration wizard or automatically import, relocate or merge legacy settings, credentials or sessions; leave existing setups untouched until the user explicitly acts.
 - Guide users through connecting providers and choosing models, then offer model assignments for title generation, subagents, history compaction and tool/skill selection. Explain each job and its extra usage.
 - Prompt users to assign models, but do not recommend particular models, maintain recommendation lists or automatically rank models for these assignments. Users choose from their configured models.
 - Assign an initial main session model automatically from the user's enabled, configured models; no separate main-model selection step is required. Users can change it through the normal model picker. Preserve existing users' saved selections.
@@ -83,12 +84,12 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 - Classify current configuration/instructions as required product behavior, safe defaults or optional personal customizations. Ship only intentional product defaults; make personal agents, skills, MCP endpoints and account-specific selections opt-in.
 - Provision a user-local agent/configuration home shared by both normal hosts. Define precedence for shipped defaults, user preferences, workspace instructions and explicit overrides. Normal UI edits must never modify the application/source checkout.
 - Remove inaccessible provider/model assumptions from chat, title generation, pruning and subagent defaults. Optional automation must work with configured eligible models or clearly remain off; it must not secretly require another subscription.
-- Specify a reversible migration for existing settings, provider/legacy credential references and session locations. Show conflicts; preserve customized files and history. Do not silently import the maintainer's setup or merge credentials.
+- Document an opt-in manual import path for existing settings, provider/credential references and history, with backups and explicit handling of conflicts. Preserve the original files; do not build a migration wizard or silently import the maintainer's setup, relocate history or merge credentials.
 - Decide session-location provisioning separately from the existing storage cutoff, including whether a location-only change is needed. Preserve current closure/retention behavior unless its change is explicitly approved.
 
-**Decide first:** configuration precedence and instruction-pack boundary; migration/conflict UX; session-location approach and relationship to the gated cutoff.
+**Decide first:** configuration precedence and instruction-pack boundary; manual-import boundaries; session-location approach and relationship to the gated cutoff.
 
-**Acceptance:** a private empty profile starts with neutral defaults; connecting one supported provider is enough for the core task flow. Settings survive restart and replacement of application files. VS Code resolves the intended personal configuration; preserve shared configuration authority and existing standalone regressions for the later desktop host. Existing-user migration is tested on disposable fixtures, can be reversed, and neither loses history nor changes retention implicitly. Source and release payload stay unchanged.
+**Acceptance:** a private empty profile starts with neutral defaults; connecting one supported provider is enough for the core task flow. Settings survive restart and replacement of application files. VS Code resolves the intended personal configuration; preserve shared configuration authority and existing standalone regressions for the later desktop host. Manual-import instructions are checked on disposable fixtures, preserve a reversible path, and neither lose history nor change retention implicitly. Source and release payload stay unchanged.
 
 ### 2. Deliver VS Code Marketplace releases
 
@@ -119,7 +120,7 @@ Current architecture and lifecycle rules belong to [Architecture](../architectur
 
 - Carry honestly unpriced models through native request execution, accounting and UI without fabricating rates or zero monetary totals. Preserve partial-rate and tier applicability facts and captured request provenance.
 - Give actionable, distinct states for saved connection, listing failure, missing required metadata, unsupported protocol/capability, expired authentication and request rejection. A saved provider or listed model must not promise entitlement.
-- Complete the configuration/credential transition selected in milestone 1. Make Add/Edit/Refresh/Reconnect/Disable/Remove semantics clear, including effects on existing pinned chats and irreversible secret deletion.
+- Respect milestone 1's fresh-profile and opt-in manual-import boundaries. Make Add/Edit/Refresh/Reconnect/Disable/Remove semantics clear, including effects on existing pinned chats and irreversible secret deletion.
 - Qualify the promised provider/auth modes on the shared installed application. Cover cached/offline use, refresh races, cancellation and account/endpoint replacement; keep last-known-good information without retaining invalid access claims.
 
 **Decide first:** initial supported provider/auth matrix and handling of incomplete capability metadata. There is no current monetary-budget feature to redesign; any future budget treatment of unpriced work needs its own decision.
