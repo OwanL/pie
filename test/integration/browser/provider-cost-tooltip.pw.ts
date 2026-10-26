@@ -46,6 +46,8 @@ test('provider costs stay single-line and zero-spend models are omitted', async 
     await expect(detail).toBeVisible();
     await expect(detail.locator('.rich-tooltip-legend-detail-row')).toHaveCount(4);
     await expect(detail).not.toContainText('claude-fable');
+    await expect(detail).not.toContainText('github-copilot');
+    await expect(detail).not.toContainText('$97.54');
     await expect(detail).toContainText('$0.8873');
     await expect(detail.locator('.rich-tooltip-legend-detail-model').first()).toHaveText('gpt-6.1-sol');
 

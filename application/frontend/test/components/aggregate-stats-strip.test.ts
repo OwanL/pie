@@ -274,7 +274,7 @@ test('provider legend entries are focusable and expose provider-qualified nested
   const html = renderToString(h(ProviderLegend, {
     items: [{
       key: 'copilot',
-      value: '$1.00',
+      value: '$2.00',
       models: [{ provider: 'copilot', model: 'shared-model', value: '$1.00' }],
     }],
   }));
@@ -286,6 +286,9 @@ test('provider legend entries are focusable and expose provider-qualified nested
   const model = root.querySelector<HTMLElement>('.rich-tooltip-legend-detail-model')!;
   assert.equal(model.textContent, 'shared-model');
   assert.equal(model.title, 'shared-model (copilot)');
+  const detail = root.querySelector('.rich-tooltip-legend-detail')!;
+  assert.doesNotMatch(detail.textContent!, /copilot|\$2\.00/);
+  assert.match(root.querySelector('.rich-tooltip-legend-trigger')!.textContent!, /copilot\$2\.00/);
 });
 
 test('cost breakdowns omit zero-spend models but retain tiny positive values; token breakdowns retain zeroes', () => {

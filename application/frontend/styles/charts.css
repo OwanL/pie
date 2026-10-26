@@ -104,7 +104,6 @@
   gap: 2px;
 }
 
-.rich-tooltip-legend-detail-head,
 .rich-tooltip-legend-detail-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
@@ -112,25 +111,10 @@
   align-items: baseline;
 }
 
-.rich-tooltip-legend-detail-head {
-  padding-bottom: 7px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--panel-border-subtle);
-  font-weight: 600;
-}
-
 .rich-tooltip-legend-detail-row {
   padding-block: 2px;
 }
 
-.rich-tooltip-legend-detail-head > :first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rich-tooltip-legend-detail-head > :last-child,
 .rich-tooltip-legend-detail-value {
   white-space: nowrap;
   overflow-wrap: normal;

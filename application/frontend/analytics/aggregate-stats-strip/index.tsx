@@ -224,9 +224,6 @@ export function ProviderLegend({ items }: { items: ProviderLegendItem[] }): JSX.
               <span class="rich-tooltip-legend-val">{it.value}</span>
             </button>
             <span id={detailId} class="rich-tooltip-legend-detail" role="tooltip">
-              <span class="rich-tooltip-legend-detail-head">
-                <span>{it.key}</span><span>{it.value}</span>
-              </span>
               {it.models.length > 0
                 ? it.models.map((model) => (
                     <span class="rich-tooltip-legend-detail-row" key={`${model.provider}\u0000${model.model}`}>
