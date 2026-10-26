@@ -38,6 +38,8 @@ export interface TooltipProps {
   delayHide?: number;
   /** Preferred placement relative to the trigger. */
   placement?: 'top' | 'bottom';
+  /** Horizontal alignment relative to the trigger. Defaults to centered. */
+  align?: 'start' | 'center' | 'end';
   /**
    * Extra class(es) for the trigger wrapper. Useful when the wrapper is a flex
    * item and needs layout-only styling (e.g. `margin-left: auto` to pin a
@@ -94,6 +96,7 @@ export function Tooltip({
   delayShow = 350,
   delayHide = 50,
   placement = 'bottom',
+  align = 'center',
   freezeWhileVisible = false,
   richRole = 'tooltip',
   returnFocusOnEscape = false,
@@ -320,7 +323,11 @@ export function Tooltip({
       selectedPlacement === 'bottom'
         ? rect.bottom + gap
         : rect.top - hostRect.height - gap;
-    let left = rect.left + rect.width / 2 - hostRect.width / 2;
+    let left = align === 'start'
+      ? rect.left
+      : align === 'end'
+        ? rect.right - hostRect.width
+        : rect.left + rect.width / 2 - hostRect.width / 2;
 
     // Keep inside the viewport.
     const maxLeft = window.innerWidth - hostRect.width - gap;
@@ -334,7 +341,7 @@ export function Tooltip({
 
     host.style.top = `${top}px`;
     host.style.left = `${left}px`;
-  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement, richRole, dismissTooltip, dismissOnActivation]);
+  }, [isVisible, effectiveContent, effectiveContentNode, effectiveHasRich, placement, align, richRole, dismissTooltip, dismissOnActivation]);
 
   // Remove the host when the component unmounts, and tear down any pending timers.
   useEffect(() => {

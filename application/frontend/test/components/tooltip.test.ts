@@ -486,6 +486,33 @@ test('activatable tooltips prefer a fitting side and flip when only the other si
   }
 });
 
+test('horizontal alignment positions at trigger edges, defaults to center, and clamps to the viewport', async () => {
+  installFakeTimers();
+  const originalWidth = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 400 });
+  try {
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+    const position = async (align: 'start' | 'center' | 'end' | undefined, left: number, right: number, expected: string) => {
+      act(() => render(h(Tooltip, { content: 'alignment', align, delayShow: 0 }, h('span', null, 'target')), container));
+      trigger().getBoundingClientRect = () => ({ top: 100, bottom: 120, left, right, width: right - left, height: 20 } as DOMRect);
+      host().getBoundingClientRect = () => ({ width: 100, height: 30 } as DOMRect);
+      await act(async () => { trigger().dispatchEvent(new MouseEvent('mouseenter')); flushTimers(); });
+      assert.equal(host().style.left, expected);
+      await act(async () => { trigger().dispatchEvent(new MouseEvent('mouseleave')); flushTimers(); });
+    };
+
+    await position('start', 100, 140, '100px');
+    await position('end', 100, 140, '40px');
+    await position(undefined, 100, 140, '70px');
+    await position('start', 390, 400, '294px'); // right viewport edge
+    await position('end', 60, 80, '6px'); // left viewport edge
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    restoreTimers();
+  }
+});
+
 test('default tall tooltips retain their positioning without an activation height cap', async () => {
   installFakeTimers();
   try {
