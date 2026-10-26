@@ -71,6 +71,10 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   for (const input of [
     traversalPolicyHelper,
     nativeOwnerHelper,
+    path.join(repositoryRoot, 'harness', 'agent-instructions', 'resource-roots.ts'),
+    path.join(repositoryRoot, 'harness', 'agent-instructions', 'agent-discovery', 'agents.ts'),
+    path.join(repositoryRoot, 'harness', 'agent-instructions', 'prompt-assembly', 'append-system-prompt.ts'),
+    path.join(repositoryRoot, 'harness', 'agent-instructions', 'skill-discovery', 'index.ts'),
     path.join(repositoryRoot, 'harness', 'tools', 'warm-bash', 'index.ts'),
     path.join(repositoryRoot, 'harness', 'tools', 'computer-use', 'runtime-client.ts'),
     path.join(repositoryRoot, 'harness', 'tools', 'playwright', 'sidecar.mjs'),
@@ -217,6 +221,60 @@ test('analytics implementation changes coordinate identity and watches without s
     assert.equal(runIdentityPlugin(node).buildId, previous.buildId);
     assert.equal(runIdentityPlugin(webview).buildId, previous.buildId);
   }
+});
+
+test('selected instruction bytes and manifest coordinate both graph identities without personal files', (t) => {
+  const identityRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-instructions-identity-'));
+  t.after(() => rmSync(identityRoot, { recursive: true, force: true }));
+  const instructions = path.join(identityRoot, 'harness', 'agent-instructions');
+  mkdirSync(path.join(instructions, 'defaults'), { recursive: true });
+  const selected = path.join(instructions, 'defaults', 'APPEND_SYSTEM.md');
+  const manifest = path.join(instructions, 'bundled-resources.json');
+  const personal = path.join(instructions, 'APPEND_SYSTEM.md');
+  const implementations = ['resource-roots.ts', 'prompt-assembly/append-system-prompt.ts', 'future-owner/discovery.mjs']
+    .map((relative) => path.join(instructions, relative));
+  for (const input of implementations) {
+    mkdirSync(path.dirname(input), { recursive: true });
+    writeFileSync(input, 'export const implementation = "before";');
+  }
+  const unselectedHelper = path.join(instructions, 'skills', 'personal', 'helper.mjs');
+  mkdirSync(path.dirname(unselectedHelper), { recursive: true });
+  writeFileSync(unselectedHelper, 'export const personal = "before";');
+  writeFileSync(selected, 'selected before');
+  writeFileSync(personal, 'personal before');
+  const files = [{ source: 'defaults/APPEND_SYSTEM.md', destination: 'APPEND_SYSTEM.md' }];
+  writeFileSync(manifest, JSON.stringify({ version: 1, files }));
+  const node = createBuildIdentityPlugin(identityRoot);
+  const webview = createBuildIdentityPlugin(identityRoot);
+  const before = runIdentityPlugin(node);
+  assert.equal(before.buildId, runIdentityPlugin(webview).buildId);
+  assert.ok(before.watched.includes(manifest));
+  assert.ok(before.watched.includes(selected));
+  assert.ok(!before.watched.includes(personal));
+  assert.ok(!before.watched.includes(unselectedHelper));
+  for (const input of implementations) assert.ok(before.watched.includes(input), `${input} must be watched`);
+  writeFileSync(personal, 'personal after');
+  writeFileSync(unselectedHelper, 'export const personal = "after";');
+  assert.equal(before.buildId, runIdentityPlugin(node).buildId);
+  assert.equal(before.buildId, runIdentityPlugin(webview).buildId);
+  let previousId = before.buildId;
+  for (const input of implementations) {
+    writeFileSync(input, 'export const implementation = "after";');
+    const afterImplementation = runIdentityPlugin(node);
+    assert.notEqual(afterImplementation.buildId, previousId, `${input} must affect identity`);
+    const webviewIdentity = runIdentityPlugin(webview);
+    assert.equal(afterImplementation.buildId, webviewIdentity.buildId);
+    assert.ok(webviewIdentity.watched.includes(input));
+    previousId = afterImplementation.buildId;
+  }
+  writeFileSync(selected, 'selected after');
+  const afterBytes = runIdentityPlugin(node);
+  assert.notEqual(previousId, afterBytes.buildId);
+  assert.equal(afterBytes.buildId, runIdentityPlugin(webview).buildId);
+  writeFileSync(manifest, JSON.stringify({ version: 1, files }, null, 2));
+  const afterManifest = runIdentityPlugin(node);
+  assert.notEqual(afterBytes.buildId, afterManifest.buildId);
+  assert.equal(afterManifest.buildId, runIdentityPlugin(webview).buildId);
 });
 
 test('delivery node builds emit the neutral runtime lock bytes unchanged', () => {

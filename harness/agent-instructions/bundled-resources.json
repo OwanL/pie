@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "files": [
+    { "source": "defaults/APPEND_SYSTEM.md", "destination": "APPEND_SYSTEM.md" },
+    { "source": "defaults/SUBAGENT_SYSTEM.md", "destination": "SUBAGENT_SYSTEM.md" },
+    { "source": "agents/reviewer.md", "destination": "agents/reviewer.md" },
+    { "source": "agents/scout.md", "destination": "agents/scout.md" },
+    { "source": "agents/worker.md", "destination": "agents/worker.md" },
+    { "source": "skills/add-provider/SKILL.md", "destination": "skills/add-provider/SKILL.md" },
+    { "source": "skills/check-ui/SKILL.md", "destination": "skills/check-ui/SKILL.md" },
+    { "source": "skills/codebase-maintenance/.ignore", "destination": "skills/codebase-maintenance/.ignore" },
+    { "source": "skills/codebase-maintenance/SKILL.md", "destination": "skills/codebase-maintenance/SKILL.md" },
+    { "source": "skills/codebase-maintenance/analyze_complexity.py", "destination": "skills/codebase-maintenance/analyze_complexity.py" },
+    { "source": "skills/codebase-maintenance/detect_smells.py", "destination": "skills/codebase-maintenance/detect_smells.py" },
+    { "source": "skills/codebase-maintenance/find_dead_code.py", "destination": "skills/codebase-maintenance/find_dead_code.py" },
+    { "source": "skills/codebase-maintenance/find_duplicates.py", "destination": "skills/codebase-maintenance/find_duplicates.py" },
+    { "source": "skills/codebase-maintenance/find_large_files.py", "destination": "skills/codebase-maintenance/find_large_files.py" },
+    { "source": "skills/codebase-maintenance/find_markdown_drift.py", "destination": "skills/codebase-maintenance/find_markdown_drift.py" },
+    { "source": "skills/codebase-maintenance/prepared_scanner.py", "destination": "skills/codebase-maintenance/prepared_scanner.py" },
+    { "source": "skills/customize-pie/SKILL.md", "destination": "skills/customize-pie/SKILL.md" },
+    { "source": "skills/develop-pie/SKILL.md", "destination": "skills/develop-pie/SKILL.md" },
+    { "source": "skills/develop-pie/source-setup.md", "destination": "skills/develop-pie/source-setup.md" },
+    { "source": "skills/diagnose/SKILL.md", "destination": "skills/diagnose/SKILL.md" },
+    { "source": "skills/grill-with-docs/DECISION-FORMAT.md", "destination": "skills/grill-with-docs/DECISION-FORMAT.md" },
+    { "source": "skills/grill-with-docs/DOC-FORMAT.md", "destination": "skills/grill-with-docs/DOC-FORMAT.md" },
+    { "source": "skills/grill-with-docs/SKILL.md", "destination": "skills/grill-with-docs/SKILL.md" },
+    { "source": "skills/pie-logs/SKILL.md", "destination": "skills/pie-logs/SKILL.md" },
+    { "source": "skills/pie-logs/pi_logs.py", "destination": "skills/pie-logs/pi_logs.py" },
+    { "source": "skills/query-analytics/SKILL.md", "destination": "skills/query-analytics/SKILL.md" }
+  ]
+}

@@ -4,6 +4,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
+import { createInstructionAssetsPlugin, readInstructionAssets, INSTRUCTION_MANIFEST } from '../../../scripts/build/instruction-assets';
 // The shared resolver is JavaScript-only and intentionally has no production
 // TypeScript dependency. Keep the config seam typed at its use site.
 // @ts-expect-error The repository build helper is an ESM .mjs module without a declaration file.
@@ -74,6 +75,19 @@ function sourceFiles(directory: string): string[] {
     });
 }
 
+/** Instruction runtime code is a source owner, separate from curated payloads.
+ * Include implementation modules in any current/future implementation directory;
+ * agents, skills and defaults are payload roots governed only by the manifest. */
+function instructionImplementationInputs(directory: string): string[] {
+  if (!fs.existsSync(directory)) return [];
+  const payloadRoots = new Set(['agents', 'skills', 'defaults']);
+  return sourceFiles(directory).filter((input) => {
+    const relative = path.relative(directory, input);
+    return !payloadRoots.has(relative.split(path.sep)[0])
+      && /\.(?:[cm]?[jt]sx?)$/u.test(input);
+  });
+}
+
 /** Deterministic across the separately-started node and webview builds. */
 function buildIdentityInputs(identityRoot = rootDir): string[] {
   // The explicit root parameter remains a fixture seam; production hashes
@@ -82,7 +96,7 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   const applicationFrontendRoot = production ? frontendDir : path.join(identityRoot, 'frontend');
   const helperRoot = production ? repoDir : path.dirname(identityRoot);
   const buildHelpers = path.join(helperRoot, 'scripts', 'build');
-  const harnessInstructions = path.join(repoDir, 'harness', 'agent-instructions');
+  const harnessInstructions = path.join(production ? repoDir : identityRoot, 'harness', 'agent-instructions');
   const harnessTools = path.join(production ? repoDir : identityRoot, 'harness', 'tools');
   const harnessModelProviders = path.join(production ? repoDir : identityRoot, 'harness', 'model-providers');
   const toolAndSkillSelection = path.join(production ? repoDir : identityRoot, 'harness', 'tool-and-skill-selection');
@@ -100,7 +114,9 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   ].map((owner) => path.join(production ? repoDir : identityRoot, 'analytics', owner));
   return [
     ...analyticsRoots.flatMap((directory) => fs.existsSync(directory) ? sourceFiles(directory) : []),
-    ...(production && fs.existsSync(harnessInstructions) ? sourceFiles(harnessInstructions) : []),
+    ...instructionImplementationInputs(harnessInstructions),
+    ...(production || fs.existsSync(path.join(harnessInstructions, INSTRUCTION_MANIFEST))
+      ? readInstructionAssets(harnessInstructions).inputs : []),
     ...(fs.existsSync(harnessTools) ? sourceFiles(harnessTools) : []),
     ...(fs.existsSync(harnessModelProviders) ? sourceFiles(harnessModelProviders) : []),
     ...(fs.existsSync(toolAndSkillSelection) ? sourceFiles(toolAndSkillSelection) : []),
@@ -192,7 +208,7 @@ export default defineConfig(({ mode }) => {
       ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-node') } : {}),
       publicDir: false,
       define,
-      plugins: [createBuildIdentityPlugin(), createShippedRuntimeLockPlugin()],
+      plugins: [createBuildIdentityPlugin(), createShippedRuntimeLockPlugin(), createInstructionAssetsPlugin(path.join(repoDir, 'harness', 'agent-instructions'))],
       build: {
         target: 'node20',
         outDir,
