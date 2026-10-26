@@ -29,13 +29,15 @@ test('curated entry facades load as factories through default JITI without losin
     mkdirSync(path.dirname(file), { recursive: true });
     const mixed = ['safeguard', 'tool-result-pruner'].includes(entry.id);
     writeFileSync(file, mixed
-      ? `export function namedHelper() { return ${entry.id === 'safeguard' ? 40 : 2}; }\nexport default function factory() { return namedHelper(); }`
+      ? `import { RULE_KEY_BY_NAME } from '../types';\nexport { RULE_KEY_BY_NAME } from '../types';\nexport function namedHelper() { return ${entry.id === 'safeguard' ? 40 : 2} + RULE_KEY_BY_NAME.offset; }\nexport default function factory() { return namedHelper(); }`
       : `import { combined } from '../shared-consumer';\nexport default function factory() { return { value: combined(), peer: () => import('typebox/fixture') }; }`);
   }
+  writeFileSync(path.join(root, 'extensions/types.ts'), 'export const RULE_KEY_BY_NAME = { offset: 0 };');
   writeFileSync(path.join(root, 'extensions/shared-consumer.ts'), `
+import { RULE_KEY_BY_NAME } from './types';
 import { namedHelper as safeguard } from './safeguard/index';
 import { namedHelper as pruner } from './tool-result-pruner/index';
-export function combined() { return safeguard() + pruner(); }
+export function combined() { return safeguard() + pruner() + RULE_KEY_BY_NAME.offset; }
 `);
   await build({ ...bundledExtensionBuildOptions(root, output), configFile: false, logLevel: 'silent' });
   const relocated = path.join(root, 'relocated');
@@ -57,6 +59,28 @@ export function combined() { return safeguard() + pruner(); }
       entry.id === 'safeguard' ? 40 : entry.id === 'tool-result-pruner' ? 2 : 42);
   }
   assert.ok(readFileSync(path.join(relocated, 'ask-user.js'), 'utf8').includes('typebox/fixture'), 'lazy peer remains bare/external');
+});
+
+test('actual curated source graph emits exactly default-only entry signatures without bundled peers', async t => {
+  const output = mkdtempSync(path.join(os.tmpdir(), 'pie-core-signatures-'));
+  t.after(() => rmSync(output, { recursive: true, force: true }));
+  const options = bundledExtensionBuildOptions(path.resolve('.'), output);
+  let checked = false;
+  await build({ ...options, configFile: false, logLevel: 'silent', plugins: [...(options.plugins ?? []), {
+    name: 'assert-actual-core-entry-signatures',
+    generateBundle(_options, bundle) {
+      const chunks = Object.values(bundle).filter(item => item.type === 'chunk');
+      const entries = chunks.filter(chunk => chunk.isEntry);
+      assert.deepEqual(entries.map(chunk => chunk.fileName).sort(), BUNDLED_EXTENSIONS.map(entry => entry.outputFile).sort());
+      for (const entry of entries) assert.deepEqual(entry.exports, ['default'], entry.fileName);
+      for (const chunk of chunks) for (const id of Object.keys(chunk.modules)) {
+        const normalized = id.replaceAll('\\', '/');
+        assert.doesNotMatch(normalized, /(?:node_modules\/(?:@(?:earendil-works|mariozechner)\/pi-[^/]+|@sinclair\/typebox|typebox)(?:\/|$)|harness\/pi\/packages\/(?:coding-agent|agent|ai|tui)\/(?:src|dist)\/)/u, 'peer implementation bundled: ' + id);
+      }
+      checked = true;
+    },
+  }] });
+  assert.ok(checked, 'actual Rollup graph must be inspected; real extension code is never imported or executed');
 });
 
 test('relocated CJS entries and shared chunks preserve module paths and agent-root resources', async t => {

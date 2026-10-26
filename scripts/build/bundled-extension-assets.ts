@@ -70,6 +70,9 @@ export function bundledExtensionBuildOptions(root: string, outDir: string,
       ssr: true, ssrEmitAssets: true,
       rollupOptions: {
         input: entries,
+        // SSR defaults may otherwise extend a facade's exports to serve shared
+        // constants from its entry chunk, breaking native CJS default loading.
+        ...(input === undefined ? { preserveEntrySignatures: 'strict' as const } : {}),
         external: id => isBundledExtensionPeer(id) || id === 'vscode' || id.startsWith('node:')
           || id === 'bufferutil' || id === 'utf-8-validate'
           || id === '@picovoice/pvrecorder-node' || id === 'whisper-cpp-node' || id.startsWith('@whisper-cpp-node/'),
