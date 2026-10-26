@@ -261,16 +261,16 @@
 }
 
 .transcript-jump-latest {
-  width: 36px;
-  min-width: 36px;
-  height: 36px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--panel-foreground) 35%, var(--panel-control-surface));
-  background: var(--panel-hover-surface);
-  color: var(--panel-foreground);
+  border: 1px solid var(--panel-border-subtle);
+  background: var(--panel-control-surface);
+  color: var(--panel-muted);
   line-height: 1;
   padding: 0;
   cursor: pointer;
@@ -290,7 +290,7 @@
 
 .transcript-jump-latest:hover {
   background: var(--panel-control-hover);
-  border-color: var(--panel-foreground);
+  border-color: var(--panel-border);
   color: var(--panel-foreground);
 }
 

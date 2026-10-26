@@ -464,7 +464,7 @@ test('transcript.css styles the enhanced code-block affordances', async () => {
   assert.match(css, /\.md-table-wrap\s*\{[\s\S]*?overflow-x:\s*auto;/);
 });
 
-test('jump-to-latest floats with contrast and shadow without intercepting surrounding content', async () => {
+test('jump-to-latest stays muted with shadow for separation and leaves surrounding content interactive', async () => {
   const css = await readTranscriptCss();
   const rule = css.match(/\.transcript-jump-latest\s*\{[\s\S]*?\n\}/);
   assert.ok(rule, 'expected .transcript-jump-latest rule in transcript.css');
@@ -474,9 +474,9 @@ test('jump-to-latest floats with contrast and shadow without intercepting surrou
   assert.match(dock, /pointer-events:\s*none;/);
   assert.doesNotMatch(dock, /background:|--composer-height/);
   assert.match(rule![0], /pointer-events:\s*auto;/);
-  assert.match(rule![0], /color:\s*var\(--panel-foreground\);/);
+  assert.match(rule![0], /color:\s*var\(--panel-muted\);/);
   assert.match(rule![0], /box-shadow:\s*(?!none)[^;]+;/);
-  assert.match(rule![0], /width:\s*36px;[^}]*height:\s*36px;/);
+  assert.match(rule![0], /width:\s*32px;[^}]*height:\s*32px;/);
   assert.match(rule![0], /padding:\s*0;/);
   assert.match(css, /@media \(pointer: coarse\)\s*\{\s*\.transcript-jump-latest \{ height: 44px;/);
 });
