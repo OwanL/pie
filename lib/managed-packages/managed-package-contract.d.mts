@@ -16,3 +16,9 @@ export function classifyManagedPackageSources(
 	packageName: string,
 	files: { readonly index?: string; readonly storage?: string; readonly agentDir?: string },
 ): "pristine" | "supported-patched" | "unsupported";
+
+export function patchWorkflowClampInSource(content: string): string;
+export function patchWorkflowDescriptionInSource(content: string): string;
+export function patchMcpCachePathInSource(content: string): string;
+export function patchWebFetchCachePathInSource(content: string): string;
+export function adaptManagedPackageSources(packageName: string, files: { index?: string; storage?: string; agentDir?: string }): { index?: string; storage?: string; agentDir?: string };

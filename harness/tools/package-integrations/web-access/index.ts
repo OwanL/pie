@@ -48,55 +48,17 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyManagedPackageSources, classifyMcpScriptSource, patchMcpScriptLoadingInSource, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../../../lib/managed-packages/managed-package-contract.mjs";
+import { patchWorkflowClampInSource, patchWorkflowDescriptionInSource, patchMcpCachePathInSource, patchWebFetchCachePathInSource, classifyManagedPackageSources, classifyMcpScriptSource, patchMcpScriptLoadingInSource, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from "../../../../lib/managed-packages/managed-package-contract.mjs";
 import { resolvePieDataPaths } from "../../../../lib/data-root/pie-data-root-core.mjs";
 
-export { patchMcpScriptLoadingInSource };
+export { patchMcpScriptLoadingInSource, patchWorkflowClampInSource, patchWorkflowDescriptionInSource, patchMcpCachePathInSource, patchWebFetchCachePathInSource };
+
+// Explicit bundled load-only route. No source patches, environment writes, or
+// .DELETE repair; the delivery owner must select and verify its package roots.
+export { verifyPreparedManagedPackage as verifyBundledManagedPackage } from "../../../../lib/managed-packages/prepare-managed-packages.mjs";
 
 /** Prefix on every diagnostic line so users can attribute/filter the source. */
 const LOG_PREFIX = "web-access-guard";
-
-/**
- * Matches `function resolveWorkflow(...): WebSearchWorkflow { ... }` — the
- * single chokepoint that decides whether `web_search` opens the curator
- * (`summary-review`) or runs an LLM summary round-trip (`auto-summary`). The
- * body has no nested braces, so the first `\n}` reliably marks the function
- * end. Tolerant of signature changes: `[^)]*` accepts any param list.
- */
-const RESOLVE_WORKFLOW_RE = /function resolveWorkflow\([^)]*\): WebSearchWorkflow \{[\s\S]*?\n\}/;
-
-/**
- * Matches the `workflow` parameter's `StringEnum(["none", "summary-review",
- * "auto-summary"], { ... })` schema in the tool registration — the only site
- * where those three values appear together as an array literal. The /curator
- * command compares strings (`arg === "summary-review"`), not arrays, so it
- * is never touched.
- */
-const WORKFLOW_ENUM_RE = /StringEnum\(\["none", "summary-review", "auto-summary"\],[\s\S]*?\}\)/;
-
-/**
- * Matches the misleading sentence in `web_search`'s tool `description` that
- * claims searches auto-open the curator and that `"none"` / `"auto-summary"`
- * are selectable workflows. After `patchWorkflowClampInSource`, the only
- * effective mode is `"none"` (raw results); the curator and LLM summary are
- * disabled, so the description must match that effective behavior.
- */
-const WORKFLOW_DESCRIPTION_RE =
-	/Searches auto-open the interactive browser curator and stream results live; set workflow to "none" to skip curation or "auto-summary" for a model-generated summary without the browser curator\./g;
-
-const WORKFLOW_DESCRIPTION_FIXED =
-	'Only raw search results are returned in this deployment — the interactive curator and LLM summary modes are disabled (workflow is fixed to "none").';
-
-/**
- * The clamped `resolveWorkflow`: always returns `"none"`. The only way to
- * guarantee `generateSummaryDraft` can never be reached, regardless of config,
- * `/curator on`, or a per-call `workflow: "summary-review"` / `"auto-summary"
- * override from the model.
- */
-const RESOLVE_WORKFLOW_CLAMPED =
-	"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {\n" +
-	'\treturn "none";\n' +
-	"}";
 
 /**
  * P2c uses only these exact installed package versions. The packages do not
@@ -110,30 +72,6 @@ const MCP_ADAPTER_PACKAGE_NAME = MCP_ADAPTER_REQUIREMENT.name;
 const MCP_ADAPTER_VERSION = MCP_ADAPTER_REQUIREMENT.version;
 const WEB_ACCESS_PACKAGE_NAME = WEB_ACCESS_REQUIREMENT.name;
 const WEB_ACCESS_VERSION = WEB_ACCESS_REQUIREMENT.version;
-
-const MCP_AGENT_PATH_RE = /export function getAgentPath\(\.\.\.segments: string\[\]\): string \{\n {2}return join\(getAgentDir\(\), \.\.\.segments\);\n\}/;
-const MCP_AGENT_PATH_REPLACEMENT = [
-	"export function getAgentPath(...segments: string[]): string {",
-	"  const cacheDir = process.env.PIE_CACHE_DIR?.trim();",
-	"  if (cacheDir && segments.length === 1 && (segments[0] === \"mcp-cache.json\" || segments[0] === \"mcp-npx-cache.json\")) {",
-	"    return join(resolve(cacheDir), segments[0]);",
-	"  }",
-	"  return join(getAgentDir(), ...segments);",
-	"}",
-].join("\n");
-
-const WEB_FETCH_CACHE_IMPORT_RE = /import \{ join \} from "node:path";/;
-const WEB_FETCH_CACHE_RE = /export function getFetchCacheDir\(\): string \{\n\treturn join\(getWebSearchConfigDir\(\), FETCH_CACHE_DIR\);\n\}/;
-const WEB_FETCH_CACHE_IMPORT_REPLACEMENT = 'import { isAbsolute, join } from "node:path";';
-const WEB_FETCH_CACHE_REPLACEMENT = [
-	"export function getFetchCacheDir(): string {",
-	"  const configured = process.env.PIE_CACHE_DIR?.trim();",
-	"  const baseDir = configured && isAbsolute(configured)",
-	"    ? configured",
-	"    : getWebSearchConfigDir();",
-	"  return join(baseDir, FETCH_CACHE_DIR);",
-	"}",
-].join("\n");
 
 /** `@mozilla/readability`'s `index.js` `require()`s this; missing it = corrupted. */
 const READABILITY_ENTRY = "@mozilla/readability/Readability.js";
@@ -219,50 +157,6 @@ async function verifyPatch(target: string, expected: string): Promise<void> {
  * rewrites either site, the regex misses and the pass is a no-op — same
  * philosophy as the other source transforms.
  */
-export function patchWorkflowClampInSource(content: string): string {
-	return content
-		.replace(RESOLVE_WORKFLOW_RE, RESOLVE_WORKFLOW_CLAMPED)
-		.replace(
-			WORKFLOW_ENUM_RE,
-			'StringEnum(["none"], { description: "Search workflow mode: none = raw results only (curator and LLM summary disabled)" })',
-		);
-}
-
-/**
- * Rewrite `web_search`'s tool `description` so it matches the clamped runtime
- * behavior: the workflow is always `"none"` (raw search results only), and
- * the curator + LLM summary path is disabled in this deployment.
- *
- * Idempotent: once the misleading sentence is gone the regex no longer
- * matches and the pass is a no-op. Forward-compatible: if upstream rewords
- * the description, the regex misses and the pass is a no-op — same philosophy
- * as `patchWorkflowClampInSource`.
- */
-export function patchWorkflowDescriptionInSource(content: string): string {
-	return content.replace(WORKFLOW_DESCRIPTION_RE, WORKFLOW_DESCRIPTION_FIXED);
-}
-
-/**
- * Route only pi-mcp-adapter's two Pie-owned state caches into the canonical
- * cache category. Other getAgentPath callers (config, auth, onboarding, and
- * server state) retain the agent directory owner.
- */
-export function patchMcpCachePathInSource(content: string): string {
-	return content.replace(MCP_AGENT_PATH_RE, MCP_AGENT_PATH_REPLACEMENT);
-}
-
-/**
- * Route pi-web-access's fetched-content cache into the canonical cache
- * category. Configuration and credentials continue to use the package's
- * existing config directory.
- */
-export function patchWebFetchCachePathInSource(content: string): string {
-	if (!WEB_FETCH_CACHE_IMPORT_RE.test(content) || !WEB_FETCH_CACHE_RE.test(content)) return content;
-	return content
-		.replace(WEB_FETCH_CACHE_IMPORT_RE, WEB_FETCH_CACHE_IMPORT_REPLACEMENT)
-		.replace(WEB_FETCH_CACHE_RE, WEB_FETCH_CACHE_REPLACEMENT);
-}
-
 /** True for npm's "could not replace" rename artifacts, e.g. `Readability.js.DELETE.e9020…`. */
 export function isDeleteArtifact(name: string): boolean {
 	return /\.DELETE\..+$/.test(name);

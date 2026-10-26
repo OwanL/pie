@@ -37,3 +37,20 @@ Tests use isolated temporary package roots and do not access credentials,
 network services, or global installs. The real pinned-tarball install/reinstall
 qualification must run separately in a unique scratch root with an isolated
 npm cache and `--ignore-scripts`.
+
+## Immutable preparation precursor
+
+The explicit `verifyBundledManagedPackage(root, name)` export is load-only:
+it rejects missing, corrupt or incompletely adapted bytes and never repairs
+`.DELETE.*` artifacts or writes files. Existing default/source guard behavior
+remains mutable; delivery selection is not wired here.
+
+`lib/managed-packages/prepare-managed-packages.mjs` copies explicitly owned,
+exact-pinned package trees to a fresh private staging directory and applies the
+same pure transforms used by the source guard before final read-only verification.
+The caller owns sealing/hash inventory and cleanup of successful staging output.
+This is not a complete deployable dependency closure: a future acquisition owner
+must supply lock/integrity-bound materialized dependencies, including local
+Readability and MCP worker/script dependencies, qualify resolution without
+ancestor/global fallback, and bind that closure to delivery identity. No Pi SDK
+manifest membership is implied and pins are unchanged.
