@@ -562,6 +562,8 @@ test('unknown post-compaction usage is rejected before the estimated-overflow pr
 for (const overflowScenario of [
   { name: 'estimated zero-length overflow', stopReason: 'length', errorMessage: undefined },
   { name: 'native provider-error overflow', stopReason: 'error', errorMessage: 'prompt is too long' },
+  { name: 'Haiku empty one-token context exhaustion', stopReason: 'length', input: 2, cacheRead: 94_963, cacheWrite: 3_495, output: 1 },
+  { name: 'Haiku partial-output context exhaustion', stopReason: 'length', input: 2, cacheRead: 92_282, cacheWrite: 1_786, output: 2_432, text: 'partial answer' },
 ]) {
   test(`${overflowScenario.name} compacts then retries without the durable failed row`, async (t) => {
   const modules = await sourceModules;
@@ -592,10 +594,17 @@ for (const overflowScenario of [
       (event: any) => event.message,
     );
     const result = responseIndex++ === 0
-      ? (failedMessage = assistant(requestModel.provider, requestModel.id, '', {
-        stopReason: overflowScenario.stopReason, input: 0, output: 0, errorMessage: overflowScenario.errorMessage,
+      ? (failedMessage = assistant(requestModel.provider, requestModel.id, overflowScenario.text ?? '', {
+        stopReason: overflowScenario.stopReason, input: overflowScenario.input ?? 0,
+        output: overflowScenario.output ?? 0, errorMessage: overflowScenario.errorMessage,
       }))
       : assistant(requestModel.provider, requestModel.id, 'retry succeeded', { input: 20, output: 4 });
+    if (result === failedMessage) {
+      result.usage.cacheRead = overflowScenario.cacheRead ?? 0;
+      result.usage.cacheWrite = overflowScenario.cacheWrite ?? 0;
+      result.usage.totalTokens = result.usage.input + result.usage.output
+        + result.usage.cacheRead + result.usage.cacheWrite;
+    }
     result.api = requestModel.api;
     queueMicrotask(() => {
       response.push({ type: 'start', partial: result });
@@ -605,7 +614,7 @@ for (const overflowScenario of [
   };
   const f = await fixture(t, {
     hooks,
-    contextWindow: 90,
+    contextWindow: overflowScenario.input ? 100_000 : 90,
     streamFn,
     contextMessageOmissions: consumedOverflowMessageEntryIds,
   });

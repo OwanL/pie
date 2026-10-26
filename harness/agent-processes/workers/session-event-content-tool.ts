@@ -44,7 +44,7 @@ import {
 } from '../../session-storage/transcripts/transcript';
 import type { ActiveRequest, SessionContext } from '../coordinator/server-types.js';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
-import { isAllZeroEmptyLengthMessage, isEstimatedContextOverflowMessage } from './history-compaction';
+import { isEstimatedContextOverflowMessage } from './history-compaction';
 import {
   clearSettledProviderIncident,
   emitLatestPruningResult,
@@ -708,8 +708,8 @@ function subagentDetailRoot(context: SessionContext, rootToolCallId: string): Su
 }
 /** Mirror the SDK overflow shapes that can only be confirmed after agent_end.
  * Explicit provider errors are candidates; the SDK will later distinguish
- * overflow from ordinary failures. Some providers instead return length with
- * zero output at the configured context-window boundary. */
+ * overflow from ordinary failures. Length stops use the same near-window
+ * reported/estimated usage predicate as the source compaction hook. */
 function mayNeedOverflowRecovery(context: SessionContext, message: SdkSessionEvent['message']): boolean {
   if (!message || message.role !== 'assistant') return false;
   if (message.stopReason === 'error' || (message.errorMessage?.trim().length ?? 0) > 0) return true;
@@ -717,13 +717,6 @@ function mayNeedOverflowRecovery(context: SessionContext, message: SdkSessionEve
 
   const contextWindow = context.session.model?.contextWindow;
   if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return false;
-  const usage = message.usage as { input?: unknown; output?: unknown; cacheRead?: unknown } | undefined;
-  const input = readTokenCount(usage?.input) ?? 0;
-  const cacheRead = readTokenCount(usage?.cacheRead) ?? 0;
-  const output = readTokenCount(usage?.output) ?? 0;
-  if (output === 0 && input + cacheRead >= contextWindow * 0.99) return true;
-  if (!isAllZeroEmptyLengthMessage(message)) return false;
-
   const estimatedTokens = context.session.getContextUsage?.()?.tokens;
   return isEstimatedContextOverflowMessage(message, contextWindow, estimatedTokens);
 }

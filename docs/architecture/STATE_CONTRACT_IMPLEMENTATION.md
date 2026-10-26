@@ -72,7 +72,7 @@ Cold `systemPrompts` and the empty-session `initialContextEstimate` are produced
 
 ## Snapshot Recovery — overflow compaction margin
 
-Provider-forced overflow compaction is treated as resumable when the provider response failed, including an empty `length` response whose usage counters are all zero when the SDK's last-valid-usage estimate remains at least **98%** of the model window.
+Provider-forced overflow compaction is resumable for `length` responses with reported context usage (input, cache reads/writes, and output) at least **95%** of the model window, including partial output. All-zero empty responses instead require a fresh SDK estimate of at least **98%**. Recovery allows one compact-and-retry attempt per continuation. Absolute token-mode proactive thresholds are capped at **70% soft / 85% hard** of the active model's window; lower configured thresholds still apply.
 
 ## Snapshot Recovery — compaction chip and readiness probe constants
 

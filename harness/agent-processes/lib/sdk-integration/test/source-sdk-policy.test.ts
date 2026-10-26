@@ -92,6 +92,38 @@ test('source compaction hooks preserve Pie thresholds and estimated-overflow cla
   }), true);
 });
 
+test('near-window length stops recover with reported cache-write and output usage', async () => {
+  const hooks = createSourceSdkPolicyAdapter({
+    readHistoryCompactionSettings: () => emptySettings,
+    beforeCompact: () => undefined,
+  }).compactionHooks();
+  const model = { provider: 'fixture-provider', id: 'fixture-model', contextWindow: 100_000 } as any;
+  for (const [content, usage] of [
+    [[], { input: 2, output: 1, cacheRead: 94_963, cacheWrite: 3_495 }],
+    [[], { input: 2, output: 1, cacheRead: 0, cacheWrite: 98_458 }],
+    [[{ type: 'thinking', thinking: 'unfinished reasoning' }],
+      { input: 2, output: 359, cacheRead: 94_287, cacheWrite: 1_603 }],
+    [[{ type: 'text', text: 'partial answer' }],
+      { input: 2, output: 2_432, cacheRead: 92_282, cacheWrite: 1_786 }],
+  ] as const) {
+    const message = { ...assistant('length'), content, usage };
+    assert.equal(await hooks.isEstimatedContextOverflow?.({
+      assistantMessage: message,
+      contextUsage: { tokens: 96_000, contextWindow: 100_000, percent: 96 }, model,
+    }), true);
+    message.stopReason = 'stop';
+    assert.equal(await hooks.isEstimatedContextOverflow?.({
+      assistantMessage: message,
+      contextUsage: { tokens: 96_000, contextWindow: 100_000, percent: 96 }, model,
+    }), false, 'completed answers must not resume');
+  }
+  const ordinaryLength = { ...assistant('length'), usage: { input: 30_000, output: 8_000 } };
+  assert.equal(await hooks.isEstimatedContextOverflow?.({
+    assistantMessage: ordinaryLength,
+    contextUsage: { tokens: 98_000, contextWindow: 100_000, percent: 98 }, model,
+  }), false, 'ordinary output limits do not recover from an unrelated estimate');
+});
+
 test('missing Pie settings delegate threshold decisions to the existing source hook', async () => {
   let delegatedThresholdCalls = 0;
   const adapter = createSourceSdkPolicyAdapter({

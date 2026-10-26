@@ -279,6 +279,29 @@ test('all-zero empty length exhaustion preserves automatic continuation using es
   assert.notEqual(harness.context.activeRequest?.liveTurnAccumulator, harness.accumulator);
 });
 
+for (const content of [[], [{ type: 'text', text: 'unfinished answer' }]]) {
+  test(`near-window length recovery retains request ownership (${content.length ? 'partial' : 'empty'} output)`, () => {
+    const harness = createHarness();
+    handleSdkSessionEvent(harness.deps, harness.context, { type: 'message_start', message: { role: 'assistant' } });
+    handleSdkSessionEvent(harness.deps, harness.context, {
+      type: 'message_end', sessionEntryId: 'near-window-entry',
+      message: {
+        role: 'assistant', content, stopReason: 'length',
+        usage: { input: 2, output: 1, cacheRead: 94_963, cacheWrite: 3_495 },
+      },
+    });
+    assert.equal(harness.context.activeRequest?.mayNeedOverflowRecovery, true);
+    handleSdkSessionEvent(harness.deps, harness.context, { type: 'agent_end', willRetry: false });
+    handleSdkSessionEvent(harness.deps, harness.context, { type: 'compaction_start', reason: 'overflow' });
+    handleSdkSessionEvent(harness.deps, harness.context, {
+      type: 'compaction_end', reason: 'overflow', willRetry: true,
+      result: { summary: 'summary', firstKeptEntryId: 'kept', tokensBefore: 98_461 },
+    });
+    assert.equal(harness.context.activeRequest?.id, 'request-1');
+    assert.notEqual(harness.context.activeRequest?.liveTurnAccumulator, harness.accumulator);
+  });
+}
+
 test('a retryable error does not terminalize and tombstone the still-running live turn', () => {
   const harness = createHarness();
 

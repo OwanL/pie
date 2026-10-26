@@ -66,6 +66,24 @@ test('history compaction restores a safe pair when thresholds invert or leave ra
   );
 });
 
+test('history compaction caps absolute token thresholds at safe context-window percentages', () => {
+  const absolute = resolveHistoryCompactionSettings({
+    thresholdMode: 'tokens',
+    softThreshold: 100_000,
+    hardThreshold: 120_000,
+  });
+  assert.equal(resolveHistoryCompactionThresholdTokens(absolute, 100_000, 'soft'), 70_000);
+  assert.equal(resolveHistoryCompactionThresholdTokens(absolute, 100_000, 'hard'), 85_000);
+
+  const lower = resolveHistoryCompactionSettings({
+    thresholdMode: 'tokens',
+    softThreshold: 40_000,
+    hardThreshold: 60_000,
+  });
+  assert.equal(resolveHistoryCompactionThresholdTokens(lower, 100_000, 'soft'), 40_000);
+  assert.equal(resolveHistoryCompactionThresholdTokens(lower, 100_000, 'hard'), 60_000);
+});
+
 test('history compaction resolves percentage and token limits for an active model', () => {
   assert.equal(
     resolveHistoryCompactionThresholdTokens(DEFAULT_HISTORY_COMPACTION_SETTINGS, 200_000, 'soft'),

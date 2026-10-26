@@ -41,3 +41,36 @@ test('history compaction threshold helper resolves percentage and token modes', 
     true,
   );
 });
+
+test('absolute token thresholds are capped per model without overriding lower profile thresholds', () => {
+  const absolute: HistoryCompactionSettings = {
+    ...config,
+    softThreshold: 80_000,
+    hardThreshold: 100_000,
+    modelProfiles: {
+      'test/profiled': { softThreshold: 3_000, hardThreshold: 4_000, keepRecentTokens: 1_000 },
+      'test/large-profile': { softThreshold: 8_000, hardThreshold: 9_000, keepRecentTokens: 1_000 },
+    },
+  };
+
+  assert.equal(shouldRunHistoryCompaction(absolute, { tokens: 6_999, contextWindow: 10_000 }, 'soft'), false);
+  assert.equal(shouldRunHistoryCompaction(absolute, { tokens: 7_000, contextWindow: 10_000 }, 'soft'), true);
+  assert.equal(shouldRunHistoryCompaction(absolute, { tokens: 8_499, contextWindow: 10_000 }, 'hard'), false);
+  assert.equal(shouldRunHistoryCompaction(absolute, { tokens: 8_500, contextWindow: 10_000 }, 'hard'), true);
+  assert.equal(
+    shouldRunHistoryCompaction(absolute, { tokens: 3_000, contextWindow: 10_000 }, 'soft', { provider: 'test', id: 'profiled' }),
+    true,
+  );
+  assert.equal(
+    shouldRunHistoryCompaction(absolute, { tokens: 6_999, contextWindow: 10_000 }, 'soft', { provider: 'test', id: 'large-profile' }),
+    false,
+  );
+  assert.equal(
+    shouldRunHistoryCompaction(absolute, { tokens: 7_000, contextWindow: 10_000 }, 'soft', { provider: 'test', id: 'large-profile' }),
+    true,
+  );
+  assert.equal(
+    shouldRunHistoryCompaction(absolute, { tokens: 8_500, contextWindow: 10_000 }, 'hard', { provider: 'test', id: 'large-profile' }),
+    true,
+  );
+});

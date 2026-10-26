@@ -91,9 +91,10 @@ export function isAllZeroEmptyLengthMessage(
     || (typeof value === 'number' && Number.isFinite(value) && value === 0));
 }
 
-/** The automatic-recovery classifier is intentionally narrower than the
- * transcript classifier: an all-zero empty length response is retried only
- * when the SDK's estimate still places the prompt at the context boundary. */
+/** A length stop near the context boundary can contain partial output or a
+ * synthetic output token with no content. Use reported context usage (including
+ * cache writes) when available; only trust estimates for all-zero empty replies.
+ * Ordinary output-length limits away from the boundary are not overflow. */
 export function isEstimatedContextOverflowMessage(
   message: {
     stopReason?: string;
@@ -103,10 +104,15 @@ export function isEstimatedContextOverflowMessage(
   contextWindow: number | undefined,
   estimatedContextTokens: number | null | undefined,
 ): boolean {
+  if (message.stopReason !== 'length'
+      || typeof contextWindow !== 'number'
+      || !Number.isFinite(contextWindow)
+      || contextWindow <= 0) return false;
+  const usage = message.usage;
+  const reportedTokens = finiteUsage(usage?.input) + finiteUsage(usage?.cacheRead)
+    + finiteUsage(usage?.cacheWrite) + finiteUsage(usage?.output);
+  if (reportedTokens > 0) return reportedTokens >= contextWindow * 0.95;
   return isAllZeroEmptyLengthMessage(message)
-    && typeof contextWindow === 'number'
-    && Number.isFinite(contextWindow)
-    && contextWindow > 0
     && typeof estimatedContextTokens === 'number'
     && Number.isFinite(estimatedContextTokens)
     && estimatedContextTokens >= contextWindow * 0.98;
@@ -117,7 +123,7 @@ export function isEstimatedContextOverflowMessage(
  * continuation agree after a runtime rebuild. */
 export function isContextOverflowMessage(
   message: Pick<MessageLike, 'stopReason' | 'errorMessage' | 'content' | 'usage'>,
-  _contextWindow?: number,
+  contextWindow?: number,
 ): boolean {
   const errorMessage = message.errorMessage;
   if (message.stopReason === 'error' && errorMessage) {
@@ -125,10 +131,12 @@ export function isContextOverflowMessage(
     if (OVERFLOW_PATTERNS.some((pattern) => pattern.test(errorMessage))) return true;
   }
 
+  if (isEstimatedContextOverflowMessage(message, contextWindow, undefined)) return true;
   const input = finiteUsage(message.usage?.input) + finiteUsage(message.usage?.cacheRead);
   const output = finiteUsage(message.usage?.output);
   // A successful stop is a completed answer even when the provider reports an
-  // over-window usage estimate. Only a no-output length stop is resumable.
+  // over-window usage estimate. Near-window length stops above are resumable,
+  // including partial output; no-output length stops also remain interrupted.
   // Some providers incorrectly zero every usage field at this boundary; an
   // empty response remains interrupted, while automatic retry separately
   // requires a near-window estimate.

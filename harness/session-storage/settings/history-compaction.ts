@@ -151,9 +151,12 @@ export function resolveHistoryCompactionThresholdTokens(
   trigger: 'soft' | 'hard',
 ): number {
   const value = trigger === 'soft' ? settings.softThreshold : settings.hardThreshold;
-  return settings.thresholdMode === 'percentage'
-    ? Math.floor(contextWindow * value / 100)
-    : Math.floor(value);
+  if (settings.thresholdMode === 'percentage') return Math.floor(contextWindow * value / 100);
+
+  const percentageCeiling = trigger === 'soft'
+    ? DEFAULT_HISTORY_COMPACTION_SETTINGS.softThreshold
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.hardThreshold;
+  return Math.min(Math.floor(value), Math.floor(contextWindow * percentageCeiling / 100));
 }
 
 export function resolveHistoryCompactionEffectiveSettings(
