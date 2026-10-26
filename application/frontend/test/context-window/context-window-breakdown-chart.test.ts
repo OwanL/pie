@@ -12,6 +12,7 @@ import {
   segmentColor,
 } from '../../context-inspector/breakdown-chart';
 import type { ContextWindowBreakdown, ContextWindowBreakdownEntry } from '../../context-inspector/breakdown';
+import { buildInitialContextBreakdown } from '../../context-inspector/initial-breakdown';
 
 // `computeBarLayout` accepts a structural `{ tokens }` shape, so tests pass
 // minimal objects rather than full render segments.
@@ -125,12 +126,22 @@ test('ContextWindowBreakdownChart header shows percentage, used/total, and remai
   assert.match(html, /rich-tooltip-head-value[^>]*>6% · 23\.4k \/ 400k · 376\.6k left</);
 });
 
-test('ContextWindowBreakdownChart renders fresh-session pruning distribution rows', () => {
-  const breakdown = {
-    ...makeBreakdown(),
-    afterPruning: { medianTokens: 12_345, p25Tokens: 10_000, p75Tokens: 15_678 },
-  };
+test('fresh-session tooltip keeps the pre-pruning legend concise without history', () => {
+  const breakdown = buildInitialContextBreakdown({ tokens: 21_154, contextWindow: 1_050_000 });
   const html = renderToString(h(ContextWindowBreakdownChart, { breakdown }));
+  assert.match(html, /Before pruning/);
+  assert.match(html, /21\.2k/);
+  assert.doesNotMatch(html, /ctx-legend-note|Fresh pre-filter|After pruning|Middle 50%/);
+});
+
+test('ContextWindowBreakdownChart renders fresh-session pruning distribution rows', () => {
+  const breakdown = buildInitialContextBreakdown({
+    tokens: 23_400,
+    contextWindow: 200_000,
+    afterPruning: { medianTokens: 12_345, p25Tokens: 10_000, p75Tokens: 15_678 },
+  });
+  const html = renderToString(h(ContextWindowBreakdownChart, { breakdown }));
+  assert.doesNotMatch(html, /ctx-legend-note|Fresh pre-filter/);
   assert.match(html, /After pruning/);
   assert.match(html, /Median/);
   assert.match(html, /12\.3k/);

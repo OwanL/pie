@@ -34,7 +34,6 @@ export function buildInitialContextBreakdown(
     value: formatTokens(estimate.tokens),
     kind: 'estimated',
     tokens: estimate.tokens,
-    note: 'Fresh pre-filter catalog estimate; unavailable or resource-config-excluded packages are excluded.',
   }];
   const footerEntries: ContextWindowBreakdownEntry[] = [
     { key: 'window.used', label: 'Used', value: formatTokens(estimate.tokens), kind: 'estimated', tokens: estimate.tokens },
