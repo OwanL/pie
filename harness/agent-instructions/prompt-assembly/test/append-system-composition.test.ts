@@ -28,7 +28,7 @@ test('main composition adds defaults, personal and only the native eligible proj
   const compose = centralAppendSystemPromptOverride(root, { cwd: root });
   const composed = compose(['Project']);
   assert.deepEqual(composed, ['Defaults', 'Personal', 'Project']);
-  const promptOptions = { customPrompt: 'Explicit base', appendSystemPrompt: composed.join('\n\n') };
+  const promptOptions = { cwd: root, customPrompt: 'Explicit base', appendSystemPrompt: composed.join('\n\n') };
   assert.equal(applySystemPromptTogglesToOptions(promptOptions, new Set()).appendSystemPrompt, composed.join('\n\n'));
   const disabled = applySystemPromptTogglesToOptions(promptOptions, new Set([APPEND_ENTRY_ID]));
   assert.equal(disabled.appendSystemPrompt, undefined);
