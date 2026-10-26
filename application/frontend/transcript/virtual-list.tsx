@@ -8,6 +8,7 @@ import { memo } from 'preact/compat';
 import { type ChatMessage, type ChatPrefs, type ComposerInput, type PruningResult, type PruningSettings, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../lib/protocol/index.js';
 import { deriveTurnActivityState } from './activity';
 import { MessageRail } from './message-rail';
+import { LiveMessageMotion, useLiveMessageArrivals } from './live-message-motion';
 import { createMessageRailJumpController, type MessageRailJumpController } from './message-rail-jump';
 import { TranscriptScrollbar } from './transcript-scrollbar';
 import { UserPromptContextBar } from './user-prompt-context-bar';
@@ -253,6 +254,7 @@ function useTranscriptRenderToolCall({
 
 interface VirtualRowProps {
   virtualRow: VirtualItem;
+  arrivals: ReturnType<typeof useLiveMessageArrivals>;
   rows: readonly TranscriptRow[];
   lastRow: TranscriptRow | undefined;
   busy: boolean;
@@ -280,6 +282,7 @@ interface VirtualRowProps {
 
 const VirtualRow = memo(function VirtualRow({
   virtualRow,
+  arrivals,
   rows,
   lastRow,
   busy,
@@ -324,6 +327,12 @@ const VirtualRow = memo(function VirtualRow({
       )}
       style={{ transform: `translateY(${virtualRow.start}px)` }}
     >
+      <LiveMessageMotion
+        enabled={row.kind === 'message' && row.message.role === 'assistant'}
+        entrance={arrivals.entrances.get(row.key)}
+        placeholderKey={row.kind === 'message' && row.message.id.startsWith('assistant-placeholder:') ? row.key : undefined}
+        placeholders={arrivals.placeholders}
+      >
       <TranscriptVirtualRow
         row={row}
         busy={busy}
@@ -349,6 +358,7 @@ const VirtualRow = memo(function VirtualRow({
         sessionKey={sessionKey}
         onCancelPrepass={onCancelPrepass}
       />
+      </LiveMessageMotion>
     </div>
   );
 });
@@ -393,6 +403,7 @@ export function TranscriptVirtualList({
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
   });
+  const arrivals = useLiveMessageArrivals(rows, sessionKey, busy, transcriptWindow.hasNewer);
   // Prompt entries are rebuilt with the row model — a cheap index of source
   // message references plus flags (no per-prompt text normalization). The
   // context bar binary-searches this ordered index per render and derives the
@@ -544,6 +555,7 @@ export function TranscriptVirtualList({
             <VirtualRow
               key={virtualRow.key}
               virtualRow={virtualRow}
+              arrivals={arrivals}
               rows={rows}
               lastRow={lastRow}
               busy={busy}

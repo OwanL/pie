@@ -2,7 +2,9 @@
 /** @jsxImportSource preact */
 
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+
+import { useDisclosureMotion } from '../lib/components/use-disclosure-motion';
 
 import { renderMarkdown } from './markdown';
 import { annotateAppendedText } from './appended-text-fade';
@@ -16,6 +18,8 @@ interface BufferedTextPartProps {
   index: number;
   text: string;
   streaming: boolean;
+  /** A new text slot in an already mounted live message, never a restored slot. */
+  enter?: boolean;
   workingDirectory: string | null;
   onOpenFile: (path: string) => void;
   onContextMenu: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
@@ -44,7 +48,7 @@ const SELECTION_DEFER_POLL_MS = 200;
  * are deferred until the selection clears — otherwise each distinct html
  * string resets innerHTML, recreating DOM nodes and clearing the Selection.
  */
-export function BufferedTextPart({ messageId, index, text, streaming, workingDirectory, onOpenFile, onContextMenu, onFilePathContextMenu }: BufferedTextPartProps) {
+export function BufferedTextPart({ messageId, index, text, streaming, enter = false, workingDirectory, onOpenFile, onContextMenu, onFilePathContextMenu }: BufferedTextPartProps) {
   // Advance this synchronously with prop replacement, before effects from the
   // previous render can run. A terminal/replacement render therefore fences an
   // already-queued streaming parse instead of allowing it to publish stale
@@ -73,6 +77,37 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   const bodyRef = useRef<HTMLDivElement>(null);
   const pendingHtmlRef = useRef<{ html: string; text: string } | null>(null);
   const deferTimerRef = useRef<number | null>(null);
+
+  // Own only occupied space: the Markdown body remains natural and every
+  // published snapshot still reaches the DOM (and commit evidence) at once.
+  const [retainStreamMotion, setRetainStreamMotion] = useState(streaming || enter);
+  const disclosure = useDisclosureMotion(true, streaming || retainStreamMotion, enter ? 0 : undefined);
+  const naturalContentRef = disclosure.contentRef;
+  const setBodyRef = useCallback((node: HTMLDivElement | null) => {
+    bodyRef.current = node;
+    naturalContentRef.current = node;
+  }, [naturalContentRef]);
+
+  useEffect(() => {
+    if (streaming) {
+      setRetainStreamMotion(true);
+      return;
+    }
+    if (!retainStreamMotion) return;
+    // Let terminal parsing, selection deferral, and the final owned motion
+    // finish before restoring natural sizing. History never enters this path.
+    let timer: number;
+    const releaseWhenSettled = () => {
+      if (timerRef.current !== null || pendingHtmlRef.current !== null
+        || disclosure.bodyRef.current?.hasAttribute('data-height-moving')) {
+        timer = window.setTimeout(releaseWhenSettled, 200);
+        return;
+      }
+      setRetainStreamMotion(false);
+    };
+    timer = window.setTimeout(releaseWhenSettled, 200);
+    return () => window.clearTimeout(timer);
+  }, [streaming, retainStreamMotion, rendered, disclosure.bodyRef]);
 
   function publish(candidate: { html: string; text: string }) {
     setRendered(previous => ({
@@ -184,22 +219,25 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   useCommittedTextLeaf(messageId, index, rendered.text);
 
   return (
-    <div
-      key={`text-${messageId}-${index}`}
-      class={`message-body${streaming ? ' streaming-text' : ''}`}
-      ref={bodyRef}
-      dangerouslySetInnerHTML={{ __html: rendered.html }}
-      onClick={(e) => {
-        handleDelegatedFilePathClick(e, workingDirectory, onOpenFile);
-      }}
-      onKeyDown={(e) => {
-        handleDelegatedFilePathKeyDown(e, workingDirectory, onOpenFile);
-      }}
-      onContextMenu={(e) => {
-        if (handleDelegatedFilePathContextMenu(e, workingDirectory, onFilePathContextMenu)) return;
-        e.preventDefault();
-        onContextMenu(e);
-      }}
-    />
+    <div ref={disclosure.bodyRef}>
+      <div
+        key={`text-${messageId}-${index}`}
+        class={`message-body${streaming ? ' streaming-text' : ''}`}
+        ref={setBodyRef}
+        style={{ display: 'flow-root' }}
+        dangerouslySetInnerHTML={{ __html: rendered.html }}
+        onClick={(e) => {
+          handleDelegatedFilePathClick(e, workingDirectory, onOpenFile);
+        }}
+        onKeyDown={(e) => {
+          handleDelegatedFilePathKeyDown(e, workingDirectory, onOpenFile);
+        }}
+        onContextMenu={(e) => {
+          if (handleDelegatedFilePathContextMenu(e, workingDirectory, onFilePathContextMenu)) return;
+          e.preventDefault();
+          onContextMenu(e);
+        }}
+      />
+    </div>
   );
 }

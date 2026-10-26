@@ -114,10 +114,19 @@ export function useScrollEventsEffect(
       const next = el.scrollTop;
       const previous = lastScrollTopRef.current;
       const expectedProgrammaticTop = programmaticScrollTargetRef.current;
-      const programmatic = expectedProgrammaticTop !== null
-        && Math.abs(next - expectedProgrammaticTop) <= 1;
-      // Consume the expectation even on mismatch. A different position means
-      // browser coalescing included genuine thumb movement, which must win.
+      const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      // Measurement can shrink the range beneath an outstanding follow write.
+      // The queued event may arrive after a little regrowth, not at exact bottom.
+      // Explicit reader intent must still win over that layout-owned clamp.
+      const programmaticClamp = expectedProgrammaticTop !== null
+        && expectedProgrammaticTop > maxScrollTop
+        && !pointerGestureActive
+        && !inputIntentActive
+        && next <= maxScrollTop;
+      const programmatic = programmaticClamp || (expectedProgrammaticTop !== null
+        && Math.abs(next - expectedProgrammaticTop) <= 1);
+      // Consume even on mismatch; outside the range-clamp case, coalesced
+      // genuine thumb movement must win.
       if (expectedProgrammaticTop !== null) programmaticScrollTargetRef.current = null;
       // Pointer/input intent owns both scroll directions. Once detached from
       // auto-follow, any untagged movement is also treated as manual; this
@@ -138,7 +147,7 @@ export function useScrollEventsEffect(
         ? false
         : resolveAutoFollowState({
             previousAutoFollow: autoFollowRef.current,
-            previousScrollTop: lastScrollTopRef.current,
+            previousScrollTop: programmaticClamp ? next : previous,
             nextScrollTop: next,
             metrics,
           });

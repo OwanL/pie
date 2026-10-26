@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { animateHeightChange, cancelHeightMotion } from './height-motion';
 
 /** Own occupied space while the separate flow-root content stays natural. */
-export function useDisclosureMotion(open: boolean, enabled = true) {
+export function useDisclosureMotion(open: boolean, enabled = true, initialHeight?: number) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [retained, setRetained] = useState(open);
@@ -47,6 +47,8 @@ export function useDisclosureMotion(open: boolean, enabled = true) {
       if (!body.hasAttribute('data-height-moving')
         && content.querySelector('[data-height-moving], [data-preview-moving]')) commit();
       else animateHeightChange(body, commit, { from: previousHeight, duration: 160, easing: 'ease-out' });
+    } else if (!initialized && open && initialHeight !== undefined) {
+      animateHeightChange(body, commit, { from: initialHeight, duration: 160, easing: 'ease-out' });
     } else if (!initialized || !body.style.getPropertyValue('--disclosure-height')) commit();
   };
   const measureRef = useRef(measure);

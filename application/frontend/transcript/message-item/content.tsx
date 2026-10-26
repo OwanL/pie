@@ -89,6 +89,9 @@ function AssistantParts({
   deferHistoricalToolCalls = false,
 }: AssistantPartsProps) {
   const appendedToolCalls = useAppendedToolCalls(parts, isCurrentlyStreaming);
+  const previousPartCount = useRef(parts.length);
+  const firstAppendedPart = previousPartCount.current;
+  previousPartCount.current = parts.length;
   // Keep every consecutive tool-call run under one parent from its first
   // provisional card onward. Verified parallel batches are child annotations,
   // never replacement parents: mixed adjacent batches therefore stay under the
@@ -215,6 +218,7 @@ function AssistantParts({
             messageId={messageId}
             index={index}
             text={part.text}
+            enter={isCurrentlyStreaming && index >= firstAppendedPart}
             // Only the last part is actively streaming (new text is appended
             // there); earlier text parts are complete. Restricting the
             // streaming flag to that part keeps bounded markdown parsing off
