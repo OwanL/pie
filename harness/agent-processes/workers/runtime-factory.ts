@@ -6,6 +6,7 @@
 import { selectAdmittedInitialModel } from '../lib/sdk-integration/sdk';
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files';
 import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt';
+import { getApplicationResourceLoaderOptions } from '../../agent-instructions/application-resources.js';
 import { getInstructionResourcePaths } from '../../agent-instructions/resource-roots.js';
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
 import { recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
@@ -244,6 +245,7 @@ export function createRuntimeFactory(
       ...(providerServices ? { modelRegistry: providerServices.modelRegistry } : {}),
       editorVersion: resolveEditorVersion(),
       resourceLoaderOptions: {
+        ...getApplicationResourceLoaderOptions({ agentDir, cwd, context: 'primary' }),
         // Main-only default/personal/project additions. Child loaders never
         // receive this policy. Keep inventory on the same composition path.
         appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir, {

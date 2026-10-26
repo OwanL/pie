@@ -8,6 +8,7 @@
 
 import { readRuntimeContext, type TreeBudget } from "./runtime-context.js";
 import { createSubagentBackendTools } from "./backend-tools-runtime.js";
+import { getApplicationResourceLoaderOptions } from "../../agent-instructions/application-resources.js";
 import { subagentSystemPrompt } from "./system-prompt.js";
 export { subagentRuntime, readRuntimeContext, type TreeBudget, type ProcessPermitScope, type SubagentRuntimeContext } from "./runtime-context.js";
 import { createHash } from "node:crypto";
@@ -1375,6 +1376,7 @@ export async function runSingleAgent(
 
 	const agentDir = sdk.getAgentDir();
 	const resourceLoader = sdk.createResourceLoader({
+		...getApplicationResourceLoaderOptions({ agentDir, cwd: sessionCwd, context: 'subagent' }),
 		cwd: sessionCwd,
 		agentDir,
 		appendSystemPrompt: subagentSystemPrompt(agentDir, agent.systemPrompt),

@@ -116,6 +116,12 @@ test("runner explicitly attaches only cached child guidance for an empty role", 
 		sdk.createResourceLoader = (args) => { options = args; return create(args); };
 		await runFakeAgent(sdk);
 		assert.equal(options.agentDir, root);
+		assert.deepEqual(options.defaultExtensions, []);
+		assert.ok(options.additionalUserSkillPaths.includes(path.resolve(root, 'harness', 'agent-instructions', 'skills')));
+		assert.ok(options.additionalProjectSkillPaths.includes(path.resolve(options.cwd, 'skills')));
+		assert.equal(typeof options.skillPathPriority, 'function');
+		assert.equal('noContextFiles' in options, false);
+		assert.equal(options.noExtensions, false);
 		assert.deepEqual(options.appendSystemPrompt, ["child guidance"]);
 		writeFileSync(path.join(instructions, "SUBAGENT_SYSTEM.md"), "changed");
 		await runFakeAgent(sdk);

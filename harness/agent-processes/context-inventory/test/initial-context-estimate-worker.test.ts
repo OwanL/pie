@@ -204,7 +204,14 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     AuthStorage: { create: () => ({}) },
     SessionManager: { inMemory: () => ({}) },
     createAgentSessionServices: async (options: any) => {
-      const resources = options.resourceLoaderOptions.agentsFilesOverride({
+      const loaderOptions = options.resourceLoaderOptions;
+      assert.deepEqual(loaderOptions.defaultExtensions, []);
+      assert.ok(loaderOptions.additionalUserSkillPaths.includes(path.resolve('/agent', 'harness', 'agent-instructions', 'skills')));
+      assert.ok(loaderOptions.additionalProjectSkillPaths.includes(path.resolve('/workspace', 'skills')));
+      assert.equal(typeof loaderOptions.skillPathPriority, 'function');
+      assert.equal('noContextFiles' in loaderOptions, false);
+      assert.equal(typeof loaderOptions.appendSystemPromptOverride, 'function');
+      const resources = loaderOptions.agentsFilesOverride({
         agentsFiles: [{ path: '/workspace/AGENTS.md', content: 'Project instructions.' }],
       });
       assert.equal(resources.agentsFiles.length, 1);

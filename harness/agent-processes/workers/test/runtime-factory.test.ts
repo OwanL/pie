@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as path from 'node:path';
 
 import { createRuntimeFactory, ServiceLoadingGate } from '../runtime-factory';
 import { selectAdmittedInitialModel, type SdkModule } from '../../lib/sdk-integration/sdk';
@@ -52,9 +53,12 @@ test('runtime factory passes the configured provider-qualified default to new se
   const selectedModel = { id: 'shared-model', provider: 'provider-b' };
   const findCalls: Array<{ provider: string; modelId: string }> = [];
   const createOptions: Array<Record<string, unknown>> = [];
+  let resourceOptions: any;
 
   const sdk = {
-    createAgentSessionServices: async () => ({
+    createAgentSessionServices: async (options: any) => {
+      resourceOptions = options.resourceLoaderOptions;
+      return {
       modelRegistry: {
         find(provider: string, modelId: string) {
           findCalls.push({ provider, modelId });
@@ -67,7 +71,8 @@ test('runtime factory passes the configured provider-qualified default to new se
         getDefaultProvider: () => selectedModel.provider,
         getDefaultModel: () => selectedModel.id,
       },
-    }),
+    };
+    },
     createAgentSessionFromServices: async (options: unknown) => {
       createOptions.push(options as Record<string, unknown>);
       return { session: { model: selectedModel } };
@@ -88,6 +93,12 @@ test('runtime factory passes the configured provider-qualified default to new se
     sessionStartEvent: { type: 'session_start', reason: 'new' },
   });
 
+  assert.deepEqual(resourceOptions.defaultExtensions, []);
+  assert.ok(resourceOptions.additionalUserSkillPaths.includes(path.resolve('/agent', 'harness', 'agent-instructions', 'skills')));
+  assert.ok(resourceOptions.additionalProjectSkillPaths.includes(path.resolve('/workspace', 'skills')));
+  assert.equal(typeof resourceOptions.skillPathPriority, 'function');
+  assert.equal('noContextFiles' in resourceOptions, false);
+  assert.equal(typeof resourceOptions.appendSystemPromptOverride, 'function');
   assert.deepEqual(findCalls, [{ provider: 'provider-b', modelId: 'shared-model' }]);
   assert.equal(createOptions.length, 1);
   assert.equal(createOptions[0].model, selectedModel);

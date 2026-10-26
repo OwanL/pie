@@ -33,6 +33,7 @@ import {
 } from './initial-context-estimate-protocol.js';
 import { createPieSystemPromptBuilder } from '../../agent-instructions/prompt-assembly/pie-harness-prompt.js';
 import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt.js';
+import { getApplicationResourceLoaderOptions } from '../../agent-instructions/application-resources.js';
 import { getInstructionResourcePaths } from '../../agent-instructions/resource-roots.js';
 import { createBackendTools } from '../coordinator/backend-tools.js';
 import {
@@ -161,6 +162,7 @@ async function collectInitialContextInventoryInsideBoundary(
       agentDir,
       authStorage,
       resourceLoaderOptions: {
+        ...getApplicationResourceLoaderOptions({ agentDir, cwd, context: 'inventory' }),
         // Mirror the main-session loaders (runtime-factory): attach Pie's
         // centralized appended prompt so inventories estimate the same
         // context real sessions build.

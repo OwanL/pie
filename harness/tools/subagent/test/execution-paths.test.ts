@@ -362,7 +362,13 @@ test("runSingleAgent wires Pie ownership through child prompt and tool/resource 
 	);
 
 	assert.equal(result.exitCode, 0, result.errorMessage);
-	assert.deepEqual(state.createResourceLoaderArgs[0]?.appendSystemPrompt, [agentBody]);
+	const resourceOptions = state.createResourceLoaderArgs[0]!;
+	assert.deepEqual(resourceOptions.appendSystemPrompt, [agentBody]);
+	assert.deepEqual(resourceOptions.defaultExtensions, []);
+	assert.ok((resourceOptions.additionalUserSkillPaths as string[]).includes(path.resolve(String(resourceOptions.agentDir), 'harness', 'agent-instructions', 'skills')));
+	assert.deepEqual(resourceOptions.additionalProjectSkillPaths, [path.resolve(process.cwd(), 'skills')]);
+	assert.equal(typeof resourceOptions.skillPathPriority, 'function');
+	assert.equal(resourceOptions.noExtensions, false);
 	assert.equal(state.promptCalls, 1);
 });
 
