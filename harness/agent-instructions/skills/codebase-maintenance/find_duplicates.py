@@ -9,8 +9,12 @@ Detect duplicate code blocks via jscpd (copy/paste detector).
 Usage:
     uv run find_duplicates.py <directory> [options]
 
-Runs jscpd (via npx) for copy/paste and token-level duplicate detection
-across 150+ languages. npx downloads jscpd on first use; no install step.
+Runs jscpd for copy/paste and token-level duplicate detection
+across supported languages. The legacy source/developer npx route downloads
+jscpd on first use. Prepared mode uses explicit local paths with no fallback:
+    --node-executable PATH --scanner-entry PATH
+Both must be existing absolute files. Tested candidate: jscpd 5.4.2.
+Path validation does not establish version/payload readiness.
 
 Respects the shared .ignore file (see find_large_files.py for format
 details). Findings are grouped into three categories — cross-file,
@@ -64,6 +68,7 @@ Exit codes:
 """
 
 import fnmatch
+import importlib.util
 import json
 import re
 import shutil
@@ -72,6 +77,12 @@ import sys
 import tempfile
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
+
+_PREPARED_SPEC = importlib.util.spec_from_file_location(
+    "maintenance_prepared_scanner", Path(__file__).with_name("prepared_scanner.py")
+)
+_PREPARED = importlib.util.module_from_spec(_PREPARED_SPEC)
+_PREPARED_SPEC.loader.exec_module(_PREPARED)
 
 # ---------------------------------------------------------------------------
 # Ignore-file constants (duplicated from find_large_files.py)
@@ -362,7 +373,8 @@ def run_jscpd(
 
         # Read the JSON report while the temp dir still exists; the
         # ``with`` block tears it down as soon as we return.
-        duplicates = _read_jscpd_report(report_dir) or []
+        report = _read_jscpd_report(report_dir)
+        duplicates = report if report is not None else []
 
     if result.returncode != 0:
         diagnostics = result.stderr.strip()[:500]
@@ -375,16 +387,18 @@ def run_jscpd(
         )
         sys.exit(result.returncode)
 
+    if report is None:
+        print("jscpd error: no valid jscpd-report.json report produced", file=sys.stderr)
+        sys.exit(2)
     return duplicates
 
 
 def _read_jscpd_report(report_dir: Path) -> list[dict] | None:
     """Return the parsed ``duplicates`` list from jscpd's JSON report, if any.
 
-    Returns ``None`` only when no report file could be read at all (so the
-    caller can distinguish "no file" from "file present but empty"). Returns
-    an empty list when a report file is present and parses but contains zero
-    duplicates.
+    Returns ``None`` when no valid report with an explicit duplicates list
+    could be read. An empty list is a genuine zero-finding report, not a
+    substitute for missing or malformed output.
     """
     candidates = [
         report_dir / "jscpd-report.json",
@@ -399,8 +413,9 @@ def _read_jscpd_report(report_dir: Path) -> list[dict] | None:
             data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
-        duplicates = data.get("duplicates") or []
-        return duplicates if isinstance(duplicates, list) else []
+        if isinstance(data, dict) and isinstance(data.get("duplicates"), list):
+            if all(isinstance(duplicate, dict) for duplicate in data["duplicates"]):
+                return data["duplicates"]
     return None
 
 
@@ -574,11 +589,12 @@ def _locate_jscpd() -> list[str]:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def parse_args() -> tuple[Path, int, int, int, bool, bool]:
-    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+def parse_args(argv: list[str] | None = None) -> tuple[Path, int, int, int, bool, bool]:
+    args = sys.argv if argv is None else [sys.argv[0], *argv]
+    if len(args) >= 2 and args[1] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0)
-    if len(sys.argv) < 2:
+    if len(args) < 2:
         print(
             "usage: find_duplicates.py <directory> "
             "[--max-findings N] [--min-lines N] [--min-tokens N] "
@@ -587,9 +603,9 @@ def parse_args() -> tuple[Path, int, int, int, bool, bool]:
         )
         sys.exit(2)
 
-    directory = Path(sys.argv[1]).resolve()
+    directory = Path(args[1]).resolve()
     if not directory.is_dir():
-        print(f"error: not a directory: {sys.argv[1]}", file=sys.stderr)
+        print(f"error: not a directory: {args[1]}", file=sys.stderr)
         sys.exit(2)
 
     max_findings = 50
@@ -599,25 +615,25 @@ def parse_args() -> tuple[Path, int, int, int, bool, bool]:
     exclude_test_dirs = False
 
     i = 2
-    while i < len(sys.argv):
-        a = sys.argv[i]
-        if a == "--max-findings" and i + 1 < len(sys.argv):
+    while i < len(args):
+        a = args[i]
+        if a == "--max-findings" and i + 1 < len(args):
             try:
-                max_findings = int(sys.argv[i + 1])
+                max_findings = int(args[i + 1])
             except ValueError:
                 print("error: --max-findings must be an integer", file=sys.stderr)
                 sys.exit(2)
             i += 2
-        elif a == "--min-lines" and i + 1 < len(sys.argv):
+        elif a == "--min-lines" and i + 1 < len(args):
             try:
-                min_lines = int(sys.argv[i + 1])
+                min_lines = int(args[i + 1])
             except ValueError:
                 print("error: --min-lines must be an integer", file=sys.stderr)
                 sys.exit(2)
             i += 2
-        elif a == "--min-tokens" and i + 1 < len(sys.argv):
+        elif a == "--min-tokens" and i + 1 < len(args):
             try:
-                min_tokens = int(sys.argv[i + 1])
+                min_tokens = int(args[i + 1])
             except ValueError:
                 print("error: --min-tokens must be an integer", file=sys.stderr)
                 sys.exit(2)
@@ -650,6 +666,11 @@ def parse_args() -> tuple[Path, int, int, int, bool, bool]:
 
 
 def main() -> None:
+    try:
+        remaining, selected = _PREPARED.parse_prepared_args(sys.argv[1:])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
     (
         directory,
         max_findings,
@@ -657,7 +678,7 @@ def main() -> None:
         min_tokens,
         show_generated,
         exclude_test_dirs,
-    ) = parse_args()
+    ) = parse_args(remaining)
 
     script_dir = Path(__file__).parent.resolve()
     global_patterns, context_patterns = load_ignore_patterns(script_dir)
@@ -665,7 +686,8 @@ def main() -> None:
         directory, global_patterns, context_patterns,
     )
 
-    jscpd_argv = _locate_jscpd()
+    # Legacy source/developer route may acquire packages; prepared mode never does.
+    jscpd_argv = selected if selected is not None else _locate_jscpd()
     jscpd_ignore = _ignore_patterns_for_jscpd(active_patterns)
     duplicates = run_jscpd(
         directory, jscpd_argv, min_lines, min_tokens, jscpd_ignore,

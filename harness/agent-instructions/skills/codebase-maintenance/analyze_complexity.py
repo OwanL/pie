@@ -30,9 +30,11 @@ Output:
     If no flagged functions meet the grade filter: prints "no flagged functions".
 
 Prerequisites:
-    Node.js and npm must be available on PATH.  Qualitas is invoked via npx
-    which downloads it on first use.  Supports TypeScript/JS, Python, Rust, Go,
-    and Java.
+    Prepared mode: --node-executable PATH --scanner-entry PATH selects existing
+    absolute Node/JavaScript files, with no discovery, acquisition or fallback.
+    Tested candidate: Qualitas 0.5.4; path checks do not establish payload readiness.
+    Without that pair, the legacy source/developer route requires Node.js/npm on
+    PATH and invokes npx, which may download Qualitas on first use.
 
     No Python dependencies beyond the standard library are required.
 """
@@ -49,6 +51,12 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 # ---------------------------------------------------------------------------
+_PREPARED_SPEC = importlib.util.spec_from_file_location(
+    "maintenance_prepared_scanner", Path(__file__).with_name("prepared_scanner.py")
+)
+_PREPARED = importlib.util.module_from_spec(_PREPARED_SPEC)
+_PREPARED_SPEC.loader.exec_module(_PREPARED)
+
 # Re-use the shared ignore-file logic from find_large_files.py
 # ---------------------------------------------------------------------------
 _MODULE_PATH = Path(__file__).parent / "find_large_files.py"
@@ -156,7 +164,9 @@ class QualitasExecutionError(RuntimeError):
     """Raised when Qualitas did not produce a trustworthy report."""
 
 
-def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict:
+def _run_qualitas_on_dir(
+    directory: Path, npx_bin: str, *, prepared_argv: list[str] | None = None,
+) -> dict:
     """Run Qualitas and return a valid JSON report, otherwise raise."""
     out_tmp = tempfile.NamedTemporaryFile(
         suffix=".json", prefix="qualitas-", delete=False,
@@ -164,7 +174,8 @@ def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict:
     out_path = out_tmp.name
     out_tmp.close()
 
-    cmd = [npx_bin, "qualitas", str(directory), "-f", "json", "-o", out_path]
+    prefix = prepared_argv if prepared_argv is not None else [npx_bin, "qualitas"]
+    cmd = [*prefix, str(directory), "-f", "json", "-o", out_path]
 
     try:
         try:
@@ -217,9 +228,13 @@ def _run_qualitas_on_dir(directory: Path, npx_bin: str) -> dict:
 def run_qualitas(
     root: Path,
     source_dirs: list[Path],
+    *,
+    node_executable: str | None = None,
+    scanner_entry: str | None = None,
 ) -> dict:
-    """Run Qualitas on each source directory, merge results, and return."""
-    npx_bin = shutil.which("npx")
+    """Run a selected prepared tool, or the legacy source/developer npx route."""
+    selected = _PREPARED.prepared_argv(node_executable, scanner_entry)
+    npx_bin = "" if selected is not None else shutil.which("npx")
     if npx_bin is None:
         print(
             "Error: npx not found in PATH.\n"
@@ -235,7 +250,7 @@ def run_qualitas(
     merged_files: list[dict] = []
 
     for src_dir in source_dirs:
-        data = _run_qualitas_on_dir(src_dir, npx_bin)
+        data = _run_qualitas_on_dir(src_dir, npx_bin, prepared_argv=selected)
 
         # Normalise single-file and directory output shapes.
         if "files" in data:
@@ -418,11 +433,12 @@ def format_output(flagged: list[dict], max_findings: int) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-def parse_args() -> tuple[Path, int, str]:
-    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+def parse_args(argv: list[str] | None = None) -> tuple[Path, int, str]:
+    args = sys.argv if argv is None else [sys.argv[0], *argv]
+    if len(args) >= 2 and args[1] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0)
-    if len(sys.argv) < 2:
+    if len(args) < 2:
         print(
             "usage: analyze_complexity.py <directory> "
             "[--max-findings N] [--min-grade GRADE]",
@@ -430,25 +446,25 @@ def parse_args() -> tuple[Path, int, str]:
         )
         sys.exit(2)
 
-    directory = Path(sys.argv[1]).resolve()
+    directory = Path(args[1]).resolve()
     if not directory.is_dir():
-        print(f"error: not a directory: {sys.argv[1]}", file=sys.stderr)
+        print(f"error: not a directory: {args[1]}", file=sys.stderr)
         sys.exit(2)
 
     max_findings = 50
     min_grade = "C"
 
     i = 2
-    while i < len(sys.argv):
-        if sys.argv[i] == "--max-findings" and i + 1 < len(sys.argv):
+    while i < len(args):
+        if args[i] == "--max-findings" and i + 1 < len(args):
             try:
-                max_findings = int(sys.argv[i + 1])
+                max_findings = int(args[i + 1])
             except ValueError:
                 print("error: --max-findings must be an integer", file=sys.stderr)
                 sys.exit(2)
             i += 2
-        elif sys.argv[i] == "--min-grade" and i + 1 < len(sys.argv):
-            grade = sys.argv[i + 1].upper()
+        elif args[i] == "--min-grade" and i + 1 < len(args):
+            grade = args[i + 1].upper()
             if grade not in GRADE_ORDER:
                 print(
                     f"error: invalid grade '{grade}'. "
@@ -459,7 +475,7 @@ def parse_args() -> tuple[Path, int, str]:
             min_grade = grade
             i += 2
         else:
-            print(f"unknown argument: {sys.argv[i]}", file=sys.stderr)
+            print(f"unknown argument: {args[i]}", file=sys.stderr)
             sys.exit(2)
 
     if max_findings < 0:
@@ -470,7 +486,12 @@ def parse_args() -> tuple[Path, int, str]:
 
 
 def main() -> None:
-    directory, max_findings, min_grade = parse_args()
+    try:
+        remaining, selected = _PREPARED.parse_prepared_args(sys.argv[1:])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    directory, max_findings, min_grade = parse_args(remaining)
 
     # Load shared .ignore patterns
     script_dir = Path(__file__).parent.resolve()
@@ -484,7 +505,11 @@ def main() -> None:
     try:
         with _stage_filtered_scan_tree(directory, active_patterns) as (scan_root, staged_files):
             scan_targets = [scan_root] if staged_files else []
-            data = run_qualitas(scan_root, scan_targets)
+            selection = (
+                {"node_executable": selected[0], "scanner_entry": selected[1]}
+                if selected is not None else {}
+            )
+            data = run_qualitas(scan_root, scan_targets, **selection)
     except (OSError, QualitasExecutionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(2)

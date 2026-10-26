@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -115,6 +116,100 @@ class TraversalPolicyDriftTests(unittest.TestCase):
         )
 
 
+class PreparedScannerTests(unittest.TestCase):
+    def test_source_default_keeps_legacy_route(self):
+        remaining, selected = duplicates._PREPARED.parse_prepared_args(["--report", "json"])
+        self.assertEqual(remaining, ["--report", "json"])
+        self.assertIsNone(selected)
+
+    def test_prepared_pair_is_exact_argv_and_preserves_other_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="scanner space-雪-") as tmp:
+            root = Path(tmp)
+            node = root / "node executable"
+            entry = root / "scanner entry 雪.js"
+            node.touch()
+            entry.touch()
+            args = [
+                "--report", "json", "--node-executable", str(node),
+                "--scanner-entry", str(entry), "--threshold", "70",
+            ]
+            remaining, selected = duplicates._PREPARED.parse_prepared_args(args)
+        self.assertEqual(remaining, ["--report", "json", "--threshold", "70"])
+        self.assertEqual(selected, [str(node), str(entry)])
+        self.assertIsInstance(selected, list)
+
+    def test_missing_invalid_and_incomplete_prepared_pairs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node = root / "node"
+            entry = root / "scanner.js"
+            node.touch()
+            entry.touch()
+            cases = [
+                ["--node-executable", str(node)],
+                ["--scanner-entry", str(entry)],
+                ["--node-executable", str(node), "--scanner-entry", str(root / "missing.js")],
+                ["--node-executable", "relative-node", "--scanner-entry", str(entry)],
+                ["--node-executable", str(node), "--scanner-entry", str(node)],
+                ["--node-executable", str(node), "--scanner-entry"],
+            ]
+            for args in cases:
+                with self.subTest(args=args), self.assertRaises(ValueError):
+                    duplicates._PREPARED.parse_prepared_args(args)
+
+    def test_bad_prepared_pair_does_not_fall_back_to_source_scanner(self):
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "argv", ["find_duplicates.py", "--node-executable", "missing"]), \
+             mock.patch.object(duplicates, "_locate_jscpd", side_effect=AssertionError("fallback")), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                duplicates.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn("fallback", stderr.getvalue())
+
+
+    def test_prepared_scanner_prefix_reaches_subprocess_without_shell_or_discovery(self):
+        with tempfile.TemporaryDirectory(prefix="prepared space 雪-") as tmp:
+            root = Path(tmp)
+            node, entry = root / "node", root / "scanner 雪.js"
+            node.touch()
+            entry.touch()
+            captured = []
+
+            def fake_run(cmd, **kwargs):
+                captured.append(cmd)
+                self.assertFalse(kwargs.get("shell", False))
+                if "--output" in cmd:
+                    report = Path(cmd[cmd.index("--output") + 1]) / "jscpd-report.json"
+                    payload = {"duplicates": []}
+                else:
+                    report = Path(cmd[cmd.index("-o") + 1])
+                    payload = {"files": []}
+                report.write_text(json.dumps(payload), encoding="utf-8")
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(sys, "argv", ["find_duplicates.py", str(root),
+                    "--node-executable", str(node), "--scanner-entry", str(entry)]), \
+                 mock.patch.object(duplicates, "_locate_jscpd", side_effect=AssertionError("fallback")), \
+                 mock.patch.object(duplicates.subprocess, "run", side_effect=fake_run), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                duplicates.main()
+            with mock.patch.object(complexity.shutil, "which", side_effect=AssertionError("discovery")), \
+                 mock.patch.object(complexity.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(complexity.run_qualitas(root, [root],
+                    node_executable=str(node), scanner_entry=str(entry)), {"files": []})
+            self.assertEqual(len(captured), 2)
+            for cmd in captured:
+                self.assertEqual(cmd[:2], [str(node), str(entry)])
+
+    def test_legacy_qualitas_discovery_is_preserved(self):
+        with mock.patch.object(complexity.shutil, "which", return_value="legacy-npx") as which, \
+             mock.patch.object(complexity, "_run_qualitas_on_dir", return_value={"files": []}) as scan:
+            self.assertEqual(complexity.run_qualitas(Path("src"), [Path("src")]), {"files": []})
+        which.assert_called_once_with("npx")
+        scan.assert_called_once_with(Path("src"), "legacy-npx", prepared_argv=None)
+
+
 class DuplicateTests(unittest.TestCase):
     def test_jscpd_uses_file_ignore_globs(self):
         translated = duplicates._ignore_patterns_for_jscpd(
@@ -141,6 +236,37 @@ class DuplicateTests(unittest.TestCase):
             self.assertEqual(
                 duplicates.to_rel_posix("project/src/app.ts", root), "src/app.ts"
             )
+
+    def test_successful_jscpd_requires_valid_report_but_accepts_empty_duplicates(self):
+        invalid_reports = (
+            None, "not json", "[]", "{}", '{"duplicates": null}',
+            '{"duplicates": {}}', '{"duplicates": [1]}',
+        )
+        for report_text in invalid_reports:
+            def fake_run(cmd, **_kwargs):
+                if report_text is not None:
+                    output = Path(cmd[cmd.index("--output") + 1])
+                    (output / "jscpd-report.json").write_text(report_text, encoding="utf-8")
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with self.subTest(report_text=report_text), tempfile.TemporaryDirectory() as tmp, \
+                 mock.patch.object(duplicates.subprocess, "run", side_effect=fake_run), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    duplicates.run_jscpd(Path(tmp), ["jscpd"], 8, 70, [])
+                self.assertEqual(raised.exception.code, 2)
+
+        def empty_report(cmd, **_kwargs):
+            output = Path(cmd[cmd.index("--output") + 1])
+            (output / "jscpd-report.json").write_text(
+                json.dumps({"duplicates": []}), encoding="utf-8"
+            )
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            duplicates.subprocess, "run", side_effect=empty_report
+        ):
+            self.assertEqual(duplicates.run_jscpd(Path(tmp), ["jscpd"], 8, 70, []), [])
 
     def test_run_jscpd_passes_ignore_not_ignore_pattern(self):
         captured: list[str] = []
@@ -215,7 +341,10 @@ class QualitasTests(unittest.TestCase):
                 self.assertEqual(visible, ["src/app.ts"])
             self.assertFalse(stage_path.exists())
 
-    @unittest.skipUnless(shutil.which("npx"), "npx is not installed")
+    @unittest.skipUnless(
+        os.environ.get("PIE_TEST_NODE_EXECUTABLE") and os.environ.get("PIE_TEST_QUALITAS_ENTRY"),
+        "set PIE_TEST_NODE_EXECUTABLE and PIE_TEST_QUALITAS_ENTRY to opt in to live Qualitas",
+    )
     def test_real_qualitas_scans_only_the_filtered_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "project"
@@ -234,7 +363,12 @@ class QualitasTests(unittest.TestCase):
                 root, ["data/", "*.egg-info/"]
             ) as (stage, staged_files):
                 self.assertEqual(staged_files, ["src/kept.js"])
-                report = complexity.run_qualitas(stage, [stage])
+                report = complexity.run_qualitas(
+                    stage,
+                    [stage],
+                    node_executable=os.environ["PIE_TEST_NODE_EXECUTABLE"],
+                    scanner_entry=os.environ["PIE_TEST_QUALITAS_ENTRY"],
+                )
 
         reported = {entry["filePath"] for entry in report["files"]}
         self.assertIn("src/kept.js", reported)
@@ -338,7 +472,10 @@ class SemgrepTests(unittest.TestCase):
         self.assertEqual(exclude_values, ["cache"])
         self.assertFalse(any("**" in value for value in exclude_values))
 
-    @unittest.skipUnless(shutil.which("semgrep"), "semgrep is not installed")
+    @unittest.skipUnless(
+        os.environ.get("PIE_TEST_SEMGREP") == "1",
+        "set PIE_TEST_SEMGREP=1 to opt in to live Semgrep",
+    )
     def test_real_semgrep_excludes_preserve_root_and_any_depth_semantics(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

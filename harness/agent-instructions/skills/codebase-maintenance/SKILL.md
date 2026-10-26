@@ -63,7 +63,15 @@ Semgrep detects bugs and code smells. Verify the flagged code paths, fix support
 uv run find_duplicates.py <directory> [options]
 ```
 
-Copy/paste duplicates across files (jscpd). Review whether they represent the same responsibility; shared config and test fixtures may justify repetition. Extract shared utilities only when they reduce maintenance cost without coupling unrelated behavior. Use `--show-generated` to inspect lock-file / minified duplicates, or
+Copy/paste duplicates across files (jscpd). For an already prepared scanner, append
+`--node-executable "<absolute Node executable>" --scanner-entry "<absolute jscpd JS entry>"`.
+Both paths are required; invalid selections fail without fallback or downloads.
+The tested Windows x64 candidate is jscpd **5.4.2** (`run-jscpd.js`). Path validation
+is not version/payload qualification; initial setup wiring is not implemented yet.
+Without the pair, the legacy source/developer route still uses npx and may download
+packages. Do not assume that route is a prepared, offline installed workflow.
+
+Review whether they represent the same responsibility; shared config and test fixtures may justify repetition. Extract shared utilities only when they reduce maintenance cost without coupling unrelated behavior. Use `--show-generated` to inspect lock-file / minified duplicates, or
 `--exclude-test-directories` when test boilerplate dominates the report.
 
 ### 4. Complexity
@@ -72,7 +80,12 @@ Copy/paste duplicates across files (jscpd). Review whether they represent the sa
 uv run analyze_complexity.py <directory> [options]
 ```
 
-Qualitas reports per function, with a file location and letter grade. Treat scores as investigation signals, not refactoring targets. Simplify genuinely difficult behavior or split distinct responsibilities; do not move code solely to improve a metric. Domain-appropriate complexity in dispatchers or pipelines may be justified.
+Qualitas reports per function, with a file location and letter grade. It accepts
+the same `--node-executable` / `--scanner-entry` pair; the tested Windows x64
+candidate is Qualitas **0.5.4** (`bin/qualitas.js`). Prepared invocation uses argv
+arrays without npm/npx or fallback. The legacy default still uses npx and may
+acquire packages. Neither mode establishes clean-machine prerequisites or a
+native telemetry/offline guarantee. Treat scores as investigation signals, not refactoring targets. Simplify genuinely difficult behavior or split distinct responsibilities; do not move code solely to improve a metric. Domain-appropriate complexity in dispatchers or pipelines may be justified.
 
 ### 5. Large files
 
