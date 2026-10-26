@@ -194,9 +194,25 @@
   --panel-skill-surface: color-mix(in srgb, var(--panel-accent) 6%, var(--panel-control-surface));
   --panel-skill-border: color-mix(in srgb, var(--panel-accent) 18%, var(--panel-border));
   --panel-accent-surface: color-mix(in srgb, var(--panel-accent) 11%, transparent);
-  --panel-subagent-header-surface: color-mix(in srgb, var(--panel-accent) 9%, var(--panel-control-surface));
-  --panel-subagent-header-surface-hover: color-mix(in srgb, var(--panel-accent) 12%, var(--panel-control-hover));
-  --panel-subagent-header-border: color-mix(in srgb, var(--panel-accent) 20%, var(--panel-border));
+  /* Subagent cards: a dedicated neutral raised frame, independent from the
+     warm panel palette (dark-only grays, see the dark-only palette note
+     above). The header band sits one step above the card so the delegation
+     header outranks task text and preview content. Running/idle cards keep
+     the same neutral band; only the role icon warms up. */
+  --panel-subagent-surface: #161616;
+  --panel-subagent-border: rgba(255, 255, 255, 0.1);
+  --panel-subagent-radius: 5px;
+  --panel-subagent-header-surface: #262626;
+  --panel-subagent-header-surface-hover: #2e2e2e;
+  --panel-subagent-header-foreground: #e8e8e8;
+  --panel-subagent-header-icon: #d4d4d4;
+  --panel-subagent-header-reasoning: #969696;
+  --panel-subagent-header-secondary: #8f8f8f;
+  --panel-subagent-task-foreground: #c6c6c6;
+  --panel-subagent-preview-foreground: #999999;
+  --panel-subagent-preview-emphasis: #ababab;
+  --panel-subagent-preview-code: #a5a5a5;
+  --panel-subagent-preview-code-surface: #1f1f1f;
   --panel-code-surface: var(--panel-ink-2);
   --panel-input-surface: var(--panel-ink-2);
 

@@ -1269,7 +1269,7 @@ test('parallel subagent groups use a shared boundary without a rail', async () =
   const css = await readFile(new URL('../../styles/tool-call.css', import.meta.url), 'utf8');
   const group = css.match(/\.subagent-parallel-group\s*\{[^}]*\}/)?.[0] ?? '';
   assert.match(group, /display:\s*flex/);
-  assert.match(group, /border:\s*1px solid var\(--panel-border-subtle\)/);
+  assert.match(group, /border:\s*1px solid var\(--panel-subagent-border\)/);
   assert.doesNotMatch(group, /border-left|padding-left/);
   assert.match(css, /\.subagent-parallel-child \+ \.subagent-parallel-child\s*\{[^}]*border-top:\s*1px solid var\(--panel-border-subtle\)/);
   assert.match(css, /\.subagent-parallel-child > \.tool-call\.tool-call-subagent\s*\{\s*border:\s*0;\s*border-radius:\s*0;/);

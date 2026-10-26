@@ -1,18 +1,14 @@
 /* ── Subagent container and collapsed header ────────────────────────────── */
 /* Delegated work is a higher-level unit than an ordinary tool call. Give only
-   subagents a bounded opaque surface; generic operational rows stay flat. */
+   subagents a bounded opaque raised surface (see --panel-subagent-* tokens);
+   generic operational rows stay flat. */
 .tool-call.tool-call-subagent,
 .tool-call-card.tool-call-subagent {
-  border: 1px solid var(--panel-border-subtle);
-  border-radius: var(--panel-radius-md);
-  background: var(--panel-card-surface);
+  border: 1px solid var(--panel-subagent-border);
+  border-radius: var(--panel-subagent-radius);
+  background: var(--panel-subagent-surface);
   box-shadow: none;
   container: tool-row subagent-card / inline-size;
-}
-
-.tool-call.tool-call-subagent {
-  border-radius: 4px;
-  background: var(--vscode-editor-background, var(--panel-surface));
 }
 
 /* ── Ordinary tool inspector: target / state / actions ─────────────────── */
@@ -636,20 +632,22 @@
   align-items: baseline;
   column-gap: 8px;
   min-width: 0;
-  min-height: 26px;
-  padding: 4px 10px;
+  min-height: 32px;
+  padding: 7px 12px;
   position: relative;
   font: 400 11.5px/18px var(--panel-font-sans);
   color: var(--panel-foreground-soft);
-  background: var(--panel-subtle-surface);
-  border-radius: calc(var(--panel-radius-md) - 1px);
+  background: var(--panel-subagent-header-surface);
+  /* The header is the card's top band; the card's own radius and
+     overflow-clip round the outer corners. */
+  border-radius: 0;
   cursor: pointer;
   transition: background var(--panel-transition-fast);
 }
-.subagent-header:hover { background: var(--panel-card-surface); }
+.subagent-header:hover { background: var(--panel-subagent-header-surface-hover); }
 .subagent-header:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: -2px; }
 .subagent-header-content { display: contents; }
-.subagent-header > .collapsible-chevron { align-self: center; width: 10px; margin: 0; color: var(--panel-muted); }
+.subagent-header > .collapsible-chevron { align-self: center; width: 10px; margin: 0; color: var(--panel-subagent-header-secondary); }
 .subagent-agent-trigger,
 .subagent-agent-trigger > .pie-tooltip-trigger {
   display: inline-flex;
@@ -665,10 +663,10 @@
   width: 16px;
   height: 18px;
   border-radius: var(--panel-radius-sm);
-  color: var(--panel-foreground);
+  color: var(--panel-subagent-header-foreground);
   cursor: help;
 }
-.subagent-role-icon { width: 14px; height: 14px; flex: none; color: var(--panel-muted); }
+.subagent-role-icon { width: 14px; height: 14px; flex: none; color: var(--panel-subagent-header-icon); }
 .subagent-agent-name:hover { background: var(--panel-control-hover); }
 .subagent-agent-name:focus-visible,
 .subagent-model-details-trigger:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 2px; }
@@ -679,8 +677,8 @@
   min-width: 0;
   max-width: 100%;
   border-radius: var(--panel-radius-sm);
-  color: var(--panel-foreground);
-  font: 400 12px/18px var(--panel-font-sans);
+  color: var(--panel-subagent-header-foreground);
+  font: 500 12px/18px var(--panel-font-sans);
   cursor: help;
 }
 .subagent-model-qualified { display: none; }
@@ -690,7 +688,7 @@
   align-items: baseline;
   column-gap: 8px;
   min-width: 0;
-  color: var(--panel-muted);
+  color: var(--panel-subagent-header-secondary);
   font-variant-numeric: tabular-nums;
 }
 .subagent-inline-usage,
@@ -721,15 +719,15 @@
 }
 .subagent-live-preview {
   margin: 0;
-  padding: 8px 12px 11px;
+  padding: 10px 12px 12px;
   background: transparent;
   font: 12px/18px var(--panel-font-sans);
-  color: var(--panel-foreground-soft);
+  color: var(--panel-subagent-preview-foreground);
   user-select: text;
   overflow: hidden;
   overflow-wrap: anywhere;
 }
-.subagent-activity { color: var(--panel-muted); }
+.subagent-activity { color: var(--panel-subagent-preview-foreground); }
 .subagent-pending-prompt {
   display: block;
   max-width: 100%;
@@ -747,18 +745,19 @@
 .subagent-pending-prompt:hover { background: var(--panel-control-hover); }
 .subagent-pending-prompt:focus-visible { outline: 1px solid var(--panel-accent); outline-offset: 2px; }
 .tool-call.tool-call-subagent > .status-chip { margin: 6px 12px 0; }
-/* Warm state belongs only to the header; body output keeps normal contrast. */
+/* Every lifecycle shares the same neutral header band; the warm running/idle
+   emphasis lives only in the role icon, never in a tinted background. */
 .tool-call.tool-call-subagent.running > .subagent-header,
 .tool-call.tool-call-subagent.idle > .subagent-header {
-  background: color-mix(in srgb, var(--panel-accent) 12%, var(--panel-ink, var(--panel-card-surface)));
+  background: var(--panel-subagent-header-surface);
 }
 .tool-call.tool-call-subagent.running > .subagent-header:hover,
 .tool-call.tool-call-subagent.idle > .subagent-header:hover {
-  background: color-mix(in srgb, var(--panel-accent) 16%, var(--panel-ink, var(--panel-card-surface)));
+  background: var(--panel-subagent-header-surface-hover);
 }
-.tool-call.tool-call-subagent.completed .subagent-model-details-trigger,
-.tool-call.tool-call-subagent.completed .subagent-agent-name {
-  color: color-mix(in srgb, var(--panel-foreground-soft) 70%, var(--panel-muted) 30%);
+.tool-call.tool-call-subagent.running .subagent-role-icon,
+.tool-call.tool-call-subagent.idle .subagent-role-icon {
+  color: color-mix(in srgb, var(--panel-accent) 40%, var(--panel-subagent-header-icon));
 }
 @media (pointer: coarse) {
   .subagent-header { grid-template-columns: 44px minmax(0, 1fr) max-content 10px; min-height: 44px; padding-block: 0; }
@@ -858,25 +857,31 @@
   overflow-wrap: anywhere;
 }
 
-.subagent-task,
+.subagent-task {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-font-sans);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--panel-subagent-task-foreground);
+  cursor: help;
+}
+/* Clamp at a line boundary rather than cropping glyphs with max-height.
+   Paragraph spacing keeps the compact Markdown preview readable. */
 .subagent-outcome {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 6;
   overflow: hidden;
-  white-space: pre-wrap;
-}
-.subagent-task {
-  -webkit-line-clamp: 3;
-  font-family: var(--panel-font-sans);
-  white-space: pre-wrap;
-  font-size: 12px;
+  white-space: normal;
+  margin: 14px 0 0;
   line-height: 18px;
-  color: var(--panel-foreground-soft);
-  cursor: help;
+  color: var(--panel-subagent-preview-foreground);
 }
-.subagent-current,
-.subagent-outcome { margin: 8px 0 0; color: var(--panel-foreground); }
+.subagent-current { margin: 10px 0 0; }
 /* One four-row viewport for waiting, reasoning, replies and tools. Source
    changes update content, never transcript geometry; only expansion adds rows. */
 .subagent-current {
@@ -902,17 +907,25 @@
 }
 .subagent-current-tool { font: 11.5px/18px var(--panel-font-mono, Consolas, monospace); }
 .subagent-current-reasoning { font-style: italic; }
-.subagent-outcome { line-height: 1.5; white-space: normal; max-height: 6em; }
 /* Compact Markdown shares the existing row budgets, not transcript typography.
    Explicit resets also keep Tailwind's heading/list defaults out of previews. */
 .subagent-preview-markdown { white-space: normal; overflow-wrap: anywhere; }
 .subagent-preview-markdown :is(p, pre, ul, ol, blockquote) { margin: 0; }
 .subagent-preview-markdown :is(p, pre, li, blockquote) { font-size: inherit; line-height: inherit; }
+/* Preview emphasis remains below the task in the visual hierarchy. */
+.subagent-outcome :is(strong, b),
+.subagent-outcome p:has(strong:only-child) { color: var(--panel-subagent-preview-emphasis); }
+.subagent-outcome :is(code, pre) { color: var(--panel-subagent-preview-code); }
+.subagent-current-text :is(strong, b),
+.subagent-current-text p:has(strong:only-child) { color: var(--panel-subagent-preview-code); }
+.subagent-outcome p { margin: 0 0 5px; }
+.subagent-outcome p:has(strong:only-child) { margin: 7px 0 3px; }
+.subagent-outcome.subagent-preview-markdown ul { margin: 0 0 5px; padding-left: 17px; }
 .subagent-preview-markdown strong { font-weight: 600; }
 .subagent-preview-markdown ul { list-style-type: disc; padding-left: 1.25em; }
 .subagent-preview-markdown ol { list-style-type: decimal; padding-left: 1.5em; }
 .subagent-preview-markdown blockquote { padding-left: 0.75em; border-left: 2px solid var(--panel-border); }
-.subagent-preview-markdown code { font-family: var(--panel-font-mono); font-size: 0.95em; background: var(--panel-code-surface); border-radius: 2px; padding: 0 2px; }
+.subagent-preview-markdown code { font-family: var(--panel-font-mono); font-size: 0.95em; background: var(--panel-subagent-preview-code-surface); border-radius: 2px; padding: 0 2px; }
 .subagent-preview-markdown pre { white-space: pre-wrap; }
 .subagent-preview-markdown pre code { padding: 0; background: none; }
 
@@ -969,14 +982,16 @@
 }
 
 /* ── Parallel groups ─────────────────────────────────────────────────────── */
-/* Siblings share one quiet boundary, without a rail or added indentation. */
+/* Siblings share one quiet raised frame — the same --panel-subagent-* tokens
+   as standalone cards — without a rail or added indentation. */
 .subagent-parallel-group {
   display: flex;
   flex-direction: column;
   min-width: 0;
   margin-block: 5px;
-  border: 1px solid var(--panel-border-subtle);
-  border-radius: 4px;
+  border: 1px solid var(--panel-subagent-border);
+  border-radius: var(--panel-subagent-radius);
+  background: var(--panel-subagent-surface);
   overflow: clip;
 }
 .subagent-parallel-child > .tool-call.tool-call-subagent { border: 0; border-radius: 0; }
@@ -1088,7 +1103,14 @@
 /* ── Subagent model label ─────────────────────────────────────────────────── */
 
 .subagent-model-label { min-width: 0; max-width: 100%; font: inherit; color: inherit; white-space: normal; overflow-wrap: anywhere; }
-.subagent-model-reasoning { white-space: nowrap; }
+/* The model label arrives as a generic transcript-header-summary-subtle
+   (muted + 66% opacity). The header hierarchy needs the model identity fully
+   readable on the raised band, so the subtle styling is overridden here. */
+.subagent-model-label.transcript-header-summary-subtle {
+  opacity: 1;
+  color: var(--panel-subagent-header-foreground);
+}
+.subagent-model-reasoning { color: var(--panel-subagent-header-reasoning); white-space: nowrap; }
 
 /* ── Subagent model selection detail panel ───────────────────────────────── */
 /* Shown when model selection reasoning is available */

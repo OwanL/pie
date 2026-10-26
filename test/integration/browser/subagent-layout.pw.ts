@@ -103,7 +103,7 @@ test.describe('subagent redesign in the real isolated renderer', () => {
           const model = item.locator('.subagent-model-short');
           const reasoning = item.locator('.subagent-model-reasoning');
           await expect(model).toHaveCSS('font-size', '12px');
-          await expect(model).toHaveCSS('font-weight', '400');
+          await expect(model).toHaveCSS('font-weight', '500');
           await expect(model).toHaveCSS('line-height', '18px');
           const level = children[index]!.thinkingLevel;
           if (level) {
@@ -294,11 +294,11 @@ test.describe('bounded live subagent preview', () => {
     await expect(outcomePreview.locator('code')).toContainText('answer');
     await expect(outcomePreview.locator('li')).toHaveCount(2);
     await expect(outcomePreview.locator('h1,h2,h3,h4,h5,h6')).toHaveCount(0);
-    const outcomeFitsFourLines = await outcomePreview.evaluate((element) => {
+    const outcomeFitsSixLines = await outcomePreview.evaluate((element) => {
       const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
-      return element.getBoundingClientRect().height <= lineHeight * 4 + 1;
+      return element.getBoundingClientRect().height <= lineHeight * 6 + 18;
     });
-    expect(outcomeFitsFourLines).toBe(true);
+    expect(outcomeFitsSixLines).toBe(true);
 
     for (const width of [320, 420]) {
       await page.setViewportSize({ width, height: 900 });
@@ -338,9 +338,147 @@ test.describe('bounded live subagent preview', () => {
     await expect(item.locator('.subagent-current-input')).toHaveText('pnpm test -- cancellation');
     await expect(item.locator('.subagent-current-output')).toContainText('No leaked listeners');
     await expect(item.locator('.subagent-telemetry-cost')).toHaveText('~$0.02');
-    expect((await header(item).boundingBox())!.height).toBeLessThanOrEqual(28);
+    const headerHeight = (await header(item).boundingBox())!.height;
+    expect(headerHeight).toBeGreaterThanOrEqual(32);
+    expect(headerHeight).toBeLessThanOrEqual(34);
     expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
     await expectContained(item);
+  });
+});
+
+// Check hierarchy by contrast rather than pinning tests to a palette.
+test.describe('subagent card hierarchy', () => {
+  const reviewAnswer = [
+    'First paragraph states the finding in plain prose so the preview base layer stays muted.',
+    '',
+    '## Section heading row',
+    '- Highlighted **emphasis detail** with an `inline code` marker',
+    '- Another bullet keeps the preview occupying more than one row',
+    '',
+    '## Trailing heading',
+    'Closing paragraph after two sections keeps the clamp engaged on every width under test.',
+  ].join('\n');
+  const longTask = `${'Single-line delegated instruction that is deliberately long enough to overflow a one-row preview. '.repeat(3)}END_OF_TASK_9C1D`;
+  const hierarchyChildren: SubagentSingleResult[] = [{
+    agent: 'reviewer', task: longTask, model: 'fixture/GPT-6.1 Sol', thinkingLevel: 'low',
+    exitCode: 0, activityPhase: 'completed', startedAt: NOW - 60_000, completedAt: NOW,
+    contextWindow: 200_000, usage: { contextTokens: 24_000, cost: 0.06 },
+    finalOutput: reviewAnswer, messages: [{ role: 'assistant', content: reviewAnswer, timestamp: NOW }],
+  }];
+  test.use({ viewState: state(hierarchyChildren) });
+
+  test('orders the header above task above preview by contrast, not palette', async ({ page }, info) => {
+    const card = page.locator('.tool-call-subagent');
+    for (const [index, [width, height]] of [[440, 900] as const, [1100, 900] as const].entries()) {
+      await page.setViewportSize({ width, height });
+      await page.goto('/');
+      await expect(card).toHaveCount(1);
+      await card.scrollIntoViewIfNeeded();
+      await page.evaluate(() => document.fonts.ready);
+      const hierarchy = await page.evaluate(() => {
+        const srgb = (value: number) => {
+          const channel = value / 255;
+          return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        };
+        const luminance = (color: string) => {
+          const match = color.match(/rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/);
+          if (!match || (match[4] !== undefined && Number(match[4]) < 1)) throw new Error(`not opaque: ${color}`);
+          return 0.2126 * srgb(Number(match[1])) + 0.7152 * srgb(Number(match[2])) + 0.0726 * srgb(Number(match[3]));
+        };
+        const contrast = (foreground: string, background: string) => {
+          const a = luminance(foreground), b = luminance(background);
+          return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+        };
+        const root = document.querySelector('.tool-call-subagent')!;
+        const header = root.querySelector('.subagent-header');
+        const headerBg = getComputedStyle(header!).backgroundColor;
+        const cardBg = getComputedStyle(root).backgroundColor;
+        const firstStrong = root.querySelector('.subagent-outcome strong');
+        const plainParagraph = root.querySelector('.subagent-outcome p:not(:has(strong:only-child))');
+        return {
+          main: contrast(getComputedStyle(root.querySelector('.subagent-model-short')!).color, headerBg),
+          icon: contrast(getComputedStyle(root.querySelector('.subagent-role-icon')!).color, headerBg),
+          task: contrast(getComputedStyle(root.querySelector('.subagent-task')!).color, cardBg),
+          strong: contrast(getComputedStyle(firstStrong!).color, cardBg),
+          preview: contrast(getComputedStyle(plainParagraph!).color, cardBg),
+          headerContrastsWithCard: headerBg !== cardBg,
+        };
+      });
+      // Header identity outranks task text, which outranks both the preview
+      // base layer and its stepped-up emphasis; the icon stays legible.
+      expect(hierarchy.main).toBeGreaterThan(hierarchy.task);
+      expect(hierarchy.task).toBeGreaterThan(hierarchy.strong);
+      expect(hierarchy.strong).toBeGreaterThan(hierarchy.preview);
+      expect(hierarchy.icon).toBeGreaterThan(3);
+      expect(hierarchy.headerContrastsWithCard).toBe(true);
+      if (index === 1) {
+        const screenshot = info.outputPath('approved-hierarchy-1100.png');
+        await page.screenshot({ path: screenshot });
+        await info.attach('approved-hierarchy-1100', { path: screenshot, contentType: 'image/png' });
+      }
+    }
+  });
+
+  test('keeps a long task on one row with the full text only a tooltip away', async ({ page }) => {
+    await page.setViewportSize({ width: 440, height: 900 });
+    await page.goto('/');
+    const task = page.locator('.subagent-task').first();
+    await expect(task).toBeVisible();
+    const oneRow = await task.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return {
+        height: rect.height, lineHeight: style.lineHeight, overflow: style.overflow,
+        ellipsis: style.textOverflow, nowrap: style.whiteSpace, truncated: element.scrollWidth > element.clientWidth,
+      };
+    });
+    expect(oneRow.height).toBeLessThanOrEqual(Number.parseFloat(oneRow.lineHeight) + 1);
+    expect(oneRow.overflow).toBe('hidden');
+    expect(oneRow.ellipsis).toBe('ellipsis');
+    expect(oneRow.nowrap).toBe('nowrap');
+    expect(oneRow.truncated).toBe(true);
+    await task.hover();
+    const tooltip = page.locator('.subagent-task-tooltip');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toHaveText(longTask);
+    await expect(tooltip).toContainText('END_OF_TASK_9C1D');
+    // Keyboard access reaches the very same popover.
+    await page.mouse.move(1, 1);
+    await expect(tooltip).toBeHidden();
+    await task.focus();
+    await expect(tooltip, 'keyboard focus opens the full task tooltip').toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toBeHidden();
+  });
+
+  test('bounds settled and live previews to fixed budgets across widths', async ({ page, isolatedHost }, info) => {
+    const item = page.locator('.tool-call-subagent');
+    for (const width of [320, 440, 1100] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/');
+      const outcome = item.locator('.subagent-outcome.subagent-preview-markdown');
+      await expect(outcome).toBeVisible();
+      await item.scrollIntoViewIfNeeded();
+      await expect(outcome.locator('p > strong').first()).toContainText('Section heading row');
+      await expect(outcome.locator('strong').filter({ hasText: 'emphasis detail' })).toBeVisible();
+      await expect(outcome.locator('code')).toContainText('inline code');
+      await expect(outcome.locator('li')).toHaveCount(2);
+      await expect(outcome.locator('h1,h2,h3,h4,h5,h6')).toHaveCount(0);
+      const bounds = await outcome.evaluate((element) => ({
+        lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight), height: getComputedStyle(element).height,
+      }));
+      // CSS-only line clamp: no measuring script, integer row budget. Paragraph
+      // margins between the clamped rows add a small, bounded slack on top of
+      // the six 18px line boxes.
+      expect(Number.parseFloat(bounds.height)).toBeLessThanOrEqual(bounds.lineHeight * 6 + 30);
+      await expectContained(item);
+    }
+    // The live viewport keeps its 72px budget while markdown streams.
+    let seq = 0;
+    isolatedHost.publishState(state([{ ...hierarchyChildren[0]!, exitCode: -1, completedAt: undefined, activityPhase: 'streaming', streamingText: '# Streaming **markdown** preview\nNext `line`' }], ++seq));
+    await expect(item.locator('.subagent-current-text.subagent-preview-markdown')).toBeVisible();
+    expect(await item.locator('.subagent-current').evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBe(72);
+    await page.screenshot({ path: info.outputPath('bounded-live-72px.png') });
   });
 });
 

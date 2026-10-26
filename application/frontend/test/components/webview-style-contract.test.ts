@@ -331,11 +331,11 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
 
   assert.match(toolCallCss, /\.tool-call-header\s*\{[^}]*background:\s*transparent/);
   assert.match(toolCallCss, /\.tool-call-header \.status-chip\s*\{[^}]*background:\s*transparent/);
-  assert.match(toolCallCss, /\.tool-call\.tool-call-subagent,[\s\S]*?\.tool-call-card\.tool-call-subagent\s*\{[^}]*border:\s*1px solid var\(--panel-border-subtle\);[^}]*background:\s*var\(--panel-card-surface\)/);
+  assert.match(toolCallCss, /\.tool-call\.tool-call-subagent,[\s\S]*?\.tool-call-card\.tool-call-subagent\s*\{[^}]*border:\s*1px solid var\(--panel-subagent-border\);[^}]*background:\s*var\(--panel-subagent-surface\)/);
   // Disclosure does not change the quiet header surface; active work has its
   // own state treatment rather than a collapsed-only panel.
-  assert.match(toolCallCss, /\.subagent-header\s*\{[^}]*background:\s*var\(--panel-subtle-surface\)/);
-  assert.match(toolCallCss, /\.subagent-header:hover\s*\{[^}]*background:\s*var\(--panel-card-surface\)/);
+  assert.match(toolCallCss, /\.subagent-header\s*\{[^}]*background:\s*var\(--panel-subagent-header-surface\)/);
+  assert.match(toolCallCss, /\.subagent-header:hover\s*\{[^}]*background:\s*var\(--panel-subagent-header-surface-hover\)/);
   assert.match(toolCallCss, /\.subagent-pending-prompt\s*\{[^}]*background:\s*var\(--panel-control-surface\)/);
   assert.match(toolCallCss, /\.subagent-messages\s*\{[^}]*background:\s*var\(--panel-code-surface\)/);
   assert.match(toolCallCss, /\.tool-call-status-draft\s*\{[^}]*border:\s*1px dashed var\(--panel-muted\)/);
