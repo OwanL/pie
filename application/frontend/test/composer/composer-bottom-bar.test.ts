@@ -196,7 +196,7 @@ test('working-time tooltip breaks total time down by phase and tool', () => {
   assert.match(html, /Subagents[\s\S]*3 attempts/);
   assert.match(html, /Cumulative agent time[\s\S]*≈9s/);
   assert.match(html, /1 additional duration unavailable/);
-  assert.match(html, /parallel, nested, and retry attempts independently/);
+  assert.doesNotMatch(html, /Measured phase totals|marks legacy|Tool call time may overlap|parallel, nested|excludes time waiting/);
 });
 
 test('working-time tooltip preserves mocked phase totals instead of zeroing later categories', () => {
@@ -223,7 +223,7 @@ test('working-time tooltip preserves mocked phase totals instead of zeroing late
   assert.match(html, /Retry wait[\s\S]*2s/);
   assert.match(html, /Auxiliary model calls[\s\S]*1s/);
   assert.doesNotMatch(html, /Other work/);
-  assert.match(html, /overlapping phase totals may exceed working time/);
+  assert.doesNotMatch(html, /overlapping phase totals may exceed working time/);
 });
 
 test('working-time tooltip omits zero phases from its legend and accessible description', () => {
@@ -297,7 +297,7 @@ test('working-time tooltip moves legacy subagent tool timing into its own sectio
 
   assert.match(html, /Subagents[\s\S]*2 calls/);
   assert.match(html, /Cumulative agent time[\s\S]*≈4s/);
-  assert.match(html, /Legacy total from top-level subagent tool calls/);
+  assert.doesNotMatch(html, /Legacy total from top-level subagent tool calls/);
   assert.doesNotMatch(html, /Tools by call time/);
 });
 

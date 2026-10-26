@@ -75,8 +75,6 @@ interface Segment {
   color: string;
   /** Muted tail segment (remaining context), styled differently from contributors. */
   muted?: boolean;
-  /** Compact contributor detail shown beside the label (counts/previews). */
-  note?: string;
   /** Attribution kind suffix for the legend (estimated/derived/unknown). */
   kindSuffix?: string;
   /** Hover text for the segment's native `title`. */
@@ -185,9 +183,8 @@ function ContextWindowBreakdownChartBase({
         label,
         tokens,
         color: e.key === 'other' ? SEGMENT_COLORS['Other']! : segmentColor(label),
-        note: e.note,
         kindSuffix: kindSuffixFor(e),
-        title: `${label}: ${formatCompactTokens(tokens)} tokens (${pct.toFixed(1)}%)${e.note ? ` — ${e.note}` : ''}`,
+        title: `${label}: ${formatCompactTokens(tokens)} tokens (${pct.toFixed(1)}%)`,
       } satisfies Segment;
     });
 
@@ -324,9 +321,8 @@ function ContextLegend({
               class={cx('rich-tooltip-swatch', s.muted && 'ctx-legend-swatch--muted')}
               style={`background:${s.color}`}
             />
-            <span class="ctx-legend-label" title={s.note}>
+            <span class="ctx-legend-label">
               {s.label}
-              {s.note && <span class="ctx-legend-note">{` · ${s.note}`}</span>}
               {s.kindSuffix && <span class="ctx-legend-kind">{` ${s.kindSuffix}`}</span>}
             </span>
             <span class="rich-tooltip-legend-val">{formatCompactTokens(s.tokens)}</span>

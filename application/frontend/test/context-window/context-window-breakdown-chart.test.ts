@@ -149,6 +149,17 @@ test('ContextWindowBreakdownChart renders fresh-session pruning distribution row
   assert.match(html, /10k–15\.7k/);
 });
 
+test('ContextWindowBreakdownChart omits explanatory notes from legends and native hover text', () => {
+  const breakdown = makeBreakdown();
+  breakdown.entries[0]!.note = 'Fresh pre-filter catalog estimate; unavailable resources are omitted.';
+  breakdown.notes = ['Estimated rows use tokenizer attribution.'];
+  const html = renderToString(h(ContextWindowBreakdownChart, { breakdown }));
+  assert.doesNotMatch(html, /ctx-legend-note|Fresh pre-filter|unavailable resources|tokenizer attribution/);
+  assert.match(html, /System prompt/);
+  assert.match(html, /23\.4k/);
+  assert.match(html, /Remaining/);
+});
+
 test('ContextWindowBreakdownChart omits pruning rows for ordinary breakdowns', () => {
   const html = renderToString(h(ContextWindowBreakdownChart, { breakdown: makeBreakdown() }));
   assert.doesNotMatch(html, /After pruning|Middle 50%/);

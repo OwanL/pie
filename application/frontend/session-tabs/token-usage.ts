@@ -371,7 +371,6 @@ function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): Form
 
   const lines = [
     'Estimated API-equivalent token cost by provider / model (whole branch):',
-    '  Catalog rates only; subscriptions, plan allowances, and invoices are not reconciled.',
   ];
   let displayedKnownCostUnits = 0;
   for (const entry of entries) {
@@ -1158,12 +1157,9 @@ export function buildSessionCostIndicator(
     );
   }
   if (hasIncompleteCost) {
-    const incompleteInvocations = sessionUsage?.incompleteInvocationCount ?? 0;
-    const unpricedInvocations = sessionUsage?.unpricedInvocationCount ?? 0;
     tooltipLines.push(
       '',
       `Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing`,
-      `  Provenance: ${incompleteInvocations} unknown and ${unpricedInvocations} unpriced invocation(s).`,
     );
   }
   if (summary.accountingUnknown) {

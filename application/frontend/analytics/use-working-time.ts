@@ -47,7 +47,7 @@ export function useWorkingTimeIndicator({
   return {
     label,
     ariaLabel: `Total agent working time: ${spoken}`,
-    tooltip: `Total agent working time: ${spoken}. Includes model and provider waits, retries, history compaction, and tool execution. Excludes idle time waiting for you between runs.`,
+    tooltip: `Total agent working time: ${spoken}.`,
     tooltipNode: h(WorkingTimeTooltip, { state, elapsedMs }),
   };
 }

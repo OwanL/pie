@@ -652,6 +652,7 @@ test('buildSessionCostIndicator computes cost across all channels', () => {
   // 3 + 15 + 0.3 + 3.75 = 22.05
   assert.equal(result.label, '$22.05');
   assert.match(result.tooltip, /Estimated API-equivalent token cost by provider \/ model/);
+  assert.doesNotMatch(result.tooltip, /Catalog rates only|subscriptions|plan allowances|invoices|Provenance:/);
   assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$22\.0500/);
   assert.doesNotMatch(result.tooltip, /Input:|Output:|Cache read:|Cache write:/);
   assert.match(result.tooltip, /Total: \$22\.0500/);
@@ -1302,6 +1303,7 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
   assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000/);
   assert.doesNotMatch(result.tooltip, /\$0\.0000\*/);
   assert.match(result.tooltip, /Excludes 126,500 tokens pending billing details or pricing/);
+  assert.doesNotMatch(result.tooltip, /Provenance:/);
   assert.match(result.ariaLabel, /some provider\/model usage is not yet priced/);
 });
 

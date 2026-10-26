@@ -52,7 +52,6 @@ export function SessionCostTooltip({
         <span>Estimated session cost</span>
         <span class="rich-tooltip-head-value">{indicator.label}</span>
       </div>
-      <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{subtitle}</div>
       {indicator.refreshStatus === 'error' ? (
         <div class="rich-tooltip-sub">Usage refresh failed · showing the last completed snapshot.</div>
@@ -130,7 +129,6 @@ function CanonicalActivitySection({ summary }: { summary: CanonicalSessionActivi
   return (
     <div class="session-cost-sources">
       <div class="session-cost-section-head">Canonical activity</div>
-      <div class="rich-tooltip-sub">{summary.scopeNote}</div>
       {summary.missing ? (
         <div class="rich-tooltip-sub">
           Unavailable for this session{summary.omitted
@@ -159,7 +157,7 @@ function ActivityLines({ activity }: { activity: CanonicalSessionActivitySummary
   if (!activity) return <></>;
   const lines = [
     `${activity.totalSpans} span${activity.totalSpans === 1 ? '' : 's'} · measured work `
-      + `${formatMeasuredDuration(activity.measuredTotalMs)} (additive measured durations, not wall time)`
+      + `${formatMeasuredDuration(activity.measuredTotalMs)}`
       + (activity.measuredUnknownCount > 0
         ? ` · ${activity.measuredUnknownCount} span${activity.measuredUnknownCount === 1 ? '' : 's'} without measured duration`
         : ''),
@@ -191,8 +189,7 @@ function ToolFacetLines({ facets }: { facets: NonNullable<CanonicalSessionActivi
     const removed = facets.attemptedRemovedLines === null ? '?' : formatExactCount(facets.attemptedRemovedLines);
     lines.push(
       `${facets.attemptedChangeCount} attempted-change entr${facets.attemptedChangeCount === 1 ? 'y' : 'ies'}: `
-        + `+${added}/−${removed} lines`
-        + ' (unverified proxy, not an exact diff)',
+        + `+${added}/−${removed} lines`,
     );
   } else {
     lines.push(`No attempted-change line counts recorded across ${facets.facetCount} entr${facets.facetCount === 1 ? 'y' : 'ies'}`);

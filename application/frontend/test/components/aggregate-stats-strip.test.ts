@@ -218,11 +218,11 @@ test('daily and weekly cost tooltips omit routine scope rows and retain graphs a
   assert.doesNotMatch(todayHtml, /↓1\.2k in {2}↑3\.4k out/);
   assert.match(todayHtml, /model-a/);
   assert.match(weekHtml, /<svg\b/);
-  assert.match(weekHtml, /Token counts by provider · alpha ↓5\.6k in ↑7\.8k out/);
+  assert.doesNotMatch(weekHtml, /Token counts by provider|↓5\.6k in|↑7\.8k out/);
   assert.match(weekHtml, /model-a/);
 });
 
-test('cost pair stays clean while cost and standalone token tooltip provenance remains accessible', () => {
+test('cost and token tooltips omit provenance paragraphs while cost accessibility labels retain incomplete status', () => {
   const stats = {
     ...EMPTY_AGGREGATE_STATS,
     ready: true,
@@ -255,17 +255,17 @@ test('cost pair stays clean while cost and standalone token tooltip provenance r
   assert.match(html, /Today's estimated token cost \$1\.25; incomplete billing provenance/);
 
   const todayTooltip = renderToString(todayCostTooltipNode(stats));
-  assert.match(todayTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\) today/);
+  assert.doesNotMatch(todayTooltip, /rich-tooltip-sub|Incomplete billing provenance/);
   const tokens = renderToString(tokensTooltipNode(stats, 'input'));
-  assert.match(tokens, /Known subtotal · 1 invocation/);
+  assert.doesNotMatch(tokens, /rich-tooltip-sub|invocation\(s\) have incomplete token usage/);
   assert.equal((tokens.match(/↓1\.2k/g) ?? []).length, 1);
   assert.match(tokens, /aria-label="Token chart series"/);
   assert.match(tokens, />Input<\/button>/);
   assert.match(tokens, />Output<\/button>/);
   const weekTooltip = renderToString(weekCostTooltipNode(stats));
-  assert.match(weekTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\)/);
+  assert.doesNotMatch(weekTooltip, /rich-tooltip-sub|Incomplete billing provenance/);
   for (const tooltip of [todayTooltip, weekTooltip]) {
-    assert.match(tooltip, /1 instrumentation gap\(s\)/);
+    assert.doesNotMatch(tooltip, /instrumentation gap\(s\)/);
     assert.doesNotMatch(tooltip, /API-equivalent estimate; not an invoice|Across all sessions/);
   }
 });
@@ -563,9 +563,9 @@ test('User-input tooltip uses one continuous adjusted-character line with Today 
   const html = renderToString(userInputTooltipNode(stats));
 
   assert.match(html, /<span>Today<\/span><span class="rich-tooltip-head-value">≥1\.4k chars<\/span>/);
-  assert.match(html, /3\/4 known · P95 cap 400 chars · 1 capped outlier · ≥ value is a lower bound/);
+  assert.match(html, /3\/4 known · P95 cap 400 chars · 1 capped outlier/);
   assert.match(html, /<span>7-day<\/span><span class="rich-tooltip-head-value">≥3\.2k chars<\/span>/);
-  assert.match(html, /8\/9 known · P95 cap 400 chars · 2 capped outliers · ≥ value is a lower bound/);
+  assert.match(html, /8\/9 known · P95 cap 400 chars · 2 capped outliers/);
   assert.match(html, /3 file refs · 2 images \(2 KB\) · 5 attachments total · 4 asks cancelled/);
 
   assert.match(html, /aria-label="7-day daily adjusted user-input character volume\. One continuous line; values use the shared rolling P95 cap\."/);
@@ -575,10 +575,7 @@ test('User-input tooltip uses one continuous adjusted-character line with Today 
   assert.doesNotMatch(html, /<rect\b/, 'the user-input trend is not discretized into bars');
   assert.doesNotMatch(html, />900<\/td>/, 'the chart is scoped to the same seven-day window as its headline');
 
-  assert.match(html, /Prompt and answered ask_user characters/);
-  assert.match(html, /rolling 14-day P95 cap/);
-  assert.doesNotMatch(html, /fewer than 5 samples/);
-  assert.match(html, /≥ marks incomplete legacy or malformed-answer coverage/);
+  assert.doesNotMatch(html, /aggregate-strip-user-input-note|Prompt and answered ask_user characters|≥ marks incomplete|value is a lower bound/);
   assert.doesNotMatch(html, /prompt text|prompt tok|prompts<|answered ask_user<|input tokens/i,
     'count, raw-prompt, token-estimate, and provider-token prose are absent');
 });
@@ -657,7 +654,7 @@ test('User-input tooltip reports cancellations without reverting to answer count
   };
   const html = renderToString(userInputTooltipNode(stats));
   assert.match(html, /1 ask cancelled/);
-  assert.match(html, /≥ marks incomplete legacy or malformed-answer coverage/);
+  assert.doesNotMatch(html, /≥ marks incomplete legacy or malformed-answer coverage/);
   assert.doesNotMatch(html, /answered ask_user<|2 answers|answer count|rich-tooltip-legend-val/i);
 });
 
@@ -713,6 +710,6 @@ test('User-input tooltip uses lower-bound character coverage without legacy prom
   };
   const html = renderToString(userInputTooltipNode(stats));
   assert.match(html, /<span>Today<\/span><span class="rich-tooltip-head-value">≥10 chars<\/span>/);
-  assert.match(html, /1\/2 known · P95 cap 10 chars · 0 capped outliers · ≥ value is a lower bound/);
+  assert.match(html, /1\/2 known · P95 cap 10 chars · 0 capped outliers/);
   assert.doesNotMatch(html, /avg |prompt text|prompt tok/);
 });

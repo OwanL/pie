@@ -54,6 +54,7 @@ test('session cost tooltip renders provider graph, model details, and cost sourc
   const html = renderToString(h(SessionCostTooltip, { indicator }));
 
   assert.match(html, /Estimated session cost/);
+  assert.doesNotMatch(html, /catalog estimate|subscriptions|plan allowances|invoices/i);
   assert.match(html, /Whole branch · Main conversation: 3 assistant turns/);
   assert.match(html, /aria-label="Cost by provider:/);
   assert.match(html, /anthropic: \$0\.1000 \(71%\)/);
@@ -123,19 +124,19 @@ function renderCostTooltip(canonicalActivity: CanonicalSessionActivitySummary | 
   return renderToString(h(SessionCostTooltip, { indicator: costIndicator(), canonicalActivity }));
 }
 
-test('canonical activity renders inside the session cost tooltip with explicit scope and qualifications', () => {
+test('canonical activity keeps numeric breakdowns without explanatory subtext', () => {
   const html = renderCostTooltip(canonicalSummary());
 
   assert.match(html, /Canonical activity/);
-  assert.match(html, /Root session \(all branches\) · selected-branch totals not shown/);
-  assert.match(html, /10 spans · measured work 3\.1m \(additive measured durations, not wall time\)/);
+  assert.doesNotMatch(html, /Root session|selected-branch totals|additive measured durations|not wall time/);
+  assert.match(html, /10 spans · measured work 3\.1m/);
   assert.match(html, /1 span without measured duration/);
   assert.match(html, /observed 8 · estimated 1 · unknown 1/);
   assert.match(html, /conversation: 8 spans · 3\.1m/);
   assert.match(html, /Bounded read: row limit\(s\) reached/);
   assert.match(html, /attempted-change entry/);
   assert.match(html, /\+3\/−0 lines/);
-  assert.match(html, /unverified proxy, not an exact diff/);
+  assert.doesNotMatch(html, /unverified proxy|not an exact diff/);
   assert.match(html, /1 entry has no summed line counts/);
   assert.match(html, /verified 0 · unverified 1 · other\/unknown 1/);
 });

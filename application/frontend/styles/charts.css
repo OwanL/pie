@@ -344,10 +344,6 @@
   white-space: nowrap;
 }
 
-.ctx-legend-note {
-  color: var(--panel-muted);
-}
-
 .ctx-legend-kind {
   font-size: 9px;
   color: var(--panel-muted);

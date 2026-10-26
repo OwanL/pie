@@ -33,14 +33,6 @@ export function WorkingTimeTooltip({
   const hiddenTools = Math.max(0, tools.length - MAX_TOOL_ROWS);
   const shownTools = tools.slice(0, MAX_TOOL_ROWS);
   const active = state?.activeSince !== null && state?.activeSince !== undefined;
-  const hasEstimate = (breakdown?.estimatedToolExecutionMs ?? 0) > 0
-    || (breakdown?.estimatedRetryWaitMs ?? 0) > 0
-    || (breakdown?.estimatedSubagentDurationMs ?? 0) > 0
-    || subagents?.fallback === true;
-  const measuredTotalMs = categories
-    .filter((category) => category.key !== 'other')
-    .reduce((total, category) => total + category.durationMs, 0);
-  const hasOverlappingPhases = measuredTotalMs > finiteDuration(elapsedMs);
 
   return (
     <div class="rich-tooltip working-time-tooltip">
@@ -49,7 +41,7 @@ export function WorkingTimeTooltip({
         <span class="rich-tooltip-head-value">{formatTooltipDuration(elapsedMs)}</span>
       </div>
       <div class="rich-tooltip-sub">
-        {active ? 'Working now' : 'Idle'} · excludes time waiting for you between runs
+        {active ? 'Working now' : 'Idle'}
       </div>
 
       <div
@@ -115,17 +107,14 @@ export function WorkingTimeTooltip({
               {subagents.unknownCount} additional duration{subagents.unknownCount === 1 ? '' : 's'} unavailable
             </div>
           )}
-          {subagents.fallback && (
-            <div class="rich-tooltip-sub">Legacy total from top-level subagent tool calls</div>
-          )}
         </div>
       )}
 
-      <div class="rich-tooltip-sub working-time-note">
-        {breakdown
-          ? `Measured phase totals${hasEstimate ? '; ≈ marks legacy or scheduled estimates' : ''}${hasOverlappingPhases ? '; overlapping phase totals may exceed working time' : ''}. Tool call time may overlap. Subagent time counts parallel, nested, and retry attempts independently and overlaps the session total.`
-          : 'Detailed phase timing is unavailable for earlier working-time data.'}
-      </div>
+      {!breakdown && (
+        <div class="rich-tooltip-sub working-time-note">
+          Detailed phase timing is unavailable for earlier working-time data.
+        </div>
+      )}
     </div>
   );
 }

@@ -7,7 +7,6 @@ import { useId, useState } from 'preact/hooks';
 
 import type {
   AggregateProductivityStats,
-  AggregateProviderCost,
   AggregateSeriesPoint,
   AggregateStats,
   DeferredTriggerView,
@@ -258,13 +257,6 @@ function modelValuesForProvider(
     .map((entry) => ({ provider: entry.provider, model: entry.model, value: format(entry.value) }));
 }
 
-function providerTokenSummary(providers: AggregateProviderCost[]): string {
-  return providers
-    .filter((provider) => provider.inputTokens > 0 || provider.outputTokens > 0)
-    .map((provider) => `${provider.provider} ↓${formatCompactTokens(provider.inputTokens)} in ↑${formatCompactTokens(provider.outputTokens)} out`)
-    .join('  ·  ');
-}
-
 function ariaLabel(s: AggregateStats): string {
   if (!s.ready) return 'Usage stats: computing.';
   return 'Estimated API-equivalent token cost across all runs today ' + formatCostAdaptive(s.todayCost) + '. This week ' + formatCostAdaptive(s.weekCost) + '.';
@@ -280,19 +272,6 @@ export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
         <span>Estimated token cost today</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
-      {!!s.billableAccounting && (
-        s.billableAccounting.todayUnknownInvocationCount > 0
-        || s.billableAccounting.todayUnpricedInvocationCount > 0
-        || s.billableAccounting.todayInstrumentationGapInvocationCount > 0
-      ) && (
-        <div class="rich-tooltip-sub">
-          Incomplete billing provenance: {s.billableAccounting.todayUnknownInvocationCount} unknown and{' '}
-          {s.billableAccounting.todayUnpricedInvocationCount} unpriced invocation(s) today
-          {s.billableAccounting.todayInstrumentationGapInvocationCount > 0
-            ? ` (${s.billableAccounting.todayInstrumentationGapInvocationCount} instrumentation gap(s))`
-            : ''}.
-        </div>
-      )}
       <StackedAreaChart points={s.todayCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatTimeOfDay}
         colorKeys={s.todayCostByProvider.map((p) => p.provider)} />
       {s.todayCostByProvider.length > 0 && (
@@ -308,25 +287,12 @@ export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
 
 export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
-  const tokenSummary = providerTokenSummary(s.weekCostByProvider);
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
         <span>Estimated token cost (7d)</span>
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.weekCost)}</span>
       </div>
-      {tokenSummary && <div class="rich-tooltip-sub">Token counts by provider · {tokenSummary}</div>}
-      {!!s.billableAccounting && (s.billableAccounting.weekUnknownInvocationCount > 0
-        || s.billableAccounting.weekUnpricedInvocationCount > 0
-        || s.billableAccounting.weekInstrumentationGapInvocationCount > 0) && (
-        <div class="rich-tooltip-sub">
-          Incomplete billing provenance: {s.billableAccounting.weekUnknownInvocationCount} unknown and{' '}
-          {s.billableAccounting.weekUnpricedInvocationCount} unpriced invocation(s)
-          {s.billableAccounting.weekInstrumentationGapInvocationCount > 0
-            ? ` (${s.billableAccounting.weekInstrumentationGapInvocationCount} instrumentation gap(s))`
-            : ''}.
-        </div>
-      )}
       <StackedAreaChart points={s.weekCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatDateTimeShort}
         colorKeys={s.weekCostByProvider.map((p) => p.provider)} />
       {s.weekCostByProvider.length > 0 && (
@@ -376,11 +342,6 @@ function TokensTooltip({ stats, initialKind, onKindChange }: {
           ↓{formatCompactTokens(stats.todayInputTokens)} · ↑{formatCompactTokens(stats.todayOutputTokens)}
         </span>
       </div>
-      {(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 && (
-        <div class="rich-tooltip-sub">
-          Known subtotal · {stats.billableAccounting?.todayInstrumentationGapInvocationCount} invocation(s) have incomplete token usage
-        </div>
-      )}
       <div class="rich-tooltip-toggle" role="group" aria-label="Token chart series">
         <button type="button" aria-pressed={input} onClick={() => selectKind('input')}>Input</button>
         <button type="button" aria-pressed={!input} onClick={() => selectKind('output')}>Output</button>
@@ -424,7 +385,6 @@ function userInputDetailsLine(p: AggregateProductivityStats): string {
       : `P95 cap ${formatCompactTokens(p.userInputCharCap)} chars`,
     `${p.cappedUserInputCharSampleCount} capped outlier${p.cappedUserInputCharSampleCount === 1 ? '' : 's'}`,
   ];
-  if (!userInputTrackingKnown(p)) parts.push('≥ value is a lower bound');
   if (p.filesystemPathRefCount > 0) {
     parts.push(`${p.filesystemPathRefCount} file ref${p.filesystemPathRefCount === 1 ? '' : 's'}`);
   }
@@ -483,9 +443,6 @@ export function userInputTooltipNode(s: AggregateStats): JSX.Element {
           formatX={formatDateShort}
           colorKeys={[...USER_INPUT_SERIES]}
         />
-      </div>
-      <div class="rich-tooltip-sub aggregate-strip-user-input-note">
-        Prompt and answered ask_user characters, adjusted by the rolling 14-day P95 cap. ≥ marks incomplete legacy or malformed-answer coverage.
       </div>
     </div>
   );

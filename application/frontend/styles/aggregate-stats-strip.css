@@ -132,12 +132,6 @@
   width: 100%;
 }
 
-.aggregate-strip-user-input-note {
-  margin-top: 6px;
-  padding-top: 5px;
-  border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
-}
-
 .aggregate-strip-providers {
   display: inline-flex;
   align-items: center;
