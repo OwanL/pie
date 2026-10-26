@@ -189,6 +189,8 @@ function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSi
   return (
     <Tooltip
       placement="bottom"
+      align="start"
+      delayShow={200}
       freezeWhileVisible
       contentNode={<SubagentModelDetailsTooltip result={result} requestedMode={requestedMode} displayCost={displayCost} />}
     >
@@ -430,9 +432,11 @@ function InlineUsage({ result }: { result: SubagentSingleResult }) {
   const window = knownNonNegative(result.contextWindow) || undefined;
   if (context === undefined) return null;
   return (
-    <span class="subagent-inline-usage subagent-inline-context" title={window === undefined ? 'Context tokens used' : 'Context tokens used / context window'}>
-      {formatDetailTokens(context)}{window === undefined ? ' tok' : `/${formatDetailTokens(window)}`}
-    </span>
+    <Tooltip delayShow={200} content={window === undefined ? 'Context tokens used' : 'Context tokens used / context window'} triggerClassName="subagent-inline-context">
+      <span class="subagent-inline-usage" tabIndex={0}>
+        {formatDetailTokens(context)}{window === undefined ? ' tok' : `/${formatDetailTokens(window)}`}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -457,18 +461,20 @@ export function subagentElapsed(result: SubagentSingleResult, now: number, live:
 
 function ElapsedTelemetry({ result, now, live }: { result: SubagentSingleResult; now: number; live: boolean }) {
   const elapsed = subagentElapsed(result, now, live);
-  return elapsed ? <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span> : null;
+  return elapsed ? <Tooltip delayShow={200} content={`Total elapsed: ${elapsed}`}><span class="subagent-telemetry-item subagent-telemetry-elapsed" tabIndex={0}>{elapsed}</span></Tooltip> : null;
 }
 
 function RuntimeTelemetry({ displayCost }: { displayCost?: SubagentDisplayCost }) {
   if (displayCost === undefined) return null;
   const title = (displayCost.estimated ? 'Estimated cost: ~' : 'Cost: ') + '$' + displayCost.cost.toFixed(4);
   return (
-    <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
-      <span class="subagent-telemetry-item subagent-telemetry-cost">
-        {(displayCost.estimated ? '~' : '') + '$' + displayCost.cost.toFixed(2)}
+    <Tooltip delayShow={200} content={title}>
+      <span class="subagent-runtime-telemetry" tabIndex={0} aria-label={title}>
+        <span class="subagent-telemetry-item subagent-telemetry-cost">
+          {(displayCost.estimated ? '~' : '') + '$' + displayCost.cost.toFixed(2)}
+        </span>
       </span>
-    </span>
+    </Tooltip>
   );
 }
 
@@ -921,7 +927,6 @@ function SubagentSingleBlock({
         tabIndex={0}
         aria-expanded={open}
         aria-controls={renderBody ? bodyId : undefined}
-        title={open ? 'Collapse' : 'Expand'}
         aria-label={`Toggle ${singleResult.agent} subagent`}
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
@@ -940,7 +945,6 @@ function SubagentSingleBlock({
                 class="subagent-agent-name transcript-header-title-mono"
                 tabIndex={0}
                 aria-label={`Inspect ${singleResult.agent} model exchange`}
-                title={singleResult.agent}
               >
                 <SubagentRoleIcon agent={singleResult.agent} />
               </span>
@@ -951,7 +955,7 @@ function SubagentSingleBlock({
             requestedMode={requestedParentUserContextMode(toolCall.input)}
             displayCost={displayCost}
           />
-          <span class="subagent-header-metrics">
+          <span class="subagent-header-metrics" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
             <InlineUsage result={singleResult} />
             <RuntimeTelemetry displayCost={displayCost} />
             <ElapsedTelemetry result={singleResult} now={activityNow} live={live} />

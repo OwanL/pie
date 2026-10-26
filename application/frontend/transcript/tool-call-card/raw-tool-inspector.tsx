@@ -134,7 +134,7 @@ export function RawToolInspector({ toolCall, children, triggerClassName }: { too
     toolCallId: toolCall.id, sizeBytes: 0, summary: 'Captured model exchange', available: true,
   } : undefined;
   return (
-    <Tooltip contentNode={<RawModelExchange detailRef={detailRef} unavailable={subagent
+    <Tooltip delayShow={toolCall.name === 'subagent' ? 200 : 350} align={toolCall.name === 'subagent' ? 'start' : 'center'} contentNode={<RawModelExchange detailRef={detailRef} unavailable={subagent
       ? 'Model exchange capture unavailable: child durable session identity is not available.'
       : 'Model exchange capture unavailable: session identity is not available.'} />} richRole="region" returnFocusOnEscape freezeWhileVisible placement="bottom" dismissOnActivation={children !== undefined} triggerClassName={triggerClassName ?? 'tool-call-icon-inspector'}>
       {children ?? <button type="button" class="tool-call-kind-icon tool-call-raw-action" aria-label={`Inspect ${toolCall.name} model exchange`} onClick={(e) => e.stopPropagation()}>

@@ -424,7 +424,7 @@ test.describe('subagent card hierarchy', () => {
     await page.goto('/');
     const task = page.locator('.subagent-task').first();
     await expect(task).toBeVisible();
-    const oneRow = await task.evaluate((element) => {
+    const oneRow = await task.locator('.subagent-task-excerpt').evaluate((element) => {
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       return {
@@ -450,6 +450,96 @@ test.describe('subagent card hierarchy', () => {
     await page.keyboard.press('Escape');
     await expect(tooltip).toBeHidden();
   });
+
+  test('waits 200ms before opening the prompt on hover', async ({ page }) => {
+    await page.goto('/');
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
+    await page.locator('.subagent-task').hover();
+    const prompt = page.locator('.subagent-task-tooltip');
+    await page.clock.runFor(199);
+    await expect(prompt).toBeHidden();
+    // Flush the renderer's next animation frame after the hover timer.
+    await page.clock.runFor(20);
+    await expect(prompt).toBeVisible();
+  });
+
+  for (const [width, height] of [[320, 844], [420, 900], [1100, 900], [420, 240]] as const) {
+    test(`anchors and bounds the prompt inspector at ${width}x${height}, with a pointer bridge and scrollable end`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto('/');
+      const task = page.locator('.subagent-task');
+      await task.scrollIntoViewIfNeeded();
+      await task.hover();
+      const popup = page.locator('.pie-tooltip-host:has(.subagent-task-popover)');
+      const prompt = popup.locator('.subagent-task-tooltip');
+      await expect(popup).toBeVisible();
+      await expect(prompt).toHaveText(longTask);
+      const trigger = (await task.boundingBox())!;
+      const bounds = (await popup.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(5);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 5);
+      expect(bounds.y).toBeGreaterThanOrEqual(5);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(height - 5);
+      // Start aligned where it fits; otherwise clamp, rather than centering.
+      expect(bounds.x).toBeCloseTo(Math.max(6, Math.min(trigger.x, width - bounds.width - 6)), 0);
+      expect(bounds.y >= trigger.y + trigger.height || bounds.y + bounds.height <= trigger.y).toBe(true);
+      // Cross the real six-pixel bridge, then remain over the popup longer
+      // than its hide delay: hovering the host must cancel dismissal.
+      await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 10, { steps: 5 });
+      await page.waitForTimeout(300);
+      await expect(popup).toBeVisible();
+      await prompt.hover();
+      await page.mouse.wheel(0, 2000);
+      await expect.poll(() => prompt.evaluate((element) => Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop))).toBeLessThanOrEqual(1);
+      const endVisible = await prompt.evaluate((element) => {
+        const text = element.firstChild!;
+        const range = document.createRange();
+        range.setStart(text, text.textContent!.indexOf('END_OF_TASK_9C1D'));
+        range.setEnd(text, text.textContent!.length);
+        const end = range.getBoundingClientRect(), box = element.getBoundingClientRect();
+        return end.top >= box.top && end.bottom <= box.bottom;
+      });
+      expect(endVisible).toBe(true);
+      if (height === 240) expect(await prompt.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    });
+  }
+
+  for (const denied of [false, true]) {
+    test(`copies the exact raw prompt with ${denied ? 'denied' : 'success'} feedback and keyboard return`, async ({ page }) => {
+      await page.addInitScript((deny) => {
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+          writeText: async (text: string) => {
+            (window as unknown as { copiedPrompt: string }).copiedPrompt = text;
+            if (deny) throw new DOMException('Fixture clipboard denied', 'NotAllowedError');
+          },
+        } });
+      }, denied);
+      await page.setViewportSize({ width: 420, height: 240 });
+      await page.goto('/');
+      const task = page.locator('.subagent-task');
+      await task.focus();
+      const popup = page.locator('.pie-tooltip-host:has(.subagent-task-popover)');
+      const copy = popup.getByRole('button', { name: 'Copy delegated prompt' });
+      const prompt = popup.locator('.subagent-task-tooltip');
+      await expect(popup).toBeVisible();
+      await page.keyboard.press('Tab');
+      await expect(copy).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(copy).toHaveText(denied ? 'Copy failed' : 'Copied');
+      await expect(popup.getByRole('status')).toHaveText(denied ? 'Copy failed' : 'Copied');
+      expect(await page.evaluate(() => (window as unknown as { copiedPrompt: string }).copiedPrompt)).toBe(longTask);
+      await page.keyboard.press('Tab');
+      await expect(prompt).toBeFocused();
+      expect(await prompt.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await page.keyboard.press('Control+End');
+      await expect.poll(() => prompt.evaluate((element) => Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop))).toBeLessThanOrEqual(1);
+      await page.keyboard.press('Escape');
+      await expect(popup).toBeHidden();
+      await expect(task).toBeFocused();
+      await expect(page.locator('.subagent-header')).toHaveAttribute('aria-expanded', 'false');
+    });
+  }
 
   test('bounds settled and live previews to fixed budgets across widths', async ({ page, isolatedHost }, info) => {
     const item = page.locator('.tool-call-subagent');

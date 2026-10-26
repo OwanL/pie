@@ -280,6 +280,6 @@ test('subagent model and metrics can shrink without reintroducing metadata badge
   assert.match(css, /\.subagent-primary-meta > \.pie-tooltip-trigger\s*\{[^}]*min-width:\s*0/);
   assert.match(css, /\.subagent-header-metrics\s*\{[^}]*display:\s*flex;[^}]*min-width:\s*0/);
   assert.match(css, /@container subagent-card \(max-width: 379px\)[\s\S]*?\.subagent-header-metrics\s*\{[^}]*flex-wrap:\s*wrap/);
-  assert.match(css, /\.subagent-task-trigger\s*\{[^}]*display:\s*block;[^}]*min-width:\s*0/);
+  assert.match(css, /\.subagent-task-trigger\s*\{[^}]*width:\s*fit-content;[^}]*min-width:\s*0/);
   for (const selector of ['subagent-secondary-meta', 'subagent-model-tag', 'subagent-thinking-tag']) assert.ok(!css.includes('.' + selector));
 });

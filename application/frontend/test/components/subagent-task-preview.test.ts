@@ -75,7 +75,9 @@ test('shows the complete unedited prompt in a labelled rich region and cleans up
   assert.equal(host().getAttribute('aria-label'), 'Task for scout');
   const popover = host().querySelector('.subagent-task-popover')!;
   assert.ok(popover, 'the entire popup, including its caption, owns the height budget');
-  assert.equal(popover.querySelector('.subagent-task-popover-heading')?.textContent, 'Delegated prompt · scout');
+  assert.equal(popover.querySelector('.subagent-task-popover-title')?.textContent, 'Delegated prompt');
+  assert.equal(popover.querySelector('.subagent-task-popover-agent')?.textContent, 'scout');
+  assert.equal(popover.querySelector('button')?.getAttribute('aria-label'), 'Copy delegated prompt');
   assert.equal(popover.querySelector('.subagent-task-tooltip')?.textContent, task);
   assert.equal(popover.querySelectorAll('[tabindex]').length, 1, 'only the raw text is a keyboard scroll surface');
   assert.ok(host().style.getPropertyValue('--pie-tooltip-available-height'));
@@ -85,15 +87,17 @@ test('shows the complete unedited prompt in a labelled rich region and cleans up
   assert.ok(document.querySelector('.pie-tooltip-host') === null);
 });
 
-test('focus opens, Tab enters the scroll surface, and Escape returns to the excerpt', async () => {
+test('focus opens, Tab enters the inspector, and Escape returns from its scroll surface', async () => {
   act(() => trigger().focus());
   await flush();
   const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
   dispatch(trigger(), tab);
   const scrollRegion = host().querySelector('.subagent-task-tooltip') as HTMLElement;
   assert.equal(scrollRegion.tabIndex, 0);
-  assert.ok(document.activeElement === scrollRegion);
+  assert.ok(document.activeElement === host().querySelector('button'));
   assert.equal(tab.defaultPrevented, true);
+  act(() => scrollRegion.focus());
+  assert.equal(host().style.display, 'block');
   const end = new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true });
   dispatch(scrollRegion, end);
   assert.equal(end.defaultPrevented, false, 'native scrolling keys remain available');
@@ -144,10 +148,9 @@ test('task popup bounds its complete content and keeps one raw-text scroll owner
   assert.match(text, /user-select:\s*text;/);
   assert.doesNotMatch(text, /--pie-tooltip-available-height/);
   const hostSkin = rule('.pie-tooltip-host:has(.subagent-task-popover)');
-  assert.match(hostSkin, /width:\s*min\(420px, calc\(100vw - 16px\)\);/);
+  assert.match(hostSkin, /width:\s*min\([^;]*calc\(100vw - 16px\)\);/);
   assert.match(hostSkin, /box-sizing:\s*border-box;/);
-  assert.match(hostSkin, /padding:\s*10px;/);
-  assert.match(hostSkin, /box-shadow:\s*none;/);
+  assert.match(hostSkin, /padding:\s*0;/);
 });
 
 test('click and keyboard activation dismiss without activating the parent card', async () => {

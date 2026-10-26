@@ -355,7 +355,7 @@ test('header context keeps known zero while detailed usage stays out of the head
   child.usage = { input: 0, output: NaN, contextTokens: 0, cacheRead: 0, cacheWrite: 1200, turns: 1 };
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
   assert.equal(container.querySelector('.subagent-inline-context')?.textContent, '0/200k');
-  assert.equal(container.querySelector('.subagent-inline-context')?.getAttribute('title'), 'Context tokens used / context window');
+  assert.equal(container.querySelector('.subagent-inline-context')?.getAttribute('title'), null, 'context tooltip must not duplicate its accessible tooltip natively');
   assert.ok(container.querySelector('.subagent-inline-tokens') === null);
   assert.ok(container.querySelector('.subagent-inline-cache') === null);
   assert.ok(container.querySelector('.subagent-inline-turns') === null);
@@ -384,6 +384,36 @@ test('header metrics remain grouped without status or activity decoration', () =
   assert.equal(metrics.querySelector('.subagent-telemetry-cost')?.textContent, '$0.01');
   assert.ok(metrics.querySelector('.subagent-telemetry-elapsed') === null, 'short elapsed stays hidden');
   for (const selector of ['.subagent-activity', '.subagent-activity-dot', '.status-chip']) assert.ok(header.querySelector(selector) === null);
+});
+
+test('shared metric tooltips open on hover/focus and keep activation inside the collapsed header', async () => {
+  mount(telemetrySubagentToolCall('legacy'), prefsWith({ autoExpandSubagentCalls: false }));
+  const header = container.querySelector<HTMLElement>('.subagent-header')!;
+  const contextMetric = container.querySelector<HTMLElement>('.subagent-inline-usage')!;
+  const contextHost = await openDetailsTooltip(contextMetric);
+  assert.match(contextHost.textContent ?? '', /Context tokens used \/ context window/);
+  assert.equal(header.getAttribute('aria-expanded'), 'false');
+  for (const key of ['Enter', ' ']) {
+    act(() => { contextMetric.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); });
+    assert.equal(header.getAttribute('aria-expanded'), 'false', `${key} on context metric must not expand the card`);
+  }
+  act(() => { contextMetric.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+  assert.equal(header.getAttribute('aria-expanded'), 'false', 'context metric click must not expand the card');
+  act(() => { contextMetric.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+  assert.equal(contextHost.style.display, 'none', 'Escape closes the context tooltip');
+
+  const costMetric = container.querySelector<HTMLElement>('.subagent-runtime-telemetry')!;
+  assert.match(costMetric.getAttribute('aria-label') ?? '', /Cost: \$0\.0123/);
+  const costHost = await openDetailsTooltip(costMetric, 'focus');
+  assert.equal(costHost.getAttribute('role'), 'tooltip');
+  assert.match(costHost.textContent ?? '', /Cost: \$0\.0123/);
+  assert.equal(header.getAttribute('aria-expanded'), 'false');
+  act(() => { costMetric.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+  assert.equal(header.getAttribute('aria-expanded'), 'false', 'cost metric Enter must not expand the card');
+  act(() => { costMetric.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+  assert.equal(header.getAttribute('aria-expanded'), 'false', 'cost metric click must not expand the card');
+  act(() => { costMetric.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+  assert.equal(costHost.style.display, 'none', 'Escape closes the cost tooltip');
 });
 
 test('model interactions stay inside the single-row header while header Enter expands', async () => {
@@ -645,7 +675,10 @@ test('parallel agent names inspect the same original parent capture, not synthet
   mount(toolCall, prefsWith({ autoExpandSubagentCalls: true }), undefined, captureSession);
   assert.equal(messages.length, 0);
   const names = Array.from(container.querySelectorAll<HTMLElement>('.subagent-agent-name'));
-  assert.deepEqual(names.map((name) => name.getAttribute('title')), ['worker', 'reviewer', 'scout']);
+  assert.deepEqual(names.map((name) => name.getAttribute('aria-label')), [
+    'Inspect worker model exchange', 'Inspect reviewer model exchange', 'Inspect scout model exchange',
+  ]);
+  assert.deepEqual(names.map((name) => name.querySelector('.subagent-role-icon')?.getAttribute('data-role-icon')), ['worker', 'reviewer', 'scout']);
   for (const name of names) {
     const before: number = messages.length;
     const host = await openDetailsTooltip(name);
@@ -889,8 +922,9 @@ test('estimated cost retains visible estimate marker and hover details', async (
   mount(costEvidenceToolCall({ input: 100_000, output: 60_000, cacheRead: 0, cacheWrite: 0, contextTokens: 160_000 }), prefsWith({ autoExpandSubagentCalls: false }), pricingForModel);
 
   assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '~$0.64');
-  const costTelemetry = container.querySelector<HTMLElement>('.subagent-telemetry-cost')?.parentElement;
-  assert.match(costTelemetry?.getAttribute('title') ?? '', /Estimated cost: ~\$0\.6400/);
+  const costTelemetry = container.querySelector<HTMLElement>('.subagent-runtime-telemetry');
+  assert.match(costTelemetry?.getAttribute('aria-label') ?? '', /Estimated cost: ~\$0\.6400/);
+  assert.equal(costTelemetry?.getAttribute('title'), null, 'cost tooltip must not duplicate its accessible name natively');
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Estimated cost~\$0\.6400/);
 });
@@ -937,9 +971,10 @@ test('nested subagent: with autoExpand, both outer and inner subagent headers re
   const headers = container.querySelectorAll('.subagent-header');
   // Expect at least 2: the outer worker header + the inner scout header.
   assert.ok(headers.length >= 2, `expected >=2 subagent headers, got ${headers.length}`);
-  const agentNames = Array.from(headers).map((h) => h.querySelector('.subagent-agent-name')?.getAttribute('title') ?? '');
+  const agentNames = Array.from(headers).map((h) => h.querySelector('.subagent-role-icon')?.getAttribute('data-role-icon') ?? '');
   assert.ok(agentNames.includes('worker'), `outer header should show worker, got ${JSON.stringify(agentNames)}`);
   assert.ok(agentNames.includes('scout'), `inner header should show scout, got ${JSON.stringify(agentNames)}`);
+  assert.ok(Array.from(headers).every((header) => header.querySelector('.subagent-agent-name')?.getAttribute('aria-label')?.startsWith('Inspect ')));
 });
 
 test('nested subagent: collapsed by default hides the inner subagent entirely', () => {
