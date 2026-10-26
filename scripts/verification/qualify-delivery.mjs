@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -13,21 +13,32 @@ import { abortOnProcessSignals, resolveChildProcessTimeoutMs, watchChildProcess,
 import { verificationChildEnv } from './verification-runtime.mjs';
 import { createOwnerRequire } from '../lib/package-resolution.mjs';
 
+import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity } from './lib/vsix-candidate.mjs';
+
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
-export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root>]\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
+export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>]\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
 
 export function parseQualificationArgs(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
   let artifactDir;
+  let vsix;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === '--vsix' || arg.startsWith('--vsix=')) {
+      if (vsix !== undefined) throw new Error('--vsix may be specified only once.');
+      const value = arg === '--vsix' ? argv[++index] : arg.slice('--vsix='.length);
+      if (!value || value.startsWith('--') || !path.isAbsolute(value)) throw new Error('--vsix requires an absolute candidate path.');
+      vsix = path.resolve(value);
+      continue;
+    }
     if (arg !== '--pi-runtime' && !arg.startsWith('--pi-runtime=')) throw new Error(`Unknown delivery qualification option: ${arg}`);
     if (artifactDir !== undefined) throw new Error('--pi-runtime may be specified only once.');
     const value = arg === '--pi-runtime' ? argv[++index] : arg.slice('--pi-runtime='.length);
     if (!value || value.startsWith('--') || !path.isAbsolute(value)) throw new Error('--pi-runtime requires an absolute artifact root.');
     artifactDir = path.resolve(value);
   }
-  return { artifactDir };
+  if (vsix !== undefined && artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
+  return vsix === undefined ? { artifactDir } : { vsix };
 }
 
 // This is command composition, not another build graph or test runner.
@@ -130,6 +141,10 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
   let completed = false;
   try {
     signal?.throwIfAborted();
+    if (selection.vsix !== undefined && selection.artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
+    if (selection.vsix !== undefined && !path.isAbsolute(selection.vsix)) throw new Error('--vsix requires an absolute candidate path.');
+    const fingerprint = selection.vsix === undefined ? undefined
+      : await (dependencies.fingerprintCandidate ?? fingerprintCandidate)(selection.vsix);
     // Resolve in the invoking environment, before native tests isolate browser
     // cache roots (LOCALAPPDATA/HOME), and before any expensive compilation.
     let browserExecutable;
@@ -147,7 +162,7 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     // Compile using the existing gate/command, not an unconditional Moon prereq:
     // explicit artifact reuse must remain independent of checkout compilation.
     const stages = qualificationStages(root, '', selection.artifactDir);
-    if (selection.artifactDir === undefined) {
+    if (selection.vsix === undefined && selection.artifactDir === undefined) {
       const stage = stages.shift();
       status(`${stage.name}: started`);
       const result = await run(stage, { root, signal, env });
@@ -163,8 +178,16 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     packageRoot = canonical;
     status(`package: ${packageRoot} (invocation-owned, nonpublishing)`);
     signal?.throwIfAborted();
-    await (dependencies.copySkeleton ?? copyPackageSkeleton)(root, packageRoot);
-    for (const stage of qualificationStages(root, packageRoot, selection.artifactDir, browserExecutable).filter(stage => stage.name !== 'pi-compile')) {
+    let candidateIdentity;
+    if (selection.vsix !== undefined) {
+      await (dependencies.extractCandidate ?? extractCandidate)(selection.vsix, packageRoot);
+      signal?.throwIfAborted();
+      candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot);
+    } else {
+      await (dependencies.copySkeleton ?? copyPackageSkeleton)(root, packageRoot);
+    }
+    for (const stage of qualificationStages(root, packageRoot, selection.artifactDir, browserExecutable)
+      .filter(stage => selection.vsix !== undefined ? stage.name === 'delivered-hosts' : stage.name !== 'pi-compile')) {
       signal?.throwIfAborted();
       status(`${stage.name}: started`);
       // Until both layers report completion, retain this package even if the
@@ -176,12 +199,24 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
       signal?.throwIfAborted();
       status(`${stage.name}: completed`);
     }
+    if (selection.vsix !== undefined) {
+      const after = await (dependencies.fingerprintCandidate ?? fingerprintCandidate)(selection.vsix);
+      if (after.sha256 !== fingerprint.sha256 || after.size !== fingerprint.size) throw new Error('VSIX candidate changed during qualification; package retained.');
+      signal?.throwIfAborted();
+      const candidate = { path: selection.vsix, ...fingerprint, ...candidateIdentity };
+      const evidencePath = path.join(packageRoot, 'qualification-evidence.json');
+      await writeFile(evidencePath, `${JSON.stringify({ candidate, packageRoot, qualification: 'passed: private standalone and mocked VS Code adapters plus headless browser first paint', installed: false, published: false }, null, 2)}\n`, { flag: 'wx' });
+      status(`qualified: exact VSIX candidate; evidence: ${evidencePath}; NOT installed/published or real Electron acceptance`);
+      return { code: 0, packageRoot, evidencePath, candidate };
+    }
     completed = true;
     status('qualified: private built delivery, both headless adapters and browser first paint; NOT installed/published or real Electron acceptance');
     return { code: 0, packageRoot };
   } finally {
     if (packageRoot) {
-      if (safeToRemove && !signal?.aborted) {
+      if (selection.vsix !== undefined) {
+        status(`package: RETAINED ${packageRoot}; VSIX candidate extraction and qualification evidence`);
+      } else if (safeToRemove && !signal?.aborted) {
         await remove(packageRoot);
         status(`package: removed ${packageRoot}${completed ? ' after confirmed qualification completion' : ' (no uncertain child ownership)'}`);
       } else status(`package: RETAINED ${packageRoot}; completion/cancellation evidence is uncertain, no automatic deletion`);

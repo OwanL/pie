@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -8,9 +9,137 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { copyPackageSkeleton, parseQualificationArgs, qualificationStages, qualifyDelivery, runQualificationStage, validateBrowserExecutable } from '../qualify-delivery.mjs';
 import { watchChildProcess } from '../../lib/process-watchdog.mjs';
+import { createOwnerRequire } from '../../lib/package-resolution.mjs';
+import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity } from '../lib/vsix-candidate.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const confirmed = { code: 0, outerConfirmed: true, innerConfirmed: true };
+
+const candidateFingerprint = { sha256: 'a'.repeat(64), size: 123 };
+const candidateIdentity = { extensionId: 'pie.pie', version: '1.2.3', buildId: 'b'.repeat(20), piRuntimeIdentity: 'fixture-runtime' };
+
+async function candidateFixture(t, overrides = {}) {
+  return fixture(t, {
+    fingerprintCandidate: async () => ({ ...candidateFingerprint }),
+    extractCandidate: async () => {},
+    verifyCandidateIdentity: async () => ({ ...candidateIdentity }),
+    ...overrides,
+  });
+}
+
+async function assertNoSuccessEvidence(f) {
+  assert.equal((await readdir(f.packageRoot)).includes('qualification-evidence.json'), false);
+  assert.equal(f.events.some(event => event.startsWith('qualified:')), false);
+  assert.equal(f.events.includes('remove'), false);
+  assert.ok(f.events.some(event => event.includes(`RETAINED ${f.packageRoot}`)));
+}
+
+test('VSIX parser requires absolute paths, rejects duplicates and runtime combinations', () => {
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  assert.deepEqual(parseQualificationArgs(['--vsix', vsix]), { vsix });
+  assert.deepEqual(parseQualificationArgs([`--vsix=${vsix}`]), { vsix });
+  for (const args of [['--vsix'], ['--vsix='], ['--vsix', 'relative.vsix'],
+    ['--vsix', vsix, `--vsix=${vsix}`], ['--vsix', vsix, '--pi-runtime', os.tmpdir()],
+    ['--pi-runtime', os.tmpdir(), '--vsix', vsix]]) assert.throws(() => parseQualificationArgs(args));
+});
+
+test('exact candidate runs only delivered hosts and retains identity/fingerprint evidence', async t => {
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const f = await candidateFixture(t, {
+    copySkeleton: async () => assert.fail('candidate must not copy skeleton'),
+    verifyRuntime: async () => assert.fail('candidate must not use checkout runtime'),
+    extractCandidate: async (file, destination) => { assert.equal(file, vsix); assert.equal(destination, f.packageRoot); },
+  });
+  const result = await qualifyDelivery({ vsix }, undefined, f.dependencies);
+  assert.equal(result.code, 0);
+  assert.deepEqual(f.stages.map(item => item.stage.name), ['delivered-hosts']);
+  assert.equal(f.stages[0].stage.env.PIE_DELIVERED_HOST_ROOT, f.packageRoot);
+  assert.equal(f.stages[0].stage.env.PIE_DELIVERED_BROWSER_EXECUTABLE, process.execPath);
+  assert.deepEqual(result.candidate, { path: vsix, ...candidateFingerprint, ...candidateIdentity });
+  assert.deepEqual(JSON.parse(await readFile(result.evidencePath, 'utf8')), { candidate: result.candidate, packageRoot: f.packageRoot, qualification: 'passed: private standalone and mocked VS Code adapters plus headless browser first paint', installed: false, published: false });
+  assert.equal(f.events.includes('remove'), false);
+  assert.ok(f.events.some(event => event.includes(`RETAINED ${f.packageRoot}`)));
+});
+
+test('candidate hash or size mutation rejects without success evidence', async t => {
+  for (const mutation of [{ sha256: 'c'.repeat(64) }, { size: 124 }]) {
+    let fingerprints = 0;
+    const f = await candidateFixture(t, { fingerprintCandidate: async () => ({ ...candidateFingerprint, ...(fingerprints++ ? mutation : {}) }) });
+    await assert.rejects(qualifyDelivery({ vsix: path.join(os.tmpdir(), 'candidate.vsix') }, undefined, f.dependencies), /changed during qualification/u);
+    assert.equal(fingerprints, 2);
+    await assertNoSuccessEvidence(f);
+  }
+});
+
+test('candidate uncertain completion, nested 125 and cancellation retain without success evidence', async t => {
+  for (const mode of ['outer', 'inner', '125', 'cancel']) {
+    const controller = new AbortController();
+    const f = await candidateFixture(t, { runStage: async () => {
+      if (mode === 'cancel') controller.abort();
+      return { ...confirmed, ...(mode === 'outer' ? { outerConfirmed: false } : mode === 'inner' ? { innerConfirmed: false } : mode === '125' ? { code: 125 } : {}) };
+    } });
+    await assert.rejects(qualifyDelivery({ vsix: path.join(os.tmpdir(), 'candidate.vsix') }, controller.signal, f.dependencies));
+    await assertNoSuccessEvidence(f);
+  }
+});
+
+async function zipFixture(directory, entries, rewrite) {
+  const yazl = createRequire(createOwnerRequire().resolve('@vscode/vsce/package.json'))('yazl');
+  const zip = new yazl.ZipFile();
+  const chunks = [];
+  const bytes = new Promise((resolve, reject) => {
+    zip.outputStream.on('data', chunk => chunks.push(chunk));
+    zip.outputStream.on('end', () => resolve(Buffer.concat(chunks)));
+    zip.outputStream.on('error', reject);
+  });
+  for (const [name, content, options] of entries) zip.addBuffer(Buffer.from(content), name, options);
+  zip.end();
+  const file = path.join(directory, 'candidate.vsix');
+  const buffer = await bytes;
+  await writeFile(file, rewrite ? rewrite(buffer) : buffer);
+  return file;
+}
+
+test('real VSIX extraction excludes metadata and rejects duplicate, symlink and traversal entries', async t => {
+  for (const mode of ['good', 'duplicate', 'symlink', 'traversal', 'unsafe-metadata']) {
+    const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-extract-'));
+    t.after(() => rm(sandbox, { recursive: true, force: true }));
+    const entries = [['extension/package.json', '{"name":"pie"}'], ['extension.vsixmanifest', 'metadata'], ['[Content_Types].xml', 'metadata']];
+    if (mode === 'duplicate') entries.push(['extension/package.json', 'duplicate']);
+    if (mode === 'symlink') entries.push(['extension/link', 'target', { mode: 0o120777 }]);
+    if (mode === 'traversal') entries.push(['extension/xx/file', 'escape']);
+    if (mode === 'unsafe-metadata') entries.push(['metadata/CON', 'unsafe']);
+    const file = await zipFixture(sandbox, entries, mode === 'traversal'
+      ? buffer => Buffer.from(buffer.toString('latin1').replaceAll('extension/xx/file', 'extension/../file'), 'latin1') : undefined);
+    const destination = path.join(sandbox, 'extracted');
+    if (mode === 'good') {
+      await extractCandidate(file, destination);
+      assert.deepEqual(await readdir(destination), ['package.json']);
+      assert.equal(await readFile(path.join(destination, 'package.json'), 'utf8'), '{"name":"pie"}');
+    } else await assert.rejects(extractCandidate(file, destination), /Duplicate|Nonregular|Unsafe|invalid relative path/u);
+  }
+});
+
+test('candidate helper fingerprints bytes and rejects malformed package/build identity', async t => {
+  const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-identity-'));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const file = path.join(sandbox, 'candidate.vsix');
+  await writeFile(file, 'candidate bytes');
+  assert.deepEqual(await fingerprintCandidate(file), { sha256: createHash('sha256').update('candidate bytes').digest('hex'), size: 15 });
+  await assert.rejects(fingerprintCandidate(sandbox), /regular nonsymlink/u);
+  await mkdir(path.join(sandbox, 'out/webview/panel'), { recursive: true });
+  const valid = { publisher: 'pie', name: 'pie', main: './runtime/bootstrap.cjs', version: '1.0.0' };
+  for (const patch of [{ publisher: 'other' }, { name: 'other' }, { main: './out/main.js' }, { version: '' }]) {
+    await writeFile(path.join(sandbox, 'package.json'), JSON.stringify({ ...valid, ...patch }));
+    await assert.rejects(verifyCandidateIdentity(sandbox), /Invalid candidate package identity/u);
+  }
+  await writeFile(path.join(sandbox, 'package.json'), JSON.stringify(valid));
+  for (const [build, panel] of [['malformed', 'malformed'], ['a'.repeat(20), 'b'.repeat(20)]]) {
+    await writeFile(path.join(sandbox, 'out/pie-build-id.txt'), build);
+    await writeFile(path.join(sandbox, 'out/webview/panel/pie-build-id.txt'), panel);
+    await assert.rejects(verifyCandidateIdentity(sandbox), /matching 20-hex/u);
+  }
+});
 
 async function fixture(t, overrides = {}) {
   const packageRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'pie-qualification-unit-')));
