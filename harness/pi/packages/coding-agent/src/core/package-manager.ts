@@ -120,6 +120,8 @@ export interface PackageManager {
 export interface DefaultExtension {
 	path: string;
 	legacyPaths: readonly string[];
+	/** Native npm/git package identities whose explicit selection owns this fallback, regardless of version or installation. */
+	legacyPackageSources?: readonly string[];
 }
 
 interface PackageManagerOptions {
@@ -980,7 +982,10 @@ export class DefaultPackageManager implements PackageManager {
 		// Trust bootstrap may evaluate ordinary user/CLI extensions, but application fallbacks
 		// must wait until the resulting project trust state determines legacy eligibility.
 		if (!options?.suppressDefaultExtensions) {
-			this.addDefaultExtensions(accumulator, globalSettings.extensions ?? [], projectSettings.extensions ?? []);
+			this.addDefaultExtensions(
+				accumulator, globalSettings.extensions ?? [], projectSettings.extensions ?? [],
+				packageSources.map(({ pkg }) => this.getPackageSourceString(pkg)),
+			);
 		}
 
 		return this.toResolvedPaths(accumulator);
@@ -2505,8 +2510,16 @@ export class DefaultPackageManager implements PackageManager {
 		accumulator: ResourceAccumulator,
 		userEntries: string[],
 		projectEntries: string[],
+		packageSources: string[],
 	): void {
 		if (this.defaultExtensions.length === 0) return;
+		// Eligibility is already enforced by native settings/trust resolution. Selection intent
+		// survives missing installations and package filters; never infer it from installed paths.
+		const selectedPackages = new Set(
+			[...packageSources, ...this.additionalExtensionPaths]
+				.filter((source) => this.parseSource(source).type !== "local")
+				.map((source) => this.getPackageIdentity(source)),
+		);
 		const explicitPaths = [
 			...splitPatterns(userEntries).plain.map((path) => this.resolvePathFromBase(path, this.agentDir)),
 			...splitPatterns(projectEntries).plain.map((path) =>
@@ -2516,6 +2529,9 @@ export class DefaultPackageManager implements PackageManager {
 				.map((path) => this.resolvePath(path)),
 		];
 		for (const descriptor of this.defaultExtensions) {
+			if (descriptor.legacyPackageSources?.some((source) =>
+				this.parseSource(source).type !== "local" && selectedPackages.has(this.getPackageIdentity(source)),
+			)) continue;
 			const path = this.resolvePathFromBase(descriptor.path, this.agentDir);
 			const legacyPaths = descriptor.legacyPaths.map((legacy) => this.resolvePathFromBase(legacy, this.agentDir));
 			const legacyKeys = new Set(legacyPaths.map(canonicalizePath));

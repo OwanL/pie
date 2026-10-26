@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -26,6 +27,8 @@ describe("application default extensions", () => {
 		factory(bundled, "bundled");
 	});
 	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		delete globalState[counter];
 		rmSync(root, { recursive: true, force: true });
 	});
@@ -49,7 +52,9 @@ describe("application default extensions", () => {
 	}
 
 	it.each([true, false])("defers fresh user-scope defaults until trust resolves to %s", async (trusted) => {
-		const resources = loader();
+		const resources = loader({ defaultExtensions: [{
+			path: bundled, legacyPaths: [], legacyPackageSources: ["npm:pi-web-access", "npm:pi-mcp-adapter"],
+		}] });
 		await resources.reload({ resolveProjectTrust: async ({ extensionsResult }) => {
 			expect(extensionsResult.extensions).toEqual([]);
 			expect(globalState[counter]).toBeUndefined();
@@ -168,6 +173,81 @@ describe("application default extensions", () => {
 		await resources.reload({ resolveProjectTrust: async () => true });
 		expect(resources.getExtensions().extensions.map((e) => e.path)).toEqual([bundled]);
 		expect(globalState[counter]).toBe(1);
+	});
+
+	it.each(["user", "project", "cli"])("honors explicit npm ownership in %s scope regardless of installation state", async (scope) => {
+		vi.stubEnv("PI_OFFLINE", "1");
+		const installed = join(root, "other-native-prefix", "pi-web-access");
+		// Keep native package resolution/filtering; isolate only the installation prefix, with no installer traffic.
+		vi.spyOn(DefaultPackageManager.prototype as unknown as { getNpmInstallPath(): string }, "getNpmInstallPath")
+			.mockReturnValue(installed);
+		const source = "npm:pi-web-access@1.2.3";
+		const settingsDir = scope === "project" ? join(cwd, ".pi") : agentDir;
+		mkdirSync(settingsDir, { recursive: true });
+		const makeLoader = () => loader({
+			defaultExtensions: [{ path: bundled, legacyPaths: [], legacyPackageSources: ["npm:pi-web-access"] }],
+			...(scope === "cli" ? { additionalExtensionPaths: [source] } : {}),
+		});
+		for (const state of ["missing", "disabled", "broken"]) {
+			if (scope !== "cli") writeFileSync(join(settingsDir, "settings.json"), JSON.stringify({
+				packages: [{ source, ...(state === "disabled" ? { extensions: [] } : {}) }],
+			}));
+			if (state !== "missing") {
+				mkdirSync(installed, { recursive: true });
+				writeFileSync(join(installed, "package.json"), JSON.stringify({
+					name: "pi-web-access", version: "1.2.3", pi: { extensions: ["index.ts"] },
+				}));
+				if (state === "disabled" && scope !== "cli") factory(join(installed, "index.ts"), "package-legacy");
+				else writeFileSync(join(installed, "index.ts"), "throw new Error('broken selected package'); export default function() {};");
+			}
+			const resources = makeLoader();
+			await resources.reload({ resolveProjectTrust: async () => true });
+			expect(resources.getExtensions().extensions).toEqual([]);
+			expect(globalState[counter]).toBeUndefined();
+		}
+		// Selecting the physical bundle is still ordinary native input.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [bundled],
+			...(scope === "user" ? { packages: [source] } : {}),
+		}));
+		const explicit = makeLoader();
+		await explicit.reload({ resolveProjectTrust: async () => true });
+		expect(explicit.getExtensions().extensions.map((e) => e.path)).toEqual([bundled]);
+		expect(globalState[counter]).toBe(1);
+	});
+
+	it.each([false, true])("ignores untrusted npm intent until trust resolves to %s", async (trust) => {
+		vi.stubEnv("PI_OFFLINE", "1");
+		vi.spyOn(DefaultPackageManager.prototype as unknown as { getNpmInstallPath(): string }, "getNpmInstallPath")
+			.mockReturnValue(join(root, "missing"));
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-mcp-adapter@9.0.0"] }));
+		const resources = loader({ defaultExtensions: [{ path: bundled, legacyPaths: [], legacyPackageSources: ["npm:pi-mcp-adapter"] }] });
+		await resources.reload({ resolveProjectTrust: async ({ extensionsResult }) => {
+			expect(extensionsResult.extensions).toEqual([]);
+			expect(globalState[counter]).toBeUndefined();
+			return trust;
+		} });
+		expect(globalState[counter]).toBe(trust ? undefined : 1);
+	});
+
+	it("does not suppress defaults for a different npm identity", async () => {
+		vi.stubEnv("PI_OFFLINE", "1");
+		vi.spyOn(DefaultPackageManager.prototype as unknown as { getNpmInstallPath(): string }, "getNpmInstallPath")
+			.mockReturnValue(join(root, "missing"));
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-web-access-other@1.2.3"] }));
+		const resources = loader({ defaultExtensions: [{ path: bundled, legacyPaths: [], legacyPackageSources: ["npm:pi-web-access"] }] });
+		await resources.reload({ resolveProjectTrust: async () => false });
+		expect(resources.getExtensions().extensions.map((e) => e.path)).toEqual([bundled]);
+		expect(globalState[counter]).toBe(1);
+	});
+
+	it("does not confuse package identity with module basename or registered command name", async () => {
+		const unrelated = join(agentDir, "extensions", "pi-web-access.ts");
+		factory(unrelated, "pi-web-access");
+		const resources = loader({ defaultExtensions: [{ path: bundled, legacyPaths: [], legacyPackageSources: ["npm:pi-web-access"] }] });
+		await resources.reload({ resolveProjectTrust: async () => false });
+		expect(resources.getExtensions().extensions.map((e) => e.path)).toEqual([unrelated, bundled]);
+		expect(globalState[counter]).toBe(2);
 	});
 
 	it("recognizes native directory entry points without basename deduplication", async () => {

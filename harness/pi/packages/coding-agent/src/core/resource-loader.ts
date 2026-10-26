@@ -132,6 +132,8 @@ export interface DefaultResourceLoaderOptions {
 	additionalExtensionPaths?: string[];
 	/** User-scope application defaults. Eligible exact legacy routes replace these before loading;
 	 * explicit legacy selections never fall back after missing files or load failures.
+	 * legacyPackageSources matches native eligible npm/git selection identities regardless of
+	 * version, installation prefix, missing files or package resource filters.
 	 * User extension overrides also match legacyPaths relative to agentDir. Disabled by noExtensions.
 	 * With resolveProjectTrust, automatic defaults load only after trust resolves (accept or deny);
 	 * explicitly selected default paths remain ordinary native bootstrap inputs.
