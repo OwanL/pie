@@ -90,13 +90,14 @@ export async function buildCandidate(selection, signal, deps = {}) {
     ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir])] });
   await (deps.stagePackage ?? stageExtensionForPackaging)(root, buildDir, stageRoot);
   const identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot);
+  if (typeof identity.target !== 'string') throw new Error('Staged build identity is missing a target; scratch retained.');
   if (runtime && identity.piRuntimeIdentity !== runtime.identity) throw new Error('Staged Pi runtime identity does not match the selected runtime; scratch retained.');
   const vsce = await (deps.resolveVsce ?? resolveVsce)(root);
-  await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--out', candidate] }, stageRoot);
+  await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--target', identity.target, '--out', candidate] }, stageRoot);
   const fingerprint = await (deps.fingerprint ?? fingerprintCandidate)(candidate);
   const evidence = { schema: 1, purpose: 'local-development-only', qualified: false,
     licenseQualified: false, cleanMachineQualified: false, source, runtime: { selection: selection.artifactDir ?? 'workspace', identity: runtime?.identity ?? identity.piRuntimeIdentity },
-    build: identity, candidate: { path: output, ...fingerprint }, scratch };
+    build: identity, candidate: { path: output, target: identity.target, ...fingerprint }, scratch };
   signal?.throwIfAborted();
   // Recheck both names just before publication; exclusive operations also close races.
   await absent(output);

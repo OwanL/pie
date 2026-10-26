@@ -17,7 +17,7 @@ async function fixture(t) {
   const output = path.join(base, 'candidate.vsix');
   const calls = [];
   const source = { head: 'fixture-head', status: ' M fixture' };
-  const identity = { buildId: 'fixture-build', piRuntimeIdentity: 'fixture-runtime' };
+  const identity = { buildId: 'fixture-build', piRuntimeIdentity: 'fixture-runtime', target: 'win32-x64' };
   const bytes = Buffer.from('fake packaged candidate bytes');
   const deps = {
     root, status() {}, createScratch: async () => scratch,
@@ -77,12 +77,12 @@ for (const reuse of [false, true]) {
     assert.deepEqual(f.calls.find(call => call[0] === 'stage').slice(1), [f.root, path.join(f.scratch, 'build'), path.join(f.scratch, 'stage')]);
     const packaging = f.calls.find(call => call[0] === 'candidate-package');
     assert.equal(packaging[2].root, path.join(f.scratch, 'stage'));
-    assert.deepEqual(packaging[1].args, ['fake-vsce', 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--out', path.join(f.scratch, 'candidate.vsix')]);
+    assert.deepEqual(packaging[1].args, ['fake-vsce', 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--target', 'win32-x64', '--out', path.join(f.scratch, 'candidate.vsix')]);
     assert.deepEqual(await readFile(f.output), f.bytes);
     const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
     assert.deepEqual(evidence, { schema: 1, purpose: 'local-development-only', qualified: false, licenseQualified: false, cleanMachineQualified: false,
       source: f.source, runtime: { selection: reuse ? artifactDir : 'workspace', identity: f.identity.piRuntimeIdentity },
-      build: f.identity, candidate: { path: f.output, sha256: createHash('sha256').update(f.bytes).digest('hex'), size: f.bytes.length }, scratch: f.scratch });
+      build: f.identity, candidate: { path: f.output, target: 'win32-x64', sha256: createHash('sha256').update(f.bytes).digest('hex'), size: f.bytes.length }, scratch: f.scratch });
     assert.deepEqual(result.evidence, evidence);
     assert.deepEqual(await readFile(path.join(f.scratch, 'candidate.vsix')), f.bytes);
     assert.ok((await lstat(path.join(f.scratch, 'stage'))).isDirectory());

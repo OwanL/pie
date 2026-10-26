@@ -10,18 +10,18 @@ import test from 'node:test';
 import { copyPackageSkeleton, parseQualificationArgs, qualificationStages, qualifyDelivery, runQualificationStage, validateBrowserExecutable } from '../qualify-delivery.mjs';
 import { watchChildProcess } from '../../lib/process-watchdog.mjs';
 import { createOwnerRequire } from '../../lib/package-resolution.mjs';
-import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity } from '../lib/vsix-candidate.mjs';
+import { extractCandidate, fingerprintCandidate, runtimeTargetPlatform, validateCandidateContainer, verifyCandidateIdentity } from '../lib/vsix-candidate.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const confirmed = { code: 0, outerConfirmed: true, innerConfirmed: true };
 
 const candidateFingerprint = { sha256: 'a'.repeat(64), size: 123 };
-const candidateIdentity = { extensionId: 'pie.pie', version: '1.2.3', buildId: 'b'.repeat(20), piRuntimeIdentity: 'fixture-runtime' };
+const candidateIdentity = { extensionId: 'pie.pie', version: '1.2.3', target: 'win32-x64', buildId: 'b'.repeat(20), piRuntimeIdentity: 'fixture-runtime' };
 
 async function candidateFixture(t, overrides = {}) {
   return fixture(t, {
     fingerprintCandidate: async () => ({ ...candidateFingerprint }),
-    extractCandidate: async () => {},
+    extractCandidate: async () => ({ ...candidateIdentity }),
     verifyCandidateIdentity: async () => ({ ...candidateIdentity }),
     ...overrides,
   });
@@ -48,7 +48,7 @@ test('exact candidate runs only delivered hosts and retains identity/fingerprint
   const f = await candidateFixture(t, {
     copySkeleton: async () => assert.fail('candidate must not copy skeleton'),
     verifyRuntime: async () => assert.fail('candidate must not use checkout runtime'),
-    extractCandidate: async (file, destination) => { assert.equal(file, vsix); assert.equal(destination, f.packageRoot); },
+    extractCandidate: async (file, destination) => { assert.equal(file, vsix); assert.equal(destination, f.packageRoot); return { ...candidateIdentity }; },
   });
   const result = await qualifyDelivery({ vsix }, undefined, f.dependencies);
   assert.equal(result.code, 0);
@@ -83,6 +83,18 @@ test('candidate uncertain completion, nested 125 and cancellation retain without
   }
 });
 
+function containerEntries({ id = 'pie', publisher = 'pie', version = '1.2.3', target = 'win32-x64', installation = 'Microsoft.VisualStudio.Code', asset = 'extension/package.json' } = {}) {
+  return [
+    ['extension.vsixmanifest', `<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata><Identity Id="${id}" Publisher="${publisher}" Version="${version}" TargetPlatform="${target}"/></Metadata>
+  <Installation><InstallationTarget Id="${installation}" Version="[1.90.0,)"/></Installation>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="${asset}"/></Assets>
+</PackageManifest>`],
+    ['[Content_Types].xml', '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="json" ContentType="application/json"/><Default Extension="vsixmanifest" ContentType="text/xml"/></Types>'],
+  ];
+}
+
 async function zipFixture(directory, entries, rewrite) {
   const yazl = createRequire(createOwnerRequire().resolve('@vscode/vsce/package.json'))('yazl');
   const zip = new yazl.ZipFile();
@@ -104,7 +116,7 @@ test('real VSIX extraction excludes metadata and rejects duplicate, symlink and 
   for (const mode of ['good', 'duplicate', 'symlink', 'traversal', 'unsafe-metadata']) {
     const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-extract-'));
     t.after(() => rm(sandbox, { recursive: true, force: true }));
-    const entries = [['extension/package.json', '{"name":"pie"}'], ['extension.vsixmanifest', 'metadata'], ['[Content_Types].xml', 'metadata']];
+    const entries = [['extension/package.json', '{"name":"pie"}'], ...containerEntries()];
     if (mode === 'duplicate') entries.push(['extension/package.json', 'duplicate']);
     if (mode === 'symlink') entries.push(['extension/link', 'target', { mode: 0o120777 }]);
     if (mode === 'traversal') entries.push(['extension/xx/file', 'escape']);
@@ -113,10 +125,47 @@ test('real VSIX extraction excludes metadata and rejects duplicate, symlink and 
       ? buffer => Buffer.from(buffer.toString('latin1').replaceAll('extension/xx/file', 'extension/../file'), 'latin1') : undefined);
     const destination = path.join(sandbox, 'extracted');
     if (mode === 'good') {
-      await extractCandidate(file, destination);
+      assert.deepEqual(await extractCandidate(file, destination), { extensionId: 'pie.pie', version: '1.2.3', target: 'win32-x64' });
       assert.deepEqual(await readdir(destination), ['package.json']);
       assert.equal(await readFile(path.join(destination, 'package.json'), 'utf8'), '{"name":"pie"}');
     } else await assert.rejects(extractCandidate(file, destination), /Duplicate|Nonregular|Unsafe|invalid relative path/u);
+  }
+});
+
+test('real VSIX container identity agrees with payload version, publisher, name and native target', async t => {
+  const identity = { ...candidateIdentity, target: runtimeTargetPlatform({ platform: 'win32', arch: 'x64' }) };
+  for (const [patch, mismatch] of [
+    [{}, undefined], [{ version: '1.2.4' }, 'version'], [{ publisher: 'other' }, 'extensionId'],
+    [{ id: 'other' }, 'extensionId'], [{ target: 'universal' }, 'target'], [{ target: 'linux-x64' }, 'target'],
+  ]) {
+    const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-container-'));
+    t.after(() => rm(sandbox, { recursive: true, force: true }));
+    const file = await zipFixture(sandbox, [['extension/package.json', JSON.stringify({ publisher: 'pie', name: 'pie', version: identity.version })], ...containerEntries(patch)]);
+    const container = await extractCandidate(file, path.join(sandbox, 'extracted'));
+    if (mismatch) assert.throws(() => validateCandidateContainer(container, identity), new RegExp(`${mismatch} mismatch`, 'u'));
+    else assert.doesNotThrow(() => validateCandidateContainer(container, identity));
+  }
+});
+
+test('real VSIX rejects missing XML, invalid installation target and package asset', async t => {
+  for (const mode of ['manifest', 'types', 'malformed', 'installation', 'asset']) {
+    const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-invalid-container-'));
+    t.after(() => rm(sandbox, { recursive: true, force: true }));
+    let entries = containerEntries(mode === 'installation' ? { installation: 'Other.Host' } : mode === 'asset' ? { asset: 'extension/other.json' } : {});
+    if (mode === 'manifest') entries = entries.filter(([name]) => name !== 'extension.vsixmanifest');
+    if (mode === 'types') entries = entries.filter(([name]) => name !== '[Content_Types].xml');
+    if (mode === 'malformed') entries[0][1] = '<broken>';
+    const file = await zipFixture(sandbox, [['extension/package.json', '{}'], ...entries]);
+    await assert.rejects(extractCandidate(file, path.join(sandbox, 'extracted')), /XML|Unexpected|Unclosed|InstallationTarget|package manifest asset/u);
+  }
+});
+
+test('qualifier rejects mismatched container metadata before launching hosts', async t => {
+  for (const patch of [{ version: 'other' }, { extensionId: 'other.pie' }, { extensionId: 'pie.other' }, { target: 'universal' }, { target: 'linux-x64' }]) {
+    const f = await candidateFixture(t, { extractCandidate: async () => ({ ...candidateIdentity, ...patch }) });
+    await assert.rejects(qualifyDelivery({ vsix: path.join(os.tmpdir(), 'candidate.vsix') }, undefined, f.dependencies), /VSIX container .* mismatch/u);
+    assert.equal(f.stages.length, 0);
+    await assertNoSuccessEvidence(f);
   }
 });
 

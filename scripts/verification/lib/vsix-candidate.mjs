@@ -47,7 +47,64 @@ function entryPath(entry) {
   return { parts, directory };
 }
 
-/** Validate every ZIP entry; extract only extension/ into an empty private directory. */
+const MAX_CONTAINER_XML_BYTES = 1024 * 1024;
+
+function one(values, label) {
+  if (!Array.isArray(values) || values.length !== 1) throw new Error(`Invalid VSIX container: expected exactly one ${label}`);
+  return values[0];
+}
+
+async function parseContainer(manifestXml, contentTypesXml, parseStringPromise) {
+  for (const xml of [manifestXml, contentTypesXml]) {
+    if (typeof xml !== 'string' || /<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error('Invalid VSIX container XML');
+  }
+  const options = { explicitArray: true, strict: true, attrkey: '$', charkey: '_' };
+  const manifest = (await parseStringPromise(manifestXml, options)).PackageManifest;
+  const types = (await parseStringPromise(contentTypesXml, options)).Types;
+  if (!manifest || manifest.$?.xmlns !== 'http://schemas.microsoft.com/developer/vsx-schema/2011'
+    || !types || types.$?.xmlns !== 'http://schemas.openxmlformats.org/package/2006/content-types') {
+    throw new Error('Invalid VSIX container XML roots');
+  }
+  const identity = one(one(manifest.Metadata, 'Metadata').Identity, 'Identity').$;
+  const installation = one(manifest.Installation, 'Installation');
+  const targets = installation.InstallationTarget;
+  if (!Array.isArray(targets) || targets.length !== 1 || targets[0].$?.Id !== 'Microsoft.VisualStudio.Code') {
+    throw new Error('Invalid VSIX container InstallationTarget');
+  }
+  const assets = one(manifest.Assets, 'Assets').Asset;
+  const packageAssets = assets?.filter((asset) => asset.$?.Type === 'Microsoft.VisualStudio.Code.Manifest');
+  if (one(packageAssets, 'package manifest asset').$?.Path !== 'extension/package.json') {
+    throw new Error('Invalid VSIX container package manifest asset');
+  }
+  for (const key of ['Id', 'Publisher', 'Version', 'TargetPlatform']) {
+    if (typeof identity?.[key] !== 'string' || !identity[key].trim()) throw new Error(`Invalid VSIX container Identity.${key}`);
+  }
+  return { extensionId: `${identity.Publisher}.${identity.Id}`, version: identity.Version, target: identity.TargetPlatform };
+}
+
+/** Map a verified native runtime target to an explicit VS Code target (never universal). */
+export function runtimeTargetPlatform(target) {
+  const mappings = {
+    'win32-x64': 'win32-x64', 'win32-arm64': 'win32-arm64',
+    'linux-x64': 'linux-x64', 'linux-arm64': 'linux-arm64', 'linux-arm': 'linux-armhf',
+    'darwin-x64': 'darwin-x64', 'darwin-arm64': 'darwin-arm64',
+    'alpine-x64': 'alpine-x64', 'alpine-arm64': 'alpine-arm64',
+  };
+  const value = mappings[`${target?.platform}-${target?.arch}`];
+  if (!value) throw new Error('Unsupported candidate runtime target');
+  return value;
+}
+
+/** Compare parsed container metadata with the independently verified payload identity. */
+export function validateCandidateContainer(container, identity) {
+  for (const field of ['extensionId', 'version', 'target']) {
+    if (typeof container?.[field] !== 'string' || !container[field] || container[field] !== identity?.[field]) {
+      throw new Error(`VSIX container ${field} mismatch`);
+    }
+  }
+}
+
+/** Validate every ZIP entry; extract only extension/ and return container metadata without writing it. */
 export async function extractCandidate(file, destination) {
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Candidate must be a regular nonsymlink file');
@@ -58,7 +115,10 @@ export async function extractCandidate(file, destination) {
   }
   const root = await realpath(destination);
   const ownerRequire = createOwnerRequire();
-  const yauzl = createRequire(ownerRequire.resolve('@vscode/vsce/package.json'))('yauzl');
+  const vsceRequire = createRequire(ownerRequire.resolve('@vscode/vsce/package.json'));
+  const yauzl = vsceRequire('yauzl');
+  const { parseStringPromise } = vsceRequire('xml2js');
+  const containerXml = new Map();
   const zip = await new Promise((resolve, reject) => yauzl.open(file, {
     lazyEntries: true, strictFileNames: true, validateEntrySizes: true, autoClose: false,
   }, (error, value) => error ? reject(error) : resolve(value)));
@@ -81,6 +141,19 @@ export async function extractCandidate(file, destination) {
             const previous = nodes.get(prefix.toLowerCase());
             if (previous && (previous.name !== prefix || previous.kind !== kind)) throw new Error(`Conflicting VSIX path: ${name}`);
             nodes.set(prefix.toLowerCase(), { name: prefix, kind });
+          }
+          if (!directory && (name === 'extension.vsixmanifest' || name === '[Content_Types].xml')) {
+            if (entry.uncompressedSize > MAX_CONTAINER_XML_BYTES) throw new Error('VSIX container XML is too large');
+            const input = await new Promise((resolveStream, rejectStream) => zip.openReadStream(entry,
+              (error, stream) => error ? rejectStream(error) : resolveStream(stream)));
+            const chunks = [];
+            let size = 0;
+            for await (const chunk of input) {
+              size += chunk.length;
+              if (size > MAX_CONTAINER_XML_BYTES) throw new Error('VSIX container XML is too large');
+              chunks.push(chunk);
+            }
+            containerXml.set(name, Buffer.concat(chunks).toString('utf8'));
           }
           if (parts[0] === 'extension' && parts.length > 1) {
             const target = path.join(root, ...parts.slice(1));
@@ -105,6 +178,9 @@ export async function extractCandidate(file, destination) {
   } finally {
     zip.close();
   }
+  if (nodes.get('extension/package.json')?.name !== 'extension/package.json'
+    || nodes.get('extension/package.json')?.kind !== 'file') throw new Error('Missing VSIX extension/package.json');
+  return parseContainer(containerXml.get('extension.vsixmanifest'), containerXml.get('[Content_Types].xml'), parseStringPromise);
 }
 
 /** Verify the extracted extension and return only its release identity. */
@@ -116,5 +192,5 @@ export async function verifyCandidateIdentity(destination) {
   const panelBuildId = (await readFile(path.join(destination, 'out/webview/panel/pie-build-id.txt'), 'utf8')).trim();
   if (!/^[a-f0-9]{20}$/.test(buildId) || panelBuildId !== buildId) throw new Error('Candidate build IDs must be matching 20-hex identifiers');
   const runtime = await verifyPiRuntimeArtifact(path.join(destination, 'out/pi-runtime'));
-  return { extensionId: 'pie.pie', version: pkg.version, buildId, piRuntimeIdentity: runtime.identity };
+  return { extensionId: 'pie.pie', version: pkg.version, target: runtimeTargetPlatform(runtime.manifest.target), buildId, piRuntimeIdentity: runtime.identity };
 }

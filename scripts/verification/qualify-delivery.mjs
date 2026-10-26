@@ -15,7 +15,7 @@ import { createOwnerRequire } from '../lib/package-resolution.mjs';
 import { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 export { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 
-import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity } from './lib/vsix-candidate.mjs';
+import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity, validateCandidateContainer } from './lib/vsix-candidate.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>]\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
@@ -162,9 +162,10 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     signal?.throwIfAborted();
     let candidateIdentity;
     if (selection.vsix !== undefined) {
-      await (dependencies.extractCandidate ?? extractCandidate)(selection.vsix, packageRoot);
+      const container = await (dependencies.extractCandidate ?? extractCandidate)(selection.vsix, packageRoot);
       signal?.throwIfAborted();
       candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot);
+      validateCandidateContainer(container, candidateIdentity);
     } else {
       await (dependencies.copySkeleton ?? copyPackageSkeleton)(root, packageRoot);
     }
