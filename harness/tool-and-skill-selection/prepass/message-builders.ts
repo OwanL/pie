@@ -128,7 +128,7 @@ export function buildDecision(input: {
 	prepassSystemPrompt?: string;
 	/** User message sent to the prepass LLM (for the local input-size estimate). */
 	prepassUserMessage?: string;
-	/** Short git SHA tagging the pruning-code version that produced this decision. */
+	/** Tagged build identity, source Git SHA or "unknown" identifying this pruning-code cohort. */
 	codeVersion?: string;
 	/** True when a prior successful prepass was reused. */
 	cacheHit?: boolean;

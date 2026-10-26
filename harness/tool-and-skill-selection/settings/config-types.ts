@@ -191,6 +191,6 @@ export interface PruningDecision {
 	prepassCacheWriteTokens?: number;
 	/** Locally-computed estimate of the prepass INPUT size (system prompt + user message), via the shared BPE tokenizer. Always present when a prepass ran; the primary cohort marker — it drops when the pruning prompt/descriptions are compacted, so before/after can be split even when the provider reports no usage. */
 	prepassInputEstimateTokens?: number;
-	/** Short git SHA of the repo HEAD when the extension loaded, tagging which pruning-code version produced this decision so runs can be split into cohorts. "unknown" when git is unavailable. */
+	/** Pruning-code cohort: tagged build identity for compiled code, source Git SHA otherwise, or "unknown" when source Git is unavailable. */
 	codeVersion?: string;
 }

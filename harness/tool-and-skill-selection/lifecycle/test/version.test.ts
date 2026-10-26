@@ -1,9 +1,9 @@
 /**
  * Unit tests for the code-version tag stamped onto every pruning decision.
  *
- * `getCodeVersion()` resolves the repo HEAD short SHA lazily and caches it,
- * so analytics can split pruning runs into cohorts (e.g. before/after a
- * prompt-compaction change) even when the provider reports no token usage.
+ * Source-test builds resolve and cache the repo HEAD short SHA; delivered
+ * builds instead use an explicitly tagged build identity without git. Both
+ * values let analytics split pruning runs into diagnostic cohorts.
  */
 import test from "node:test";
 import assert from "node:assert/strict";

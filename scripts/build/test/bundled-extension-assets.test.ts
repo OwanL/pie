@@ -144,6 +144,62 @@ export * as config from ${source('harness/tools/result-processing/config.ts')};
   }
 });
 
+test('relocated emitted CJS uses the tagged build identity without spawning git', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-bundled-version-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, 'output');
+  const buildId = 'version-fixture-build-id-2026';
+  const input = { version: path.resolve('harness/tool-and-skill-selection/lifecycle/version.ts') };
+  const options = bundledExtensionBuildOptions(path.resolve('.'), output, input);
+  await build({ ...options, configFile: false, logLevel: 'silent',
+    // Match the production Vite define while compiling the real lifecycle module.
+    define: { __PIE_BUILD_ID__: JSON.stringify(buildId) },
+  });
+  const relocated = path.join(root, 'relocated');
+  renameSync(output, relocated);
+
+  const childProcess = ownerRequire('node:child_process') as typeof import('node:child_process');
+  const originalExec = childProcess.exec;
+  const originalExecSync = childProcess.execSync;
+  let execCalls = 0;
+  let execSyncCalls = 0;
+  childProcess.exec = (() => {
+    execCalls++;
+    throw new Error('delivered version resolution must not spawn exec');
+  }) as typeof childProcess.exec;
+  childProcess.execSync = (() => {
+    execSyncCalls++;
+    throw new Error('delivered version resolution must not spawn execSync');
+  }) as typeof childProcess.execSync;
+  try {
+    const version = ownerRequire(path.join(relocated, 'version.js')) as {
+      getCodeVersion(): string;
+      prewarmCodeVersion(): void;
+      __setCodeVersionForTesting(version: string | null): void;
+      __peekCodeVersionCacheForTesting(): string | undefined;
+    };
+    const expected = `build:${buildId}`;
+    const assertNoSpawns = () => assert.deepEqual({ exec: execCalls, execSync: execSyncCalls }, { exec: 0, execSync: 0 });
+
+    version.__setCodeVersionForTesting(null);
+    assert.equal(version.getCodeVersion(), expected, 'sync path returns the emitted build identity');
+    assert.equal(version.getCodeVersion(), expected, 'repeated sync reads retain the tagged build identity');
+    assertNoSpawns();
+
+    version.__setCodeVersionForTesting(null);
+    version.prewarmCodeVersion();
+    assert.equal(version.__peekCodeVersionCacheForTesting(), expected, 'prewarm caches the tagged identity without async git');
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(version.getCodeVersion(), expected);
+    version.prewarmCodeVersion();
+    assert.equal(version.getCodeVersion(), expected, 'repeated prewarm and sync calls stay on the build identity');
+    assertNoSpawns();
+  } finally {
+    childProcess.exec = originalExec;
+    childProcess.execSync = originalExecSync;
+  }
+});
+
 test('tiny CJS extension entries retain bare peers, inventory and relocated chunks', async t => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-bundled-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
