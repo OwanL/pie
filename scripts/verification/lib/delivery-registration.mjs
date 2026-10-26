@@ -61,6 +61,10 @@ export function registerExitReport({process,report,resultPath,writeSync}) {
     try {writeSync(resultPath,JSON.stringify(report,null,2));} catch(error) {process.exitCode=1;throw error;}
   });
 }
+export function registrationShell(shell,host={}) {
+  // Empty inherited selectors are unset, not paths; explicit API values still fail validation.
+  return shell ?? (host.PIE_SHELL || path.join(host.ProgramFiles || 'C:/Program Files','Git/bin/bash.exe'));
+}
 export function privateEnvironment(dirs,shell,host={}) {
   assert.ok(path.isAbsolute(shell));
   const env={};
@@ -126,7 +130,7 @@ export async function qualifyDeliveryRegistration({candidateRoot,managedIntegrat
   const keyringEntry=await resolveFile(emitted,mcpRoot,'@napi-rs/keyring','index.js');
   const keyringNativeEntry=await resolveFile(emitted,path.dirname(keyringEntry),'@napi-rs/keyring-win32-x64-msvc','keyring.win32-x64-msvc.node');
   // Existing bash selection is explicit/local; it is never executed in this gate.
-  shell=await fs.realpath(shell??hostEnv.PIE_SHELL??path.join(hostEnv.ProgramFiles??'C:/Program Files','Git/bin/bash.exe'));
+  shell=await fs.realpath(registrationShell(shell,hostEnv));
   assert.ok((await fs.lstat(shell)).isFile());
   const defaults=defaultsFromInventories(stageRoot,JSON.parse(await fs.readFile(path.join(stageRoot,'resources/bundled-extensions.json'),'utf8')),managed.manifest);
   const before={sources:await sourceSnapshot(),recipe:await qualificationInputs(checkout),candidate:await tree(candidateRoot),stage:await tree(preparedStageRoot),receipt:hash(await fs.readFile(receiptPath))};

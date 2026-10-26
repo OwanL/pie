@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {CORE,REQUIRED_TOOLS,defaultsFromInventories,loadDefaults,validateRegistrationReport,privateEnvironment,validatePrivateEnvironment,registerExitReport,collectRegistrationOutcome,createDenialRecorder} from '../lib/delivery-registration.mjs';
+import {CORE,REQUIRED_TOOLS,defaultsFromInventories,loadDefaults,validateRegistrationReport,registrationShell,privateEnvironment,validatePrivateEnvironment,registerExitReport,collectRegistrationOutcome,createDenialRecorder} from '../lib/delivery-registration.mjs';
 const core={version:1,extensions:CORE.map(id=>({id,entry:`${id}.js`}))},managed={schemaVersion:1,packages:['pi-web-access','pi-mcp-adapter'].map(name=>({name,entry:`node_modules/${name}/index.ts`}))};
 const defaults=defaultsFromInventories(os.tmpdir(),core,managed);
 const report=()=>({ok:true,errors:[],denied:[],requests:[],extensions:defaults.map((d,i)=>({path:d.path,tools:[...REQUIRED_TOOLS[i]]}))});
@@ -29,6 +29,14 @@ test('loader uses DEFAULT JITI and reload/get only',async()=>{
  let options;const calls=[];class Loader{constructor(o){options=o;}async reload(){calls.push('reload');}getExtensions(){calls.push('get');return 'loaded';}}
  assert.equal(await loadDefaults(Loader,{defaults,workDir:'work',agentDir:'agent'}),'loaded');
  assert.deepEqual(options,{cwd:'work',agentDir:'agent',noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,defaultExtensions:defaults});assert.deepEqual(calls,['reload','get']);
+});
+test('shell selection ignores empty ambient selectors and preserves explicit choices',()=>{
+ const programFiles=path.join(os.tmpdir(),'Program Files'),fallback=path.join(programFiles,'Git/bin/bash.exe');
+ for(const PIE_SHELL of [undefined,''])assert.equal(registrationShell(undefined,{ProgramFiles:programFiles,PIE_SHELL}),fallback);
+ assert.equal(registrationShell(undefined,{ProgramFiles:'',PIE_SHELL:''}),path.join('C:/Program Files','Git/bin/bash.exe'));
+ assert.equal(registrationShell(undefined,{PIE_SHELL:'ambient'}),'ambient');
+ assert.equal(registrationShell('explicit',{PIE_SHELL:'ambient'}),'explicit');
+ assert.equal(registrationShell('',{PIE_SHELL:'ambient'}),'');
 });
 test('exact private environment excludes secrets and Windows injected-key drift',()=>{
  const privateRoot=path.join(os.tmpdir(),'registration-private'),dirs=Object.fromEntries(['home','appdata','localappdata','temp','agent','cache','work'].map(k=>[k,path.join(privateRoot,k)]));
