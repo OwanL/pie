@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 
-import { resolveAgentDir } from '../agent-dir-resolution';
+import { resolveAgentDir, resolveNormalAgentDir } from '../agent-dir-resolution';
 
 // Build an in-memory `exists` that treats the given paths as present.
 // Normalizes both backslashes→forward slashes AND strips a leading drive
@@ -95,17 +97,19 @@ test('recovers via extension-relative fallback when both setting and env are sta
   assert.ok(result.rejections.some((r) => r.source === 'env'));
 });
 
-test('returns empty source=none when no candidate validates, with all rejections', () => {
+test('selects normal home when no candidate validates, with all rejections', () => {
   // Nothing exists — every candidate is rejected.
   const result = resolveAgentDir({
     configuredAgentDir: '/gone/setting',
     envAgentDir: '/gone/env',
     extensionPath: '/gone/application/hosts/vscode',
+    localAppDataDir: 'C:\\fixture\\Local',
+    platform: 'win32',
     exists: () => false,
   });
 
-  assert.equal(result.agentDir, '');
-  assert.equal(result.source, 'none');
+  assert.equal(result.agentDir, 'C:\\fixture\\Local\\pie');
+  assert.equal(result.source, 'normal');
   assert.equal(result.rejections.length, 3);
   assert.ok(result.rejections.every((r) => r.reason === 'not-a-directory'));
 });
@@ -141,11 +145,13 @@ test('an installed extension does not infer an agent dir from its parent', () =>
   const present = dirWith('/installed/extensions');
   const result = resolveAgentDir({
     extensionPath: '/installed/extensions/pie-sidebar-1.0.0',
+    localAppDataDir: 'C:\\fixture\\Local',
+    platform: 'win32',
     exists: makeExists(present),
   });
 
-  assert.equal(result.agentDir, '');
-  assert.equal(result.source, 'none');
+  assert.equal(result.agentDir, 'C:\\fixture\\Local\\pie');
+  assert.equal(result.source, 'normal');
   assert.deepEqual(result.rejections, []);
 });
 
@@ -176,4 +182,35 @@ test('whitespace-only configuredAgentDir is ignored (treated as unset)', () => {
   assert.equal(result.source, 'env');
   // '   ' trims to '' → not considered a candidate → no rejection recorded.
   assert.deepEqual(result.rejections, []);
+});
+
+test('fresh normal home supports spaces and Unicode without probing or creating it', () => {
+  const result = resolveAgentDir({
+    platform: 'win32', localAppDataDir: 'C:\\Users\\Zoë User\\Local',
+    exists: () => { throw new Error('normal home must not need a marker'); },
+  });
+  assert.equal(result.agentDir, 'C:\\Users\\Zoë User\\Local\\pie');
+  assert.equal(result.source, 'normal');
+});
+
+test('normal home fails closed for missing, relative, NUL or unsupported defaults', () => {
+  for (const root of ['', '   ', 'relative', 'C:\\bad\u0000root']) {
+    assert.throws(() => resolveNormalAgentDir(root, 'win32'), /LOCALAPPDATA/);
+  }
+  assert.throws(() => resolveNormalAgentDir('C:\\Local', 'linux'), /Windows-only/);
+});
+
+test('explicit roots leave existing settings, credentials and data unchanged', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-path-Zoë '));
+  try {
+    const originals = { 'settings.json': '{}', 'auth.json': '{"fixture":true}', 'history.jsonl': 'keep\n' };
+    for (const [name, content] of Object.entries(originals)) fs.writeFileSync(path.join(root, name), content);
+    const before = fs.readdirSync(root);
+    const result = resolveAgentDir({ configuredAgentDir: root });
+    assert.equal(result.agentDir, root);
+    assert.deepEqual(fs.readdirSync(root), before);
+    for (const [name, content] of Object.entries(originals)) assert.equal(fs.readFileSync(path.join(root, name), 'utf8'), content);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

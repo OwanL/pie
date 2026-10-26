@@ -45,7 +45,7 @@ function applyDevelopmentProfileEnvironment(env: NodeJS.ProcessEnv): boolean {
   return true;
 }
 
-function prepareBackendEnvironment(
+export function prepareBackendEnvironment(
   host: BackendStartupHost,
   onNotice: (notice: string) => void,
   env: NodeJS.ProcessEnv,
@@ -57,22 +57,12 @@ function prepareBackendEnvironment(
     configuredAgentDir,
     envAgentDir: env.PI_CODING_AGENT_DIR,
     extensionPath: host.extensionPath,
+    localAppDataDir: env.LOCALAPPDATA ?? '',
   });
 
-  if (result.agentDir) {
-    env.PI_CODING_AGENT_DIR = result.agentDir;
-  } else {
-    // No candidate validated. Clear any stale value so the backend doesn't
-    // read a non-existent dir; the pi SDK will fall back to ~/.pi/agent.
-    delete env.PI_CODING_AGENT_DIR;
-    const tried = result.rejections
-      .map((rejection) => `${rejection.source}="${rejection.candidate}" (${rejection.reason})`)
-      .join('; ');
-    appendPieLog('warn', 'startup', 'no valid agent dir found', {
-      tried: tried || 'none',
-      note: 'Custom providers will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
-    });
-  }
+  // Always select Pie's root explicitly; never activate the SDK's ~/.pi/agent
+  // fallback. This preflight only selects paths, and does not seed user files.
+  env.PI_CODING_AGENT_DIR = result.agentDir;
 
   const settingRejected = result.rejections.some((rejection) => rejection.source === 'setting');
   if (settingRejected && result.source !== 'setting') {
@@ -80,10 +70,13 @@ function prepareBackendEnvironment(
       ? 'the PI_CODING_AGENT_DIR env var'
       : result.source === 'extension-relative'
         ? 'the checkout agent dir'
-        : 'a fallback';
+        : 'the normal Pie configuration home';
+    const recoveryAdvice = result.source === 'normal'
+      ? 'Clear the stale pie.agentDir setting to use the application default and clear this warning.'
+      : 'Set pie.agentDir to this path, or re-run the installer, to clear this warning.';
     onNotice(
       `pie.agentDir points to a path that no longer exists${configuredAgentDir ? ` (${configuredAgentDir})` : ''}. `
-      + `Recovering using ${sourceLabel} (${result.agentDir}). Set pie.agentDir to this path, or re-run the installer, to clear this warning.`,
+      + `Recovering using ${sourceLabel} (${result.agentDir}). ${recoveryAdvice}`,
     );
   }
 

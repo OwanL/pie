@@ -5,7 +5,7 @@ import * as path from 'node:path';
  *
  * The backend (pi SDK) resolves its config dir via `getAgentDir()`, which reads
  * `PI_CODING_AGENT_DIR`. That dir must contain `settings.json` and `models.json`
- * — the latter is the ONLY place custom providers are defined. A
+ * for legacy custom model configuration. A
  * built-in provider list missing configured custom providers is the symptom of a
  * wrong/empty agent dir, NOT a missing auth key.
  *
@@ -18,7 +18,9 @@ import * as path from 'node:path';
  *
  * The robust contract here: a candidate dir is only trusted if it actually
  * contains `settings.json` (the file that defines an agent dir). Candidates are
- * tried in priority order; the first that validates wins. This makes the
+ * tried in priority order; the first that validates wins. If none validate,
+ * the normal Windows application home is selected, without creating files.
+ * This makes the
  * previously-fatal "stale setting" scenario self-healing instead of silent.
  */
 
@@ -31,15 +33,19 @@ export interface ResolveAgentDirOptions {
   checkoutRoot?: string;
   /** Loaded package directory; used to identify known checkout layouts only. */
   extensionPath?: string;
+  /** Windows application-home authority; never derived from auth/data overrides. */
+  localAppDataDir?: string;
+  /** Defaults to the current platform. Normal defaults are currently Windows-only. */
+  platform?: NodeJS.Platform;
   /** fs.exists stand-in, injectable for tests. Defaults to node:fs existsSync. */
   exists?: (filePath: string) => boolean;
 }
 
 export interface ResolvedAgentDir {
-  /** Absolute, validated agent dir (contains settings.json). Empty string if none validated. */
+  /** Explicit validated root, or the normal application home (which may not exist yet). */
   agentDir: string;
   /** Which source the resolved dir came from. */
-  source: 'setting' | 'env' | 'extension-relative' | 'none';
+  source: 'setting' | 'env' | 'extension-relative' | 'normal';
   /**
    * Diagnostics for the caller to log/surface. Populated when a candidate was
    * considered but rejected (e.g. a stale `pie.agentDir` pointing at a path
@@ -101,6 +107,8 @@ function buildRejection(
  *   2. `PI_CODING_AGENT_DIR` env var (validated)
  *   3. Explicit checkout root (or the known checkout package layout), validated.
  *      Installed extension directories do not imply a checkout at their parent.
+ *   4. Normal Windows application home (%LOCALAPPDATA%/pie), without a marker
+ *      requirement or filesystem writes. Missing/unsupported defaults fail closed.
  *
  * Unlike the previous behavior, a STALE `pie.agentDir` no longer silently
  * clobbers a correct env var: if the setting's path doesn't validate, it is
@@ -121,6 +129,21 @@ export function checkoutAgentRoot(extensionPath: string): string | undefined {
     return path.dirname(applicationRoot);
   }
   return undefined;
+}
+
+/** Resolve only the supported application default; never use another Pi profile. */
+export function resolveNormalAgentDir(
+  localAppDataDir: string | undefined = process.env.LOCALAPPDATA,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== 'win32') {
+    throw new Error('The normal Pie configuration home is currently Windows-only; configure an explicit agent directory.');
+  }
+  const root = localAppDataDir?.trim();
+  if (!root || root.includes('\u0000') || !path.win32.isAbsolute(root)) {
+    throw new Error('LOCALAPPDATA must be a non-empty absolute path without NUL bytes to resolve the normal Pie configuration home.');
+  }
+  return path.win32.join(root, 'pie');
 }
 
 export function resolveAgentDir(options: ResolveAgentDirOptions): ResolvedAgentDir {
@@ -156,5 +179,11 @@ export function resolveAgentDir(options: ResolveAgentDirOptions): ResolvedAgentD
     rejections.push(buildRejection('extension-relative', candidate, exists));
   }
 
-  return { agentDir: '', source: 'none', rejections };
+  // A fresh normal profile need not exist. Resolution performs no provisioning:
+  // startup admission and the settings owner must govern any later writes.
+  return {
+    agentDir: resolveNormalAgentDir(options.localAppDataDir, options.platform),
+    source: 'normal',
+    rejections,
+  };
 }
