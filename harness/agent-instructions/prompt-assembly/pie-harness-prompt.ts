@@ -44,6 +44,18 @@ function promptPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/\/$/, '');
 }
 
+function skillGuidePath(skills: readonly unknown[] | undefined, name: string): string | undefined {
+  for (const skill of skills ?? []) {
+    if (!skill || typeof skill !== 'object') continue;
+    const candidate = skill as { name?: unknown; filePath?: unknown; disableModelInvocation?: unknown };
+    if (candidate.name === name && candidate.disableModelInvocation !== true
+      && typeof candidate.filePath === 'string' && candidate.filePath.trim()) {
+      return promptPath(candidate.filePath);
+    }
+  }
+  return undefined;
+}
+
 function extractBullet(block: string, label: string): string | undefined {
   const prefix = `- ${label}: `;
   const line = block.split('\n').find((candidate) => candidate.startsWith(prefix));
@@ -89,7 +101,7 @@ function extractStockPromptSections(prompt: string): {
 export function rewritePieBuiltSystemPrompt(
   prompt: string,
   options: PieSystemPromptOptions,
-  agentDir: string,
+  _agentDir: string,
 ): string {
   if (options.customPrompt !== undefined) return prompt;
 
@@ -101,12 +113,16 @@ export function rewritePieBuiltSystemPrompt(
   const piExamples = extractBullet(sections.docs, 'Examples')?.replace(/ \(extensions, custom tools, SDK\)$/, '');
   if (!piReadme || !piDocs || !piExamples) return prompt;
 
-  const root = promptPath(agentDir);
+  // Use the loader's selected definitions, not inferred checkout/profile paths.
+  // Missing, excluded and manual-only skills must not gain an automatic pointer.
+  const customizeGuide = skillGuidePath(options.skills, 'customize-pie');
+  const developGuide = skillGuidePath(options.skills, 'develop-pie');
   const harnessDocumentation = [
     'Harness documentation',
     'Consult harness documentation only when the task concerns Pie or its underlying Pi runtime.',
     '',
-    `- For Pie development or configuration, load: ${root}/harness/agent-instructions/skills/develop-pie/SKILL.md`,
+    ...(customizeGuide ? [`- For configuring or customising installed Pie, load: ${customizeGuide}`] : []),
+    ...(developGuide ? [`- For Pie application/runtime source work, load: ${developGuide}`] : []),
     '- For underlying Pi APIs, use the documentation and examples shipped with the pinned SDK:',
     `  README: ${piReadme}`,
     `  Documentation: ${piDocs}`,

@@ -11,9 +11,11 @@ import {
   type PieSystemPromptOptions,
 } from '../../harness/agent-instructions/prompt-assembly/pie-harness-prompt.js';
 import {
+  applySystemPromptTogglesToOptions,
   buildSessionSystemPrompts,
   HARNESS_ENTRY_ID,
   RUNTIME_ENTRY_ID,
+  SKILLS_ENTRY_ID,
   TOOLS_ENTRY_ID,
   contextFileEntryId,
   installSystemPromptToggleRebuildGuard,
@@ -31,6 +33,11 @@ async function loadSdkPrompt(): Promise<{
   return await loadSdkInternalModule(sourceDescriptor.sdkPath, 'core/system-prompt.js', sourceLoadMode);
 }
 
+function guideSkill(name: string, filePath: string, disableModelInvocation = false) {
+  return { name, filePath, description: `${name} guidance`, baseDir: filePath.slice(0, filePath.lastIndexOf('/')),
+    sourceInfo: null, disableModelInvocation };
+}
+
 test('Pie base uses the approved static wording and preserves live SDK tool sections', async () => {
   const sdkPrompt = await loadSdkPrompt();
   const dynamicSnippet = 'Live SDK dynamic snippet';
@@ -40,6 +47,10 @@ test('Pie base uses the approved static wording and preserves live SDK tool sect
     selectedTools: ['read'],
     toolSnippets: { read: dynamicSnippet },
     promptGuidelines: [dynamicGuideline],
+    skills: [
+      guideSkill('customize-pie', 'C:/delivered/resources/agent-instructions/skills/customize-pie/SKILL.md'),
+      guideSkill('develop-pie', 'C:/delivered/resources/agent-instructions/skills/develop-pie/SKILL.md'),
+    ],
   }, sdkPrompt.buildSystemPrompt, 'C:/pie');
 
   assert.ok(result.startsWith(`${pieIntro}\n\n${pieRole}\n\n${pieCapabilities}`));
@@ -47,7 +58,9 @@ test('Pie base uses the approved static wording and preserves live SDK tool sect
   assert.ok(result.includes(`Tool guidance:\n- ${dynamicGuideline}`));
   assert.ok(result.includes('- Omit optional arguments when documented defaults are intended (e.g. read.offset=1, ask_user.allowCustom=true); omit timeout only when the configured default is intended, and keep required identity/decision fields explicit.'));
   assert.ok(result.includes('Harness documentation\nConsult harness documentation only when the task concerns Pie or its underlying Pi runtime.'));
-  assert.ok(result.includes('- For Pie development or configuration, load: C:/pie/harness/agent-instructions/skills/develop-pie/SKILL.md'));
+  assert.ok(result.includes('- For configuring or customising installed Pie, load: C:/delivered/resources/agent-instructions/skills/customize-pie/SKILL.md'));
+  assert.ok(result.includes('- For Pie application/runtime source work, load: C:/delivered/resources/agent-instructions/skills/develop-pie/SKILL.md'));
+  assert.ok(!result.includes('C:/pie/harness/agent-instructions'));
   assert.ok(result.includes('Read the full normative contract when changing its invariants.'));
   assert.ok(result.includes('Stop when the relevant requirements and constraints are understood.'));
   assert.doesNotMatch(result, /Read relevant (?:documents|docs) completely/u);
@@ -59,6 +72,25 @@ test('Pie base uses the approved static wording and preserves live SDK tool sect
   assert.ok(result.endsWith(`Current date: ${localDate}\nCurrent working directory: C:/work`));
   assert.ok(!result.includes(TRAVERSAL_POLICY_PROMPT), 'the approved base does not inject traversal prose');
   assert.ok(!result.includes('You are an expert coding assistant operating inside pi'));
+});
+
+test('guide pointers follow selected replacements and respect unavailable or manual-only skills', async () => {
+  const sdkPrompt = await loadSdkPrompt();
+  for (const root of ['C:/bundle/resources', 'C:/personal', 'C:/project']) {
+    const options = { cwd: 'C:/work', skills: [guideSkill('customize-pie', `${root}/skills/customize-pie/SKILL.md`)] };
+    const result = buildPieSystemPrompt(options, sdkPrompt.buildSystemPrompt, 'C:/not-a-source-checkout');
+    assert.ok(result.includes(`- For configuring or customising installed Pie, load: ${options.skills[0].filePath}`));
+    assert.doesNotMatch(result, /- For Pie application\/runtime source work, load:/u);
+    assert.doesNotMatch(result, /not-a-source-checkout/u);
+    const toggled = applySystemPromptTogglesToOptions(options, new Set([SKILLS_ENTRY_ID]));
+    assert.doesNotMatch(buildPieSystemPrompt(toggled, sdkPrompt.buildSystemPrompt, 'C:/not-a-source-checkout'), /- For configuring or customising installed Pie, load:/u);
+  }
+  for (const skills of [undefined, [], [guideSkill('customize-pie', 'C:/manual/SKILL.md', true)]]) {
+    const result = buildPieSystemPrompt({ cwd: 'C:/work', skills }, sdkPrompt.buildSystemPrompt, 'C:/not-a-source-checkout');
+    assert.doesNotMatch(result, /- For (?:configuring or customising installed Pie|Pie application\/runtime source work), load:/u);
+    assert.doesNotMatch(result, /not-a-source-checkout/u);
+    assert.match(result, /For underlying Pi APIs/u);
+  }
 });
 
 test('shared builder preserves SDK append and context-file appendix semantics', async () => {
