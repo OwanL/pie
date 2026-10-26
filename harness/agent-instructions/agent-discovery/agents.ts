@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getInstructionResourcePaths, getUserAgentResourceDirs, type InstructionResourceRootOptions } from "../resource-roots.js";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -26,7 +27,7 @@ export interface AgentConfig {
 	 */
 	canSpawn?: string[];
 	systemPrompt: string;
-	source: "user" | "project";
+	source: "bundled" | "user" | "project";
 	filePath: string;
 }
 
@@ -43,15 +44,9 @@ function getAgentDir(): string {
 	return path.join(os.homedir(), ".pi", "agent");
 }
 
-/**
- * User/global agent definitions moved with the B3 authored-resource
- * relocation: repository/global agent definitions live under
- * `<agentDir>/harness/agent-instructions/agents` instead of the previous
- * `<agentDir>/agents`. Project discovery still walks up for a generic
- * project-local `agents/` directory unchanged.
- */
-function getUserAgentsDir(): string {
-	return path.join(getAgentDir(), "harness", "agent-instructions", "agents");
+export interface AgentDiscoveryOptions extends InstructionResourceRootOptions {
+	/** Selected user/source profile; defaults to the existing agent-dir authority. */
+	agentDir?: string;
 }
 
 function parseFrontmatter<T extends Record<string, string>>(content: string): { frontmatter: T; body: string } {
@@ -104,7 +99,7 @@ export function parseBucket(rawBucket: string | undefined): string | undefined {
 	return bucket && VALID_BUCKETS.has(bucket) ? bucket : undefined;
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 
 	if (!fs.existsSync(dir)) {
@@ -199,13 +194,14 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
  * agents not yet seen). Project agents always override same-named user agents
  * (preserving the existing `"both"` scope semantics).
  */
-export function discoverAgents(searchCwds: string | string[], scope: AgentScope): AgentDiscoveryResult {
+export function discoverAgents(searchCwds: string | string[], scope: AgentScope, options: AgentDiscoveryOptions = {}): AgentDiscoveryResult {
 	const cwds = Array.isArray(searchCwds)
 		? Array.from(new Set(searchCwds.filter((c): c is string => typeof c === "string" && c.length > 0)))
 		: [searchCwds];
-	const userDir = getUserAgentsDir();
-
-	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
+	const userAgents = scope === "project" ? [] : [
+		...loadAgentsFromDir(getInstructionResourcePaths(options).agentsDir, "bundled"),
+		...getUserAgentResourceDirs(options.agentDir ?? getAgentDir()).flatMap((dir) => loadAgentsFromDir(dir, "user")),
+	];
 
 	// Walk up from each cwd to find project-local `agents/` dirs. Dedup by
 	// realpath so the same dir reached via different cwds isn't loaded twice.

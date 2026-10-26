@@ -88,7 +88,7 @@ export interface SingleResult {
 	lineage?: SubagentChildIdentity[];
 	liveAddressable?: boolean;
 	agent: string;
-	agentSource: "user" | "project" | "unknown";
+	agentSource: "bundled" | "user" | "project" | "unknown";
 	task: string;
 	/** Effective working directory used to create this child session. Legacy
 	 * results may omit it; consumers should use the owning call input cwd, then
