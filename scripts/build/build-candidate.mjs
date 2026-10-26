@@ -137,5 +137,5 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  main().catch(error => { console.error(`[build-candidate] ${error.message}`); process.exitCode = 1; });
+  await main().catch(error => { console.error(`[build-candidate] ${error.message}`); process.exitCode = 1; });
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -112,6 +113,80 @@ async function zipFixture(directory, entries, rewrite) {
   return file;
 }
 
+test('real extractor subprocess completes every entry including empty and deflated files', async t => {
+  const sandbox = await mkdtemp(path.join(os.tmpdir(), 'vsix-subprocess-'));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  // Deterministic xorshift bytes exercise backpressure without compressing away.
+  const payload = Buffer.alloc(2 * 1024 * 1024 + 17);
+  let state = 0x12345678;
+  for (let i = 0; i < payload.length; i++) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    payload[i] = state & 0xff;
+  }
+  const files = [['package.json', Buffer.from('{}'), false], ['empty', Buffer.alloc(0), false],
+    ['nested/stored.bin', payload, false], ['nested/deflated.bin', payload, true], ['last.txt', Buffer.from('last'), true]];
+  const file = await zipFixture(sandbox, [...files.map(([name, content, compress]) => [`extension/${name}`, content, { compress }]), ...containerEntries()]);
+  const destination = path.join(sandbox, 'extracted');
+  const moduleUrl = new URL('../lib/vsix-candidate.mjs', import.meta.url).href;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { extractCandidate } from ${JSON.stringify(moduleUrl)};
+     extractCandidate(${JSON.stringify(file)}, ${JSON.stringify(destination)}).then(() => console.log('EXTRACTION_COMPLETE')).catch(error => { console.error(error); process.exitCode = 1; });`],
+  { encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /EXTRACTION_COMPLETE/, `exit zero without completion is not success: ${result.stderr}`);
+  for (const [name, content] of files) assert.deepEqual(await readFile(path.join(destination, name)), content);
+});
+
+test('real extractor awaits source descriptor close before resolving', async t => {
+  const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-awaited-close-'));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const file = await zipFixture(sandbox, [['extension/package.json', '{}'], ...containerEntries()]);
+  const destination = path.join(sandbox, 'extracted');
+  const moduleUrl = new URL('../lib/vsix-candidate.mjs', import.meta.url).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const source = ${JSON.stringify(file)};
+    const originalOpen = fs.promises.open;
+    let closeCount = 0;
+    let extractionResolved = false;
+    let releaseClose;
+    const closeGate = new Promise(resolve => { releaseClose = resolve; });
+    fs.promises.open = async function(filePath, ...args) {
+      const handle = await originalOpen.call(this, filePath, ...args);
+      if (filePath !== source) return handle;
+      const originalClose = handle.close.bind(handle);
+      handle.close = async () => {
+        await originalClose();
+        closeCount++;
+        await closeGate;
+      };
+      return handle;
+    };
+    syncBuiltinESMExports();
+    const { extractCandidate } = await import(${JSON.stringify(moduleUrl)});
+    const extraction = extractCandidate(source, ${JSON.stringify(destination)}).then(value => {
+      extractionResolved = true;
+      return value;
+    });
+    for (let i = 0; i < 200 && closeCount === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(closeCount, 1, 'source descriptor close was invoked exactly once');
+    assert.equal(extractionResolved, false, 'extraction remains pending while close is pending');
+    releaseClose();
+    await extraction;
+    assert.equal(closeCount, 1);
+    console.log('AWAITED_CLOSE_CONFIRMED');
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /AWAITED_CLOSE_CONFIRMED/u, result.stderr);
+});
+
 test('real VSIX extraction excludes metadata and rejects duplicate, symlink and traversal entries', async t => {
   for (const mode of ['good', 'duplicate', 'symlink', 'traversal', 'unsafe-metadata']) {
     const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-extract-'));
@@ -130,6 +205,20 @@ test('real VSIX extraction excludes metadata and rejects duplicate, symlink and 
       assert.equal(await readFile(path.join(destination, 'package.json'), 'utf8'), '{"name":"pie"}');
     } else await assert.rejects(extractCandidate(file, destination), /Duplicate|Nonregular|Unsafe|invalid relative path/u);
   }
+});
+
+test('real extractor rejects invalid ZIP initialization and preserves existing destinations', async t => {
+  const sandbox = await mkdtemp(path.join(os.tmpdir(), 'pie-vsix-invalid-'));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const file = path.join(sandbox, 'invalid.vsix');
+  await writeFile(file, 'not a ZIP archive');
+  await assert.rejects(extractCandidate(file, path.join(sandbox, 'invalid-output')), /central directory|zipfile|ZIP/i);
+  const valid = await zipFixture(sandbox, [['extension/package.json', '{}'], ...containerEntries()]);
+  const destination = path.join(sandbox, 'existing');
+  await mkdir(destination);
+  await writeFile(path.join(destination, 'package.json'), 'preserve me', { flag: 'wx' });
+  await assert.rejects(extractCandidate(valid, destination), /empty nonsymlink directory/);
+  assert.equal(await readFile(path.join(destination, 'package.json'), 'utf8'), 'preserve me');
 });
 
 test('real VSIX container identity agrees with payload version, publisher, name and native target', async t => {

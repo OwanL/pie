@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, createReadStream, read } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -124,9 +124,33 @@ export async function extractCandidate(file, destination) {
   const yauzl = vsceRequire('yauzl');
   const { parseStringPromise } = vsceRequire('xml2js');
   const containerXml = new Map();
-  const zip = await new Promise((resolve, reject) => yauzl.open(file, {
-    lazyEntries: true, strictFileNames: true, validateEntrySizes: true, autoClose: false,
-  }, (error, value) => error ? reject(error) : resolve(value)));
+  const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  let closing;
+  const close = () => closing ??= handle.close();
+  const reader = new yauzl.RandomAccessReader();
+  // Installed yauzl's legacy fd-slicer marks its stream destroyed at EOF,
+  // suppressing completion under backpressure on large DEFLATE entries.
+  // Native range streams retain descriptor ownership here; yauzl still applies
+  // its range byte counters and all ZIP/entry-size validation.
+  reader._readStreamForRange = (start, end) => createReadStream(file, {
+    fd: handle.fd, start, end: end - 1, autoClose: false,
+    // yauzl explicitly destroys completed ranges; native destroy calls close
+    // even with autoClose:false. Only the reader may close the shared fd.
+    fs: { read, close: (_fd, callback) => callback(null) },
+  });
+  reader.read = (buffer, offset, length, position, callback) => read(handle.fd, buffer, offset, length, position, callback);
+  reader.close = callback => { close().then(() => callback(), callback); };
+  let zip;
+  try {
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) throw new Error('Candidate changed while opening');
+    zip = await new Promise((resolve, reject) => yauzl.fromRandomAccessReader(reader, openedStat.size, {
+      lazyEntries: true, strictFileNames: true, validateEntrySizes: true, autoClose: false,
+    }, (error, value) => error ? reject(error) : resolve(value)));
+  } catch (error) {
+    await close();
+    throw error;
+  }
   const entries = new Set();
   const nodes = new Map();
   try {
@@ -181,7 +205,8 @@ export async function extractCandidate(file, destination) {
       zip.readEntry();
     });
   } finally {
-    zip.close();
+    try { zip.close(); }
+    finally { await close(); }
   }
   if (nodes.get('extension/package.json')?.name !== 'extension/package.json'
     || nodes.get('extension/package.json')?.kind !== 'file') throw new Error('Missing VSIX extension/package.json');
