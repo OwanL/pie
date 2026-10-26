@@ -17,6 +17,7 @@ import { parseManagedIntegrationSelection } from '../lib/managed-integration-sel
 export { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 
 import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity, validateCandidateContainer } from './lib/vsix-candidate.mjs';
+import { qualifyDeliveryRegistration } from './lib/delivery-registration.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nManaged build selection requires explicit --pi-runtime; exact VSIX verifies the extracted runtime by payload identity.\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
@@ -193,13 +194,23 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
       if (stage.name === 'delivery-build') candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot, { managedIntegration: selection.managedIntegration });
       status(`${stage.name}: completed`);
     }
+    let registration;
+    if (selection.vsix !== undefined && (selection.managedIntegration || candidateIdentity?.managedIntegration)) {
+      if (!selection.managedIntegration) throw new Error('Managed registration requires original stage and receipt.');
+      safeToRemove = false;
+      registration = await (dependencies.qualifyRegistration ?? qualifyDeliveryRegistration)({
+        candidateRoot: packageRoot, managedIntegration: selection.managedIntegration,
+        runStage: run, signal,
+      });
+      signal?.throwIfAborted();
+    }
     if (selection.vsix !== undefined) {
       const after = await (dependencies.fingerprintCandidate ?? fingerprintCandidate)(selection.vsix);
       if (after.sha256 !== fingerprint.sha256 || after.size !== fingerprint.size) throw new Error('VSIX candidate changed during qualification; package retained.');
       signal?.throwIfAborted();
       const candidate = { path: selection.vsix, ...fingerprint, ...candidateIdentity };
       const evidencePath = path.join(packageRoot, 'qualification-evidence.json');
-      await writeFile(evidencePath, `${JSON.stringify({ candidate, packageRoot, qualification: 'passed: private standalone and mocked VS Code adapters plus headless browser first paint', installed: false, published: false }, null, 2)}\n`, { flag: 'wx' });
+      await writeFile(evidencePath, `${JSON.stringify({ candidate, packageRoot, ...(registration ? { registration } : {}), qualification: 'passed: private standalone and mocked VS Code adapters plus headless browser first paint', installed: false, published: false }, null, 2)}\n`, { flag: 'wx' });
       status(`qualified: exact VSIX candidate; evidence: ${evidencePath}; NOT installed/published or real Electron acceptance`);
       return { code: 0, packageRoot, evidencePath, candidate };
     }

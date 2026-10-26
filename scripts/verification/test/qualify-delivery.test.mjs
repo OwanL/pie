@@ -28,6 +28,30 @@ async function candidateFixture(t, overrides = {}) {
   });
 }
 
+test('managed exact candidate must finish registration before pass evidence', async t => {
+  const selection = { vsix: path.join(os.tmpdir(), 'candidate.vsix'), managedIntegration: { stageRoot: os.tmpdir(), receiptPath: path.join(os.tmpdir(), 'receipt.json') } };
+  for (const failed of [true, false]) {
+    let called = false;
+    const f = await candidateFixture(t, { qualifyRegistration: async options => {
+      called = true;
+      assert.equal(options.candidateRoot, f.packageRoot);
+      assert.deepEqual(options.managedIntegration, selection.managedIntegration);
+      assert.equal((await readdir(f.packageRoot)).includes('qualification-evidence.json'), false);
+      if (failed) throw Error('registration failed');
+      return { evidencePath: 'private-registration-evidence' };
+    } });
+    if (failed) { await assert.rejects(qualifyDelivery(selection, undefined, f.dependencies), /registration failed/); await assertNoSuccessEvidence(f); }
+    else { const result = await qualifyDelivery(selection, undefined, f.dependencies); assert.deepEqual(JSON.parse(await readFile(result.evidencePath, 'utf8')).registration, { evidencePath: 'private-registration-evidence' }); }
+    assert.ok(called);
+  }
+});
+
+test('managed marker identity cannot bypass stage/receipt registration requirement', async t => {
+  const f = await candidateFixture(t, { verifyCandidateIdentity: async () => ({ ...candidateIdentity, managedIntegration: {} }) });
+  await assert.rejects(qualifyDelivery({ vsix: path.join(os.tmpdir(), 'candidate.vsix') }, undefined, f.dependencies), /original stage and receipt/);
+  await assertNoSuccessEvidence(f);
+});
+
 async function assertNoSuccessEvidence(f) {
   assert.equal((await readdir(f.packageRoot)).includes('qualification-evidence.json'), false);
   assert.equal(f.events.some(event => event.startsWith('qualified:')), false);
