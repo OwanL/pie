@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath, URL } from 'node:url';
+import { prepareToolRuntimeEntry } from '../runtime-path.js';
 
 import {
   assertChildToolRuntimeOwnerOpen,
@@ -72,7 +72,7 @@ export function potentialHeldForSequence(sequence: ComputerSequence | undefined)
 }
 
 function defaultSpawn(): ChildLike {
-  const entry = fileURLToPath(new URL('./sidecar.mjs', import.meta.url));
+  const entry = prepareToolRuntimeEntry('computer-use', import.meta.url);
   return spawn(process.execPath, [entry], {
     env: { ...process.env, CUA_DRIVER_RS_TELEMETRY_ENABLED: 'false', CUA_DRIVER_RS_UPDATE_CHECK: 'false' },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,

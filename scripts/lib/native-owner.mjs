@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,12 +19,21 @@ function resolveRepositoryRoot(value) {
 }
 
 /** Resolve one of the stable native dependency owners from the repository root. */
-export function resolveNativeOwnerRoot(owner, { repositoryRoot: root = repositoryRoot } = {}) {
+export function resolveNativeOwnerRoot(owner, { repositoryRoot: root } = {}) {
   const ownerPath = Object.hasOwn(NATIVE_DEPENDENCY_OWNERS, owner)
     ? NATIVE_DEPENDENCY_OWNERS[owner]
     : undefined;
   if (!ownerPath) {
     throw new Error(`Unknown native dependency owner "${owner}" (expected computer-use or playwright)`);
+  }
+  if (root === undefined) {
+    const copiedRuntimeLayout = path.basename(repositoryRoot) === 'tool-runtimes'
+      && path.basename(path.dirname(repositoryRoot)) === 'resources';
+    const marker = path.join(repositoryRoot, 'manifest.json');
+    if (copiedRuntimeLayout || (existsSync(marker) && JSON.parse(readFileSync(marker, 'utf8')).codeOnly === true)) {
+      throw new Error(`Native dependency owner "${owner}" preparation unavailable: code-only packaged tool runtimes have no implicit repository root`);
+    }
+    root = repositoryRoot;
   }
   return path.join(resolveRepositoryRoot(root), ...ownerPath);
 }

@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath, URL } from 'node:url';
+import { prepareToolRuntimeEntry } from '../runtime-path.js';
 
 import { canonicalSessionPath } from './artifacts.js';
 import {
@@ -252,7 +252,7 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
 }
 
 function defaultSpawn(): ChildLike {
-  const entry = fileURLToPath(new URL('./sidecar.mjs', import.meta.url));
+  const entry = prepareToolRuntimeEntry('playwright', import.meta.url);
   return spawn(process.execPath, [entry], {
     env: { ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,

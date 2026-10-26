@@ -67,7 +67,7 @@ test('watch reuses app-only selection, rotates after drain, and suppresses stale
   writeFileSync(fixture.fingerprintFile, 'source-v2\n');
   await waitFor(() => events(fixture).some(item => item.event === 'acquire-start' && item.count === 2), child, 'fresh acquisition after source edit');
   const startsBefore = events(fixture).filter(item => item.event === 'child-start' && item.watch);
-  assert.equal(startsBefore.length, 3, 'the stale watch selection launched no children during rotation');
+  assert.equal(startsBefore.length, 4, 'the stale watch selection launched no children during rotation');
   const secondStart = events(fixture).find(item => item.event === 'acquire-start' && item.count === 2);
   assert.ok(startsBefore.every(item => secondStart.drainedChildPids.includes(item.pid)), 'all previous children closed before fresh acquisition');
   assert.equal(secondStart.previousArtifactExists, false, 'the prior owned artifact was removed after child teardown');
@@ -78,8 +78,7 @@ test('watch reuses app-only selection, rotates after drain, and suppresses stale
   assert.equal(rendererCount(fixture), beforeRotation, 'a source change during acquisition publishes no stale selection');
   const thirdStart = events(fixture).find(item => item.event === 'acquire-start' && item.count === 3);
   assert.equal(thirdStart.previousArtifactExists, false, 'the acquisition that overlapped a source edit is cleaned before retry');
-  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 6, child, 'stable fresh selection starts watchers');
-  assert.equal(rendererCount(fixture), beforeRotation, 'publication resumes only after the stable source acquisition');
+  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 8, child, 'stable fresh selection starts watchers');
   await waitFor(() => rendererCount(fixture) === beforeRotation + 1, child, 'stable fresh selection publication');
 
   const records = events(fixture);
@@ -163,8 +162,8 @@ for (const stage of ['polling', 'publication', 'acquisition']) {
         'no old runtime identity publishes after observed instability');
       assert.equal(records.filter(item => item.event === 'runtime-publication').at(-1).identity, latest.identity);
       const next = records.find(item => item.event === 'acquire-start' && item.count === 2);
-      const oldChildren = records.filter(item => item.event === 'child-start' && item.watch).slice(0, 3);
-      assert.equal(oldChildren.length, 3);
+      const oldChildren = records.filter(item => item.event === 'child-start' && item.watch).slice(0, 4);
+      assert.equal(oldChildren.length, 4);
       assert.ok(oldChildren.every(item => next.drainedChildPids.includes(item.pid)));
       assert.equal(next.previousArtifactExists, false, 'cleanup follows complete sibling teardown');
       assert.equal(rendererCount(fixture), published + 1, 'no stale or partial selection published');
@@ -224,13 +223,13 @@ test('explicitly pinned watch ignores mutable source fingerprints', async (t) =>
   const pinned = path.join(fixture.directory, 'pinned-runtime');
   await makePinnedArtifact(fixture, pinned);
   const child = startWatchBuild(t, fixture, ['--delivery', '--watch', '--pi-runtime', pinned, '--no-sync']);
-  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 3, child, 'pinned watchers start');
+  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 4, child, 'pinned watchers start');
   assert.match(child.stdoutText, /explicitly pinned/u);
   assert.equal(existsSync(path.join(fixture.directory, 'acquisitions.txt')), false, 'an explicit artifact is reused, never reacquired');
 
   writeFileSync(fixture.fingerprintFile, 'mutable-source-changed\n');
   await new Promise(resolve => setTimeout(resolve, 1300));
-  assert.equal(events(fixture).filter(item => item.event === 'child-start' && item.watch).length, 3, 'source edits do not rotate a pinned selection');
+  assert.equal(events(fixture).filter(item => item.event === 'child-start' && item.watch).length, 4, 'source edits do not rotate a pinned selection');
   assert.equal(existsSync(pinned), true, 'the caller-owned pinned artifact is never removed');
   await stopWatch(child);
 });

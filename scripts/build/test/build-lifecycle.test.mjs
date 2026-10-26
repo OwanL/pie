@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest } from '../tool-runtime-assets.mjs';
 
 const checkout = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const buildSource = path.join(checkout, 'scripts/build/build.mjs');
@@ -80,6 +81,8 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   }
   write(repo, 'scripts/build/build.mjs', build);
   write(repo, 'scripts/build/fixture-watch.mjs', fakeOutputWatcher());
+  write(repo, 'scripts/build/bundled-extension-verification.mjs', readFileSync(path.join(checkout, 'scripts/build/bundled-extension-verification.mjs')));
+  write(repo, 'scripts/build/tool-runtime-assets.mjs', readFileSync(path.join(checkout, 'scripts/build/tool-runtime-assets.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(runtimeContextSource));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', fakeVerifier(trace));
   write(repo, 'scripts/lib/package-resolution.mjs', packageResolver());
@@ -274,7 +277,8 @@ function fakeVite(trace, owner, webviewFails) {
     const watch = args.includes('--watch');
     const modeAt = args.indexOf('--mode');
     const nodeMode = modeAt >= 0 && args[modeAt + 1] === 'node';
-    const label = nodeMode ? 'vite-node' : 'vite-webview';
+    const bundledMode = modeAt >= 0 && args[modeAt + 1] === 'bundled-extensions';
+    const label = nodeMode ? 'vite-node' : bundledMode ? 'vite-bundled-extensions' : 'vite-webview';
     const sdk = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
     const artifactDir = sdk ? path.resolve(sdk, '../../..') : '';
     const event = (name, fields = {}) => fs.appendFileSync(trace, JSON.stringify({ event: name, label, pid: process.pid, artifactDir, artifactExists: !!artifactDir && fs.existsSync(artifactDir), ...fields }) + '\\n');
@@ -284,6 +288,19 @@ function fakeVite(trace, owner, webviewFails) {
       if (nodeMode) {
         for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'dictation-helper.js', 'windows-runtime-lock.cjs']) fs.writeFileSync(path.join(output, name), 'fixture');
         fs.writeFileSync(path.join(output, 'pie-build-id.txt'), id + '\\n');
+      } else if (bundledMode) {
+        const resources = path.join(output, 'resources');
+        fs.mkdirSync(resources, { recursive: true });
+        const extensions = Array.from({ length: 12 }, (_, index) => ({ id: 'fixture-' + index, entry: 'fixture-' + index + '.js' }));
+        for (const { entry } of extensions) fs.writeFileSync(path.join(output, entry), 'fixture');
+        fs.writeFileSync(path.join(resources, 'bundled-extensions.json'), JSON.stringify({ version: 1, extensions }));
+        fs.writeFileSync(path.join(resources, 'bundled-extensions-build-id.txt'), id + '\\n');
+        for (const file of ${JSON.stringify(TOOL_RUNTIME_FILES)}) {
+          const asset = path.join(output, ${JSON.stringify(TOOL_RUNTIME_DIRECTORY)}, file);
+          fs.mkdirSync(path.dirname(asset), { recursive: true });
+          fs.writeFileSync(asset, 'fixture');
+        }
+        fs.writeFileSync(path.join(output, ${JSON.stringify(TOOL_RUNTIME_MANIFEST)}), ${JSON.stringify(JSON.stringify(toolRuntimeManifest()))});
       } else {
         const web = path.join(output, 'webview/panel');
         fs.mkdirSync(path.join(web, '.vite'), { recursive: true });
@@ -297,7 +314,7 @@ function fakeVite(trace, owner, webviewFails) {
       process.on('SIGTERM', () => setTimeout(() => { event('child-close', { signal: 'SIGTERM' }); process.exit(0); }, 100));
       setInterval(() => {}, 1000);
     } else {
-      const code = ${webviewFails ? '!nodeMode ? 7 : 0' : '0'};
+      const code = ${webviewFails ? '!nodeMode && !bundledMode ? 7 : 0' : '0'};
       setTimeout(() => { event('child-close', { code }); process.exit(code); }, nodeMode ? 250 : 30);
     }
   `;
@@ -308,7 +325,9 @@ function fakeTsc(trace) {
     const fs = require('node:fs');
     const args = process.argv.slice(2);
     const watch = args.includes('--watch');
-    const event = (name, fields = {}) => fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ event: name, label: 'tsc', pid: process.pid, watch, ...fields }) + '\\n');
+    const sdk = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+    const artifactDir = sdk ? require('node:path').resolve(sdk, '../../..') : '';
+    const event = (name, fields = {}) => fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({ event: name, label: 'tsc', pid: process.pid, watch, artifactDir, artifactExists: !!artifactDir && fs.existsSync(artifactDir), ...fields }) + '\\n');
     event('child-start');
     if (watch) {
       process.on('SIGTERM', () => setTimeout(() => { event('child-close', { signal: 'SIGTERM' }); process.exit(0); }, 100));
@@ -422,6 +441,25 @@ test('failed sibling bundle drains the surviving child before private artifact r
   assert.equal(existsSync(artifactDir), false, 'the artifact is removed only after both children have closed');
 });
 
+test('successful one-shot builds bundled extensions only after both sibling bundles close', (t) => {
+  const fixture = makeFixture(t, { webviewFails: false });
+  const result = runBuild(fixture);
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const trace = events(fixture);
+  const starts = trace.filter(item => item.event === 'child-start');
+  const closes = trace.filter(item => item.event === 'child-close');
+  assert.deepEqual(starts.map(item => item.label).sort(), ['vite-bundled-extensions', 'vite-node', 'vite-webview']);
+  const bundledAt = trace.findIndex(item => item.event === 'child-start' && item.label === 'vite-bundled-extensions');
+  for (const label of ['vite-node', 'vite-webview']) {
+    assert.ok(trace.findIndex(item => item.event === 'child-close' && item.label === label) < bundledAt);
+  }
+  assert.equal(closes.length, 3);
+  assert.ok(closes.every(item => item.artifactExists), 'all bundles close before private artifact removal');
+  const artifactDir = trace.find(item => item.event === 'acquire-complete').artifactDir;
+  assert.equal(existsSync(artifactDir), false);
+});
+
 test('uncertain child-close acknowledgement retains the private artifact', (t) => {
   const fixture = makeFixture(t, { uncertainClose: true });
   const result = runBuild(fixture);
@@ -433,7 +471,7 @@ test('uncertain child-close acknowledgement retains the private artifact', (t) =
 });
 
 test('SIGTERM drains watch children but retains the private Pi artifact', async (t) => {
-  const fixture = makeFixture(t);
+  const fixture = makeFixture(t, { webviewFails: false });
   const child = startWatch(fixture, ['--delivery', '--watch', '--no-sync']);
   t.after(async () => {
     if (child.exitCode !== null) return;
@@ -445,7 +483,7 @@ test('SIGTERM drains watch children but retains the private Pi artifact', async 
     ]);
     if (child.exitCode === null) child.kill('SIGKILL');
   });
-  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 3, child, 'watchers start');
+  await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 4, child, 'watchers start');
   const artifactDir = events(fixture).find(item => item.event === 'acquire-complete').artifactDir;
   assert.equal(existsSync(artifactDir), true);
 
@@ -455,7 +493,7 @@ test('SIGTERM drains watch children but retains the private Pi artifact', async 
   assert.equal(child.exitCode, 0, `${child.stdoutText}\n${child.stderrText}`);
   const closes = events(fixture).filter(item => item.event === 'child-close' && item.watch);
   if (process.platform !== 'win32') {
-    assert.equal(closes.length, 3, 'both Vite processes and the TypeScript watcher drained');
+    assert.equal(closes.length, 4, 'all three Vite processes and the TypeScript watcher drained');
     assert.ok(closes.every(item => item.artifactExists), 'each child closed before cleanup could remove its selected artifact');
   }
   assert.equal(existsSync(artifactDir), true, 'withPiRuntime retains an owned artifact after cancellation');

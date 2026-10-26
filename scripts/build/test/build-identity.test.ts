@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createBuildIdentityPlugin, createShippedRuntimeLockPlugin } from '../../../application/hosts/vscode/vite.config.ts';
+import { BUNDLED_EXTENSIONS_BUILD_ID, bundledExtensionInputs } from '../bundled-extension-assets.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageResolutionHelper = path.join(repositoryRoot, 'scripts', 'lib', 'package-resolution.mjs');
@@ -14,7 +15,7 @@ const BUILD_ID_SENTINEL = '__PIE_COMPILED_BUILD_ID_REPLACE__';
 
 type EmittedAsset = { type: string; fileName?: string; source?: string | Uint8Array };
 
-function runIdentityPlugin(plugin: ReturnType<typeof createBuildIdentityPlugin>) {
+function runIdentityPlugin(plugin: ReturnType<typeof createBuildIdentityPlugin>, fileName = 'pie-build-id.txt') {
   const watched: string[] = [];
   const emitted: EmittedAsset[] = [];
 
@@ -47,7 +48,7 @@ function runIdentityPlugin(plugin: ReturnType<typeof createBuildIdentityPlugin>)
     false,
   );
 
-  const identityAsset = emitted.find((asset) => asset.fileName === 'pie-build-id.txt');
+  const identityAsset = emitted.find((asset) => asset.fileName === fileName);
   assert.equal(typeof identityAsset?.source, 'string');
   const emittedId = String(identityAsset?.source).trim();
   assert.ok(rendered.code.includes(emittedId), 'runtime sentinel and emitted identity must agree');
@@ -83,11 +84,19 @@ test('build identity hashes and watches package resolution for both graphs', (t)
     path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'completion-attention.ts'),
     path.join(repositoryRoot, 'application', 'lib', 'protocol', 'messages.ts'),
     path.join(repositoryRoot, 'lib', 'build-identity.ts'),
+    path.join(repositoryRoot, 'scripts', 'build', 'bundled-extension-assets.ts'),
   ]) {
     assert.ok(productionNode.watched.includes(input), `${input} must be watched by the node graph`);
     assert.ok(productionWebview.watched.includes(input), `${input} must be watched by the webview graph`);
   }
   assert.equal(productionNode.buildId, productionWebview.buildId);
+  for (const wrapper of bundledExtensionInputs(repositoryRoot)) {
+    assert.ok(productionNode.watched.includes(wrapper), `${wrapper} must be watched by the node graph`);
+    assert.ok(productionWebview.watched.includes(wrapper), `${wrapper} must be watched by the webview graph`);
+  }
+  const askUserAdapter = path.join(repositoryRoot, 'harness', 'tools', 'ask-user', 'index.ts');
+  assert.ok(productionNode.watched.includes(askUserAdapter));
+  assert.ok(productionWebview.watched.includes(askUserAdapter));
 
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-build-identity-'));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
@@ -99,6 +108,9 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   const hostFixture = path.join(identityRoot, 'application', 'hosts', 'fixture-host.ts');
   const rootLibFixture = path.join(identityRoot, 'lib', 'fixture-fact.ts');
   const runtimeFixture = path.join(identityRoot, 'runtime', 'runtime-generations.d.cts');
+  const askUserWrapperFixture = path.join(identityRoot, 'extensions', 'ask-user', 'index.ts');
+  const askUserAdapterFixture = path.join(identityRoot, 'harness', 'tools', 'ask-user', 'index.ts');
+  const buildHelperFixture = path.join(fixtureRoot, 'scripts', 'build', 'fixture-helper.mjs');
   mkdirSync(path.dirname(helperFixture), { recursive: true });
   mkdirSync(path.dirname(toolFixture), { recursive: true });
   mkdirSync(path.dirname(selectorFixture), { recursive: true });
@@ -106,6 +118,9 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   mkdirSync(path.dirname(hostFixture), { recursive: true });
   mkdirSync(path.dirname(rootLibFixture), { recursive: true });
   mkdirSync(path.dirname(runtimeFixture), { recursive: true });
+  mkdirSync(path.dirname(askUserWrapperFixture), { recursive: true });
+  mkdirSync(path.dirname(askUserAdapterFixture), { recursive: true });
+  mkdirSync(path.dirname(buildHelperFixture), { recursive: true });
   writeFileSync(helperFixture, 'export const resolution = "before";\n');
   writeFileSync(toolFixture, 'export const tool = "before";\n');
   writeFileSync(selectorFixture, 'export const selector = "before";\n');
@@ -113,6 +128,9 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   writeFileSync(hostFixture, 'export const host = "before";\n');
   writeFileSync(rootLibFixture, 'export const fact = "before";\n');
   writeFileSync(runtimeFixture, 'export interface RuntimeGenerations {}\n');
+  writeFileSync(askUserWrapperFixture, 'export const wrapper = "before";\n');
+  writeFileSync(askUserAdapterFixture, 'export const adapter = "before";\n');
+  writeFileSync(buildHelperFixture, 'export const helper = "before";\n');
 
   const node = createBuildIdentityPlugin(identityRoot);
   const webview = createBuildIdentityPlugin(identityRoot);
@@ -132,7 +150,34 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.ok(beforeWebview.watched.includes(rootLibFixture));
   assert.ok(beforeNode.watched.includes(runtimeFixture));
   assert.ok(beforeWebview.watched.includes(runtimeFixture));
+  assert.ok(beforeNode.watched.includes(askUserWrapperFixture));
+  assert.ok(beforeWebview.watched.includes(askUserWrapperFixture));
+  assert.ok(beforeNode.watched.includes(askUserAdapterFixture));
+  assert.ok(beforeWebview.watched.includes(askUserAdapterFixture));
+  assert.ok(!beforeNode.watched.includes(buildHelperFixture), 'fixture identities must not scan scripts/build');
+  assert.ok(!beforeWebview.watched.includes(buildHelperFixture), 'fixture identities must not scan scripts/build');
   assert.equal(beforeNode.buildId, beforeWebview.buildId);
+
+  const bundledFixture = runIdentityPlugin(createBuildIdentityPlugin(identityRoot, undefined, BUNDLED_EXTENSIONS_BUILD_ID), BUNDLED_EXTENSIONS_BUILD_ID);
+  assert.equal(bundledFixture.buildId, beforeNode.buildId, 'the bundled graph must share the host build identity');
+  assert.ok(bundledFixture.watched.includes(askUserWrapperFixture));
+  assert.equal(BUNDLED_EXTENSIONS_BUILD_ID, 'resources/bundled-extensions-build-id.txt');
+
+  writeFileSync(askUserWrapperFixture, 'export const wrapper = "after";\n');
+  const afterWrapperNode = runIdentityPlugin(node);
+  const afterWrapperWebview = runIdentityPlugin(webview);
+  const afterWrapperBundled = runIdentityPlugin(createBuildIdentityPlugin(identityRoot, undefined, BUNDLED_EXTENSIONS_BUILD_ID), BUNDLED_EXTENSIONS_BUILD_ID);
+  assert.notEqual(afterWrapperNode.buildId, beforeNode.buildId);
+  assert.equal(afterWrapperNode.buildId, afterWrapperWebview.buildId);
+  assert.equal(afterWrapperNode.buildId, afterWrapperBundled.buildId);
+
+  writeFileSync(askUserAdapterFixture, 'export const adapter = "after";\n');
+  const afterAdapterNode = runIdentityPlugin(node);
+  const afterAdapterWebview = runIdentityPlugin(webview);
+  const afterAdapterBundled = runIdentityPlugin(createBuildIdentityPlugin(identityRoot, undefined, BUNDLED_EXTENSIONS_BUILD_ID), BUNDLED_EXTENSIONS_BUILD_ID);
+  assert.notEqual(afterAdapterNode.buildId, afterWrapperNode.buildId);
+  assert.equal(afterAdapterNode.buildId, afterAdapterWebview.buildId);
+  assert.equal(afterAdapterNode.buildId, afterAdapterBundled.buildId);
 
   writeFileSync(helperFixture, 'export const resolution = "after";\n');
   const afterNode = runIdentityPlugin(node);

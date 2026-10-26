@@ -13,6 +13,7 @@ import { assertRuntimeBootstrapSupportsSchema, hasRuntimeBootstrap, installRunti
 import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { verifyBundledExtensionOutput } from './bundled-extension-verification.mjs';
 
 // Ordinary compilation never constructs a release or discovers installed Pie.
 // The legacy immutable lane remains explicitly selected for delivery/publication.
@@ -231,7 +232,8 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
   if (hostBuildId !== webviewBuildId) {
     throw new Error(`Host/webview build identity mismatch (${hostBuildId} != ${webviewBuildId}).`);
   }
-  console.log(`[build] Coordinated host/webview identity ${hostBuildId}`);
+  await verifyBundledExtensionOutput(buildDir, hostBuildId);
+  console.log(`[build] Coordinated host/webview/bundled-extensions identity ${hostBuildId}`);
 }
 
 async function copyArtifactEntries(source, destination) {
@@ -622,6 +624,8 @@ async function buildOnce() {
   ]));
   const failed = bundles.find((result) => result.status === 'rejected');
   if (failed) throw failed.reason;
+  // Host/resource copies finish first; the dedicated pass must not race them.
+  await runViteBuild(['--mode', 'bundled-extensions', '--emptyOutDir=false']);
   await withBuildTiming('built output identity verification', () => verifyCoordinatedBuildIdentity());
   await withBuildTiming('publication pipeline', () => publishToInstalledExtension());
 }
@@ -654,7 +658,7 @@ async function drainChildren({ stop = false } = {}) {
 async function watchSelection() {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(path.join(outDir, webviewRelativeDir), { recursive: true });
-  const builtOutputWatcher = createBuiltOutputWatcher();
+  let builtOutputWatcher;
   let pollTimer;
   let polling;
   let watching = true;
@@ -665,13 +669,19 @@ async function watchSelection() {
     if (fingerprint && await readFingerprint() !== selectedInputFingerprint) return;
     cancellation.signal.throwIfAborted();
     publicationPaused = false;
+    // Complete the ordered initial emission before starting any long-lived
+    // writers or observing output for publication. All children share the
+    // selected runtime env through spawnLocalCli, including this third pass.
+    await buildOnce();
+    builtOutputWatcher = createBuiltOutputWatcher();
     const node = runViteWatch('node');
     const webview = runViteWatch();
+    const bundledExtensions = runViteWatch('bundled-extensions');
     const tsc = skipTypecheck ? null : await runTypecheckWatch();
     await new Promise((resolve, reject) => {
       onAbort = () => { pausePublication(); resolve(); };
       cancellation.signal.addEventListener('abort', onAbort, { once: true });
-      for (const child of [node, webview, tsc].filter(Boolean)) {
+      for (const child of [node, webview, bundledExtensions, tsc].filter(Boolean)) {
         child.once('error', reject);
         child.once('close', (code, signal) => {
           if (!cancellation.signal.aborted) reject(new Error(`Build watcher stopped (${signal ?? code}).`));
@@ -706,7 +716,7 @@ async function watchSelection() {
     watching = false;
     clearTimeout(pollTimer);
     if (onAbort) cancellation.signal.removeEventListener('abort', onAbort);
-    builtOutputWatcher.close();
+    builtOutputWatcher?.close();
     // Drain publication/typecheck before terminating this selection's children.
     await syncQueue;
     await polling;

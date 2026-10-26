@@ -1,9 +1,12 @@
 import { defineConfig, type Plugin } from 'vite';
+// @ts-expect-error Plain Node build asset authority has no declaration file.
+import { createToolRuntimeAssetsPlugin } from '../../../scripts/build/tool-runtime-assets.mjs';
 import tailwindcssPostcss from '@tailwindcss/postcss';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
+import { bundledExtensionBuildOptions, bundledExtensionInputs, bundledExtensionPeerAliases, BUNDLED_EXTENSIONS_BUILD_ID } from '../../../scripts/build/bundled-extension-assets';
 import { createInstructionAssetsPlugin, readInstructionAssets, INSTRUCTION_MANIFEST } from '../../../scripts/build/instruction-assets';
 // The shared resolver is JavaScript-only and intentionally has no production
 // TypeScript dependency. Keep the config seam typed at its use site.
@@ -114,6 +117,7 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   ].map((owner) => path.join(production ? repoDir : identityRoot, 'analytics', owner));
   return [
     ...analyticsRoots.flatMap((directory) => fs.existsSync(directory) ? sourceFiles(directory) : []),
+    ...bundledExtensionInputs(production ? repoDir : identityRoot),
     ...instructionImplementationInputs(harnessInstructions),
     ...(production || fs.existsSync(path.join(harnessInstructions, INSTRUCTION_MANIFEST))
       ? readInstructionAssets(harnessInstructions).inputs : []),
@@ -165,6 +169,7 @@ function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, 
 export function createBuildIdentityPlugin(
   identityRoot = rootDir,
   runtimeIdentity = identityRoot === rootDir ? selectedPiRuntimeIdentity : undefined,
+  fileName = 'pie-build-id.txt',
 ): Plugin {
   let buildId = '';
   return {
@@ -181,7 +186,7 @@ export function createBuildIdentityPlugin(
       return replaced === code ? null : { code: replaced, map: null };
     },
     generateBundle() {
-      this.emitFile({ type: 'asset', fileName: 'pie-build-id.txt', source: `${buildId}\n` });
+      this.emitFile({ type: 'asset', fileName, source: `${buildId}\n` });
     },
   };
 }
@@ -202,6 +207,16 @@ export default defineConfig(({ mode }) => {
   const define = {
     __PIE_BUILD_ID__: JSON.stringify(BUILD_ID_SENTINEL),
   };
+  if (mode === 'bundled-extensions') {
+    const options = bundledExtensionBuildOptions(repoDir, outDir);
+    return {
+      ...options,
+      define,
+      plugins: [createBuildIdentityPlugin(rootDir, selectedPiRuntimeIdentity, BUNDLED_EXTENSIONS_BUILD_ID), createToolRuntimeAssetsPlugin(repoDir), ...(options.plugins ?? [])],
+      resolve: { alias: [...bundledExtensionPeerAliases(), ...nodePackageAliases] },
+      ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-bundled-extensions') } : {}),
+    };
+  }
   if (mode === 'node') {
     return {
       root: vscodeHostDir,
