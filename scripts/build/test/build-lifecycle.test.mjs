@@ -84,6 +84,7 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   write(repo, 'scripts/build/fixture-watch.mjs', fakeOutputWatcher());
   write(repo, 'scripts/build/bundled-extension-verification.mjs', readFileSync(path.join(checkout, 'scripts/build/bundled-extension-verification.mjs')));
   write(repo, 'scripts/build/tool-runtime-assets.mjs', readFileSync(path.join(checkout, 'scripts/build/tool-runtime-assets.mjs')));
+  write(repo, 'scripts/build/playwright-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/playwright-payload.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(runtimeContextSource));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', fakeVerifier(trace));
   write(repo, 'scripts/lib/package-resolution.mjs', packageResolver());
@@ -138,6 +139,7 @@ function packageResolver() {
     import { fileURLToPath } from 'node:url';
     const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
     const owner = path.join(repo, 'application/hosts/vscode');
+    export function createOwnerRequire() { throw Error('unexpected Playwright owner resolution'); }
     export function resolvePackageRoots() { return { repositoryRoot: repo, distributionRoot: owner }; }
     export function resolveOwnerModule(name) { if (name !== 'vite/package.json') throw Error(name); return path.join(owner, 'node_modules/vite/package.json'); }
     export function resolveTypeScriptCompiler() { return path.join(owner, 'node_modules/typescript/bin/tsc'); }

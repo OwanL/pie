@@ -15,13 +15,15 @@ import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolve
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
 import { verifyBundledExtensionOutput } from './bundled-extension-verification.mjs';
+import { copyPreparedPlaywrightHeadlessPayload, parsePlaywrightPayloadOption, resolvePlaywrightHeadlessPayloadExpected, verifyPlaywrightHeadlessPayloadOutput } from './tool-runtime-assets.mjs';
+import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
 import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
 
 // Ordinary compilation never constructs a release or discovers installed Pie.
 // The legacy immutable lane remains explicitly selected for delivery/publication.
 const lifecycleArgs = process.argv.slice(2);
-const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir', '--managed-stage', '--managed-qualification-receipt'].includes(arg)
-  || ['--pi-runtime=', '--output-dir=', '--managed-stage=', '--managed-qualification-receipt='].some(prefix => arg.startsWith(prefix)));
+const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir', '--managed-stage', '--managed-qualification-receipt', '--playwright-payload'].includes(arg)
+  || ['--pi-runtime=', '--output-dir=', '--managed-stage=', '--managed-qualification-receipt=', '--playwright-payload='].some(prefix => arg.startsWith(prefix)));
 if (!deliverySelected) {
   const { buildDevelopment } = await import('./build-development.mjs');
   await buildDevelopment(lifecycleArgs);
@@ -49,11 +51,18 @@ const piRuntimeOption = piRuntimeOptions[0];
 const requestedPiRuntime = piRuntimeOption === '--pi-runtime'
   ? cliArgs[cliArgs.indexOf(piRuntimeOption) + 1]
   : piRuntimeOption?.slice('--pi-runtime='.length);
+const requestedPlaywrightPayload = parsePlaywrightPayloadOption(cliArgs, { requireDelivery: true });
 const managedSelection = parseManagedIntegrationSelection(cliArgs);
 const watchMode = cliArgs.includes('--watch');
 if (managedSelection && (!requestedPiRuntime || watchMode)) {
   throw new Error('Managed delivery requires explicit --pi-runtime and does not support --watch.');
 }
+const playwrightPayloadExpected = requestedPlaywrightPayload
+  ? await resolvePlaywrightHeadlessPayloadExpected(repositoryRoot)
+  : undefined;
+const selectedPlaywrightPayload = requestedPlaywrightPayload
+  ? await validatePlaywrightHeadlessPayload({ directory: requestedPlaywrightPayload, expected: playwrightPayloadExpected })
+  : undefined;
 const managedResources = managedSelection ? await import('./bundled-managed-resources.mjs') : undefined;
 const skipTypecheck = cliArgs.includes('--skip-typecheck');
 const noSync = isolatedOutput || cliArgs.includes('--no-sync') || !(cliArgs.includes('--publish') || cliArgs.includes('--activate'));
@@ -251,6 +260,12 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
     if (!managedQualification) throw new Error('Managed output has no verified qualification selection.');
     managedResources.verifyBundledManagedOutput(buildDir, managedQualification);
   }
+  if (selectedPlaywrightPayload) {
+    const copied = await verifyPlaywrightHeadlessPayloadOutput(buildDir, {
+      expected: playwrightPayloadExpected, expectedIdentity: selectedPlaywrightPayload.identity,
+    });
+    if (copied.identity !== selectedPlaywrightPayload.identity) throw new Error('Copied Playwright payload does not match the selected prepared payload.');
+  }
   console.log(`[build] Coordinated host/webview/bundled-extensions identity ${hostBuildId}`);
 }
 
@@ -446,6 +461,7 @@ function spawnLocalCli(cli, args, label) {
       PIE_BUILD_PI_RUNTIME_SDK_PATH: selectedPiRuntime?.sdkPath ?? '',
       PIE_BUILD_PI_RUNTIME_IDENTITY: selectedPiRuntime?.identity ?? '',
       PIE_BUILD_MANAGED_IDENTITY: managedBuildIdentity ?? '',
+      PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY: selectedPlaywrightPayload?.identity ?? '',
     },
     stdio: 'inherit',
     windowsHide: true,
@@ -645,6 +661,12 @@ async function buildOnce() {
   if (failed) throw failed.reason;
   // Host/resource copies finish first; the dedicated pass must not race them.
   await runViteBuild(['--mode', 'bundled-extensions', '--emptyOutDir=false']);
+  if (selectedPlaywrightPayload) {
+    await withBuildTiming('prepared Playwright payload copy and verification', () =>
+      copyPreparedPlaywrightHeadlessPayload({
+        directory: requestedPlaywrightPayload, buildDirectory: outDir, expected: playwrightPayloadExpected,
+      }));
+  }
   if (managedSelection) {
     const emitted = await withBuildTiming('qualified managed resource emission', () =>
       managedResources.emitBundledManagedResources({
@@ -771,6 +793,13 @@ try {
       try {
         await withPiRuntime({ artifactDir: requestedPiRuntime, signal: cancellation.signal }, async (context) => {
           selectedPiRuntime = context;
+          if (selectedPlaywrightPayload) {
+            const runtime = await verifyPiRuntimeArtifact(context.artifactDir);
+            if (runtime.identity !== context.identity) throw new Error('Selected Pi runtime changed before Playwright payload build selection.');
+            if (runtime.manifest.target.platform !== 'win32' || runtime.manifest.target.arch !== 'x64') {
+              throw new Error('A Playwright headless payload is supported only for an explicitly selected win32/x64 build target.');
+            }
+          }
           selectedTooling = undefined;
           retainedRuntimeOutput = undefined;
           children = [];

@@ -27,10 +27,11 @@ test('delivery build preflight resolves moved extension source through the owner
   t.after(() => rmSync(privateBuilds, { recursive: true, force: true }));
   const owner = path.join(fixture, 'application', 'hosts', 'vscode');
   const modules = path.join(owner, 'node_modules');
-  for (const file of ['build.mjs', 'publication.mjs', 'runtime-publication.mjs']) {
+  for (const file of ['build.mjs', 'publication.mjs', 'runtime-publication.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs']) {
     write(fixture, `scripts/build/${file}`, readFileSync(path.join(repositoryRoot, 'scripts', 'build', file)));
   }
-  for (const file of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs']) {
+  write(fixture, 'scripts/build/bundled-extension-verification.mjs', 'export async function verifyBundledExtensionOutput() {}\n');
+  for (const file of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs', 'managed-integration-selection.mjs']) {
     write(fixture, `scripts/lib/${file}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', file)));
   }
   write(fixture, 'lib/windows-runtime-lock/windows-runtime-lock.cjs', readFileSync(path.join(repositoryRoot, 'lib/windows-runtime-lock/windows-runtime-lock.cjs')));
@@ -91,7 +92,7 @@ test('delivery build preflight resolves moved extension source through the owner
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /Running TypeScript check/);
-  assert.match(result.stdout, /Coordinated host\/webview identity/);
+  assert.match(result.stdout, /Coordinated host\/webview\/bundled-extensions identity/);
   assert.equal(readFileSync(acquisitionCount, 'utf8'), '1', 'typecheck and both bundles share one source-default acquisition');
   assert.equal(runtime.identity.length, 64);
 

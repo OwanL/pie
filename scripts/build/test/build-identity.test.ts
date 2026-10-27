@@ -242,6 +242,31 @@ test('qualified managed selection changes all coordinated graph identities', (t)
   assert.equal(first, identity('b'.repeat(64), BUNDLED_EXTENSIONS_BUILD_ID));
 });
 
+test('selected Playwright payload identity participates even when Vite development mode is inherited', (t) => {
+  const configSource = readFileSync(path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'vite.config.ts'), 'utf8');
+  assert.match(configSource, /const selectedPlaywrightPayloadIdentity = process\.env\.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY \|\| undefined;/);
+  assert.doesNotMatch(configSource, /selectedPlaywrightPayloadIdentity = process\.env\.PIE_BUILD_DEVELOPMENT/);
+
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-playwright-identity-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = 'a'.repeat(64);
+  const managed = 'b'.repeat(64);
+  const payload = 'c'.repeat(64);
+  const identity = (selectedPayload?: string, file = 'pie-build-id.txt') =>
+    runIdentityPlugin(createBuildIdentityPlugin(root, runtime, file, managed, selectedPayload), file).buildId;
+  const previousDevelopment = process.env.PIE_BUILD_DEVELOPMENT;
+  t.after(() => {
+    if (previousDevelopment === undefined) delete process.env.PIE_BUILD_DEVELOPMENT;
+    else process.env.PIE_BUILD_DEVELOPMENT = previousDevelopment;
+  });
+  process.env.PIE_BUILD_DEVELOPMENT = '1';
+  const before = identity(payload);
+  assert.notEqual(before, identity());
+  assert.notEqual(before, identity('d'.repeat(64)));
+  assert.equal(before, identity(payload, BUNDLED_EXTENSIONS_BUILD_ID));
+  assert.equal(before, identity(payload));
+});
+
 test('analytics implementation changes coordinate identity and watches without scanning analytics data', (t) => {
   const identityRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-analytics-identity-'));
   t.after(() => rmSync(identityRoot, { recursive: true, force: true }));

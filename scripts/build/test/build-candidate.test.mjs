@@ -42,11 +42,14 @@ async function absent(file) {
 test('candidate arguments require explicit absolute VSIX output and reject ambiguous options', () => {
   const output = path.resolve('candidate.vsix');
   const artifactDir = path.resolve('runtime-fixture');
+  const playwrightPayloadDir = path.resolve('prepared-playwright-payload');
   assert.deepEqual(parseCandidateArgs(['--output', output]), { output });
   assert.deepEqual(parseCandidateArgs([`--output=${output}`, `--pi-runtime=${artifactDir}`]), { output, artifactDir });
+  assert.deepEqual(parseCandidateArgs(['--output', output, '--playwright-payload', playwrightPayloadDir]), { output, playwrightPayloadDir });
   assert.deepEqual(parseCandidateArgs(['--help']), { help: true });
   for (const args of [[], ['--output', 'relative.vsix'], ['--output', path.resolve('bad.zip')],
     ['--output'], ['--output', output, '--output', output], ['--output', output, '--pi-runtime', 'relative'],
+    ['--output', output, '--playwright-payload', 'relative'], ['--output', output, '--playwright-payload', playwrightPayloadDir, '--playwright-payload', playwrightPayloadDir],
     ['--output', output, '--unknown'], ['--output', output, '--pi-runtime', artifactDir, '--pi-runtime', artifactDir]]) {
     assert.throws(() => parseCandidateArgs(args));
   }
@@ -128,6 +131,48 @@ for (const reuse of [false, true]) {
   });
 }
 
+for (const mismatch of [false, true]) {
+  test(`candidate ${mismatch ? 'rejects a copied payload identity mismatch before packaging' : 'forwards and records the selected payload identity'}`, async t => {
+    const f = await fixture(t);
+    const artifactDir = path.join(f.base, 'runtime');
+    const playwrightPayloadDir = path.join(f.base, 'prepared-payload');
+    const payloadIdentity = 'c'.repeat(64);
+    const expected = { target: { platform: 'win32', arch: 'x64' }, playwrightVersion: '1.2.3', browserVersion: '140.1.2.3', browserRevision: '2222' };
+    f.deps.resolvePlaywrightExpected = async root => { f.calls.push(['resolve-playwright-pins', root]); return expected; };
+    f.deps.validatePlaywrightPayload = async selection => {
+      f.calls.push(['validate-playwright-input', selection]);
+      return { identity: payloadIdentity };
+    };
+    f.deps.verifyPlaywrightPayloadOutput = async (output, selection) => {
+      f.calls.push(['verify-playwright-output', output, selection]);
+      return { identity: mismatch ? 'd'.repeat(64) : payloadIdentity };
+    };
+    f.deps.verifyCandidate = async (candidate, extracted, context) => {
+      f.calls.push(['verify-candidate', candidate, extracted, context]);
+      return { ...f.identity };
+    };
+    const operation = buildCandidate({ output: f.output, artifactDir, playwrightPayloadDir }, undefined, f.deps);
+    if (mismatch) {
+      await assert.rejects(operation, /Staged Playwright payload identity/);
+      assert.equal(f.calls.some(call => call[0] === 'candidate-package'), false);
+      await absent(f.output);
+      await absent(`${f.output}.evidence.json`);
+      return;
+    }
+    const result = await operation;
+    const delivery = f.calls.find(call => call[0] === 'delivery-build')[1];
+    assert.deepEqual(delivery.args.slice(-2), ['--playwright-payload', playwrightPayloadDir]);
+    assert.deepEqual(f.calls.filter(call => call[0] === 'verify-playwright-output').map(call => call[2].expectedIdentity), [payloadIdentity, payloadIdentity]);
+    const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
+    assert.equal(evidence.playwrightPayloadIdentity, payloadIdentity);
+    assert.equal(evidence.build.playwrightPayloadIdentity, payloadIdentity);
+    assert.deepEqual(f.calls.map(call => call[0]), [
+      'resolve-playwright-pins', 'validate-playwright-input', 'verify-runtime', 'delivery-build', 'stage', 'identity',
+      'verify-playwright-output', 'candidate-package', 'verify-candidate', 'verify-playwright-output',
+    ]);
+  });
+}
+
 test('explicit runtime mismatch stops before packaging or final outputs', async t => {
   const f = await fixture(t);
   f.deps.verifyRuntime = async () => ({ identity: 'different-runtime' });
@@ -169,14 +214,18 @@ async function packageFixture(t) {
   await put(path.join(f.root, 'LICENSE'), Buffer.from('root license\r\n'));
   await put(path.join(f.root, 'COPYRIGHT'), Buffer.from('root copyright\r\n'));
   await put(path.join(f.root, 'lib/windows-runtime-lock/windows-runtime-lock.cjs'), 'neutral lock owner');
-  for (const [name, bytes] of Object.entries({ 'pi-runtime/manifest.json': '{}', 'host.js': 'isolated output', '.cache/secret': 'excluded', 'nested/.cache/secret': 'excluded', 'nested/asset': 'included' })) await put(path.join(build, name), bytes);
+  for (const [name, bytes] of Object.entries({ 'pi-runtime/manifest.json': '{}', 'host.js': 'isolated output', '.cache/secret': 'excluded', 'nested/.cache/secret': 'excluded', 'nested/asset': 'included',
+    'resources/tool-runtimes/playwright-headless-shell/manifest.json': 'prepared payload manifest',
+    'resources/tool-runtimes/playwright-headless-shell/headless-shell/chrome-headless-shell.exe': 'headless executable' })) await put(path.join(build, name), bytes);
   return { ...f, source, build, stage };
 }
 
 test('real staging copies root licence notices byte-for-byte with full media, neutral lock and isolated output', async t => {
   const f = await packageFixture(t);
   await stageExtensionForPackaging(f.root, f.build, f.stage);
-  for (const [name, bytes] of Object.entries({ 'runtime/windows-runtime-lock.cjs': 'neutral lock owner', 'runtime/bootstrap.cjs': 'bootstrap', 'media/nested/full.svg': 'full media', 'media/icon.svg': 'icon', 'out/host.js': 'isolated output', 'out/nested/asset': 'included', 'out/pi-runtime/manifest.json': '{}', '.vscodeignore': 'ignored' })) assert.equal(await readFile(path.join(f.stage, name), 'utf8'), bytes);
+  for (const [name, bytes] of Object.entries({ 'runtime/windows-runtime-lock.cjs': 'neutral lock owner', 'runtime/bootstrap.cjs': 'bootstrap', 'media/nested/full.svg': 'full media', 'media/icon.svg': 'icon', 'out/host.js': 'isolated output', 'out/nested/asset': 'included', 'out/pi-runtime/manifest.json': '{}',
+    'out/resources/tool-runtimes/playwright-headless-shell/manifest.json': 'prepared payload manifest',
+    'out/resources/tool-runtimes/playwright-headless-shell/headless-shell/chrome-headless-shell.exe': 'headless executable', '.vscodeignore': 'ignored' })) assert.equal(await readFile(path.join(f.stage, name), 'utf8'), bytes);
   assert.deepEqual(await readFile(path.join(f.stage, 'LICENSE')), Buffer.from('root license\r\n'));
   assert.deepEqual(await readFile(path.join(f.stage, 'COPYRIGHT')), Buffer.from('root copyright\r\n'));
   for (const name of ['LICENSE', 'COPYRIGHT']) await absent(path.join(f.source, name));

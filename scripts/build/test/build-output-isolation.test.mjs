@@ -50,7 +50,7 @@ async function makeFixture(t) {
   write(owner, 'package.json', '{"name":"pie-output-fixture","version":"1.0.0"}\n');
   write(owner, 'tsconfig.json', '{"compilerOptions":{}}\n');
   write(repo, 'scripts/build/build.mjs', readFileSync(buildEntry));
-  for (const helper of ['bundled-extension-verification.mjs', 'tool-runtime-assets.mjs']) {
+  for (const helper of ['bundled-extension-verification.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs']) {
     write(repo, `scripts/build/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/build', helper)));
   }
   write(repo, 'scripts/lib/managed-integration-selection.mjs', readFileSync(path.join(repositoryRoot, 'scripts/lib/managed-integration-selection.mjs')));
@@ -97,6 +97,7 @@ async function makeFixture(t) {
     const helperDirectory = path.dirname(fileURLToPath(import.meta.url));
     const fixtureRepository = path.resolve(helperDirectory, '../..');
     const ownerRoot = path.join(fixtureRepository, 'application', 'hosts', 'vscode');
+    export function createOwnerRequire() { throw new Error('unexpected Playwright owner resolution'); }
     export function resolvePackageRoots(_layout = 'planned', { repositoryRoot = fixtureRepository } = {}) {
       const root = path.resolve(repositoryRoot);
       const distributionRoot = path.join(root, 'application', 'hosts', 'vscode');

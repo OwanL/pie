@@ -14,6 +14,7 @@ export function installBuildResources(repo) {
   for (const file of [
     'scripts/build/bundled-extension-verification.mjs',
     'scripts/build/tool-runtime-assets.mjs',
+    'scripts/build/playwright-payload.mjs',
     'scripts/build/bundled-extension-assets.ts',
     'scripts/build/instruction-assets.ts',
     'harness/tools/catalog/bundled-extensions.ts',
@@ -27,7 +28,7 @@ export function installBuildResources(repo) {
   ]) write(file, readFileSync(path.join(repositoryRoot, file)));
   const catalog = readFileSync(path.join(repositoryRoot, 'harness/tools/catalog/bundled-extensions.ts'), 'utf8');
   for (const [, id] of catalog.matchAll(/^  entry\('([^']+)'/gm)) {
-    write(`extensions/${id}/index.ts`, 'export const fixtureExtension = true;\n');
+    write(`extensions/${id}/index.ts`, 'export default { fixtureExtension: true };\n');
   }
   write('harness/agent-instructions/bundled-resources.json', JSON.stringify({
     version: 1, files: [{ source: 'SYSTEM.md', destination: 'SYSTEM.md' }],

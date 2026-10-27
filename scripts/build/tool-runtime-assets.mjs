@@ -1,10 +1,16 @@
 import fs from 'node:fs';
+import { copyFile, lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { createOwnerRequire } from '../lib/package-resolution.mjs';
+import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
 
 export const TOOL_RUNTIME_DIRECTORY = 'resources/tool-runtimes';
 export const TOOL_RUNTIME_MANIFEST = `${TOOL_RUNTIME_DIRECTORY}/manifest.json`;
+export const PLAYWRIGHT_HEADLESS_OUTPUT_DIRECTORY = `${TOOL_RUNTIME_DIRECTORY}/playwright-headless-shell`;
+const PLAYWRIGHT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+const PLAYWRIGHT_TARGET = Object.freeze({ platform: 'win32', arch: 'x64' });
 export const TOOL_RUNTIME_FILES = Object.freeze([
   'harness/tools/computer-use/sidecar.mjs',
   'harness/tools/computer-use/backend.mjs',
@@ -24,6 +30,132 @@ export const TOOL_RUNTIME_FILES = Object.freeze([
   'harness/tools/png-image.mjs',
   'scripts/lib/native-owner.mjs',
 ]);
+
+export function parsePlaywrightPayloadOption(argv, { requireDelivery = false } = {}) {
+  const options = argv.filter(arg => arg === '--playwright-payload' || arg.startsWith('--playwright-payload='));
+  if (options.length > 1) throw new Error('--playwright-payload may only be supplied once.');
+  if (options.length === 0) return undefined;
+  if (requireDelivery && !argv.includes('--delivery')) {
+    throw new Error('--playwright-payload requires explicit --delivery; it is unsupported for development builds.');
+  }
+  if (['--watch', '--publish', '--activate'].some(flag => argv.includes(flag))) {
+    throw new Error('--playwright-payload supports only one-shot, non-publishing delivery builds.');
+  }
+  const option = options[0];
+  const index = argv.indexOf(option);
+  const value = option === '--playwright-payload' ? argv[index + 1] : option.slice('--playwright-payload='.length);
+  if (!value || value.startsWith('--') || !path.isAbsolute(value)) {
+    throw new Error('--playwright-payload requires an explicit absolute prepared directory.');
+  }
+  return path.resolve(value);
+}
+
+function readPackageManifest(file, expectedName) {
+  const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (manifest.name !== expectedName) throw new Error(`Expected ${expectedName} package manifest at ${file}.`);
+  return manifest;
+}
+
+/** Resolve trusted Playwright/browser pins only from the installed package owner graph. */
+export async function resolvePlaywrightHeadlessPayloadExpected(repositoryRoot) {
+  if (typeof repositoryRoot !== 'string' || !path.isAbsolute(repositoryRoot)) {
+    throw new TypeError('repositoryRoot must be an absolute path.');
+  }
+  const extensionRoot = path.join(repositoryRoot, 'extensions', 'playwright');
+  const extensionManifest = JSON.parse(await readFile(path.join(extensionRoot, 'package.json'), 'utf8'));
+  const playwrightVersion = extensionManifest.dependencies?.playwright;
+  if (typeof playwrightVersion !== 'string' || !PLAYWRIGHT_VERSION_PATTERN.test(playwrightVersion)) {
+    throw new Error('extensions/playwright/package.json must pin an exact Playwright version.');
+  }
+
+  const extensionRequire = createOwnerRequire({ dependencyOwnerRoot: extensionRoot });
+  let playwrightManifestPath;
+  try { playwrightManifestPath = extensionRequire.resolve('playwright/package.json'); }
+  catch (error) { throw new Error('The Playwright package pinned by extensions/playwright is unavailable.', { cause: error }); }
+  const playwrightRoot = path.dirname(playwrightManifestPath);
+  const playwrightManifest = readPackageManifest(playwrightManifestPath, 'playwright');
+  if (playwrightManifest.version !== playwrightVersion) {
+    throw new Error(`Installed Playwright version ${playwrightManifest.version ?? '(missing)'} does not match checked-in pin ${playwrightVersion}.`);
+  }
+
+  const playwrightRequire = createOwnerRequire({ dependencyOwnerRoot: playwrightRoot });
+  let coreManifestPath;
+  try { coreManifestPath = playwrightRequire.resolve('playwright-core/package.json'); }
+  catch (error) { throw new Error('The selected Playwright package cannot resolve its own playwright-core dependency.', { cause: error }); }
+  const coreRoot = path.dirname(coreManifestPath);
+  const coreManifest = readPackageManifest(coreManifestPath, 'playwright-core');
+  if (coreManifest.version !== playwrightVersion) {
+    throw new Error(`Installed playwright-core version ${coreManifest.version ?? '(missing)'} does not match checked-in pin ${playwrightVersion}.`);
+  }
+
+  let browsers;
+  try { browsers = JSON.parse(await readFile(path.join(coreRoot, 'browsers.json'), 'utf8')); }
+  catch (error) { throw new Error('The selected playwright-core browsers.json is unavailable or invalid.', { cause: error }); }
+  const headless = Array.isArray(browsers.browsers)
+    ? browsers.browsers.filter(browser => browser?.name === 'chromium-headless-shell')
+    : [];
+  const revision = headless[0]?.revision;
+  const browserRevision = typeof revision === 'string' && /^\d+$/u.test(revision)
+    ? revision
+    : Number.isSafeInteger(revision) && revision >= 0 ? String(revision) : undefined;
+  if (headless.length !== 1 || typeof headless[0].browserVersion !== 'string'
+    || !/^\d+(?:\.\d+){2,3}(?:[-+][0-9A-Za-z.-]+)?$/u.test(headless[0].browserVersion)
+    || browserRevision === undefined) {
+    throw new Error('The selected playwright-core browsers.json has no unique valid chromium-headless-shell pin.');
+  }
+  return {
+    target: { platform: PLAYWRIGHT_TARGET.platform, arch: PLAYWRIGHT_TARGET.arch },
+    playwrightVersion,
+    browserVersion: headless[0].browserVersion,
+    browserRevision,
+  };
+}
+
+export async function verifyPlaywrightHeadlessPayloadOutput(buildDirectory, { expected, expectedIdentity } = {}) {
+  const directory = path.join(buildDirectory, PLAYWRIGHT_HEADLESS_OUTPUT_DIRECTORY);
+  const verified = await validatePlaywrightHeadlessPayload({ directory, expected });
+  if (expectedIdentity !== undefined && verified.identity !== expectedIdentity) {
+    throw new Error(`Copied Playwright payload identity mismatch (${verified.identity} != ${expectedIdentity}).`);
+  }
+  return verified;
+}
+
+async function copyPreparedTree(source, destination) {
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    const info = await lstat(from);
+    if (info.isSymbolicLink()) throw new Error(`Refusing to copy Playwright payload symlink: ${from}`);
+    if (info.isDirectory()) {
+      await mkdir(to);
+      await copyPreparedTree(from, to);
+    } else if (info.isFile()) {
+      await copyFile(from, to);
+    } else {
+      throw new Error(`Refusing to copy non-regular Playwright payload entry: ${from}`);
+    }
+  }
+}
+
+/** Copy an explicit prepared root after Vite's curated code emission, then reverify every byte. */
+export async function copyPreparedPlaywrightHeadlessPayload({ directory, buildDirectory, expected }) {
+  const source = await validatePlaywrightHeadlessPayload({ directory, expected });
+  const owner = path.join(buildDirectory, TOOL_RUNTIME_DIRECTORY);
+  const ownerInfo = await lstat(owner);
+  if (!ownerInfo.isDirectory() || ownerInfo.isSymbolicLink()) {
+    throw new Error('Playwright payload output owner must be an emitted regular resources/tool-runtimes directory.');
+  }
+  const destination = path.join(buildDirectory, PLAYWRIGHT_HEADLESS_OUTPUT_DIRECTORY);
+  let destinationInfo;
+  try { destinationInfo = await lstat(destination); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (destinationInfo) throw new Error(`Refusing to overwrite Playwright payload output: ${destination}`);
+  await mkdir(destination);
+  await copyPreparedTree(source.directory, destination);
+  const sourceAfterCopy = await validatePlaywrightHeadlessPayload({ directory, expected });
+  if (sourceAfterCopy.identity !== source.identity) throw new Error('Prepared Playwright payload changed while being copied.');
+  return verifyPlaywrightHeadlessPayloadOutput(buildDirectory, { expected, expectedIdentity: source.identity });
+}
 
 export function toolRuntimeManifest() {
   return { version: 1, codeOnly: true, entries: {

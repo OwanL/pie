@@ -15,11 +15,13 @@ import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { verificationChildEnv } from '../verification/verification-runtime.mjs';
 import { runQualificationStage } from '../verification/qualify-delivery.mjs';
 import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
+import { resolvePlaywrightHeadlessPayloadExpected, verifyPlaywrightHeadlessPayloadOutput } from './tool-runtime-assets.mjs';
+import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
 import { extractCandidate, validateCandidateContainer, fingerprintCandidate, verifyCandidateIdentity } from '../verification/lib/vsix-candidate.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const exec = promisify(execFile);
-const HELP = 'Usage: node scripts/build/build-candidate.mjs --output <absolute .vsix> [--pi-runtime <absolute artifact root>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nLocal development-only candidate; no installation, activation, publication or qualification.';
+const HELP = 'Usage: node scripts/build/build-candidate.mjs --output <absolute .vsix> [--pi-runtime <absolute artifact root>] [--playwright-payload <absolute prepared directory>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nLocal development-only candidate; no installation, activation, publication or qualification.';
 
 export function parseCandidateArgs(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
@@ -31,7 +33,8 @@ export function parseCandidateArgs(argv) {
       if (!inline.length) i += 1;
       continue;
     }
-    const key = flag === '--output' ? 'output' : flag === '--pi-runtime' ? 'artifactDir' : undefined;
+    const key = flag === '--output' ? 'output' : flag === '--pi-runtime' ? 'artifactDir'
+      : flag === '--playwright-payload' ? 'playwrightPayloadDir' : undefined;
     if (!key) throw new Error(`Unknown candidate option: ${argv[i]}`);
     if (selection[key] !== undefined) throw new Error(`${flag} may be specified only once.`);
     const value = inline.length ? inline.join('=') : argv[++i];
@@ -64,8 +67,17 @@ function resolveVsce(root) {
 export async function buildCandidate(selection, signal, deps = {}) {
   // Validate API calls with the same rules as the CLI.
   selection = parseCandidateArgs(['--output', selection.output, ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir]),
+    ...(selection.playwrightPayloadDir === undefined ? [] : ['--playwright-payload', selection.playwrightPayloadDir]),
     ...(selection.managedIntegration === undefined ? [] : ['--managed-stage', selection.managedIntegration.stageRoot, '--managed-qualification-receipt', selection.managedIntegration.receiptPath])]);
   const root = await realpath(deps.root ?? repositoryRoot);
+  let playwrightPayload;
+  if (selection.playwrightPayloadDir !== undefined) {
+    const expected = await (deps.resolvePlaywrightExpected ?? resolvePlaywrightHeadlessPayloadExpected)(root);
+    const prepared = await (deps.validatePlaywrightPayload ?? validatePlaywrightHeadlessPayload)({
+      directory: selection.playwrightPayloadDir, expected,
+    });
+    playwrightPayload = { expected, identity: prepared.identity };
+  }
   const env = verificationChildEnv(withoutPiHarnessEnv(deps.env ?? process.env));
   const status = deps.status ?? (message => console.log(`[build-candidate] ${message}`));
   const evidencePath = `${selection.output}.evidence.json`;
@@ -96,26 +108,42 @@ export async function buildCandidate(selection, signal, deps = {}) {
   else await run({ name: 'pi-compile', args: [path.join(root, 'scripts/build/pi-workspace.mjs')] });
   await run({ name: 'delivery-build', args: [path.join(root, 'scripts/build/build.mjs'), '--delivery', '--no-sync', '--output-dir', buildDir,
     ...(selection.artifactDir === undefined ? [] : ['--pi-runtime', selection.artifactDir]),
+    ...(selection.playwrightPayloadDir === undefined ? [] : ['--playwright-payload', selection.playwrightPayloadDir]),
     ...(selection.managedIntegration === undefined ? [] : ['--managed-stage', selection.managedIntegration.stageRoot, '--managed-qualification-receipt', selection.managedIntegration.receiptPath])] });
   await (deps.stagePackage ?? stageExtensionForPackaging)(root, buildDir, stageRoot);
-  const identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot, { managedIntegration: selection.managedIntegration });
+  let identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot, { managedIntegration: selection.managedIntegration });
+  if (playwrightPayload) {
+    const copied = await (deps.verifyPlaywrightPayloadOutput ?? verifyPlaywrightHeadlessPayloadOutput)(path.join(stageRoot, 'out'), {
+      expected: playwrightPayload.expected, expectedIdentity: playwrightPayload.identity,
+    });
+    if (copied.identity !== playwrightPayload.identity) throw new Error('Staged Playwright payload identity does not match the selected prepared payload; scratch retained.');
+    identity = { ...identity, playwrightPayloadIdentity: copied.identity };
+  }
   if (typeof identity.target !== 'string') throw new Error('Staged build identity is missing a target; scratch retained.');
   if (runtime && identity.piRuntimeIdentity !== runtime.identity) throw new Error('Staged Pi runtime identity does not match the selected runtime; scratch retained.');
   const vsce = await (deps.resolveVsce ?? resolveVsce)(root);
   await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--target', identity.target, '--out', candidate] }, stageRoot);
-  if (selection.managedIntegration) {
+  if (selection.managedIntegration || playwrightPayload) {
     const managedContext = { managedIntegration: selection.managedIntegration };
-    const verified = await (deps.verifyCandidate ?? (async (file, destination, context) => {
+    let verified = await (deps.verifyCandidate ?? (async (file, destination, context) => {
       const container = await extractCandidate(file, destination);
       const extracted = await verifyCandidateIdentity(destination, context);
       validateCandidateContainer(container, extracted);
       return extracted;
     }))(candidate, path.join(scratch, 'extracted'), managedContext);
+    if (playwrightPayload) {
+      const copied = await (deps.verifyPlaywrightPayloadOutput ?? verifyPlaywrightHeadlessPayloadOutput)(path.join(scratch, 'extracted', 'out'), {
+        expected: playwrightPayload.expected, expectedIdentity: playwrightPayload.identity,
+      });
+      if (copied.identity !== playwrightPayload.identity) throw new Error('Packaged Playwright payload identity does not match the selected prepared payload; scratch retained.');
+      verified = { ...verified, playwrightPayloadIdentity: copied.identity };
+    }
     if (!isDeepStrictEqual(verified, identity)) throw new Error('Packaged candidate identity does not match the staged build; scratch retained.');
   }
   const fingerprint = await (deps.fingerprint ?? fingerprintCandidate)(candidate);
   const evidence = { schema: 1, purpose: 'local-development-only', qualified: false,
     licenseQualified: false, cleanMachineQualified: false, source, runtime: { selection: selection.artifactDir ?? 'workspace', identity: runtime?.identity ?? identity.piRuntimeIdentity },
+    ...(playwrightPayload ? { playwrightPayloadIdentity: identity.playwrightPayloadIdentity } : {}),
     build: identity, candidate: { path: output, target: identity.target, ...fingerprint }, scratch };
   signal?.throwIfAborted();
   // Recheck both names just before publication; exclusive operations also close races.

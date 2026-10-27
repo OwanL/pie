@@ -52,9 +52,11 @@ test('dedicated one-shot pass follows both graphs and precedes verification/publ
   const source = readFileSync(new URL('../build.mjs', import.meta.url), 'utf8');
   const once = source.slice(source.indexOf('async function buildOnce()'), source.indexOf('function pausePublication()'));
   assert.ok(once.indexOf('if (failed) throw failed.reason') < once.indexOf("'bundled-extensions'"));
-  assert.ok(once.indexOf("'bundled-extensions'") < once.indexOf('verifyCoordinatedBuildIdentity()'));
+  assert.ok(once.indexOf("'bundled-extensions'") < once.indexOf('copyPreparedPlaywrightHeadlessPayload'));
+  assert.ok(once.indexOf('copyPreparedPlaywrightHeadlessPayload') < once.indexOf('verifyCoordinatedBuildIdentity()'));
   assert.ok(once.indexOf('verifyCoordinatedBuildIdentity()') < once.indexOf('publishToInstalledExtension()'));
   const watch = source.slice(source.indexOf('async function watchSelection()'));
   assert.ok(watch.indexOf('await buildOnce()') < watch.indexOf("runViteWatch('bundled-extensions')"));
   assert.match(source, /PIE_BUILD_PI_RUNTIME_IDENTITY: selectedPiRuntime\?\.identity/);
+  assert.match(source, /PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY: selectedPlaywrightPayload\?\.identity \?\? ''/);
 });
