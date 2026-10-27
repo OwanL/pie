@@ -7,6 +7,7 @@ export {
   PI_RUNTIME_PACKAGES,
   PI_RUNTIME_SDK_RELATIVE_PATH,
   verifyPiRuntimeArtifact,
+  verifyPiRuntimeRoles,
   verifyPiRuntimeToolingArtifact,
 } from '../../lib/pi-runtime/artifact.mjs';
 

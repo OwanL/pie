@@ -11,11 +11,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeRoles, verifyPiRuntimeToolingArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 import { installBuildResources } from './build-resource-fixture.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -289,6 +291,52 @@ test('explicit delivery source-bound isolated build selects candidate graph and 
   assert.match(readFileSync(path.join(copiedArtifact, 'node_modules/@earendil-works/pi-coding-agent/THIRD-PARTY-NOTICES.txt'), 'utf8'), /preserve verbatim/u);
   const copied = await verifyPiRuntimeArtifact(copiedArtifact);
   assert.equal(copied.identity, artifact.identity, 'the complete copied artifact re-verifies to the source identity');
+});
+
+test('paired role verification validates tooling and inspects the runtime tree once', async (t) => {
+  const fixture = makeBuildFixture(t);
+  const toolingDir = path.join(path.dirname(fixture.artifactDir), 'pi-tooling');
+  makeArtifact(toolingDir);
+  write(toolingDir, 'tooling-only.txt', 'tooling payload');
+  write(fixture.artifactDir, 'runtime-only.txt', 'runtime payload');
+  const provenance = {
+    upstreamVersion: '0.80.6', upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
+    sourceTreeSha256: 'a'.repeat(64), lockSha256: 'b'.repeat(64),
+    target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  };
+  const tooling = await writePiRuntimeManifest(toolingDir, provenance);
+  write(fixture.artifactDir, 'tooling-reference.json', JSON.stringify({
+    schemaVersion: 1, artifactDirectory: '../pi-tooling', identity: tooling.identity,
+  }));
+  const runtime = await writePiRuntimeManifest(fixture.artifactDir, provenance);
+
+  const originalReaddir = fsPromises.default.readdir;
+  const runtimeRoot = await fsPromises.realpath(fixture.artifactDir);
+  const toolingRoot = await fsPromises.realpath(toolingDir);
+  const rootReads = new Map([[runtimeRoot, 0], [toolingRoot, 0]]);
+  fsPromises.default.readdir = async (directory, ...args) => {
+    const root = path.resolve(directory);
+    if (rootReads.has(root)) rootReads.set(root, rootReads.get(root) + 1);
+    return originalReaddir(directory, ...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    const roles = await verifyPiRuntimeRoles(fixture.artifactDir);
+    assert.equal(roles.runtime.identity, runtime.identity);
+    assert.equal(roles.tooling.identity, tooling.identity);
+    assert.deepEqual([...rootReads.values()], [1, 1], 'the runtime and tooling roots are each inspected exactly once');
+  } finally {
+    fsPromises.default.readdir = originalReaddir;
+    syncBuiltinESMExports();
+  }
+
+  write(fixture.artifactDir, 'runtime-only.txt', 'tampered runtime payload');
+  await assert.rejects(verifyPiRuntimeRoles(fixture.artifactDir), /payload hash mismatch/u,
+    'runtime verification failures propagate');
+  write(fixture.artifactDir, 'runtime-only.txt', 'runtime payload');
+  write(toolingDir, 'tooling-only.txt', 'tampered tooling payload');
+  await assert.rejects(verifyPiRuntimeRoles(fixture.artifactDir), /payload hash mismatch/u,
+    'tooling verification failures propagate');
 });
 
 test('split delivery uses tooling declarations but bundles runtime and copies both independent roles', async (t) => {

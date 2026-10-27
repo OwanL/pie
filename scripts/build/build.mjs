@@ -13,7 +13,7 @@ import {
 import { assertRuntimeBootstrapSupportsSchema, hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration } from './runtime-publication.mjs';
 import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
-import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, verifyPiRuntimeRoles } from '../lib/pi-runtime-artifact.mjs';
 import { verifyBundledExtensionOutput } from './bundled-extension-verification.mjs';
 import { copyPreparedPlaywrightHeadlessPayload, parsePlaywrightPayloadOption, resolvePlaywrightHeadlessPayloadExpected, verifyPlaywrightHeadlessPayloadOutput } from './tool-runtime-assets.mjs';
 import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
@@ -288,9 +288,7 @@ async function copyArtifactEntries(source, destination) {
 }
 
 async function verifyRuntimeRoles(directory) {
-  const [runtime, tooling] = await Promise.all([
-    verifyPiRuntimeArtifact(directory), verifyPiRuntimeToolingArtifact(directory),
-  ]);
+  const { runtime, tooling } = await verifyPiRuntimeRoles(directory);
   return { ...runtime, tooling: tooling.artifactDir === runtime.artifactDir ? undefined : tooling };
 }
 
