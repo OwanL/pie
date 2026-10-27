@@ -4,6 +4,7 @@ import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { withWinLddTracePreload } from './sidecar-trace-args.mjs';
 
 const HOST_VALIDATION_SKIP_ALIASES = new Set([
   'playwright_skip_validate_host_requirements',
@@ -89,11 +90,14 @@ const repoRequire = createRequire(path.join(sandbox, 'loader-owner.cjs'));
 const childProcess = repoRequire('node:child_process');
 const originalSpawn = childProcess.spawn;
 const sidecarLaunches = [];
+const sidecarStderrChunks = [];
+let sidecarChild;
+let sidecarClosed;
 childProcess.spawn = function (command, args, options) {
   const entry = Array.isArray(args) && typeof args[0] === 'string' ? args[0] : undefined;
   if (entry && path.resolve(entry) === path.resolve(sidecarEntry)) {
     const childEnv = { ...(options?.env ?? {}), PIE_TEST_WINLDD_TRACE_FILE: winLddTracePath };
-    const instrumentedArgs = ['--import', tracePreloadPath, ...args];
+    const instrumentedArgs = withWinLddTracePreload(args, tracePreloadPath);
     sidecarLaunches.push({
       executable: String(command),
       entry,
@@ -112,7 +116,11 @@ childProcess.spawn = function (command, args, options) {
         PI_CODING_AGENT_DIR: childEnv['PI_CODING_AGENT_DIR'],
       },
     });
-    return originalSpawn.call(this, command, instrumentedArgs, { ...options, env: childEnv });
+    sidecarChild = originalSpawn.call(this, command, instrumentedArgs, { ...options, env: childEnv });
+    // A second data listener observes the same stderr chunks without consuming or changing the runtime's IPC streams.
+    sidecarChild.stderr?.on('data', (chunk) => sidecarStderrChunks.push(Buffer.from(chunk)));
+    sidecarClosed = new Promise((resolve) => sidecarChild.once('close', resolve));
+    return sidecarChild;
   }
   return originalSpawn.call(this, command, args, options);
 };
@@ -232,7 +240,29 @@ try {
     } catch (error) {
       cleanupErrors.push(`process-tree exit: ${error instanceof Error ? error.message : String(error)}`);
     }
+  } else if (sidecarChild?.pid) {
+    try {
+      await waitForExit([sidecarChild.pid], 15_000);
+    } catch (error) {
+      cleanupErrors.push(`sidecar exit: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
+
+  if (sidecarClosed) {
+    let closeTimer;
+    try {
+      await Promise.race([
+        sidecarClosed,
+        new Promise((_, reject) => { closeTimer = setTimeout(() => reject(new Error('sidecar stdio did not close within 15 seconds')), 15_000); }),
+      ]);
+    } catch (error) {
+      cleanupErrors.push(`sidecar stdio close: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      clearTimeout(closeTimer);
+    }
+  }
+  await writeFile(path.join(sandbox, 'sidecar-stderr.log'), Buffer.concat(sidecarStderrChunks));
+  await writeFile(winLddTracePath, '', { flag: 'a' });
 }
 if (operationError) throw operationError;
 assert.deepEqual(cleanupErrors, [], 'the real shutdown path must clean up without fallback');

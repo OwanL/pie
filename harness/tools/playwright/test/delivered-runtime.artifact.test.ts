@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { inflateRawSync } from 'node:zlib';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readNodeRuntimeManifest } from '../../../../lib/node-runtime/manifest.mjs';
 import { extractCandidate } from '../../../../scripts/verification/lib/vsix-candidate.mjs';
+import { withWinLddTracePreload } from './fixtures/sidecar-trace-args.mjs';
 
 const VSIX_ENV = 'PIE_DELIVERED_PLAYWRIGHT_VSIX';
 const VSIX_SHA256_ENV = 'PIE_DELIVERED_PLAYWRIGHT_VSIX_SHA256';
@@ -31,6 +32,45 @@ function validateExpectedInputs(sha256: string | undefined, buildId: string | un
   if (!buildId?.trim()) assert.fail(`${BUILD_ID_ENV} must provide the expected candidate build ID`);
   return { sha256, buildId };
 }
+
+interface WinLddTraceRecord {
+  event: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  code: number | null;
+  signal: string | null;
+}
+
+function assertPackagedWinLddTrace(trace: WinLddTraceRecord[], expectedWinLddExecutable: string, expectedShellExecutable: string): void {
+  assert.ok(trace.length > 0, 'the actual packaged validation must record WinLdd checks');
+  const expectedCommand = path.win32.resolve(expectedWinLddExecutable).toLowerCase();
+  const expectedShell = path.win32.resolve(expectedShellExecutable).toLowerCase();
+  for (const call of trace) {
+    assert.equal(call.event, 'close', 'every packaged WinLdd check must complete');
+    assert.equal(path.win32.resolve(call.command).toLowerCase(), expectedCommand, 'every check must use WinLdd from this accepted payload');
+    assert.equal(call.code, 0, 'every packaged WinLdd check must exit successfully');
+    assert.equal(call.signal, null, 'packaged WinLdd checks must not be terminated by a signal');
+  }
+  assert.ok(
+    trace.some((call) => call.args.some((argument) => path.win32.resolve(argument).toLowerCase() === expectedShell)),
+    'the actual packaged validation must check the exact chrome-headless-shell.exe path',
+  );
+}
+
+test('packaged WinLdd trace accepts shell plus DLL checks and rejects missing-shell or failed checks', () => {
+  const winLdd = 'C:\\payload\\browsers\\winldd-1\\PrintDeps.exe';
+  const shell = 'C:\\payload\\browsers\\chromium_headless_shell-1\\chrome-headless-shell-win64\\chrome-headless-shell.exe';
+  const cwd = path.win32.dirname(shell);
+  const call = (target: string, code = 0): WinLddTraceRecord => ({
+    event: 'close', command: winLdd, args: [target], cwd, code, signal: null,
+  });
+  assert.doesNotThrow(() => assertPackagedWinLddTrace([
+    call(shell), call(path.win32.join(cwd, 'libEGL.dll')), call(path.win32.join(cwd, 'libGLESv2.dll')),
+  ], winLdd, shell));
+  assert.throws(() => assertPackagedWinLddTrace([call(path.win32.join(cwd, 'chrome-headless-shell.exe.backup'))], winLdd, shell), /exact chrome-headless-shell/u);
+  assert.throws(() => assertPackagedWinLddTrace([call(shell, 1)], winLdd, shell), /exit successfully/u);
+});
 
 test('delivered Playwright artifact expected inputs require an explicit hash and build ID', () => {
   assert.throws(() => validateExpectedInputs(undefined, undefined), /PIE_DELIVERED_PLAYWRIGHT_VSIX_SHA256/u);
@@ -317,6 +357,33 @@ function isolatedEnvironment(sandbox: string): NodeJS.ProcessEnv {
   return env;
 }
 
+test('Windows Node accepts the test-only sidecar preload as a file URL, not a drive-letter path', {
+  skip: process.platform !== 'win32',
+  timeout: 15_000,
+}, async (t) => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), 'pie-sidecar-preload-probe-'));
+  t.after(async () => { await rm(sandbox, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); });
+  const tracePath = path.join(sandbox, 'winldd-trace.jsonl');
+  const tracePreloadPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'actual-winldd-trace.mjs');
+  const env = { ...isolatedEnvironment(sandbox), PIE_TEST_WINLDD_TRACE_FILE: tracePath };
+
+  const rawPathProbe = spawnSync(process.execPath, ['--import', tracePreloadPath, '-e', ''], {
+    encoding: 'utf8', timeout: 5_000, windowsHide: true, env,
+  });
+  assert.equal(rawPathProbe.error, undefined, `raw-path Node probe failed to complete: ${rawPathProbe.error?.message ?? ''}`);
+  assert.equal(rawPathProbe.status, 1);
+  assert.match(rawPathProbe.stderr, /ERR_UNSUPPORTED_ESM_URL_SCHEME/u, 'a C:/... path is parsed as the unsupported c: URL scheme');
+
+  const preloadArgs = withWinLddTracePreload(['-e', "process.stdout.write('preload-ready')"], tracePreloadPath);
+  assert.deepEqual(preloadArgs.slice(0, 2), ['--import', pathToFileURL(tracePreloadPath).href]);
+  const fileUrlProbe = spawnSync(process.execPath, preloadArgs, {
+    encoding: 'utf8', timeout: 5_000, windowsHide: true, env,
+  });
+  assert.equal(fileUrlProbe.error, undefined, `file-URL Node probe failed to complete: ${fileUrlProbe.error?.message ?? ''}`);
+  assert.equal(fileUrlProbe.status, 0, fileUrlProbe.stderr);
+  assert.equal(fileUrlProbe.stdout, 'preload-ready');
+});
+
 test('delivered Playwright artifact registers and runs its real SDK-loaded tool, then session shutdown reaps its runtime', {
   skip: !acceptedVsixPath || !explicitlyEnabled,
   timeout: 300_000,
@@ -331,7 +398,12 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   assert.equal(initialHash, expected.sha256, 'the test must consume the exact explicitly identified candidate VSIX');
 
   const privateRoot = await mkdtemp(path.join(tmpdir(), 'pie-delivered-playwright-'));
+  let testSucceeded = false;
   t.after(async () => {
+    if (!testSucceeded) {
+      t.diagnostic(`delivered artifact failure diagnostics preserved at ${privateRoot} (sidecar stderr: ${path.join(privateRoot, 'sidecar-stderr.log')}; WinLdd trace: ${path.join(privateRoot, 'actual-winldd-trace.jsonl')})`);
+      return;
+    }
     await rm(privateRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     assert.equal(existsSync(privateRoot), false, 'the owned artifact-test tree must be removed after child shutdown');
   });
@@ -409,6 +481,8 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
     maxBuffer: 8 * 1024 * 1024,
     windowsHide: true,
   });
+  await writeFile(path.join(privateRoot, 'artifact-child.stdout.log'), child.stdout ?? '');
+  await writeFile(path.join(privateRoot, 'artifact-child.stderr.log'), child.stderr ?? '');
   assert.equal(child.error, undefined, `isolated artifact child failed to complete: ${child.error?.message ?? ''}\n${child.stderr ?? ''}\n${child.stdout ?? ''}`);
   assert.equal(child.status, 0, `isolated artifact child exited ${String(child.status)}\n${child.stderr ?? ''}\n${child.stdout ?? ''}`);
 
@@ -436,7 +510,7 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
     observeText: string;
     screenshotImageParts: number;
     sidecarLaunches: Array<{ executable: string; entry: string; args: string[]; hostValidationSkipVariables: string[]; env: Record<string, string | undefined> }>;
-    winLddTrace: Array<{ event: string; command: string; args: string[]; cwd: string; code: number | null; signal: string | null }>;
+    winLddTrace: WinLddTraceRecord[];
     pids: { sidecarPid: number; browserPids: number[] };
     shutdownHandlerInvoked: boolean;
     registryEntryBeforeShutdown: boolean;
@@ -475,7 +549,7 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   const [launch] = proof.sidecarLaunches;
   assert.equal(path.resolve(launch.executable), path.resolve(selectedNode), 'record the actual selected Node executable');
   assert.equal(path.resolve(launch.entry), path.resolve(sidecarEntry), 'the runtime must launch the sidecar extracted from this VSIX');
-  assert.deepEqual(launch.args, ['--import', path.resolve(tracePreloadPath), sidecarEntry], 'only the actual sidecar command receives the owned read-only WinLdd trace preload, before its unchanged entry');
+  assert.deepEqual(launch.args, ['--import', pathToFileURL(tracePreloadPath).href, sidecarEntry], 'only the actual sidecar command receives the owned read-only WinLdd trace preload as a file URL, before its unchanged entry');
   assert.deepEqual(launch.hostValidationSkipVariables, [], 'no case-insensitive host-validation skip alias may reach the actual sidecar');
   assert.equal(path.resolve(launch.env['PIE_TEST_WINLDD_TRACE_FILE'] ?? ''), path.resolve(hostCheckTracePath));
   assert.equal(path.resolve(launch.env['PLAYWRIGHT_BROWSERS_PATH'] ?? ''), path.resolve(browserRoot));
@@ -488,13 +562,7 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   assert.equal(launch.env['PIE_DATA_DIR'], childEnv.PIE_DATA_DIR);
   assert.equal(launch.env['PI_CODING_AGENT_DIR'], childEnv.PI_CODING_AGENT_DIR);
   assert.equal(launch.env['NODE_OPTIONS'], undefined, 'inherited Node options must not reach the SDK-owned sidecar');
-  assert.equal(proof.winLddTrace.length, 1, 'the actual packaged validation must run WinLdd against the shell rather than validate an empty/stale directory');
-  const [winLdd] = proof.winLddTrace;
-  assert.equal(winLdd.event, 'close');
-  assert.equal(path.resolve(winLdd.command), path.resolve(expectedWinLddExecutable), 'invoke the WinLdd executable from this accepted payload');
-  assert.deepEqual(winLdd.args.map((argument) => path.resolve(argument)), [path.resolve(expectedShellExecutable)], 'WinLdd must receive the real packaged chrome-headless-shell.exe path');
-  assert.equal(path.resolve(winLdd.cwd), path.dirname(path.resolve(expectedShellExecutable)));
-  assert.equal(winLdd.code, 0, 'the actual packaged WinLdd process must exit successfully');
+  assertPackagedWinLddTrace(proof.winLddTrace, expectedWinLddExecutable, expectedShellExecutable);
   assert.ok(proof.pids.sidecarPid > 0);
   assert.ok(proof.pids.browserPids.length > 0, 'the real tool must have launched its headless browser');
   assert.equal(proof.shutdownHandlerInvoked, true);
@@ -507,4 +575,5 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
 
   const finalHash = await sha256File(vsixPath);
   assert.equal(finalHash, expected.sha256, 'the candidate VSIX must remain byte-identical');
+  testSucceeded = true;
 });
