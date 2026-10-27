@@ -28,6 +28,7 @@ const PLAYWRIGHT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 const NPM_PACKAGES = ['playwright', 'playwright-core', 'pngjs'];
 const ARCHIVE_VERIFICATION = 'local-content-hash-match';
 const NO_ATTESTATION = 'none';
+const WINLDD_NOTICES = 'harness/tools/playwright/licenses/WINLDD-NOTICES.txt';
 
 function fail(message) {
   throw new Error(`Playwright runtime payload: ${message}`);
@@ -1080,7 +1081,11 @@ async function validatePayloadAt(directory, source) {
   expectedArchiveFiles(actual, `browsers/ffmpeg-${pins.ffmpeg}/`, [
     `browsers/ffmpeg-${pins.ffmpeg}/ffmpeg-win64.exe`, `browsers/ffmpeg-${pins.ffmpeg}/COPYING.LGPLv2.1`,
   ]);
-  expectedArchiveFiles(actual, `browsers/winldd-${pins.winldd}/`, [`browsers/winldd-${pins.winldd}/PrintDeps.exe`]);
+  const winlddPrefix = `browsers/winldd-${pins.winldd}/`;
+  expectedArchiveFiles(actual, winlddPrefix, [`${winlddPrefix}PrintDeps.exe`, `${winlddPrefix}LICENSE`]);
+  const trustedWinlddNotices = await readStableFile(path.join(source.root, WINLDD_NOTICES), MAX_FILE_BYTES, 'trusted WinLdd notices');
+  const packagedWinlddNotices = await readStableFile(path.join(root, winlddPrefix, 'LICENSE'), MAX_FILE_BYTES, 'packaged WinLdd notices');
+  if (!packagedWinlddNotices.equals(trustedWinlddNotices)) fail('packaged WinLdd notices do not match the trusted repository notice bytes.');
   return { directory: root, manifest, identity: manifest.payloadIdentity };
 }
 
@@ -1174,6 +1179,8 @@ export async function preparePlaywrightRuntimePayload(options) {
     }
     const winlddEntries = await extractPinnedZip(winldd, 'winldd', { root: null }, staging, `browsers/winldd-${pins.winldd}`);
     if (winlddEntries.size !== 1 || !winlddEntries.has('PrintDeps.exe')) fail('WinLdd ZIP must contain only PrintDeps.exe.');
+    const trustedWinlddNotices = await readStableFile(path.join(source.root, WINLDD_NOTICES), MAX_FILE_BYTES, 'trusted WinLdd notices');
+    await writePayloadFile(staging, `browsers/winldd-${pins.winldd}/LICENSE`, trustedWinlddNotices);
 
     const files = await inventoryPayload(staging);
     const shellInventoryPrefix = `browsers/chromium_headless_shell-${pins.chromiumHeadlessShell.revision}/chrome-headless-shell-win64/`;

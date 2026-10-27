@@ -174,6 +174,9 @@ async function fixture(t) {
     'locales/en-US.pak': Buffer.from([0, 1, 2, 255]),
   };
   await Promise.all([mkdir(extensionRoot, { recursive: true }), mkdir(sourceRoot), mkdir(browserRoot), mkdir(winlddRoot)]);
+  const winlddNotices = await readFile(new URL('../../../harness/tools/playwright/licenses/WINLDD-NOTICES.txt', import.meta.url));
+  await mkdir(path.join(repositoryRoot, 'harness', 'tools', 'playwright', 'licenses'), { recursive: true });
+  await writeFile(path.join(repositoryRoot, 'harness', 'tools', 'playwright', 'licenses', 'WINLDD-NOTICES.txt'), winlddNotices);
   await writeJson(path.join(extensionRoot, 'package.json'), {
     name: 'pie-playwright', private: true, dependencies: { playwright: versions.playwright, pngjs: versions.pngjs },
   });
@@ -395,6 +398,7 @@ test('prepares the bounded composite runtime with lock-derived pins, retained no
   assert.ok(manifest.inventory.some(item => item.relativePath === 'node_modules/playwright-core/ThirdPartyNotices.txt'));
   assert.ok(manifest.inventory.some(item => item.relativePath === 'node_modules/playwright-core/NOTICE'));
   assert.ok(manifest.inventory.some(item => item.relativePath === 'browsers/winldd-1007/PrintDeps.exe'));
+  assert.deepEqual(await readFile(path.join(prepared.directory, 'browsers/winldd-1007/LICENSE')), await readFile(new URL('../../../harness/tools/playwright/licenses/WINLDD-NOTICES.txt', import.meta.url)));
   const copiedPlaywrightManifest = JSON.parse(await readFile(path.join(prepared.directory, 'node_modules/playwright/package.json'), 'utf8'));
   assert.equal(copiedPlaywrightManifest.scripts.postinstall, 'throw new Error("must not run")', 'package lifecycle declarations are copied but never executed');
   assert.equal(manifest.archiveProvenance.length, 6);
@@ -417,6 +421,14 @@ test('prepares the bounded composite runtime with lock-derived pins, retained no
   assert.equal(moved.identity, prepared.identity);
   assert.deepEqual(await listBytes(prepared.directory), await listBytes(relocated));
   await assert.rejects(prepare(f), /already exists|destinationDirectory/iu);
+});
+
+test('requires the packaged WinLdd notice to match trusted repository bytes', async t => {
+  const f = await fixture(t);
+  const prepared = await prepare(f);
+  const trustedNotice = path.join(f.repositoryRoot, 'harness/tools/playwright/licenses/WINLDD-NOTICES.txt');
+  await writeFile(trustedNotice, 'different bytes');
+  await assert.rejects(validatePlaywrightRuntimePayload({ directory: prepared.directory, repositoryRoot: f.repositoryRoot }), /trusted repository notice bytes/u);
 });
 
 test('rejects untrusted pins, malformed metadata, and overlapping or non-absolute destinations', async t => {
