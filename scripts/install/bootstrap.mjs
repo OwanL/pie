@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { repoRoot, readPinnedNodeVersion, readPinnedPnpmVersion } from "./toolchain.mjs";
@@ -9,6 +11,8 @@ import { withPiRuntime } from "../lib/pi-runtime-context.mjs";
 import { buildPiWorkspace } from "../build/pi-workspace.mjs";
 import { createSourcePiCli } from "./lib/source-pi-cli.mjs";
 import { validateAuthDirectory } from "./lib/auth-directory.mjs";
+import { createOwnerRequire } from "../lib/package-resolution.mjs";
+import { stageExtensionForPackaging } from "../lib/delivery-package.mjs";
 
 class BootstrapCommandError extends Error {
   constructor(command, args, status) {
@@ -42,6 +46,43 @@ function runSourcePiCli(cli, step, onChildCompletionKnown) {
       } else resolve();
     });
   });
+}
+
+function contains(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function resolveVsce(root) {
+  return createOwnerRequire({ repositoryRoot: root }).resolve("@vscode/vsce/vsce");
+}
+
+async function packageExtensionFromStage({
+  root, hostRoot, nodeExecutable, spawn,
+  stagePackage = stageExtensionForPackaging,
+  createPackageScratch = () => mkdtemp(path.join(os.tmpdir(), "pie-bootstrap-package-")),
+  resolveVscePath = resolveVsce,
+}) {
+  const scratch = await createPackageScratch();
+  try {
+    const checkout = await realpath(root);
+    const packageScratch = await realpath(scratch);
+    if (contains(checkout, packageScratch) || contains(packageScratch, checkout)) {
+      throw new Error("Bootstrap package staging must be outside the checkout.");
+    }
+    const stageRoot = path.join(packageScratch, "stage");
+    await stagePackage(root, path.join(hostRoot, "out"), stageRoot);
+    const manifest = JSON.parse(await readFile(path.join(stageRoot, "package.json"), "utf8"));
+    const output = path.join(hostRoot, `${manifest.name}-${manifest.version}.vsix`);
+    const vsce = resolveVscePath(root);
+    runSync({
+      command: nodeExecutable,
+      args: [vsce, "package", "--no-dependencies", "--allow-missing-repository", "--out", output],
+      cwd: stageRoot,
+    }, spawn);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 export function parseBootstrapArgs(args) {
@@ -91,9 +132,9 @@ export function buildCommandPlan({
       cwd: root,
     },
     ...(packageExtension ? [{
-      command: "proto",
-      args: ["run", "pnpm", "--", "--dir", hostRoot, "exec", "vsce", "package", "--no-dependencies", "--allow-missing-repository", "--skip-license"],
+      operation: "package-extension",
       cwd: root,
+      hostRoot,
     }] : []),
     { command: nodeExecutable, args: ["scripts/diagnostics/doctor.mjs", "--skip-model-check", "--pi-runtime", artifactDir], cwd: root },
   ];
@@ -111,6 +152,9 @@ export async function runBootstrap({
   compilePiWorkspace = buildPiWorkspace,
   createPiCli = createSourcePiCli,
   runtimeTarget = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  stagePackage = stageExtensionForPackaging,
+  createPackageScratch,
+  resolveVscePath = resolveVsce,
 } = {}) {
   // One gated Proto-selected root install owns every workspace dependency.
   // A source-default artifact must follow a fresh compiled-workspace stamp;
@@ -135,6 +179,11 @@ export async function runBootstrap({
           // proves that the child is gone.
           childCompletionKnown = false;
           await runSourcePiCli(piCli, step, () => { childCompletionKnown = true; });
+        } else if (step.operation === "package-extension") {
+          await packageExtensionFromStage({
+            root, hostRoot: step.hostRoot, nodeExecutable, spawn,
+            stagePackage, createPackageScratch, resolveVscePath,
+          });
         } else {
           runSync(step, spawn);
         }

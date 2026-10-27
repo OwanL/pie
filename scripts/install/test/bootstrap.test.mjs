@@ -54,21 +54,64 @@ test('bootstrap command plan uses the verified source CLI and explicitly pins th
   assert.equal(plan.at(-1).cwd, repoRoot);
 });
 
-test('bootstrap package plan runs pinned host-local vsce between build and doctor', () => {
+test('bootstrap package plan uses shared staging between build and doctor', () => {
   const plan = buildCommandPlan({ packageSources: [], artifactDir: fixtureArtifactDir, package: true });
   const hostRoot = path.join(repoRoot, 'application', 'hosts', 'vscode');
   const buildIndex = plan.findIndex(({ command, args }) => command === 'proto' && args?.includes('scripts/build/build.mjs'));
-  const packageIndex = plan.findIndex(({ command, args }) => command === 'proto' && args?.includes('vsce'));
+  const packageIndex = plan.findIndex(({ operation }) => operation === 'package-extension');
   const doctorIndex = plan.findIndex(({ args }) => args?.[0] === 'scripts/diagnostics/doctor.mjs');
 
   assert.ok(buildIndex < packageIndex && packageIndex < doctorIndex);
-  assert.deepEqual(plan[packageIndex], {
-    command: 'proto',
-    args: ['run', 'pnpm', '--', '--dir', hostRoot, 'exec', 'vsce', 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license'],
-    cwd: repoRoot,
-  });
+  assert.deepEqual(plan[packageIndex], { operation: 'package-extension', cwd: repoRoot, hostRoot });
   assert.ok(!plan.some(({ args }) => args?.includes('prepackage')),
     'packaging bypasses the prepackage script so it cannot rebuild');
+});
+
+test('bootstrap packages an externally staged host with license validation enabled', async (t) => {
+  const { root, artifactDir } = await createBootstrapFixture(t);
+  const hostRoot = path.join(root, 'application', 'hosts', 'vscode');
+  const events = [];
+  let stagedRoot;
+
+  await runBootstrap({
+    root, artifactDir, packageSources: [], package: true,
+    compilePiWorkspace() { assert.fail('explicit artifact reuse must skip source compilation'); },
+    spawn(command, args, options) {
+      events.push({ type: 'command', command, args, cwd: options.cwd });
+      return { status: 0 };
+    },
+    stagePackage(stageRoot, outputBuildDir, destination) {
+      events.push({ type: 'stage', stageRoot, outputBuildDir, destination });
+      stagedRoot = destination;
+      assert.ok(!destination.startsWith(root), 'the package stage is not copied into the checkout');
+      return mkdir(destination).then(() => writeFile(path.join(destination, 'package.json'), JSON.stringify({ name: 'pie', version: '0.3.0' })));
+    },
+    resolveVscePath(selectedRoot) {
+      assert.equal(selectedRoot, root);
+      return 'fixture-vsce';
+    },
+    acquireRuntime(options, callback) {
+      return callback({ artifactDir, confirmChildCompletion() {} });
+    },
+    async createPiCli() {
+      return { run() { assert.fail('no package sources require Pi CLI execution'); } };
+    },
+  });
+
+  const stageIndex = events.findIndex(({ type }) => type === 'stage');
+  const packageIndex = events.findIndex(({ command, args }) => command === process.execPath && args?.[0] === 'fixture-vsce');
+  const doctorIndex = events.findIndex(({ args }) => args?.[0] === 'scripts/diagnostics/doctor.mjs');
+  assert.ok(stageIndex < packageIndex && packageIndex < doctorIndex);
+  assert.deepEqual(events[stageIndex], {
+    type: 'stage', stageRoot: root, outputBuildDir: path.join(hostRoot, 'out'), destination: stagedRoot,
+  });
+  assert.deepEqual(events[packageIndex].args, [
+    'fixture-vsce', 'package', '--no-dependencies', '--allow-missing-repository',
+    '--out', path.join(hostRoot, 'pie-0.3.0.vsix'),
+  ]);
+  assert.ok(!events[packageIndex].args.includes('--skip-license'));
+  assert.notEqual(events[packageIndex].cwd, hostRoot);
+  assert.equal(existsSync(path.dirname(stagedRoot)), false, 'temporary package staging is removed after synchronous packaging');
 });
 
 test('bootstrap acquires once after the frozen root pnpm install, reuses the verified CLI and confirms only after children close', async (t) => {
@@ -344,8 +387,12 @@ test('packaging failure stops before doctor and confirms artifact teardown', asy
     package: true,
     spawn(command, args) {
       events.push({ command, args });
-      return args.includes('vsce') ? { status: 23 } : { status: 0 };
+      return args.includes('fixture-vsce') ? { status: 23 } : { status: 0 };
     },
+    stagePackage(_root, _outputBuildDir, destination) {
+      return mkdir(destination).then(() => writeFile(path.join(destination, 'package.json'), JSON.stringify({ name: 'pie', version: '0.3.0' })));
+    },
+    resolveVscePath() { return 'fixture-vsce'; },
     acquireRuntime(options, callback) {
       return callback({
         artifactDir: options.artifactDir,
@@ -356,7 +403,7 @@ test('packaging failure stops before doctor and confirms artifact teardown', asy
   }), (error) => { assert.equal(error.exitCode, 23); return true; });
 
   const buildIndex = events.findIndex(({ command, args }) => command === 'proto' && args.includes('build'));
-  const packageIndex = events.findIndex(({ args }) => args.includes('vsce'));
+  const packageIndex = events.findIndex(({ args }) => args.includes('fixture-vsce'));
   assert.ok(buildIndex < packageIndex, 'packaging follows the artifact-pinned build');
   assert.ok(!events.some(({ args }) => args[0] === 'scripts/diagnostics/doctor.mjs'),
     'doctor is skipped when packaging fails');

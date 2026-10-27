@@ -18,13 +18,14 @@ test('VS Code package selects reviewed resources, including nested managed depen
     await copyFile(new URL('../../../application/hosts/vscode/.vscodeignore', import.meta.url), path.join(cwd, '.vscodeignore'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({
       name: 'pie-packaging-fixture', publisher: 'fixture', version: '0.0.0',
+      license: 'AGPL-3.0-only',
       engines: { vscode: '^1.90.0' },
       // Listing must neither resolve dependencies nor invoke lifecycle scripts.
       dependencies: { 'not-installed-fixture': '0.0.0' },
       scripts: { 'vscode:prepublish': 'node -e "process.exit(99)"' },
     }));
     const included = [
-      'README.md', 'media/icon.svg', 'runtime/loader.cjs', 'out/extension.js',
+      'README.md', 'LICENSE', 'COPYRIGHT', 'media/icon.svg', 'runtime/loader.cjs', 'out/extension.js',
       'out/pie-build-id.txt', 'out/windows-runtime-lock.cjs',
       'out/pi-runtime/manifest.json', 'out/pi-runtime/node_modules/example/index.js',
       'out/webview/panel/.vite/manifest.json', 'out/webview/panel/assets/panel.js',
@@ -55,7 +56,11 @@ test('VS Code package selects reviewed resources, including nested managed depen
     ];
     for (const file of [...included, ...excluded]) {
       await mkdir(path.dirname(path.join(cwd, file)), { recursive: true });
-      await writeFile(path.join(cwd, file), 'fixture\n');
+      if (file === 'LICENSE' || file === 'COPYRIGHT') {
+        await copyFile(new URL(`../../../${file}`, import.meta.url), path.join(cwd, file));
+      } else {
+        await writeFile(path.join(cwd, file), 'fixture\n');
+      }
     }
     const files = await listFiles({ cwd, dependencies: false, prepublish: false });
     assert.deepEqual([...files].sort(), ['package.json', ...included].sort());

@@ -102,7 +102,7 @@ export async function buildCandidate(selection, signal, deps = {}) {
   if (typeof identity.target !== 'string') throw new Error('Staged build identity is missing a target; scratch retained.');
   if (runtime && identity.piRuntimeIdentity !== runtime.identity) throw new Error('Staged Pi runtime identity does not match the selected runtime; scratch retained.');
   const vsce = await (deps.resolveVsce ?? resolveVsce)(root);
-  await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--target', identity.target, '--out', candidate] }, stageRoot);
+  await run({ name: 'candidate-package', args: [vsce, 'package', '--no-dependencies', '--allow-missing-repository', '--target', identity.target, '--out', candidate] }, stageRoot);
   if (selection.managedIntegration) {
     const managedContext = { managedIntegration: selection.managedIntegration };
     const verified = await (deps.verifyCandidate ?? (async (file, destination, context) => {

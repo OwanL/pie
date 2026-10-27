@@ -22,7 +22,13 @@ export async function copyPackageSkeleton(root, packageRoot) {
 }
 
 async function requireRegularFile(file) {
-  const info = await lstat(file);
+  let info;
+  try {
+    info = await lstat(file);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`Staged packaging requires a regular file: ${file}`);
+    throw error;
+  }
   if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Staged packaging refused a non-regular entry: ${file}`);
 }
 
@@ -51,6 +57,9 @@ export async function stageExtensionForPackaging(root, outputBuildDir, stagedRoo
   for (const name of ['package.json', '.vscodeignore', 'media/icon.svg']) {
     await requireRegularFile(path.join(source, name));
   }
+  for (const name of ['LICENSE', 'COPYRIGHT']) {
+    await requireRegularFile(path.join(root, name));
+  }
   const manifest = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
   if (Object.hasOwn(manifest.scripts ?? {}, 'vscode:prepublish')) {
     throw new Error('Staged packaging refuses manifest vscode:prepublish; packaging must never execute build hooks.');
@@ -68,6 +77,9 @@ export async function stageExtensionForPackaging(root, outputBuildDir, stagedRoo
   }
   await mkdir(stagedRoot);
   await copyPackageSkeleton(root, stagedRoot);
+  for (const name of ['LICENSE', 'COPYRIGHT']) {
+    await copyFile(path.join(root, name), path.join(stagedRoot, name));
+  }
   await copyFile(path.join(source, '.vscodeignore'), path.join(stagedRoot, '.vscodeignore'));
   await copyTree(path.join(source, 'media'), path.join(stagedRoot, 'media'), new Set(), true);
   await copyTree(outputBuildDir, path.join(stagedRoot, 'out'), new Set(['.cache']));

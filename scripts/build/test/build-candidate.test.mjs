@@ -116,7 +116,7 @@ for (const reuse of [false, true]) {
     assert.deepEqual(f.calls.find(call => call[0] === 'stage').slice(1), [f.root, path.join(f.scratch, 'build'), path.join(f.scratch, 'stage')]);
     const packaging = f.calls.find(call => call[0] === 'candidate-package');
     assert.equal(packaging[2].root, path.join(f.scratch, 'stage'));
-    assert.deepEqual(packaging[1].args, ['fake-vsce', 'package', '--no-dependencies', '--allow-missing-repository', '--skip-license', '--target', 'win32-x64', '--out', path.join(f.scratch, 'candidate.vsix')]);
+    assert.deepEqual(packaging[1].args, ['fake-vsce', 'package', '--no-dependencies', '--allow-missing-repository', '--target', 'win32-x64', '--out', path.join(f.scratch, 'candidate.vsix')]);
     assert.deepEqual(await readFile(f.output), f.bytes);
     const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
     assert.deepEqual(evidence, { schema: 1, purpose: 'local-development-only', qualified: false, licenseQualified: false, cleanMachineQualified: false,
@@ -166,17 +166,31 @@ async function packageFixture(t) {
   const stage = path.join(f.base, 'package');
   const put = async (file, bytes) => { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, bytes); };
   for (const [name, bytes] of Object.entries({ 'package.json': '{"name":"fixture"}', '.vscodeignore': 'ignored', 'media/icon.svg': 'icon', 'media/nested/full.svg': 'full media', 'runtime/bootstrap.cjs': 'bootstrap', 'runtime/windows-runtime-lock.cjs': 'checkout adapter', 'out/stale.js': 'must not copy' })) await put(path.join(source, name), bytes);
+  await put(path.join(f.root, 'LICENSE'), Buffer.from('root license\r\n'));
+  await put(path.join(f.root, 'COPYRIGHT'), Buffer.from('root copyright\r\n'));
   await put(path.join(f.root, 'lib/windows-runtime-lock/windows-runtime-lock.cjs'), 'neutral lock owner');
   for (const [name, bytes] of Object.entries({ 'pi-runtime/manifest.json': '{}', 'host.js': 'isolated output', '.cache/secret': 'excluded', 'nested/.cache/secret': 'excluded', 'nested/asset': 'included' })) await put(path.join(build, name), bytes);
   return { ...f, source, build, stage };
 }
 
-test('real staging copies full media, neutral lock and isolated output while excluding caches', async t => {
+test('real staging copies root licence notices byte-for-byte with full media, neutral lock and isolated output', async t => {
   const f = await packageFixture(t);
   await stageExtensionForPackaging(f.root, f.build, f.stage);
   for (const [name, bytes] of Object.entries({ 'runtime/windows-runtime-lock.cjs': 'neutral lock owner', 'runtime/bootstrap.cjs': 'bootstrap', 'media/nested/full.svg': 'full media', 'media/icon.svg': 'icon', 'out/host.js': 'isolated output', 'out/nested/asset': 'included', 'out/pi-runtime/manifest.json': '{}', '.vscodeignore': 'ignored' })) assert.equal(await readFile(path.join(f.stage, name), 'utf8'), bytes);
+  assert.deepEqual(await readFile(path.join(f.stage, 'LICENSE')), Buffer.from('root license\r\n'));
+  assert.deepEqual(await readFile(path.join(f.stage, 'COPYRIGHT')), Buffer.from('root copyright\r\n'));
+  for (const name of ['LICENSE', 'COPYRIGHT']) await absent(path.join(f.source, name));
   for (const name of ['out/stale.js', 'out/.cache', 'out/nested/.cache']) await absent(path.join(f.stage, name));
 });
+
+for (const name of ['LICENSE', 'COPYRIGHT']) {
+  test(`real staging requires a regular root ${name} file`, async t => {
+    const f = await packageFixture(t);
+    await rm(path.join(f.root, name));
+    await assert.rejects(stageExtensionForPackaging(f.root, f.build, f.stage), /requires a regular file/);
+    await absent(f.stage);
+  });
+}
 
 test('real staging refuses prepublish hooks without executing them', async t => {
   const f = await packageFixture(t);

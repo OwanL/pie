@@ -2,6 +2,9 @@
 
 A personal stack built around the [`pi` coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent): a VS Code sidebar extension (*pie*), reusable pi plugins, local run-analytics tooling, and the maintainer's own agents/skills/config.
 
+Original project contributions are licensed under [AGPL-3.0-only](LICENSE); see
+[COPYRIGHT](COPYRIGHT) for scope and third-party exclusions.
+
 ## What's in this repo
 
 | Path | What it is | Distribution |

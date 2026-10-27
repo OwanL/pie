@@ -1,6 +1,8 @@
 # Package only compiled runtime artifacts. package.json and README.md are
 # always retained by vsce.
 **
+!LICENSE
+!COPYRIGHT
 !media/**
 !runtime/*.cjs
 !out/*.js
