@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented for Windows with Chromium revision `1234` (`151.0.7922.34`) and headless Chromium only.
+Source implementation supports Windows with pinned headless Chromium; private packaged Windows qualification is recorded below. This is not a ready-to-ship or clean-machine-qualified feature. Installed activation/update, macOS/Linux, full native-companion closure/provenance, Chromium/FFmpeg source correspondence and redistribution/legal clearance remain open.
 
 The capability consists of:
 
@@ -281,9 +281,9 @@ The [extension manifest](../../extensions/playwright/package.json) declares runt
 - `playwright` — browser automation and Chromium installation;
 - `pngjs` — bounded screenshot encoding.
 
-Pi packages remain optional `peerDependencies` with `"*"` ranges. The shared workspace selects the local Pi packages; ordinary tests use the compiled workspace SDK and the artifact integration fixture uses a separately verified runtime.
+Pi packages remain optional `peerDependencies` with `"*"` ranges. The shared workspace selects local Pi packages; ordinary tests use the compiled workspace SDK and the artifact integration fixture uses a separately verified runtime.
 
-Repository setup includes `extensions/playwright/` but does not download browsers. Install Chromium explicitly when needed; for this headless-only tool, Playwright also supports installing just its headless shell:
+Repository/source setup includes `extensions/playwright/` but does not download browsers. For source-mode local tests, install Chromium explicitly when needed; Playwright also supports installing just its headless shell:
 
 ```bash
 proto run pnpm -- --dir extensions/playwright exec playwright install chromium
@@ -291,6 +291,12 @@ proto run pnpm -- --dir extensions/playwright exec playwright install --only-she
 ```
 
 The backend lets `launchServer({ headless: true })` resolve the pinned headless shell. If Playwright reports that its executable is missing, the runtime returns `BROWSER_NOT_INSTALLED` with the shell-only repair command; other launch errors remain `BROWSER_LAUNCH_FAILED`. It never falls back to machine Chrome or Edge.
+
+### Private packaged Windows evidence (not release readiness)
+
+The current private candidate is VSIX SHA256 `0d49668970c6cf548679b8d23e8c0c107822de27e5ecb24a40f2db68779ca6ab`, source `34051d51a1669e7a509333e4134aec9ee2ef08a6`, build `7b94ae8fdb2a63615960`. Its Playwright payload identity is `b8de83c5d2541454a60e4ead8934e735ac81e08cb9c72515ed8ee1a87aceef36` (494 files, 306,846,495 bytes), with WinLdd MIT and Apache NOTICE included and third-party bytes unchanged. Packaged dependency validation uses a pinned, non-caching direct Windows check and explicit executable: ordinary Playwright writes `DEPENDENCIES_VALIDATED` into immutable code. The raw test frontend uses a separate writable copy.
+
+Exact qualification passed 3/3 delivered-host checks, including the compiled VS Code host with mock VS Code API and bundled Node; this was not installed Electron. The actual callback receipt reports 4 pass, 0 fail, 0 skip. Real SDK-loaded factory/tool/RuntimeClient with bundled Node, WinLdd shell checks, full payload immutability and shutdown passed. This evidence is machine-specific: Node executable/DLL/builtin relocation is not clean-machine qualification. External browser page requests were blocked and background network disabled, not OS-isolated. No claim of OS-level network isolation. Full native companion closure/provenance, Chromium/FFmpeg source correspondence, legal/redistribution clearance and installed feature journeys remain open. Historical `f775` evidence lacked the WinLdd notice and is not current-candidate acceptance.
 
 ## Context-lean integration
 
