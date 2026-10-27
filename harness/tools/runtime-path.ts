@@ -30,6 +30,11 @@ const CURATED_FILES = [
 ] as const;
 const PLAYWRIGHT_PAYLOAD_DIRECTORY = 'playwright-runtime';
 const PLAYWRIGHT_MODULE_ROOT_ENV = 'PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT';
+const PLAYWRIGHT_HOST_VALIDATION_SKIP_ENV = new Set([
+  'PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS',
+  'npm_config_playwright_skip_validate_host_requirements',
+  'npm_package_config_playwright_skip_validate_host_requirements',
+]);
 const SHA256 = /^[0-9a-f]{64}$/u;
 const WINDOWS_UNSAFE_PATH = /[<>:"|?*\u0000-\u001f]/u;
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
@@ -380,6 +385,9 @@ export function prepareToolRuntimeLaunch(owner: RuntimeOwner, moduleUrl: string)
   delete env.NODE_PATH;
   env.PLAYWRIGHT_BROWSERS_PATH = path.resolve(packaged.payloadRoot, 'browsers');
   env[PLAYWRIGHT_MODULE_ROOT_ENV] = path.resolve(packaged.payloadRoot, 'node_modules');
+  for (const name of Object.keys(env)) {
+    if (PLAYWRIGHT_HOST_VALIDATION_SKIP_ENV.has(name.toLowerCase())) delete env[name];
+  }
   return { entry, env };
 }
 

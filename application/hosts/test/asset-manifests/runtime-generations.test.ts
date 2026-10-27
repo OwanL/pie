@@ -373,6 +373,30 @@ test('explicitly re-selects an earlier immutable generation while a later lease 
   assert.equal(await exists(hostInteractionsPath), false, 'generation publication and re-selection do not load or activate host code');
 }));
 
+test('a new startup selection rejects a post-publication dependency marker and falls back to the prior verified generation', async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const priorSource = await createRuntimeSource(root, 'prior-without-cache-marker');
+  const selectedSource = await createRuntimeSource(root, 'selected-before-cache-marker');
+  const prior = await runtime.publishRuntimeGeneration({ sourceOutDir: priorSource, extensionDir, identity: IDENTITY });
+  const selected = await runtime.publishRuntimeGeneration({ sourceOutDir: selectedSource, extensionDir, identity: IDENTITY });
+  assert.notEqual(selected.generation, prior.generation);
+
+  const validationMarker = path.join(
+    selected.outDir, 'resources', 'tool-runtimes', 'playwright-runtime', 'browsers',
+    'chromium_headless_shell-1234', 'DEPENDENCIES_VALIDATED',
+  );
+  await mkdir(path.dirname(validationMarker), { recursive: true });
+  await writeFile(validationMarker, '');
+
+  const freshStartupSelection = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+  try {
+    assert.equal(freshStartupSelection.generation, prior.generation, 'fresh startup rejects the changed selected generation and uses the prior complete generation');
+    assert.equal(freshStartupSelection.outDir, prior.outDir);
+  } finally {
+    await freshStartupSelection.release();
+  }
+}));
+
 test('skips torn or damaged newest markers and rejects manifest traversal', async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
   const sourceA = await createRuntimeSource(root, 'a');

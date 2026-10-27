@@ -223,6 +223,42 @@ test('packaged v2 prepares only Playwright with its explicit package and browser
   }
 });
 
+test('only packaged Playwright launches clear ambient host-validation skip variables', (t) => {
+  const fixture = makeV2Fixture(t);
+  const skipNames = new Set([
+    'PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS',
+    'npm_config_playwright_skip_validate_host_requirements',
+    'npm_package_config_playwright_skip_validate_host_requirements',
+  ]);
+  const injectedNames = [
+    'pLaYwRiGhT_sKiP_VALIDATE_HOST_REQUIREMENTS',
+    'NPM_CONFIG_Playwright_SKIP_VALIDATE_HOST_REQUIREMENTS',
+    'NPM_PACKAGE_CONFIG_PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS',
+  ];
+  const previous = Object.keys(process.env)
+    .filter((name) => skipNames.has(name.toLowerCase()))
+    .map((name) => [name, process.env[name]] as const);
+  const valueForName = (env: NodeJS.ProcessEnv, name: string) => Object.entries(env)
+    .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  try {
+    for (const name of injectedNames) process.env[name] = '1';
+
+    const packaged = prepareToolRuntimeLaunch('playwright', fixture.module);
+    assert.equal(Object.keys(packaged.env).some((name) => skipNames.has(name.toLowerCase())), false);
+
+    const sourceModule = pathToFileURL(path.join(os.tmpdir(), 'source', 'playwright', 'runtime-client.ts')).href;
+    const source = prepareToolRuntimeLaunch('playwright', sourceModule);
+    for (const name of injectedNames) assert.equal(valueForName(source.env, name), '1');
+  } finally {
+    for (const name of Object.keys(process.env)) {
+      if (skipNames.has(name.toLowerCase())) delete process.env[name];
+    }
+    for (const [name, value] of previous) {
+      if (value !== undefined) process.env[name] = value;
+    }
+  }
+});
+
 test('packaged v2 rejects malformed schema, target, identity, and arbitrary payload paths', (t) => {
   const fixture = makeV2Fixture(t);
   const top = JSON.parse(readFileSync(fixture.manifestPath, 'utf8'));

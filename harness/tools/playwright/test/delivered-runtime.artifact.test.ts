@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdtemp, open, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,11 @@ const VSIX_ENV = 'PIE_DELIVERED_PLAYWRIGHT_VSIX';
 const VSIX_SHA256_ENV = 'PIE_DELIVERED_PLAYWRIGHT_VSIX_SHA256';
 const BUILD_ID_ENV = 'PIE_DELIVERED_PLAYWRIGHT_BUILD_ID';
 const BROWSER_OPT_IN_ENV = 'PIE_RUN_DELIVERED_PLAYWRIGHT_BROWSER';
+const HOST_VALIDATION_SKIP_ALIASES = new Set([
+  'playwright_skip_validate_host_requirements',
+  'npm_config_playwright_skip_validate_host_requirements',
+  'npm_package_config_playwright_skip_validate_host_requirements',
+]);
 const acceptedVsixPath = process.env[VSIX_ENV];
 const expectedVsixSha256 = process.env[VSIX_SHA256_ENV];
 const expectedBuildId = process.env[BUILD_ID_ENV];
@@ -49,6 +54,12 @@ interface ZipMember {
   localHeaderOffset: number;
 }
 
+interface PayloadInventoryItem {
+  relativePath: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
 async function readExactly(handle: Awaited<ReturnType<typeof open>>, length: number, position: number): Promise<Buffer> {
   const bytes = Buffer.alloc(length);
   const { bytesRead } = await handle.read(bytes, 0, length, position);
@@ -56,7 +67,7 @@ async function readExactly(handle: Awaited<ReturnType<typeof open>>, length: num
   return bytes;
 }
 
-async function verifyExtractedVsixMembers(vsixPath: string, extensionRoot: string, sdkPackage: string): Promise<{ sdkFiles: number; runtimeFiles: number; payloadFiles: number }> {
+async function verifyExtractedVsixMembers(vsixPath: string, extensionRoot: string, sdkPackage: string): Promise<{ sdkFiles: number; runtimeFiles: number; payloadFiles: number; nodeFiles: number; payloadInventory: PayloadInventoryItem[] }> {
   const handle = await open(vsixPath, 'r');
   try {
     const fileSize = (await handle.stat()).size;
@@ -163,20 +174,32 @@ async function verifyExtractedVsixMembers(vsixPath: string, extensionRoot: strin
     );
     const payloadManifest = JSON.parse(payloadManifestBytes.toString('utf8')) as { inventory?: unknown };
     assert.ok(Array.isArray(payloadManifest.inventory) && payloadManifest.inventory.length > 0 && payloadManifest.inventory.length <= 8192);
+    const payloadInventory: PayloadInventoryItem[] = [];
     for (const item of payloadManifest.inventory) {
       assert.ok(item && typeof item === 'object' && !Array.isArray(item));
-      const relativePath = (item as { relativePath?: unknown }).relativePath;
+      const inventoryItem = item as { relativePath?: unknown; sizeBytes?: unknown; sha256?: unknown };
+      const relativePath = inventoryItem.relativePath;
       assert.equal(typeof relativePath, 'string');
+      assert.ok(Number.isSafeInteger(inventoryItem.sizeBytes) && Number(inventoryItem.sizeBytes) >= 0);
+      assert.ok(typeof inventoryItem.sha256 === 'string' && /^[a-f0-9]{64}$/iu.test(inventoryItem.sha256));
       const payloadRelativePath = relativePath as string;
       assert.ok(!payloadRelativePath.includes('\\') && !payloadRelativePath.startsWith('/') && !/^[A-Za-z]:/u.test(payloadRelativePath) && !payloadRelativePath.split('/').some((part) => part === '.' || part === '..' || !part));
       const extractedPath = path.resolve(payloadRoot, ...payloadRelativePath.split('/'));
       assert.ok(extractedPath.startsWith(`${path.resolve(payloadRoot)}${path.sep}`));
-      await verifyMember(
+      const bytes = await verifyMember(
         `extension/out/resources/tool-runtimes/playwright-runtime/${payloadRelativePath}`,
         extractedPath,
       );
+      assert.equal(bytes.length, inventoryItem.sizeBytes, `Playwright payload inventory size mismatch: ${payloadRelativePath}`);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), inventoryItem.sha256, `Playwright payload inventory hash mismatch: ${payloadRelativePath}`);
+      payloadInventory.push({ relativePath: payloadRelativePath, sizeBytes: Number(inventoryItem.sizeBytes), sha256: inventoryItem.sha256 as string });
     }
-
+    const payloadPrefix = 'extension/out/resources/tool-runtimes/playwright-runtime/';
+    assert.deepEqual(
+      [...members.keys()].filter((name) => name.startsWith(payloadPrefix)).sort(),
+      [payloadPrefix + 'manifest.json', ...payloadInventory.map((item) => payloadPrefix + item.relativePath)].sort(),
+      'the accepted VSIX browser payload must contain exactly its manifest inventory',
+    );
 
     const sdkPrefix = 'extension/out/pi-runtime/node_modules/@earendil-works/pi-coding-agent/';
     const sdkMembers = [...members.keys()].filter((name) => name.startsWith(sdkPrefix));
@@ -185,14 +208,62 @@ async function verifyExtractedVsixMembers(vsixPath: string, extensionRoot: strin
       const relativePath = archiveName.slice(sdkPrefix.length);
       await verifyMember(archiveName, path.join(sdkPackage, ...relativePath.split('/')));
     }
-    return { sdkFiles: sdkMembers.length, runtimeFiles: runtimeManifest.files.length, payloadFiles: payloadManifest.inventory.length, nodeFiles: nodeManifest.inventory.length };
+    return { sdkFiles: sdkMembers.length, runtimeFiles: runtimeManifest.files.length, payloadFiles: payloadInventory.length, nodeFiles: nodeManifest.inventory.length, payloadInventory };
   } finally {
     await handle.close();
   }
 }
 
+async function snapshotPackagedPayloadTree(payloadRoot: string, inventory: PayloadInventoryItem[]): Promise<{ directories: string[]; files: PayloadInventoryItem[] }> {
+  const directories = [''];
+  const files: PayloadInventoryItem[] = [];
+  async function walk(relativeDirectory: string): Promise<void> {
+    const directory = relativeDirectory === '' ? payloadRoot : path.join(payloadRoot, ...relativeDirectory.split('/'));
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const relativePath = relativeDirectory === '' ? entry.name : `${relativeDirectory}/${entry.name}`;
+      const fullPath = path.join(payloadRoot, ...relativePath.split('/'));
+      assert.equal(entry.isSymbolicLink(), false, `packaged Playwright payload must not contain symlinks: ${relativePath}`);
+      if (entry.isDirectory()) {
+        directories.push(relativePath);
+        await walk(relativePath);
+      } else {
+        assert.equal(entry.isFile(), true, `unsupported packaged Playwright payload entry: ${relativePath}`);
+        const info = await stat(fullPath);
+        files.push({ relativePath, sizeBytes: info.size, sha256: await sha256File(fullPath) });
+      }
+    }
+  }
+  await walk('');
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  directories.sort((left, right) => left.localeCompare(right));
+
+  const expectedFiles = [
+    ...inventory,
+    { relativePath: 'manifest.json', sizeBytes: (await stat(path.join(payloadRoot, 'manifest.json'))).size, sha256: await sha256File(path.join(payloadRoot, 'manifest.json')) },
+  ].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  assert.deepEqual(files.map((item) => item.relativePath), expectedFiles.map((item) => item.relativePath), 'the packaged Playwright payload file tree must match its complete declared inventory');
+  for (const expected of inventory) {
+    const actual = files.find((item) => item.relativePath === expected.relativePath);
+    assert.deepEqual(actual, expected, `packaged Playwright payload differs from its manifest inventory: ${expected.relativePath}`);
+  }
+  const expectedDirectories = new Set(['']);
+  for (const item of expectedFiles) {
+    let parent = path.posix.dirname(item.relativePath);
+    while (parent !== '.') {
+      expectedDirectories.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  assert.deepEqual(directories, [...expectedDirectories].sort((left, right) => left.localeCompare(right)), 'the packaged Playwright payload directory tree must contain no extras');
+  return { directories, files };
+}
+
 function isolatedEnvironment(sandbox: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (HOST_VALIDATION_SKIP_ALIASES.has(name.toLowerCase())) delete env[name];
+  }
   delete env.NODE_OPTIONS;
   delete env.NODE_PATH;
   delete env.NODE_V8_COVERAGE;
@@ -242,6 +313,7 @@ function isolatedEnvironment(sandbox: string): NodeJS.ProcessEnv {
     ALL_PROXY: '',
     NO_PROXY: '*',
   });
+  assert.deepEqual(Object.keys(env).filter((name) => HOST_VALIDATION_SKIP_ALIASES.has(name.toLowerCase())), [], 'all case-insensitive Playwright host-validation skip aliases must be cleared');
   return env;
 }
 
@@ -285,7 +357,10 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
 
   const sandbox = privateRoot;
   const proofPath = path.join(sandbox, 'runtime-proof.json');
-  const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'delivered-runtime-child.mjs');
+  const hostCheckTracePath = path.join(sandbox, 'actual-winldd-trace.jsonl');
+  const fixtureDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+  const fixturePath = path.join(fixtureDirectory, 'delivered-runtime-child.mjs');
+  const tracePreloadPath = path.join(fixtureDirectory, 'actual-winldd-trace.mjs');
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
   const childEnv = isolatedEnvironment(sandbox);
   const nodeRuntimeRoot = path.join(extensionRoot, 'out', 'resources', 'node-runtime');
@@ -314,7 +389,19 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
     assert.equal(abiProbe.stdout.trim(), nodeManifest.target.nodeAbi, 'actual delivered Node ABI must match its manifest');
     selectedNode = nodeExecutable;
   }
-  const child = spawnSync(selectedNode, [fixturePath, extensionRoot, sdkPackage, sandbox, proofPath], {
+  const payloadBeforeLaunch = await snapshotPackagedPayloadTree(
+    path.join(runtimeRoot, 'playwright-runtime'), verifiedMembers.payloadInventory,
+  );
+  assert.equal(existsSync(hostCheckTracePath), false, 'the sidecar-only WinLdd trace must start empty');
+  const payloadManifest = JSON.parse(await readFile(path.join(runtimeRoot, 'playwright-runtime', 'manifest.json'), 'utf8')) as {
+    pins: { chromiumHeadlessShell: { revision: string }; winldd: string };
+  };
+  const expectedShellExecutable = path.join(
+    browserRoot, `chromium_headless_shell-${payloadManifest.pins.chromiumHeadlessShell.revision}`,
+    'chrome-headless-shell-win64', 'chrome-headless-shell.exe',
+  );
+  const expectedWinLddExecutable = path.join(browserRoot, `winldd-${payloadManifest.pins.winldd}`, 'PrintDeps.exe');
+  const child = spawnSync(selectedNode, [fixturePath, extensionRoot, sdkPackage, sandbox, proofPath, hostCheckTracePath, tracePreloadPath], {
     cwd: repoRoot,
     env: childEnv,
     encoding: 'utf8',
@@ -324,6 +411,13 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   });
   assert.equal(child.error, undefined, `isolated artifact child failed to complete: ${child.error?.message ?? ''}\n${child.stderr ?? ''}\n${child.stdout ?? ''}`);
   assert.equal(child.status, 0, `isolated artifact child exited ${String(child.status)}\n${child.stderr ?? ''}\n${child.stdout ?? ''}`);
+
+  const payloadAfterShutdown = await snapshotPackagedPayloadTree(
+    path.join(runtimeRoot, 'playwright-runtime'), verifiedMembers.payloadInventory,
+  );
+  assert.deepEqual(payloadAfterShutdown, payloadBeforeLaunch, 'the complete packaged Playwright payload tree and file hashes must remain unchanged through actual session shutdown');
+  const validationMarker = path.join(browserRoot, `chromium_headless_shell-${payloadManifest.pins.chromiumHeadlessShell.revision}`, 'DEPENDENCIES_VALIDATED');
+  assert.equal(existsSync(validationMarker), false, 'actual packaged validation must not add Playwright\'s cached DEPENDENCIES_VALIDATED marker');
 
   const proof = JSON.parse(await readFile(proofPath, 'utf8')) as {
     nodeExecutable: string;
@@ -341,7 +435,8 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
     routedText: string;
     observeText: string;
     screenshotImageParts: number;
-    sidecarLaunches: Array<{ executable: string; entry: string; env: Record<string, string | undefined> }>;
+    sidecarLaunches: Array<{ executable: string; entry: string; args: string[]; hostValidationSkipVariables: string[]; env: Record<string, string | undefined> }>;
+    winLddTrace: Array<{ event: string; command: string; args: string[]; cwd: string; code: number | null; signal: string | null }>;
     pids: { sidecarPid: number; browserPids: number[] };
     shutdownHandlerInvoked: boolean;
     registryEntryBeforeShutdown: boolean;
@@ -380,6 +475,9 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   const [launch] = proof.sidecarLaunches;
   assert.equal(path.resolve(launch.executable), path.resolve(selectedNode), 'record the actual selected Node executable');
   assert.equal(path.resolve(launch.entry), path.resolve(sidecarEntry), 'the runtime must launch the sidecar extracted from this VSIX');
+  assert.deepEqual(launch.args, ['--import', path.resolve(tracePreloadPath), sidecarEntry], 'only the actual sidecar command receives the owned read-only WinLdd trace preload, before its unchanged entry');
+  assert.deepEqual(launch.hostValidationSkipVariables, [], 'no case-insensitive host-validation skip alias may reach the actual sidecar');
+  assert.equal(path.resolve(launch.env['PIE_TEST_WINLDD_TRACE_FILE'] ?? ''), path.resolve(hostCheckTracePath));
   assert.equal(path.resolve(launch.env['PLAYWRIGHT_BROWSERS_PATH'] ?? ''), path.resolve(browserRoot));
   assert.equal(path.resolve(launch.env['PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT'] ?? ''), path.resolve(moduleRoot));
   assert.notEqual(launch.env['PLAYWRIGHT_BROWSERS_PATH'], childEnv.PLAYWRIGHT_BROWSERS_PATH, 'the invalid ambient browser path must be overridden');
@@ -390,6 +488,13 @@ test('delivered Playwright artifact registers and runs its real SDK-loaded tool,
   assert.equal(launch.env['PIE_DATA_DIR'], childEnv.PIE_DATA_DIR);
   assert.equal(launch.env['PI_CODING_AGENT_DIR'], childEnv.PI_CODING_AGENT_DIR);
   assert.equal(launch.env['NODE_OPTIONS'], undefined, 'inherited Node options must not reach the SDK-owned sidecar');
+  assert.equal(proof.winLddTrace.length, 1, 'the actual packaged validation must run WinLdd against the shell rather than validate an empty/stale directory');
+  const [winLdd] = proof.winLddTrace;
+  assert.equal(winLdd.event, 'close');
+  assert.equal(path.resolve(winLdd.command), path.resolve(expectedWinLddExecutable), 'invoke the WinLdd executable from this accepted payload');
+  assert.deepEqual(winLdd.args.map((argument) => path.resolve(argument)), [path.resolve(expectedShellExecutable)], 'WinLdd must receive the real packaged chrome-headless-shell.exe path');
+  assert.equal(path.resolve(winLdd.cwd), path.dirname(path.resolve(expectedShellExecutable)));
+  assert.equal(winLdd.code, 0, 'the actual packaged WinLdd process must exit successfully');
   assert.ok(proof.pids.sidecarPid > 0);
   assert.ok(proof.pids.browserPids.length > 0, 'the real tool must have launched its headless browser');
   assert.equal(proof.shutdownHandlerInvoked, true);

@@ -8,7 +8,7 @@ import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promis
 import { once } from 'node:events';
 import path from 'node:path';
 
-import { requirePlaywrightDependency } from './dependency-owner.mjs';
+import { getPackagedPlaywrightHostRuntime, requirePlaywrightDependency } from './dependency-owner.mjs';
 import { createDisplayPng } from './image.mjs';
 import { captureBoundedSnapshot, extractRefs } from './snapshots.mjs';
 import { confirmTaskkillTree } from './sidecar-core.mjs';
@@ -151,6 +151,9 @@ export class PlaywrightBackend {
     this.closeGraceMs = options.closeGraceMs ?? 5000;
     this.spawn = options.spawn ?? spawn;
     this.chromium = options.chromium ?? chromium;
+    this.packagedHostRuntime = options.packagedHostRuntime ?? getPackagedPlaywrightHostRuntime;
+    this.platform = options.platform ?? process.platform;
+    this.arch = options.arch ?? process.arch;
     this.limits = {
       imageBytes: options.maxImageArtifactBytes ?? MAX_IMAGE_ARTIFACT_BYTES,
       downloadBytes: options.maxDownloadArtifactBytes ?? MAX_DOWNLOAD_ARTIFACT_BYTES,
@@ -778,6 +781,50 @@ export class PlaywrightBackend {
     }
   }
 
+  async packagedShellExecutablePath() {
+    const runtime = this.packagedHostRuntime();
+    if (runtime === undefined) return undefined;
+    if (this.platform !== 'win32' || this.arch !== 'x64') {
+      throw new Error(`Packaged Playwright host checks require win32/x64; found ${this.platform}/${this.arch}.`);
+    }
+    if (typeof this.chromium?.launchServer !== 'function') {
+      throw new Error('Packaged Playwright Chromium launchServer API is unavailable.');
+    }
+
+    const registry = runtime.registry;
+    if (!registry || typeof registry._validateHostRequirements !== 'function' || !Array.isArray(registry._executables)) {
+      throw new Error('Packaged Playwright core registry API does not match the pinned host-check API.');
+    }
+    const descriptors = registry._executables.filter((entry) => entry?.name === 'chromium-headless-shell');
+    if (descriptors.length !== 1) {
+      throw new Error('Packaged Playwright core registry has no unique pinned headless-shell descriptor.');
+    }
+    const descriptor = descriptors[0];
+    const expectedDirectory = runtime.expectedRevisionDirectory;
+    const expectedExecutable = runtime.expectedExecutablePath;
+    const expectedShellFromDirectory = typeof expectedDirectory === 'string'
+      ? path.win32.join(expectedDirectory, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
+      : undefined;
+    const samePath = (left, right) => typeof left === 'string' && typeof right === 'string'
+      && path.win32.isAbsolute(left) && path.win32.isAbsolute(right)
+      && path.win32.normalize(left).toLowerCase() === path.win32.normalize(right).toLowerCase();
+    if (descriptor.browserName !== 'chromium' || descriptor.revision !== runtime.revision
+      || descriptor.browserVersion !== runtime.browserVersion
+      || typeof descriptor.executablePath !== 'function'
+      || !samePath(descriptor.directory, expectedDirectory)
+      || !samePath(expectedExecutable, expectedShellFromDirectory)
+      || !samePath(descriptor.executablePath(), expectedExecutable)) {
+      throw new Error('Packaged Playwright core registry descriptor does not match the pinned payload shell.');
+    }
+
+    // Call the pinned registry primitive directly: unlike the executable
+    // wrapper, it neither writes DEPENDENCIES_VALIDATED nor selects stale scan paths.
+    await registry._validateHostRequirements(
+      'javascript', expectedDirectory, [], [], ['chrome-headless-shell-win64'],
+    );
+    return expectedExecutable;
+  }
+
   async open(params, signal) {
     this.assertSessionIdAvailable(params.sessionId);
     await this.validateStorageStatePath(params.storageStatePath);
@@ -785,6 +832,7 @@ export class PlaywrightBackend {
     const session = this.makeSession(params.sessionId, params);
     this.sessions.set(session.id, session);
     try {
+      const packagedShell = await this.packagedShellExecutablePath();
       let browser;
       try {
         // Only the Playwright-pinned Chromium build, always headless. Never
@@ -792,7 +840,11 @@ export class PlaywrightBackend {
         // userDataDir, no channel fallback). launchServer gives this dedicated
         // tool session an explicit process handle for deterministic cleanup;
         // the subsequent connection is to that fresh local process only.
-        session.browserServer = await this.chromium.launchServer({ headless: true });
+        if (packagedShell === undefined) {
+          session.browserServer = await this.chromium.launchServer({ headless: true });
+        } else {
+          session.browserServer = await this.chromium.launchServer({ headless: true, executablePath: packagedShell });
+        }
       } catch (error) {
         if (isMissingBrowserExecutable(error)) {
           throw coded(

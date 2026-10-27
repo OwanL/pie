@@ -1,16 +1,23 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
-const [extensionRootArgument, sdkPackageArgument, sandboxArgument, proofPathArgument] = process.argv.slice(2);
+const HOST_VALIDATION_SKIP_ALIASES = new Set([
+  'playwright_skip_validate_host_requirements',
+  'npm_config_playwright_skip_validate_host_requirements',
+  'npm_package_config_playwright_skip_validate_host_requirements',
+]);
+const [extensionRootArgument, sdkPackageArgument, sandboxArgument, proofPathArgument, winLddTracePathArgument, tracePreloadPathArgument] = process.argv.slice(2);
 for (const [name, value] of Object.entries({
   extensionRoot: extensionRootArgument,
   sdkPackage: sdkPackageArgument,
   sandbox: sandboxArgument,
   proofPath: proofPathArgument,
+  winLddTracePath: winLddTracePathArgument,
+  tracePreloadPath: tracePreloadPathArgument,
 })) {
   assert.ok(value && path.isAbsolute(value), `${name} must be an absolute path`);
 }
@@ -18,7 +25,11 @@ const extensionRoot = path.resolve(extensionRootArgument);
 const sdkPackage = path.resolve(sdkPackageArgument);
 const sandbox = path.resolve(sandboxArgument);
 const proofPath = path.resolve(proofPathArgument);
+const winLddTracePath = path.resolve(winLddTracePathArgument);
+const tracePreloadPath = path.resolve(tracePreloadPathArgument);
 assert.equal(path.dirname(proofPath), sandbox, 'proof must be written directly in the private sandbox');
+assert.equal(path.dirname(winLddTracePath), sandbox, 'WinLdd trace must be written directly in the private sandbox');
+assert.ok(existsSync(tracePreloadPath), 'the test-owned WinLdd trace preload must exist');
 
 const extensionEntry = path.join(extensionRoot, 'out', 'playwright.js');
 const sdkEntry = path.join(sdkPackage, 'dist', 'index.js');
@@ -45,6 +56,8 @@ for (const name of [
 ]) assertPrivate(name);
 assert.equal(process.env['NODE_OPTIONS'], undefined);
 assert.equal(process.env['NODE_PATH'], undefined);
+assert.equal(process.env['PIE_TEST_WINLDD_TRACE_FILE'], undefined, 'the trace path is only provided to the actual sidecar child');
+assert.deepEqual(Object.keys(process.env).filter((name) => HOST_VALIDATION_SKIP_ALIASES.has(name.toLowerCase())), [], 'case-insensitive host-validation skip aliases must be absent from the artifact fixture process');
 
 const requestedSessionPath = path.join(process.env['PI_CODING_AGENT_SESSION_DIR'], 'delivered-session.jsonl');
 const cwd = path.join(sandbox, 'workspace');
@@ -79,13 +92,17 @@ const sidecarLaunches = [];
 childProcess.spawn = function (command, args, options) {
   const entry = Array.isArray(args) && typeof args[0] === 'string' ? args[0] : undefined;
   if (entry && path.resolve(entry) === path.resolve(sidecarEntry)) {
-    const childEnv = options?.env ?? {};
+    const childEnv = { ...(options?.env ?? {}), PIE_TEST_WINLDD_TRACE_FILE: winLddTracePath };
+    const instrumentedArgs = ['--import', tracePreloadPath, ...args];
     sidecarLaunches.push({
       executable: String(command),
       entry,
+      args: instrumentedArgs.map(String),
+      hostValidationSkipVariables: Object.keys(childEnv).filter((name) => HOST_VALIDATION_SKIP_ALIASES.has(name.toLowerCase())),
       env: {
         PLAYWRIGHT_BROWSERS_PATH: childEnv['PLAYWRIGHT_BROWSERS_PATH'],
         PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT: childEnv['PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT'],
+        PIE_TEST_WINLDD_TRACE_FILE: childEnv['PIE_TEST_WINLDD_TRACE_FILE'],
         NODE_OPTIONS: childEnv['NODE_OPTIONS'],
         NODE_PATH: childEnv['NODE_PATH'],
         HOME: childEnv['HOME'],
@@ -95,6 +112,7 @@ childProcess.spawn = function (command, args, options) {
         PI_CODING_AGENT_DIR: childEnv['PI_CODING_AGENT_DIR'],
       },
     });
+    return originalSpawn.call(this, command, instrumentedArgs, { ...options, env: childEnv });
   }
   return originalSpawn.call(this, command, args, options);
 };
@@ -239,6 +257,8 @@ const screenshotStats = await Promise.all(screenshotPaths.map((screenshotPath) =
 const sessionStats = await stat(sessionPath);
 const deadPids = await waitForExit([pids.sidecarPid, ...pids.browserPids], 1_000);
 assert.equal((await registry.peek(sessionPath)), undefined);
+const winLddTrace = (await readFile(winLddTracePath, 'utf8')).trim().split('\n').filter(Boolean)
+  .map((line) => JSON.parse(line));
 
 await writeFile(proofPath, `${JSON.stringify({
   nodeExecutable: process.execPath,
@@ -258,6 +278,7 @@ await writeFile(proofPath, `${JSON.stringify({
   closeText: textOf(closed),
   screenshotImageParts: observed.content.filter((part) => part.type === 'image').length,
   sidecarLaunches,
+  winLddTrace,
   pids,
   shutdownHandlerInvoked,
   registryEntryBeforeShutdown,
