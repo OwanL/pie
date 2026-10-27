@@ -61,9 +61,11 @@ async function assertNoSuccessEvidence(f) {
 
 test('VSIX parser requires absolute paths, rejects duplicates and runtime combinations', () => {
   const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const nodeRuntime = path.join(os.tmpdir(), 'prepared-node-runtime');
   const playwrightRuntime = path.join(os.tmpdir(), 'prepared-playwright-runtime');
   assert.deepEqual(parseQualificationArgs(['--vsix', vsix]), { vsix });
   assert.deepEqual(parseQualificationArgs([`--vsix=${vsix}`]), { vsix });
+  assert.deepEqual(parseQualificationArgs(['--vsix', vsix, '--node-runtime', nodeRuntime]), { vsix, nodeRuntimeDir: nodeRuntime });
   assert.deepEqual(parseQualificationArgs(['--vsix', vsix, '--playwright-runtime', playwrightRuntime]), {
     vsix, playwrightRuntimeDir: playwrightRuntime,
   });
@@ -74,7 +76,9 @@ test('VSIX parser requires absolute paths, rejects duplicates and runtime combin
     ['--vsix', vsix, `--vsix=${vsix}`], ['--vsix', vsix, '--pi-runtime', os.tmpdir()],
     ['--pi-runtime', os.tmpdir(), '--vsix', vsix], ['--playwright-runtime', playwrightRuntime],
     ['--vsix', vsix, '--playwright-runtime'], ['--vsix', vsix, '--playwright-runtime', 'relative'],
-    ['--vsix', vsix, '--playwright-runtime', playwrightRuntime, '--playwright-runtime', playwrightRuntime]]) {
+    ['--vsix', vsix, '--playwright-runtime', playwrightRuntime, '--playwright-runtime', playwrightRuntime],
+    ['--vsix', vsix, '--node-runtime'], ['--vsix', vsix, '--node-runtime', 'relative'],
+    ['--vsix', vsix, '--node-runtime', nodeRuntime, '--node-runtime', nodeRuntime]]) {
     assert.throws(() => parseQualificationArgs(args));
   }
 });
@@ -140,6 +144,51 @@ test('exact VSIX validates selected Playwright identity and extracted bytes, rec
   assert.equal(Object.hasOwn(evidence, 'readiness'), false);
   assert.deepEqual(f.stages.map(item => item.stage.name), ['delivered-hosts']);
   assert.equal(f.events.some(event => event.startsWith('verify:')), false);
+});
+
+test('exact VSIX validates selected Node identity and extracted bytes without rebuilding', async t => {
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const nodeRuntimeDir = path.join(os.tmpdir(), 'prepared-node-runtime');
+  const nodeRuntimeIdentity = '8'.repeat(64);
+  const validations = [];
+  const outputChecks = [];
+  const f = await candidateFixture(t, {
+    copySkeleton: async () => assert.fail('exact VSIX must not copy a package skeleton'),
+    verifyRuntime: async () => assert.fail('exact VSIX must not use checkout runtime'),
+    validateNodeRuntimePayload: async selection => {
+      validations.push(selection);
+      return { directory: nodeRuntimeDir, identity: nodeRuntimeIdentity };
+    },
+    extractCandidate: async (file, destination) => {
+      assert.equal(file, vsix);
+      assert.equal(destination, f.packageRoot);
+      return { ...candidateIdentity, nodeRuntimeIdentity };
+    },
+    verifyCandidateIdentity: async (destination, selection) => {
+      assert.equal(destination, f.packageRoot);
+      assert.deepEqual(selection, {
+        managedIntegration: undefined,
+        expectedNodeRuntimeIdentity: nodeRuntimeIdentity,
+        repositoryRoot: root,
+      });
+      return { ...candidateIdentity, nodeRuntimeIdentity };
+    },
+    validateNodeRuntimeOutput: async selection => {
+      outputChecks.push(selection);
+      return { identity: nodeRuntimeIdentity };
+    },
+  });
+  const result = await qualifyDelivery({ vsix, nodeRuntimeDir }, undefined, f.dependencies);
+  assert.deepEqual(validations, [
+    { directory: nodeRuntimeDir, repositoryRoot: root },
+    { directory: nodeRuntimeDir, repositoryRoot: root },
+  ]);
+  assert.deepEqual(outputChecks, [{ directory: path.join(f.packageRoot, 'out/resources/node-runtime'), repositoryRoot: root }]);
+  assert.deepEqual(f.stages.map(item => item.stage.name), ['delivered-hosts']);
+  assert.equal(result.candidate.nodeRuntimeIdentity, nodeRuntimeIdentity);
+  const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
+  assert.equal(evidence.candidate.nodeRuntimeIdentity, nodeRuntimeIdentity);
+  assert.equal(f.events.includes('verify:undefined'), false);
 });
 
 test('candidate hash or size mutation rejects without success evidence', async t => {
@@ -440,6 +489,14 @@ test('stage plan delegates build and native tests without publishing/installing 
   assert.deepEqual(stages[0].args, [path.join(root, 'scripts/build/build.mjs'), '--delivery', '--no-sync', '--output-dir', path.join(packageRoot, 'out'), '--pi-runtime', artifact]);
   assert.deepEqual(stages[1].args, [path.join(root, 'scripts/verification/test-node.mjs'), 'scripts/verification/test/delivered-hosts.test.mjs']);
   assert.deepEqual(stages[1].env, { PIE_RUN_DELIVERED_HOST_TESTS: '1', PIE_RUN_DELIVERED_BROWSER_TESTS: '1', PIE_DELIVERED_HOST_ROOT: packageRoot, PIE_DELIVERED_BROWSER_EXECUTABLE: process.execPath });
+});
+
+test('private qualification build forwards its selected prepared Node runtime', () => {
+  const packageRoot = path.join(os.tmpdir(), 'qualification-package');
+  const nodeRuntimeDir = path.join(os.tmpdir(), 'prepared-node-runtime');
+  const stages = qualificationStages(root, packageRoot, undefined, undefined, undefined, nodeRuntimeDir);
+  assert.deepEqual(stages[0].args, [path.join(root, 'scripts/build/pi-workspace.mjs')]);
+  assert.deepEqual(stages[1].args, [path.join(root, 'scripts/build/build.mjs'), '--delivery', '--no-sync', '--output-dir', path.join(packageRoot, 'out'), '--node-runtime', nodeRuntimeDir]);
 });
 
 test('default compilation precedes new package, build, host/browser lane and confirmed cleanup', async t => {

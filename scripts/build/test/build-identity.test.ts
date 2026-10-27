@@ -267,6 +267,34 @@ test('selected Playwright payload identity participates even when Vite developme
   assert.equal(before, identity(payload));
 });
 
+test('selected Node runtime identity participates in every coordinated graph even in inherited development mode', (t) => {
+  const configSource = readFileSync(path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'vite.config.ts'), 'utf8');
+  assert.match(configSource, /const selectedNodeRuntimeIdentity = process\.env\.PIE_BUILD_NODE_RUNTIME_IDENTITY \|\| undefined;/);
+  assert.doesNotMatch(configSource, /selectedNodeRuntimeIdentity = process\.env\.PIE_BUILD_DEVELOPMENT/);
+  const buildSource = readFileSync(path.join(repositoryRoot, 'scripts', 'build', 'build.mjs'), 'utf8');
+  assert.match(buildSource, /process\.env\.PIE_BUILD_NODE_RUNTIME_IDENTITY = '';/,
+    'development dispatch clears any ambient identity before its mutable build is loaded');
+
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-node-runtime-identity-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = 'a'.repeat(64);
+  const managed = 'b'.repeat(64);
+  const playwright = 'c'.repeat(64);
+  const node = 'd'.repeat(64);
+  const identity = (nodeRuntime?: string, file = 'pie-build-id.txt') =>
+    runIdentityPlugin(createBuildIdentityPlugin(root, runtime, file, managed, playwright, nodeRuntime), file).buildId;
+  const previousDevelopment = process.env.PIE_BUILD_DEVELOPMENT;
+  t.after(() => {
+    if (previousDevelopment === undefined) delete process.env.PIE_BUILD_DEVELOPMENT;
+    else process.env.PIE_BUILD_DEVELOPMENT = previousDevelopment;
+  });
+  process.env.PIE_BUILD_DEVELOPMENT = '1';
+  const selected = identity(node);
+  assert.notEqual(selected, identity());
+  assert.notEqual(selected, identity('e'.repeat(64)));
+  assert.equal(selected, identity(node, BUNDLED_EXTENSIONS_BUILD_ID));
+});
+
 test('analytics implementation changes coordinate identity and watches without scanning analytics data', (t) => {
   const identityRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-analytics-identity-'));
   t.after(() => rmSync(identityRoot, { recursive: true, force: true }));

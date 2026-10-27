@@ -14,6 +14,7 @@
 !out/resources/bundled-extensions-build-id.txt
 !out/resources/tool-runtimes/**
 !out/resources/managed-integrations/**
+!out/resources/node-runtime/**
 !out/webview/panel/pie-build-id.txt
 !out/assets/**
 !out/webview/panel/.vite/manifest.json

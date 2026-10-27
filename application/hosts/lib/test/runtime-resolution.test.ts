@@ -3,15 +3,20 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import { resolveCommandInvocation } from '../command-invocation';
 import { createCommandExecutor } from '../command-execution';
 import { verifyPiRuntimeArtifact } from '../../../../lib/pi-runtime/artifact.mjs';
+import { computeNodeRuntimePayloadIdentity } from '../../../../lib/node-runtime/manifest.mjs';
 import {
+  assertBundledNodeTarget,
+  assertBundledNodeVersion,
   minimumNodeVersionFromEngine,
   probeBackendNodeTarget,
   resolveCompatibleNodePath,
   resolveNodePath,
+  resolveStartupNodePath,
 } from '../runtime-resolution';
 
 // Opt-in materialized-artifact evidence; ordinary fast tests use private fixtures.
@@ -22,6 +27,57 @@ function createTempRoot(t: { after: (fn: () => void) => void }, prefix: string):
   const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
   return tempRoot;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]));
+  }
+  return value;
+}
+
+async function writeBundledNodeRuntime(runtimeOutDir: string, options: {
+  malformed?: boolean;
+  target?: { platform: string; arch: string; nodeAbi: string };
+} = {}): Promise<string> {
+  const runtimeDir = path.join(runtimeOutDir, 'resources', 'node-runtime');
+  await fs.promises.mkdir(runtimeDir, { recursive: true });
+  if (options.malformed) {
+    await fs.promises.writeFile(path.join(runtimeDir, 'manifest.json'), '{malformed');
+    return runtimeDir;
+  }
+  const license = Buffer.from('Node.js license fixture');
+  const executable = Buffer.from('bundled-node-fixture');
+  await fs.promises.writeFile(path.join(runtimeDir, 'LICENSE'), license);
+  await fs.promises.writeFile(path.join(runtimeDir, 'node.exe'), executable);
+  const inventory = [
+    { relativePath: 'LICENSE', sizeBytes: license.length, sha256: createHash('sha256').update(license).digest('hex') },
+    { relativePath: 'node.exe', sizeBytes: executable.length, sha256: createHash('sha256').update(executable).digest('hex') },
+  ];
+  const identityFields = {
+    schemaVersion: 1,
+    kind: 'node-runtime',
+    nodeVersion: '24.16.0',
+    target: options.target ?? { platform: 'win32', arch: 'x64', nodeAbi: '137' },
+    executable: 'node.exe',
+    inventory,
+    provenance: {
+      kind: 'local-toolchain',
+      archiveUrl: 'https://nodejs.org/download/release/v24.16.0/node-v24.16.0-win-x64.zip',
+      archiveSha256: 'a'.repeat(64),
+    },
+  };
+  const manifest = {
+    ...identityFields,
+    payloadIdentity: computeNodeRuntimePayloadIdentity(identityFields),
+  };
+  await fs.promises.writeFile(
+    path.join(runtimeDir, 'manifest.json'),
+    `${JSON.stringify(canonicalize(manifest), null, 2)}\n`,
+  );
+  return runtimeDir;
 }
 
 test('resolveCommandInvocation wraps npm with cmd.exe on Windows', () => {
@@ -109,6 +165,139 @@ test('resolveNodePath rejects missing configured and environment paths and error
       exists: () => false,
     }),
     /Could not find a standalone Node\.js runtime/,
+  );
+});
+
+test('startup Node routing honors explicit overrides before the Node pinned in the selected runtime output', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-route-');
+  const runtimeOutDir = path.join(tempRoot, 'pie-runtime-v2', 'generations', 'a'.repeat(64), 'out');
+  await writeBundledNodeRuntime(runtimeOutDir);
+  const configuredPath = path.join(tempRoot, 'configured-node.exe');
+  const environmentPath = path.join(tempRoot, 'environment-node.exe');
+  await fs.promises.writeFile(configuredPath, 'configured');
+  await fs.promises.writeFile(environmentPath, 'environment');
+
+  const setting = await resolveStartupNodePath({
+    configuredPath,
+    env: { PI_NODE_PATH: environmentPath },
+    runtimeOutDir,
+  });
+  assert.deepEqual(setting, { nodePath: configuredPath, source: 'configured' });
+  let explicitProbeCalled = false;
+  await assertBundledNodeVersion(setting, {
+    exec: async () => {
+      explicitProbeCalled = true;
+      throw new Error('explicit Node overrides must not receive the bundled patch pin');
+    },
+  });
+  assert.equal(explicitProbeCalled, false);
+  assertBundledNodeTarget(setting, { platform: 'linux', arch: 'arm64', nodeAbi: '999' });
+
+  const environment = await resolveStartupNodePath({
+    env: { PI_NODE_PATH: environmentPath },
+    runtimeOutDir,
+  });
+  assert.deepEqual(environment, { nodePath: environmentPath, source: 'environment' });
+
+  const bundled = await resolveStartupNodePath({ env: {}, runtimeOutDir });
+  assert.equal(bundled.source, 'bundled');
+  assert.equal(bundled.nodePath, path.join(runtimeOutDir, 'resources', 'node-runtime', 'node.exe'),
+    'the payload is resolved under the exact immutable generation output supplied by startup');
+  await assertBundledNodeVersion(bundled, {
+    exec: async (command, args) => {
+      assert.equal(command, bundled.nodePath);
+      assert.deepEqual(args, ['--version']);
+      return { stdout: 'v24.16.0', stderr: '', exitCode: 0 };
+    },
+  });
+  await assert.rejects(assertBundledNodeVersion(bundled, {
+    exec: async () => ({ stdout: 'v24.16.1', stderr: '', exitCode: 0 }),
+  }), /Bundled Node runtime must be 24\.16\.0/);
+  assertBundledNodeTarget(bundled, { platform: 'win32', arch: 'x64', nodeAbi: '137' });
+});
+
+test('startup Node routing rejects a present malformed bundle instead of falling back to PATH', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-malformed-');
+  const runtimeOutDir = path.join(tempRoot, 'out');
+  await writeBundledNodeRuntime(runtimeOutDir, { malformed: true });
+  const legacyPath = path.join(tempRoot, 'legacy-node.exe');
+  await fs.promises.writeFile(legacyPath, 'legacy');
+
+  await assert.rejects(resolveStartupNodePath({
+    env: { PATH: tempRoot },
+    runtimeOutDir,
+  }), /manifest.json is not valid JSON/);
+});
+
+test('startup Node routing uses the legacy PATH route when no bundled payload exists', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-absent-');
+  const legacyPath = path.join(tempRoot, process.platform === 'win32' ? 'node.exe' : 'node');
+  await fs.promises.writeFile(legacyPath, 'legacy');
+
+  const selection = await resolveStartupNodePath({
+    env: { PATH: tempRoot },
+    runtimeOutDir: path.join(tempRoot, 'no-bundle'),
+  });
+  assert.equal(selection.source, 'path');
+  assert.equal(selection.nodePath, legacyPath);
+});
+
+test('startup fails closed for a dangling bundled Node directory instead of falling back', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-dangling-');
+  const runtimeOutDir = path.join(tempRoot, 'out');
+  const resourcesDir = path.join(runtimeOutDir, 'resources');
+  const nodeRuntimeDir = path.join(resourcesDir, 'node-runtime');
+  const symlinkTarget = path.join(tempRoot, 'node-runtime-target');
+  const legacyPath = path.join(tempRoot, process.platform === 'win32' ? 'node.exe' : 'node');
+  await fs.promises.mkdir(resourcesDir, { recursive: true });
+  await fs.promises.mkdir(symlinkTarget);
+  await fs.promises.writeFile(legacyPath, 'legacy');
+  try {
+    fs.symlinkSync(symlinkTarget, nodeRuntimeDir, process.platform === 'win32' ? 'junction' : 'dir');
+    fs.rmSync(symlinkTarget, { recursive: true, force: true });
+  } catch {
+    t.skip('directory symlinks are unavailable in this environment');
+    return;
+  }
+
+  await assert.rejects(resolveStartupNodePath({
+    env: { PATH: tempRoot },
+    runtimeOutDir,
+  }), /Node runtime payload|Bundled Node runtime/);
+});
+
+test('startup routing preserves a host-provided legacy default after bundle absence', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-legacy-');
+  const legacyDefault = path.join(tempRoot, 'legacy-default.exe');
+  const pathNode = path.join(tempRoot, process.platform === 'win32' ? 'node.exe' : 'node');
+  await fs.promises.writeFile(legacyDefault, 'legacy default');
+  await fs.promises.writeFile(pathNode, 'PATH node');
+
+  const selection = await resolveStartupNodePath({
+    env: { PATH: tempRoot },
+    runtimeOutDir: path.join(tempRoot, 'no-bundle'),
+    legacyDefaultPath: legacyDefault,
+  });
+  assert.deepEqual(selection, { nodePath: legacyDefault, source: 'legacy' });
+});
+
+test('bundled Node manifest and executable target mismatches fail closed', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-bundled-node-target-');
+  const invalidManifestOutDir = path.join(tempRoot, 'manifest-target');
+  await writeBundledNodeRuntime(invalidManifestOutDir, {
+    target: { platform: 'win32', arch: 'arm64', nodeAbi: '127' },
+  });
+  await assert.rejects(
+    resolveStartupNodePath({ env: {}, runtimeOutDir: invalidManifestOutDir }),
+    /manifest target is unsupported/,
+  );
+
+  const validRuntimeOutDir = path.join(tempRoot, 'executable-target');
+  await writeBundledNodeRuntime(validRuntimeOutDir);
+  const selection = await resolveStartupNodePath({ env: {}, runtimeOutDir: validRuntimeOutDir });
+  assert.throws(
+    () => assertBundledNodeTarget(selection, { platform: 'win32', arch: 'arm64', nodeAbi: '127' }),
+    /Bundled Node runtime target mismatch/,
   );
 });
 

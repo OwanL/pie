@@ -94,7 +94,7 @@ async function tree(root) {
   await walk(root); return rows;
 }
 async function sourceSnapshot() {
-  const files=[fileURLToPath(import.meta.url),childPath,path.join(checkout,'scripts/verification/qualify-delivery.mjs'),path.join(checkout,'scripts/lib/process-watchdog.mjs'),path.join(checkout,'scripts/verification/lib/vsix-candidate.mjs'),path.join(checkout,'scripts/build/bundled-managed-resources.mjs'),path.join(checkout,'lib/pi-runtime/artifact.mjs')];
+  const files=[fileURLToPath(import.meta.url),childPath,path.join(checkout,'scripts/verification/qualify-delivery.mjs'),path.join(checkout,'scripts/lib/process-watchdog.mjs'),path.join(checkout,'scripts/verification/lib/vsix-candidate.mjs'),path.join(checkout,'scripts/build/node-runtime-payload.mjs'),path.join(checkout,'lib/node-runtime/manifest.mjs'),path.join(checkout,'scripts/install/toolchain.mjs'),path.join(checkout,'scripts/lib/sdk-version.mjs'),path.join(checkout,'.node-version'),path.join(checkout,'.prototools'),path.join(checkout,'scripts/build/bundled-managed-resources.mjs'),path.join(checkout,'lib/pi-runtime/artifact.mjs')];
   return Object.fromEntries(await Promise.all(files.map(async file=>[path.relative(checkout,file),hash(await fs.readFile(file))])));
 }
 // All postchecks run independently, including after thrown launch or cancellation.
@@ -112,7 +112,7 @@ export async function collectRegistrationOutcome({launch,checks,writePostChecks,
   const report=await readReport(); validateRegistrationReport(report,defaults);
   return {completion,postChecks,report};
 }
-export async function qualifyDeliveryRegistration({candidateRoot,managedIntegration,expectedPlaywrightRuntimeIdentity,runStage,signal,shell,hostEnv=process.env}) {
+export async function qualifyDeliveryRegistration({candidateRoot,managedIntegration,expectedPlaywrightRuntimeIdentity,expectedNodeRuntimeIdentity,runStage,signal,shell,hostEnv=process.env}) {
   assert.equal(process.platform,'win32','registration qualification currently requires Windows x64'); assert.equal(process.arch,'x64');
   assert.equal(typeof runStage,'function','canonical stage runner required');
   signal?.throwIfAborted();
@@ -123,6 +123,7 @@ export async function qualifyDeliveryRegistration({candidateRoot,managedIntegrat
   const verify=()=>verifyCandidateIdentity(candidateRoot,{
     managedIntegration:selection,
     ...(expectedPlaywrightRuntimeIdentity===undefined?{}:{expectedPlaywrightRuntimeIdentity}),
+    ...(expectedNodeRuntimeIdentity===undefined?{}:{expectedNodeRuntimeIdentity}),
   });
   const identity=await verify();
   const q=await verifyManagedIntegrationQualification({...selection,artifactDir:runtimeRoot});

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -22,6 +23,8 @@ import { verifyPiRuntimeArtifact, verifyPiRuntimeToolingArtifact, writePiRuntime
 import { makeRuntimeArtifact, installFakeAcquisition } from './runtime-artifact-fixture.mjs';
 import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest } from '../tool-runtime-assets.mjs';
 import { installBuildResources } from './build-resource-fixture.mjs';
+import { computeNodeRuntimePayloadIdentity, NODE_RUNTIME_TARGET } from '../../../lib/node-runtime/manifest.mjs';
+import { validateNodeRuntimePayload } from '../node-runtime-payload.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const vscodeDependencies = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -33,6 +36,33 @@ function write(root, relative, content) {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, content);
   return file;
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  return value;
+}
+
+async function makeNodeRuntimePayload(fixture) {
+  const directory = path.join(fixture.directory, 'prepared-node-runtime');
+  mkdirSync(directory, { recursive: true });
+  const files = [
+    { relativePath: 'LICENSE', bytes: Buffer.from('Node fixture license\n') },
+    { relativePath: 'node.exe', bytes: Buffer.from('Node fixture executable\n') },
+  ];
+  const inventory = files.map(({ relativePath, bytes }) => ({
+    relativePath, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+  }));
+  for (const { relativePath, bytes } of files) writeFileSync(path.join(directory, relativePath), bytes);
+  const manifestWithoutIdentity = {
+    schemaVersion: 1, kind: 'node-runtime', nodeVersion: '24.16.0', target: NODE_RUNTIME_TARGET,
+    executable: 'node.exe', inventory,
+    provenance: { kind: 'local-toolchain', archiveUrl: 'https://nodejs.org/download/release/v24.16.0/node-v24.16.0-win-x64.zip', archiveSha256: 'a'.repeat(64) },
+  };
+  const manifest = { ...manifestWithoutIdentity, payloadIdentity: computeNodeRuntimePayloadIdentity(manifestWithoutIdentity) };
+  write(directory, 'manifest.json', `${JSON.stringify(canonicalize(manifest), null, 2)}\n`);
+  return { directory, identity: manifest.payloadIdentity, files };
 }
 
 async function makeFixture(t) {
@@ -47,14 +77,20 @@ async function makeFixture(t) {
   const home = path.join(directory, 'home');
 
   write(repo, 'package.json', '{"type":"module"}\n');
+  write(repo, '.node-version', '24.16.0\n');
+  write(repo, '.prototools', 'node = "24.16.0"\npnpm = "10.34.4"\n');
   write(owner, 'package.json', '{"name":"pie-output-fixture","version":"1.0.0"}\n');
   write(owner, 'tsconfig.json', '{"compilerOptions":{}}\n');
   write(repo, 'scripts/build/build.mjs', readFileSync(buildEntry));
-  for (const helper of ['bundled-extension-verification.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs', 'playwright-runtime-payload.mjs']) {
+  for (const helper of ['bundled-extension-verification.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs', 'playwright-runtime-payload.mjs', 'node-runtime-payload.mjs']) {
     write(repo, `scripts/build/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/build', helper)));
   }
   write(repo, 'scripts/lib/managed-integration-selection.mjs', readFileSync(path.join(repositoryRoot, 'scripts/lib/managed-integration-selection.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-context.mjs')));
+  write(repo, 'scripts/lib/process-watchdog.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'process-watchdog.mjs')));
+  write(repo, 'scripts/lib/sdk-version.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'sdk-version.mjs')));
+  write(repo, 'scripts/install/toolchain.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'install', 'toolchain.mjs')));
+  write(repo, 'lib/node-runtime/manifest.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'node-runtime', 'manifest.mjs')));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-artifact.mjs')));
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'pi-runtime', 'artifact.mjs')));
   // The real vite config's shipped runtime-lock plugin reads this file when it
@@ -139,6 +175,7 @@ async function makeFixture(t) {
       envOutputDir: process.env.PIE_BUILD_OUTPUT_DIR ?? null,
       envPiRuntimeSdkPath: process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH ?? null,
       envPiRuntimeIdentity: process.env.PIE_BUILD_PI_RUNTIME_IDENTITY ?? null,
+      envNodeRuntimeIdentity: process.env.PIE_BUILD_NODE_RUNTIME_IDENTITY ?? null,
     };
     fs.writeFileSync(path.join(outDir, 'fixture-vite-' + (nodeMode ? 'node' : bundledMode ? 'bundled-extensions' : 'webview') + '.json'), JSON.stringify(record, null, 2));
     const buildId = '0123456789abcdefabcd';
@@ -254,6 +291,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   const result = runBuild(fixture, ['--output-dir', output], {
     PIE_BUILD_PI_RUNTIME_SDK_PATH: path.join(fixture.directory, 'inherited-sdk'),
     PIE_BUILD_PI_RUNTIME_IDENTITY: 'inherited-runtime-identity',
+    PIE_BUILD_NODE_RUNTIME_IDENTITY: 'ambient-node-runtime-identity',
   });
   assertBuildSucceeded(result);
 
@@ -283,6 +321,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
     assert.equal(record.envOutputDir, output, `${mode} Vite child receives the output override`);
     assert.equal(path.basename(record.envPiRuntimeSdkPath), 'pi-coding-agent', `${mode} Vite child selects the source-default SDK`);
     assert.equal(record.envPiRuntimeIdentity, fixture.runtime.identity, `${mode} Vite child receives the source-default identity`);
+    assert.equal(record.envNodeRuntimeIdentity, '', `${mode} Vite child cannot inherit an ambient Node payload identity`);
     assert.ok(record.args.includes('--configLoader') && record.args[record.args.indexOf('--configLoader') + 1] === 'runner', `${mode} build uses Vite's runner config loader`);
   }
 
@@ -290,9 +329,28 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   assert.equal(readFileSync(path.join(sharedOut, 'sdk-local-path.json'), 'utf8'), '{"sdkPath":"shared SDK pointer"}\n');
   assert.equal(readFileSync(path.join(installed, 'preserved.txt'), 'utf8'), 'installed sentinel');
   assert.equal(existsSync(path.join(output, 'sdk-local-path.json')), false, 'isolated builds do not write SDK pointers');
+  assert.equal(existsSync(path.join(output, 'resources/node-runtime')), false, 'ambient environment cannot cause a Node runtime payload to be copied');
   assert.deepEqual(readdirSync(sharedOut).sort(), ['sdk-local-path.json', 'shared-sentinel.txt']);
   assert.deepEqual(readdirSync(installed), ['preserved.txt']);
   assert.equal(readFileSync(fixture.acquisitionCount, 'utf8'), '1', 'one source-default acquisition is shared by typecheck and both Vite children');
+});
+
+test('delivery copies only the explicit prepared Node payload and binds its identity to every graph', async (t) => {
+  const fixture = await makeFixture(t);
+  const node = await makeNodeRuntimePayload(fixture);
+  const output = path.join(fixture.outputRoot, 'with-node-runtime');
+  const result = runBuild(fixture, [
+    '--output-dir', output, '--pi-runtime', fixture.sourceArtifact, '--node-runtime', node.directory, '--skip-typecheck',
+  ]);
+  assertBuildSucceeded(result);
+  const copied = await validateNodeRuntimePayload({ directory: path.join(output, 'resources/node-runtime'), repositoryRoot: fixture.repo });
+  assert.equal(copied.identity, node.identity);
+  for (const { relativePath, bytes } of node.files) assert.deepEqual(readFileSync(path.join(copied.directory, relativePath)), bytes);
+  for (const mode of ['node', 'webview', 'bundled-extensions']) {
+    const record = JSON.parse(readFileSync(path.join(output, `fixture-vite-${mode}.json`), 'utf8'));
+    assert.equal(record.envNodeRuntimeIdentity, node.identity, `${mode} child receives the selected payload identity`);
+  }
+  assert.equal(existsSync(fixture.acquisitionCount), false, 'explicit Pi and Node inputs perform no automatic runtime acquisition');
 });
 
 test('build rejects missing standalone output before materializing the selected SDK', async (t) => {

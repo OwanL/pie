@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import { once } from 'node:events';
@@ -10,6 +11,7 @@ import { writeRuntimeArtifactFixture } from '../../test/helpers/runtime-artifact
 import {
   PI_RUNTIME_SDK_RELATIVE_PATH,
 } from '../../../../scripts/lib/pi-runtime-artifact.mjs';
+import { computeNodeRuntimePayloadIdentity } from '../../../../lib/node-runtime/manifest.mjs';
 import {
   publishRuntimeGeneration,
   RUNTIME_DIRECTORY,
@@ -44,7 +46,7 @@ async function put(root: string, relative: string, contents: string): Promise<vo
   await fs.writeFile(file, contents);
 }
 
-async function makeOutput(outDir: string, options: { artifact?: boolean; tamper?: boolean; target?: typeof TARGET } = {}): Promise<void> {
+async function makeOutput(outDir: string, options: { artifact?: boolean; tamper?: boolean; bundledNode?: boolean; target?: typeof TARGET } = {}): Promise<void> {
   const buildId = 'standalone-test-build';
   for (const relative of [
     'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js',
@@ -58,13 +60,64 @@ async function makeOutput(outDir: string, options: { artifact?: boolean; tamper?
   await put(outDir, 'webview/panel/.vite/unused.txt', 'fixture');
   await put(outDir, 'extension.js', '// extension fixture\n');
 
+  if (options.bundledNode) {
+    const nodeRuntimeDir = path.join(outDir, 'resources', 'node-runtime');
+    const license = Buffer.from('Node.js license fixture');
+    const executable = Buffer.from('bundled-node-fixture');
+    await fs.mkdir(nodeRuntimeDir, { recursive: true });
+    await fs.writeFile(path.join(nodeRuntimeDir, 'LICENSE'), license);
+    await fs.writeFile(path.join(nodeRuntimeDir, 'node.exe'), executable);
+    const identityFields = {
+      schemaVersion: 1,
+      kind: 'node-runtime',
+      nodeVersion: '24.16.0',
+      target: { platform: 'win32', arch: 'x64', nodeAbi: '137' },
+      executable: 'node.exe',
+      inventory: [
+        { relativePath: 'LICENSE', sizeBytes: license.length, sha256: createHash('sha256').update(license).digest('hex') },
+        { relativePath: 'node.exe', sizeBytes: executable.length, sha256: createHash('sha256').update(executable).digest('hex') },
+      ],
+      provenance: {
+        kind: 'local-toolchain',
+        archiveUrl: 'https://nodejs.org/download/release/v24.16.0/node-v24.16.0-win-x64.zip',
+        archiveSha256: 'a'.repeat(64),
+      },
+    };
+    const canonicalize = (value: unknown): unknown => Array.isArray(value)
+      ? value.map(canonicalize)
+      : value !== null && typeof value === 'object'
+        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, entry]) => [key, canonicalize(entry)]))
+        : value;
+    const manifest = {
+      ...identityFields,
+      payloadIdentity: computeNodeRuntimePayloadIdentity(identityFields),
+    };
+    await fs.writeFile(path.join(nodeRuntimeDir, 'manifest.json'), `${JSON.stringify(canonicalize(manifest), null, 2)}\n`);
+  }
+
   if (options.artifact === false) return;
   const artifactDir = path.join(outDir, 'pi-runtime');
   await writeRuntimeArtifactFixture(artifactDir, options.target ?? TARGET);
   if (options.tamper) await put(artifactDir, `${PI_RUNTIME_SDK_RELATIVE_PATH}/dist/cli.js`, 'tampered\n');
 }
 
-async function fixture(t: test.TestContext, options: { selected?: boolean; artifact?: boolean; tamper?: boolean; target?: typeof TARGET } = {}) {
+async function fixture(t: test.TestContext, options: { selected?: boolean; artifact?: boolean; tamper?: boolean; bundledNode?: boolean; target?: typeof TARGET } = {}) {
+  // The test runner gives each process a private LOCALAPPDATA. Seed the normal
+  // agent home just as installation does, so tests that intentionally pass an
+  // empty startup env exercise the real fallback rather than a missing fixture.
+  const fixtureRoot = process.env.PIE_TEST_FIXTURE_ROOT;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (fixtureRoot && localAppData && path.resolve(localAppData).toLowerCase().startsWith(`${path.resolve(fixtureRoot).toLowerCase()}${path.sep}`)) {
+    const normalAgentDir = path.join(localAppData, 'pie');
+    await fs.mkdir(normalAgentDir, { recursive: true });
+    const settingsDefaults = await fs.readFile(path.resolve('settings.defaults.json'), 'utf8');
+    try {
+      await fs.writeFile(path.join(normalAgentDir, 'settings.json'), settingsDefaults, { flag: 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-standalone-runtime-'));
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   const extensionPath = path.join(root, 'extension');
@@ -102,11 +155,11 @@ function artifactProbe(options: {
   beforeProbe?: () => Promise<void>;
   commandPaths?: string[];
 } = {}) {
-  return async (command: string, _args: string[]) => {
+  return async (command: string, args: string[]) => {
     options.commandPaths?.push(command);
     await options.beforeProbe?.();
     return {
-      stdout: JSON.stringify(options.target ?? TARGET),
+      stdout: args[0] === '--version' ? 'v24.16.0' : JSON.stringify(options.target ?? TARGET),
       stderr: '',
       exitCode: 0,
     };
@@ -201,6 +254,44 @@ test('selected standalone generation is leased before SDK probing and released o
   });
   assert.equal(ownershipReleased, true);
   assert.deepEqual(await leaseEntries(prepared.extensionPath), [], 'confirmed teardown releases the generation lease');
+});
+
+test('standalone routes the bundled Node from the already-selected immutable generation', { skip: process.platform !== 'win32' }, async (t) => {
+  const prepared = await fixture(t, { selected: true, bundledNode: true });
+  const restoreEnvironment = isolateStandaloneStartupEnvironment();
+  const profileDir = path.join(prepared.root, 'development-profile');
+  let environment: StandaloneEnvironment | undefined;
+  const probedNodePaths: string[] = [];
+  try {
+    environment = await resolveStandaloneEnvironment({
+      extensionPath: prepared.extensionPath,
+      env: {
+        ...process.env,
+        PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+        PI_CODING_AGENT_DIR: path.join(profileDir, 'agent'),
+        PI_CODING_AGENT_AUTH_DIR: path.join(profileDir, 'auth'),
+        PIE_DATA_DIR: path.join(profileDir, 'data'),
+        PI_CODING_AGENT_SESSION_DIR: path.join(profileDir, 'data', 'sessions'),
+      },
+      exec: artifactProbe({ commandPaths: probedNodePaths }),
+    });
+    const expectedNodePath = path.join(
+      environment.paths.runtimeOutputDirectory,
+      'resources', 'node-runtime', 'node.exe',
+    );
+    assert.equal(environment.paths.runtimeOutputDirectory, prepared.publication?.outDir,
+      'startup keeps the previously selected immutable generation');
+    assert.equal(environment.dependencies.nodePath, expectedNodePath,
+      'bundled Node is resolved relative to that exact generation, not extension/out or a second generation lookup');
+    assert.deepEqual(probedNodePaths, [expectedNodePath, expectedNodePath],
+      'the selected Node is version-probed and target-probed before SDK startup');
+  } finally {
+    try {
+      await environment?.runtimeLease?.release();
+    } finally {
+      restoreEnvironment();
+    }
+  }
 });
 
 test('standalone resolves a relative configured Node path to the exact absolute probe executable', async (t) => {

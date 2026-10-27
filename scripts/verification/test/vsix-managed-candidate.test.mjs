@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { verifyCandidateIdentity } from '../lib/vsix-candidate.mjs';
 import { BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../lib/managed-packages/bundled-resources.mjs';
 import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, toolRuntimeManifest } from '../../build/tool-runtime-assets.mjs';
+import { computeNodeRuntimePayloadIdentity, NODE_RUNTIME_TARGET } from '../../../lib/node-runtime/manifest.mjs';
 
+const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const buildId = 'a'.repeat(20);
 const runtime = { identity: 'b'.repeat(64), manifest: { target: { platform: 'win32', arch: 'x64', nodeAbi: '127' } } };
 async function fixture(t) {
@@ -53,7 +57,38 @@ test('candidate verifier enforces an explicitly expected full runtime identity',
   await assert.rejects(verifyCandidateIdentity(root, { expectedRuntimeIdentity: 'c'.repeat(64) }, deps), /expected runtime identity/);
 });
 
-async function preparedV2Candidate(t, label, playwrightRuntimeIdentity) {
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  return value;
+}
+
+async function writePreparedNodePayload(directory) {
+  await mkdir(directory, { recursive: true });
+  const nodeVersion = (await readFile(path.join(repositoryRoot, '.node-version'), 'utf8')).trim();
+  const files = [
+    { relativePath: 'LICENSE', bytes: Buffer.from('Node fixture license\n') },
+    { relativePath: 'node.exe', bytes: Buffer.from('Node fixture executable\n') },
+  ];
+  const inventory = files.map(({ relativePath, bytes }) => ({
+    relativePath, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+  }));
+  for (const { relativePath, bytes } of files) await writeFile(path.join(directory, relativePath), bytes);
+  const withoutIdentity = {
+    schemaVersion: 1, kind: 'node-runtime', nodeVersion, target: NODE_RUNTIME_TARGET,
+    executable: 'node.exe', inventory,
+    provenance: {
+      kind: 'local-toolchain',
+      archiveUrl: `https://nodejs.org/download/release/v${nodeVersion}/node-v${nodeVersion}-win-x64.zip`,
+      archiveSha256: 'a'.repeat(64),
+    },
+  };
+  const manifest = { ...withoutIdentity, payloadIdentity: computeNodeRuntimePayloadIdentity(withoutIdentity) };
+  await writeFile(path.join(directory, 'manifest.json'), `${JSON.stringify(canonicalize(manifest), null, 2)}\n`);
+  return { directory, identity: manifest.payloadIdentity };
+}
+
+async function preparedV2Candidate(t, label, playwrightRuntimeIdentity, nodeRuntimeIdentity) {
   const root = await fixture(t);
   const outDir = path.join(root, 'out');
   await writeFile(path.join(outDir, 'pie-build-id.txt'), buildId);
@@ -72,30 +107,40 @@ async function preparedV2Candidate(t, label, playwrightRuntimeIdentity) {
   await writeFile(path.join(outDir, 'resources/bundled-extensions.json'), JSON.stringify(inventory));
   await Promise.all(inventory.extensions.map(item => writeFile(path.join(outDir, item.entry), 'module.exports = {};')));
   await mkdir(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH), { recursive: true });
+  if (nodeRuntimeIdentity !== undefined) {
+    const node = await writePreparedNodePayload(path.join(outDir, 'resources/node-runtime'));
+    assert.equal(node.identity, nodeRuntimeIdentity);
+  }
   return root;
 }
 
-test('real bundled verifier accepts selected v2 Playwright manifest in managed staged and extracted candidates', async t => {
+test('real verifier checks v2 Playwright plus Node identity and managed evidence in staged and extracted candidates', async t => {
   const playwrightRuntimeIdentity = 'f'.repeat(64);
   const managedIntegration = { stageRoot: path.join(os.tmpdir(), 'selected-managed-stage'), receiptPath: path.join(os.tmpdir(), 'selected-managed-proof.json') };
+  const nodeSource = await mkdtemp(path.join(os.tmpdir(), 'selected-node-runtime-'));
+  t.after(() => rm(nodeSource, { recursive: true, force: true }));
+  const selectedNode = await writePreparedNodePayload(nodeSource);
+  const selectedRuntime = { ...runtime, manifest: { target: NODE_RUNTIME_TARGET } };
   const qualification = {
-    runtime,
+    runtime: selectedRuntime,
     stage: { root: managedIntegration.stageRoot, receipt: { inventorySha256: 'c'.repeat(64), inventory: [] } },
     qualificationRecipeSha256: 'd'.repeat(64),
   };
   for (const label of ['staged', 'extracted']) {
-    const root = await preparedV2Candidate(t, label, playwrightRuntimeIdentity);
+    const root = await preparedV2Candidate(t, label, playwrightRuntimeIdentity, selectedNode.identity);
     const verifyManaged = {
-      ...deps,
+      verifyPiRuntimeArtifact: async () => selectedRuntime,
       verifyManagedIntegrationQualification: async () => qualification,
       verifyBundledManagedOutput: async () => {},
     };
-    await assert.rejects(verifyCandidateIdentity(root, { managedIntegration }, verifyManaged), /Invalid code-only tool runtime manifest/);
+    await assert.rejects(verifyCandidateIdentity(root, { managedIntegration, expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity }, verifyManaged), /explicit expected Node runtime identity/u);
     const calls = [];
     const identity = await verifyCandidateIdentity(root, {
-      managedIntegration, expectedRuntimeIdentity: runtime.identity, expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity,
+      managedIntegration, expectedRuntimeIdentity: selectedRuntime.identity,
+      expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity,
+      expectedNodeRuntimeIdentity: selectedNode.identity, repositoryRoot,
     }, {
-      ...deps,
+      ...verifyManaged,
       verifyManagedIntegrationQualification: async args => {
         calls.push(['qualification', args]);
         return qualification;
@@ -105,13 +150,20 @@ test('real bundled verifier accepts selected v2 Playwright manifest in managed s
       },
     });
     assert.equal(identity.playwrightRuntimeIdentity, playwrightRuntimeIdentity);
+    assert.equal(identity.nodeRuntimeIdentity, selectedNode.identity);
     assert.deepEqual(identity.managedIntegration, {
-      runtimeIdentity: runtime.identity, closureInventorySha256: 'c'.repeat(64), qualificationRecipeSha256: 'd'.repeat(64),
+      runtimeIdentity: selectedRuntime.identity, closureInventorySha256: 'c'.repeat(64), qualificationRecipeSha256: 'd'.repeat(64),
     });
     assert.deepEqual(calls, [
       ['qualification', { ...managedIntegration, artifactDir: path.join(root, 'out/pi-runtime') }],
       ['managed', path.join(root, 'out'), qualification],
     ]);
+    await assert.rejects(verifyCandidateIdentity(root, {
+      expectedNodeRuntimeIdentity: selectedNode.identity, repositoryRoot,
+    }, {
+      ...deps,
+      verifyPiRuntimeArtifact: async () => ({ ...selectedRuntime, manifest: { target: { ...NODE_RUNTIME_TARGET, nodeAbi: '999' } } }),
+    }), /target does not match the selected Pi SDK target/u);
   }
 });
 

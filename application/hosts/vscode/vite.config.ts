@@ -26,6 +26,7 @@ const selectedPiRuntimeSdkPath = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH || un
 const selectedPiRuntimeIdentity = process.env.PIE_BUILD_PI_RUNTIME_IDENTITY || undefined;
 const selectedManagedIdentity = process.env.PIE_BUILD_MANAGED_IDENTITY || undefined;
 const selectedPlaywrightPayloadIdentity = process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY || undefined;
+const selectedNodeRuntimeIdentity = process.env.PIE_BUILD_NODE_RUNTIME_IDENTITY || undefined;
 const developmentBuild = process.env.PIE_BUILD_DEVELOPMENT === '1';
 const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
@@ -145,7 +146,7 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   ].filter((input) => fs.existsSync(input)).sort((left, right) => left.localeCompare(right));
 }
 
-function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, runtimeIdentity?: string, managedIdentity?: string, playwrightPayloadIdentity?: string): string {
+function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, runtimeIdentity?: string, managedIdentity?: string, playwrightPayloadIdentity?: string, nodeRuntimeIdentity?: string): string {
   const hash = crypto.createHash('sha256');
   for (const input of inputs) {
     hash.update(path.relative(identityRoot, input).replaceAll('\\', '/'));
@@ -168,6 +169,11 @@ function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, 
     hash.update(playwrightPayloadIdentity);
     hash.update('\0');
   }
+  if (nodeRuntimeIdentity) {
+    hash.update('verified-node-runtime-payload\0');
+    hash.update(nodeRuntimeIdentity);
+    hash.update('\0');
+  }
   return hash.digest('hex').slice(0, 20);
 }
 
@@ -184,13 +190,14 @@ export function createBuildIdentityPlugin(
   fileName = 'pie-build-id.txt',
   managedIdentity = identityRoot === rootDir ? selectedManagedIdentity : undefined,
   playwrightPayloadIdentity = identityRoot === rootDir ? selectedPlaywrightPayloadIdentity : undefined,
+  nodeRuntimeIdentity = identityRoot === rootDir ? selectedNodeRuntimeIdentity : undefined,
 ): Plugin {
   let buildId = '';
   return {
     name: 'pie-build-identity',
     buildStart() {
       const inputs = buildIdentityInputs(identityRoot);
-      buildId = computeBuildId(inputs, identityRoot, runtimeIdentity, managedIdentity, playwrightPayloadIdentity);
+      buildId = computeBuildId(inputs, identityRoot, runtimeIdentity, managedIdentity, playwrightPayloadIdentity, nodeRuntimeIdentity);
       // Development watches Vite's actual import closure, not test files or a
       // second source-fingerprint poll. Delivery retains coordinated identity.
       if (!developmentBuild) for (const input of inputs) this.addWatchFile(input);
@@ -226,7 +233,7 @@ export default defineConfig(({ mode }) => {
     return {
       ...options,
       define,
-      plugins: [createBuildIdentityPlugin(rootDir, selectedPiRuntimeIdentity, BUNDLED_EXTENSIONS_BUILD_ID), createToolRuntimeAssetsPlugin(repoDir), ...(options.plugins ?? [])],
+      plugins: [createBuildIdentityPlugin(rootDir, selectedPiRuntimeIdentity, BUNDLED_EXTENSIONS_BUILD_ID, selectedManagedIdentity, selectedPlaywrightPayloadIdentity, selectedNodeRuntimeIdentity), createToolRuntimeAssetsPlugin(repoDir), ...(options.plugins ?? [])],
       resolve: { alias: [...bundledExtensionPeerAliases(), ...nodePackageAliases] },
       ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-bundled-extensions') } : {}),
     };

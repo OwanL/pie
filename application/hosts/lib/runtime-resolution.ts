@@ -1,5 +1,10 @@
 import * as path from 'node:path';
+import { existsSync, lstatSync } from 'node:fs';
 
+import {
+  computeNodeRuntimePayloadIdentity,
+  readNodeRuntimeManifest,
+} from '../../../lib/node-runtime/manifest.mjs';
 import { createCommandExecutor } from './command-execution';
 import type { CommandResult } from './command-result';
 import type { GenerationPiRuntimeBackendNodeTarget } from './pi-runtime-resolution';
@@ -27,6 +32,23 @@ export interface ProbeBackendNodeTargetOptions {
 
 const BACKEND_NODE_PROBE_TIMEOUT_MS = 5_000;
 const BACKEND_NODE_PROBE_MAX_BUFFER_BYTES = 16 * 1024;
+export const BUNDLED_NODE_VERSION = '24.16.0';
+export const BUNDLED_NODE_TARGET: GenerationPiRuntimeBackendNodeTarget = {
+  platform: 'win32',
+  arch: 'x64',
+  nodeAbi: '137',
+};
+
+interface NodeRuntimeManifest {
+  schemaVersion: 1;
+  kind: 'node-runtime';
+  nodeVersion: string;
+  target: GenerationPiRuntimeBackendNodeTarget;
+  executable: string;
+  inventory: Array<{ relativePath: string; sizeBytes: number; sha256: string }>;
+  provenance: unknown;
+  payloadIdentity: string;
+}
 
 interface CommonOptions {
   env: NodeJS.ProcessEnv;
@@ -38,6 +60,19 @@ export interface ResolveNodePathOptions extends CommonOptions {
   configuredPath?: string;
 }
 
+export interface ResolveStartupNodePathOptions extends ResolveNodePathOptions {
+  /** Output directory already selected by startup; no generation lookup occurs here. */
+  runtimeOutDir: string;
+  /** Optional host-specific legacy default, used only after bundle absence. */
+  legacyDefaultPath?: string;
+}
+
+export interface StartupNodePathSelection {
+  nodePath: string;
+  source: 'configured' | 'environment' | 'bundled' | 'path' | 'legacy';
+  bundledManifest?: NodeRuntimeManifest;
+}
+
 export interface ResolveCompatibleNodePathOptions extends ResolveNodePathOptions {
   exec: CommandExecutor;
   minimumVersion: string;
@@ -45,11 +80,33 @@ export interface ResolveCompatibleNodePathOptions extends ResolveNodePathOptions
 
 const defaultExists = (filePath: string): boolean => {
   try {
-    return require('node:fs').existsSync(filePath);
+    return existsSync(filePath);
   } catch {
     return false;
   }
 };
+
+function hasBundledNodeRuntimeDirectory(nodeRuntimeDir: string): boolean {
+  const resourcesDir = path.dirname(nodeRuntimeDir);
+  let resourcesStat;
+  try {
+    resourcesStat = lstatSync(resourcesDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  if (resourcesStat.isSymbolicLink() || !resourcesStat.isDirectory()) {
+    throw new Error(`Bundled Node runtime resources path is not an ordinary directory: ${resourcesDir}`);
+  }
+
+  try {
+    lstatSync(nodeRuntimeDir);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
 
 function ensureExistingPath(
   label: string,
@@ -332,4 +389,104 @@ export function resolveNodePath(options: ResolveNodePathOptions): string {
   throw new Error(
     'Could not find a standalone Node.js runtime. Set pie.nodePath, PI_NODE_PATH, or add node to PATH.',
   );
+}
+
+/**
+ * Resolve startup's Node route while keeping legacy resolution byte-for-byte
+ * unchanged whenever the bundled payload is absent. A present payload is
+ * authoritative: invalid metadata or a missing executable is an error, never
+ * a reason to fall back to ambient PATH.
+ */
+export async function resolveStartupNodePath(
+  options: ResolveStartupNodePathOptions,
+): Promise<StartupNodePathSelection> {
+  const exists = options.exists ?? defaultExists;
+  const configuredPath = ensureExistingPath('Configured PI nodePath', options.configuredPath, exists);
+  if (configuredPath) return { nodePath: configuredPath, source: 'configured' };
+
+  const envPath = ensureExistingPath('PI_NODE_PATH', options.env.PI_NODE_PATH, exists);
+  if (envPath) return { nodePath: envPath, source: 'environment' };
+
+  const nodeRuntimeDir = path.join(options.runtimeOutDir, 'resources', 'node-runtime');
+  if (hasBundledNodeRuntimeDirectory(nodeRuntimeDir)) {
+    const manifest = await readNodeRuntimeManifest(nodeRuntimeDir) as NodeRuntimeManifest;
+    const { payloadIdentity, ...manifestWithoutIdentity } = manifest;
+    const actualIdentity = computeNodeRuntimePayloadIdentity(manifestWithoutIdentity);
+    if (actualIdentity !== payloadIdentity) {
+      throw new Error('Invalid bundled Node runtime: payloadIdentity does not match its canonical manifest metadata.');
+    }
+    if (manifest.schemaVersion !== 1 || manifest.kind !== 'node-runtime') {
+      throw new Error('Invalid bundled Node runtime: unsupported manifest identity.');
+    }
+    if (manifest.nodeVersion !== BUNDLED_NODE_VERSION) {
+      throw new Error(`Bundled Node runtime must be ${BUNDLED_NODE_VERSION}; manifest declares ${manifest.nodeVersion}.`);
+    }
+    if (manifest.target.platform !== BUNDLED_NODE_TARGET.platform
+      || manifest.target.arch !== BUNDLED_NODE_TARGET.arch
+      || manifest.target.nodeAbi !== BUNDLED_NODE_TARGET.nodeAbi) {
+      throw new Error(
+        `Bundled Node runtime target must be ${BUNDLED_NODE_TARGET.platform}/${BUNDLED_NODE_TARGET.arch}/ABI ${BUNDLED_NODE_TARGET.nodeAbi}.`,
+      );
+    }
+    if (manifest.executable !== 'node.exe') {
+      throw new Error('Invalid bundled Node runtime: executable must be node.exe.');
+    }
+    const nodePath = path.join(nodeRuntimeDir, manifest.executable);
+    if (!exists(nodePath)) {
+      throw new Error(`Bundled Node runtime executable is unavailable: ${nodePath}`);
+    }
+    return { nodePath, source: 'bundled', bundledManifest: manifest };
+  }
+
+  if (options.legacyDefaultPath) {
+    const nodePath = ensureExistingPath('Legacy PI Node runtime', options.legacyDefaultPath, exists);
+    if (nodePath) return { nodePath, source: 'legacy' };
+  }
+
+  const nodePath = resolveNodePath({ ...options, exists });
+  return { nodePath, source: 'path' };
+}
+
+/** Probe a chosen bundled Node's exact product version without ambient preloads. */
+export async function probeBackendNodeVersion(
+  nodePath: string,
+  options: ProbeBackendNodeTargetOptions = {},
+): Promise<string> {
+  const exec = options.exec ?? createCommandExecutor();
+  const result = await exec(nodePath, ['--version'], {
+    env: sanitizedNodeProbeEnv(options.env ?? process.env),
+    timeout: BACKEND_NODE_PROBE_TIMEOUT_MS,
+    maxBuffer: BACKEND_NODE_PROBE_MAX_BUFFER_BYTES,
+  });
+  const version = (result.stdout || result.stderr).trim();
+  if (result.exitCode !== 0 || !version) {
+    throw new Error(`Could not read backend Node version with ${nodePath}${version ? `: ${version}` : '.'}`);
+  }
+  return version;
+}
+
+export function assertBundledNodeTarget(
+  selection: StartupNodePathSelection,
+  target: GenerationPiRuntimeBackendNodeTarget,
+): void {
+  if (selection.source !== 'bundled') return;
+  const expected = selection.bundledManifest?.target;
+  if (!expected) throw new Error('Invalid bundled Node runtime selection: validated manifest is missing.');
+  if (target.platform !== expected.platform || target.arch !== expected.arch || target.nodeAbi !== expected.nodeAbi) {
+    throw new Error(
+      `Bundled Node runtime target mismatch: manifest requires ${expected.platform}/${expected.arch}/ABI ${expected.nodeAbi}, `
+      + `but executable reports ${target.platform}/${target.arch}/ABI ${target.nodeAbi}.`,
+    );
+  }
+}
+
+export async function assertBundledNodeVersion(
+  selection: StartupNodePathSelection,
+  options: ProbeBackendNodeTargetOptions = {},
+): Promise<void> {
+  if (selection.source !== 'bundled') return;
+  const version = await probeBackendNodeVersion(selection.nodePath, options);
+  if (version !== `v${BUNDLED_NODE_VERSION}` && version !== BUNDLED_NODE_VERSION) {
+    throw new Error(`Bundled Node runtime must be ${BUNDLED_NODE_VERSION}; executable reports ${version}.`);
+  }
 }

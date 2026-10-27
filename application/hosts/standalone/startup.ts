@@ -4,10 +4,12 @@ import * as path from 'node:path';
 import { createCommandExecutor } from '../lib/command-execution';
 import { resolveAgentDir, type ResolvedAgentDir } from '../lib/agent-dir-resolution';
 import {
+  assertBundledNodeTarget,
+  assertBundledNodeVersion,
   minimumNodeVersionFromEngine,
   probeBackendNodeTarget,
   resolveCompatibleNodePath,
-  resolveNodePath,
+  resolveStartupNodePath,
   type CommandExecutor,
 } from '../lib/runtime-resolution';
 import { resolveGenerationPiRuntime, type GenerationPiRuntimeDescriptor } from '../lib/pi-runtime-resolution';
@@ -168,20 +170,27 @@ async function resolveDependencies(
       );
   const { nodeEngine } = validateSdk(candidateSdkPath);
 
+  let nodeSelection: Awaited<ReturnType<typeof resolveStartupNodePath>>;
   let nodePath: string;
   try {
-    const configuredNodePath = options.dependencies?.nodePath
-      ?? options.env.PI_NODE_PATH?.trim()
-      ?? process.execPath;
+    nodeSelection = await resolveStartupNodePath({
+      configuredPath: options.dependencies?.nodePath,
+      env: { ...options.env, PI_NODE_PATH: options.env.PI_NODE_PATH?.trim() },
+      runtimeOutDir: runtimeOutputDirectory,
+      legacyDefaultPath: process.execPath,
+    });
+    // Preserve the selected output as authority; startup never re-resolves a
+    // managed runtime generation to find the bundled payload.
+    await assertBundledNodeVersion(nodeSelection, { exec: options.exec, env: options.env });
     const minimumVersion = minimumNodeVersionFromEngine(nodeEngine);
     nodePath = minimumVersion
       ? await resolveCompatibleNodePath({
-          configuredPath: configuredNodePath,
+          ...(nodeSelection.source === 'path' ? {} : { configuredPath: nodeSelection.nodePath }),
           env: options.env,
           exec: options.exec,
           minimumVersion,
         })
-      : resolveNodePath({ configuredPath: configuredNodePath, env: options.env });
+      : nodeSelection.nodePath;
     // Bind probing and spawning to the same executable even when the backend
     // later changes cwd to the user's workspace.
     nodePath = path.resolve(nodePath);
@@ -195,6 +204,7 @@ async function resolveDependencies(
     : undefined;
   try {
     const target = await probeBackendNodeTarget(nodePath, { exec: options.exec, env: options.env });
+    assertBundledNodeTarget(nodeSelection, target);
     if (!workspaceRoot) {
       sourceArtifactDescriptor = await resolveGenerationPiRuntime({
         runtimeOutDir: runtimeOutputDirectory,

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants, createReadStream, read } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { pipeline } from 'node:stream/promises';
@@ -10,6 +11,7 @@ import { verifyPiRuntimeArtifact } from '../../../lib/pi-runtime/artifact.mjs';
 import { verifyManagedIntegrationQualification } from '../managed-qualification-receipt.mjs';
 import { verifyBundledManagedOutput } from '../../build/bundled-managed-resources.mjs';
 import { verifyBundledExtensionOutput } from '../../build/bundled-extension-verification.mjs';
+import { validateNodeRuntimePayload } from '../../build/node-runtime-payload.mjs';
 import { BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../lib/managed-packages/bundled-resources.mjs';
 
 /** Fingerprint one ordinary file without following a final-component symlink. */
@@ -214,7 +216,10 @@ export async function extractCandidate(file, destination) {
 }
 
 /** Verify the extracted extension and return only its release identity. */
-export async function verifyCandidateIdentity(destination, { managedIntegration, expectedRuntimeIdentity, expectedPlaywrightRuntimeIdentity } = {}, deps = {}) {
+export async function verifyCandidateIdentity(destination, {
+  managedIntegration, expectedRuntimeIdentity, expectedPlaywrightRuntimeIdentity,
+  expectedNodeRuntimeIdentity, repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url)),
+} = {}, deps = {}) {
   const pkg = JSON.parse(await readFile(path.join(destination, 'package.json'), 'utf8'));
   if (pkg.publisher !== 'pie' || pkg.name !== 'pie' || pkg.main !== './runtime/bootstrap.cjs'
     || typeof pkg.version !== 'string' || !pkg.version.trim()) throw new Error('Invalid candidate package identity');
@@ -226,6 +231,28 @@ export async function verifyCandidateIdentity(destination, { managedIntegration,
   const runtime = await (deps.verifyPiRuntimeArtifact ?? verifyPiRuntimeArtifact)(artifactDir);
   if (expectedRuntimeIdentity !== undefined && runtime.identity !== expectedRuntimeIdentity) {
     throw new Error('Candidate runtime identity does not match the expected runtime identity');
+  }
+  const nodeRuntimeDirectory = path.join(outDir, 'resources/node-runtime');
+  let nodeRuntime;
+  if (expectedNodeRuntimeIdentity !== undefined) {
+    nodeRuntime = await (deps.validateNodeRuntimePayload ?? validateNodeRuntimePayload)({
+      directory: nodeRuntimeDirectory, repositoryRoot,
+    });
+    if (nodeRuntime.identity !== expectedNodeRuntimeIdentity) {
+      throw new Error('Candidate Node runtime identity does not match the expected Node runtime identity');
+    }
+    const nodeTarget = nodeRuntime.manifest.target;
+    const piTarget = runtime.manifest.target;
+    if (nodeTarget.platform !== piTarget.platform || nodeTarget.arch !== piTarget.arch || nodeTarget.nodeAbi !== piTarget.nodeAbi) {
+      throw new Error('Candidate Node runtime target does not match the selected Pi SDK target');
+    }
+  } else {
+    try {
+      await lstat(nodeRuntimeDirectory);
+      throw new Error('Candidate Node runtime payload requires an explicit expected Node runtime identity');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
   let managedPresent = false;
   try { await lstat(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH)); managedPresent = true; }
@@ -255,10 +282,11 @@ export async function verifyCandidateIdentity(destination, { managedIntegration,
     };
   } else if (managedPresent) {
     throw new Error('Managed candidate payload requires explicit stageRoot and receiptPath');
-  } else if (expectedPlaywrightRuntimeIdentity !== undefined) {
+  } else if (expectedPlaywrightRuntimeIdentity !== undefined || nodeRuntime !== undefined) {
     await verifySelectedBundledExtension();
   }
   return { extensionId: 'pie.pie', version: pkg.version, target: runtimeTargetPlatform(runtime.manifest.target), buildId, piRuntimeIdentity: runtime.identity,
     ...(expectedPlaywrightRuntimeIdentity === undefined ? {} : { playwrightRuntimeIdentity: expectedPlaywrightRuntimeIdentity }),
+    ...(nodeRuntime === undefined ? {} : { nodeRuntimeIdentity: nodeRuntime.identity }),
     ...(managedBindings ? { managedIntegration: managedBindings } : {}) };
 }

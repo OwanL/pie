@@ -102,6 +102,8 @@ function makeBuildFixture(t) {
   mkdirSync(outputs, { recursive: true });
 
   write(repo, 'package.json', '{"type":"module"}\n');
+  write(repo, '.node-version', '24.16.0\n');
+  write(repo, '.prototools', 'node = "24.16.0"\npnpm = "10.34.4"\n');
   write(owner, 'package.json', JSON.stringify({
     name: 'pie-build-artifact-fixture',
     version: '1.0.0',
@@ -127,6 +129,11 @@ function makeBuildFixture(t) {
   }, null, 2) + '\n');
   write(repo, 'source.ts', "import { candidateOnly } from '@earendil-works/pi-coding-agent';\nconst selected: 'candidate-sdk' = candidateOnly();\nexport { selected };\n");
   write(repo, 'scripts/build/build.mjs', readFileSync(path.join(repositoryRoot, 'scripts/build/build.mjs')));
+  write(repo, 'scripts/build/node-runtime-payload.mjs', readFileSync(path.join(repositoryRoot, 'scripts/build/node-runtime-payload.mjs')));
+  write(repo, 'scripts/install/toolchain.mjs', readFileSync(path.join(repositoryRoot, 'scripts/install/toolchain.mjs')));
+  write(repo, 'scripts/lib/sdk-version.mjs', readFileSync(path.join(repositoryRoot, 'scripts/lib/sdk-version.mjs')));
+  write(repo, 'scripts/lib/process-watchdog.mjs', readFileSync(path.join(repositoryRoot, 'scripts/lib/process-watchdog.mjs')));
+  write(repo, 'lib/node-runtime/manifest.mjs', readFileSync(path.join(repositoryRoot, 'lib/node-runtime/manifest.mjs')));
   installBuildResources(repo);
   write(repo, 'scripts/build/publication.mjs', `
     export async function findCompatibleInstalledExtensionDir() { throw new Error('unexpected installed-extension lookup'); }

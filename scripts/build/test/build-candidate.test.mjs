@@ -1,11 +1,72 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { buildCandidate, parseCandidateArgs } from '../build-candidate.mjs';
 import { stageExtensionForPackaging } from '../../lib/delivery-package.mjs';
+import { verifyCandidateIdentity } from '../../verification/lib/vsix-candidate.mjs';
+import { BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../lib/managed-packages/bundled-resources.mjs';
+import { computeNodeRuntimePayloadIdentity, NODE_RUNTIME_TARGET } from '../../../lib/node-runtime/manifest.mjs';
+import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, toolRuntimeManifest } from '../tool-runtime-assets.mjs';
+
+const sourceRoot = fileURLToPath(new URL('../../../', import.meta.url));
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  return value;
+}
+
+async function writePreparedNodePayload(directory) {
+  await mkdir(directory, { recursive: true });
+  const nodeVersion = (await readFile(path.join(sourceRoot, '.node-version'), 'utf8')).trim();
+  const files = [
+    { relativePath: 'LICENSE', bytes: Buffer.from('Node fixture license\n') },
+    { relativePath: 'node.exe', bytes: Buffer.from('Node fixture executable\n') },
+  ];
+  const inventory = files.map(({ relativePath, bytes }) => ({
+    relativePath, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+  }));
+  for (const { relativePath, bytes } of files) await writeFile(path.join(directory, relativePath), bytes);
+  const withoutIdentity = {
+    schemaVersion: 1, kind: 'node-runtime', nodeVersion, target: NODE_RUNTIME_TARGET,
+    executable: 'node.exe', inventory,
+    provenance: {
+      kind: 'local-toolchain',
+      archiveUrl: `https://nodejs.org/download/release/v${nodeVersion}/node-v${nodeVersion}-win-x64.zip`,
+      archiveSha256: 'a'.repeat(64),
+    },
+  };
+  const manifest = { ...withoutIdentity, payloadIdentity: computeNodeRuntimePayloadIdentity(withoutIdentity) };
+  await writeFile(path.join(directory, 'manifest.json'), `${JSON.stringify(canonicalize(manifest), null, 2)}\n`);
+  return { directory, identity: manifest.payloadIdentity };
+}
+
+async function writeCandidateStage(stageRoot, nodeRuntimeDirectory, playwrightRuntimeIdentity) {
+  const buildId = 'a'.repeat(20);
+  await mkdir(path.join(stageRoot, 'out/webview/panel'), { recursive: true });
+  await writeFile(path.join(stageRoot, 'package.json'), JSON.stringify({ publisher: 'pie', name: 'pie', version: '1.0.0', main: './runtime/bootstrap.cjs' }));
+  for (const file of ['out/pie-build-id.txt', 'out/webview/panel/pie-build-id.txt']) await writeFile(path.join(stageRoot, file), buildId);
+  const runtimeRoot = path.join(stageRoot, 'out', TOOL_RUNTIME_DIRECTORY);
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(path.join(runtimeRoot, 'manifest.json'), JSON.stringify(toolRuntimeManifest({ playwrightRuntimeIdentity })));
+  await Promise.all(TOOL_RUNTIME_FILES.map(async file => {
+    const asset = path.join(runtimeRoot, file);
+    await mkdir(path.dirname(asset), { recursive: true });
+    await writeFile(asset, 'verified tool runtime asset');
+  }));
+  const extensions = Array.from({ length: 12 }, (_, index) => ({ id: `fixture-${index}`, entry: `fixture-${index}.js` }));
+  const resources = path.join(stageRoot, 'out/resources');
+  await mkdir(resources, { recursive: true });
+  await writeFile(path.join(resources, 'bundled-extensions-build-id.txt'), buildId);
+  await writeFile(path.join(resources, 'bundled-extensions.json'), JSON.stringify({ version: 1, extensions }));
+  await Promise.all(extensions.map(item => writeFile(path.join(stageRoot, 'out', item.entry), 'module.exports = {};')));
+  await mkdir(path.join(stageRoot, 'out', BUNDLED_MANAGED_ROOT_RELATIVE_PATH), { recursive: true });
+  await cp(nodeRuntimeDirectory, path.join(resources, 'node-runtime'), { recursive: true });
+}
 
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'pie-candidate-test-')));
@@ -39,18 +100,28 @@ async function absent(file) {
   await assert.rejects(lstat(file), { code: 'ENOENT' });
 }
 
+test('VSIX package allowlist retains the separate prepared Node runtime resource tree', async () => {
+  const ignore = await readFile(path.join(sourceRoot, 'application/hosts/vscode/.vscodeignore'), 'utf8');
+  assert.match(ignore, /^!out\/resources\/node-runtime\/\*\*$/mu);
+  assert.doesNotMatch(ignore, /^!out\/resources\/tool-runtimes\/node-runtime\/\*\*$/mu,
+    'Node runtime payload is not a tool-runtime role');
+});
+
 test('candidate arguments require explicit absolute VSIX output and reject ambiguous options', () => {
   const output = path.resolve('candidate.vsix');
   const artifactDir = path.resolve('runtime-fixture');
+  const nodeRuntimeDir = path.resolve('prepared-node-runtime');
   const playwrightPayloadDir = path.resolve('prepared-playwright-payload');
   const playwrightRuntimeDir = path.resolve('prepared-playwright-runtime');
   assert.deepEqual(parseCandidateArgs(['--output', output]), { output });
   assert.deepEqual(parseCandidateArgs([`--output=${output}`, `--pi-runtime=${artifactDir}`]), { output, artifactDir });
+  assert.deepEqual(parseCandidateArgs(['--output', output, '--node-runtime', nodeRuntimeDir]), { output, nodeRuntimeDir });
   assert.deepEqual(parseCandidateArgs(['--output', output, '--playwright-payload', playwrightPayloadDir]), { output, playwrightPayloadDir });
   assert.deepEqual(parseCandidateArgs(['--output', output, '--playwright-runtime', playwrightRuntimeDir]), { output, playwrightRuntimeDir });
   assert.deepEqual(parseCandidateArgs(['--help']), { help: true });
   for (const args of [[], ['--output', 'relative.vsix'], ['--output', path.resolve('bad.zip')],
     ['--output'], ['--output', output, '--output', output], ['--output', output, '--pi-runtime', 'relative'],
+    ['--output', output, '--node-runtime', 'relative'], ['--output', output, '--node-runtime', nodeRuntimeDir, '--node-runtime', nodeRuntimeDir],
     ['--output', output, '--playwright-payload', 'relative'], ['--output', output, '--playwright-payload', playwrightPayloadDir, '--playwright-payload', playwrightPayloadDir],
     ['--output', output, '--playwright-runtime', 'relative'], ['--output', output, '--playwright-runtime', playwrightRuntimeDir, '--playwright-runtime', playwrightRuntimeDir],
     ['--output', output, '--playwright-runtime', playwrightRuntimeDir, '--playwright-payload', playwrightPayloadDir],
@@ -251,6 +322,105 @@ for (const mismatch of ['stage', 'extracted']) {
     await absent(`${f.output}.evidence.json`);
   });
 }
+
+test('candidate forwards and revalidates the selected Node payload at source, staged and extracted paths', async t => {
+  const f = await fixture(t);
+  const artifactDir = path.join(f.base, 'runtime');
+  const nodeRuntimeDir = path.join(f.base, 'prepared-node-runtime');
+  const nodeRuntimeIdentity = '9'.repeat(64);
+  const target = { platform: 'win32', arch: 'x64', nodeAbi: '137' };
+  f.deps.verifyRuntime = async artifact => {
+    f.calls.push(['verify-runtime', artifact]);
+    return { identity: 'fixture-runtime', manifest: { target } };
+  };
+  f.deps.validateNodeRuntimePayload = async selection => {
+    f.calls.push(['validate-node-source', selection]);
+    return { directory: path.resolve(selection.directory), identity: nodeRuntimeIdentity, manifest: { target } };
+  };
+  f.deps.validateNodeRuntimeOutput = async selection => {
+    f.calls.push(['validate-node-output', selection]);
+    return { directory: path.resolve(selection.directory), identity: nodeRuntimeIdentity, manifest: { target } };
+  };
+  f.deps.verifyIdentity = async (stage, context) => {
+    f.calls.push(['identity', stage, context]);
+    return { ...f.identity, nodeRuntimeIdentity };
+  };
+  f.deps.verifyCandidate = async (candidate, extracted, context) => {
+    f.calls.push(['verify-candidate', candidate, extracted, context]);
+    return { ...f.identity, nodeRuntimeIdentity };
+  };
+
+  const result = await buildCandidate({ output: f.output, artifactDir, nodeRuntimeDir }, undefined, f.deps);
+  const delivery = f.calls.find(call => call[0] === 'delivery-build')[1];
+  assert.deepEqual(delivery.args.slice(-2), ['--node-runtime', nodeRuntimeDir]);
+  const context = {
+    managedIntegration: undefined, expectedRuntimeIdentity: 'fixture-runtime',
+    expectedNodeRuntimeIdentity: nodeRuntimeIdentity, repositoryRoot: f.root,
+  };
+  assert.deepEqual(f.calls.filter(call => call[0] === 'identity').map(call => call[2]), [context]);
+  assert.deepEqual(f.calls.filter(call => call[0] === 'verify-candidate').map(call => call[3]), [context]);
+  assert.deepEqual(f.calls.filter(call => call[0] === 'validate-node-output').map(call => call[1].directory), [
+    path.join(f.scratch, 'stage/out/resources/node-runtime'),
+    path.join(f.scratch, 'extracted/out/resources/node-runtime'),
+  ]);
+  assert.equal(f.calls.filter(call => call[0] === 'validate-node-source').length, 3);
+  const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
+  assert.equal(evidence.nodeRuntimeIdentity, nodeRuntimeIdentity);
+  assert.equal(evidence.build.nodeRuntimeIdentity, nodeRuntimeIdentity);
+});
+
+test('candidate pipeline exercises the real verifier with Node, v2 Playwright and managed identities at both stages', async t => {
+  const f = await fixture(t);
+  const nodeSource = path.join(f.base, 'prepared-node-runtime');
+  const selectedNode = await writePreparedNodePayload(nodeSource);
+  const nodeRuntimeIdentity = selectedNode.identity;
+  const playwrightRuntimeIdentity = '8'.repeat(64);
+  const runtime = { identity: '7'.repeat(64), manifest: { target: NODE_RUNTIME_TARGET } };
+  const managedIntegration = { stageRoot: path.join(f.base, 'managed-stage'), receiptPath: path.join(f.base, 'managed-proof.json') };
+  const qualification = {
+    runtime,
+    stage: { root: managedIntegration.stageRoot, receipt: { inventorySha256: '6'.repeat(64), inventory: [] } },
+    qualificationRecipeSha256: '5'.repeat(64),
+  };
+  const verifierDependencies = {
+    verifyPiRuntimeArtifact: async () => runtime,
+    verifyManagedIntegrationQualification: async () => qualification,
+    verifyBundledManagedOutput: async () => {},
+  };
+  const verifierContexts = [];
+  f.deps.root = sourceRoot;
+  f.deps.verifyRuntime = async () => runtime;
+  f.deps.verifyIdentity = undefined;
+  f.deps.validatePlaywrightRuntimePayload = async selection => ({ directory: selection.directory, identity: playwrightRuntimeIdentity });
+  f.deps.verifyPlaywrightRuntimeOutput = async () => ({ identity: playwrightRuntimeIdentity });
+  f.deps.stagePackage = async (_root, _build, stageRoot) => writeCandidateStage(stageRoot, nodeSource, playwrightRuntimeIdentity);
+  f.deps.verifyCandidateIdentity = async (destination, context) => {
+    verifierContexts.push(context);
+    return verifyCandidateIdentity(destination, context, verifierDependencies);
+  };
+  f.deps.verifyCandidate = async (_candidate, destination, context) => {
+    verifierContexts.push(context);
+    await cp(path.join(f.scratch, 'stage'), destination, { recursive: true });
+    const identity = await verifyCandidateIdentity(destination, context, verifierDependencies);
+    return identity;
+  };
+
+  const result = await buildCandidate({
+    output: f.output, artifactDir: path.join(f.base, 'pi-runtime'), nodeRuntimeDir: nodeSource,
+    playwrightRuntimeDir: path.join(f.base, 'playwright-runtime'), managedIntegration,
+  }, undefined, f.deps);
+  const expectedContext = {
+    managedIntegration, expectedRuntimeIdentity: runtime.identity,
+    expectedNodeRuntimeIdentity: nodeRuntimeIdentity, repositoryRoot: path.resolve(sourceRoot),
+    expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity,
+  };
+  assert.deepEqual(verifierContexts, [expectedContext, expectedContext], 'staged and extracted real verifiers receive every selected identity');
+  assert.equal(result.evidence.build.nodeRuntimeIdentity, nodeRuntimeIdentity);
+  assert.equal(result.evidence.build.playwrightRuntimeIdentity, playwrightRuntimeIdentity);
+  assert.deepEqual(result.evidence.build.managedIntegration, {
+    runtimeIdentity: runtime.identity, closureInventorySha256: '6'.repeat(64), qualificationRecipeSha256: '5'.repeat(64),
+  });
+});
 
 test('explicit runtime mismatch stops before packaging or final outputs', async t => {
   const f = await fixture(t);

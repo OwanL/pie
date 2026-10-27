@@ -8,8 +8,10 @@ import { createCommandExecutor } from './command-execution';
 import { resolveAgentDir, type ResolvedAgentDir } from './agent-dir-resolution';
 import { initializeNormalProfile } from './normal-profile-initialization';
 import {
+  assertBundledNodeTarget,
+  assertBundledNodeVersion,
   probeBackendNodeTarget,
-  resolveNodePath,
+  resolveStartupNodePath,
 } from './runtime-resolution';
 import { resolveGenerationPiRuntime } from './pi-runtime-resolution';
 import { resolvePieDevelopmentProfilePaths } from './host-coordinator';
@@ -108,16 +110,21 @@ export function createBackendStartupPlatform(host: BackendStartupHost): BackendS
       // An SDK override is never permission to fall back to production state.
       resolvePieDevelopmentProfilePaths(env);
       const configuredNodePath = host.getSetting<string>('nodePath', 'nodePath');
-      const nodePath = path.resolve(resolveNodePath({
+      const runtimeOutDir = host.getRuntimeOutputDirectory();
+      const selection = await resolveStartupNodePath({
         configuredPath: configuredNodePath,
         env,
-      }));
+        runtimeOutDir,
+      });
+      const nodePath = path.resolve(selection.nodePath);
       const exec = createCommandExecutor();
       const probeStarted = performance.now();
       let probeOutcome: 'success' | 'failure' = 'failure';
       let target: Awaited<ReturnType<typeof probeBackendNodeTarget>>;
       try {
+        await assertBundledNodeVersion(selection, { exec });
         target = await probeBackendNodeTarget(nodePath, { exec });
+        assertBundledNodeTarget(selection, target);
         probeOutcome = 'success';
       } finally {
         finishPreflightTiming('node-target-probe', probeStarted, probeOutcome);
@@ -152,7 +159,7 @@ export function createBackendStartupPlatform(host: BackendStartupHost): BackendS
       let runtime: Awaited<ReturnType<typeof resolveGenerationPiRuntime>>;
       try {
         runtime = await resolveGenerationPiRuntime({
-          runtimeOutDir: host.getRuntimeOutputDirectory(),
+          runtimeOutDir,
           target,
           ...(developmentArtifactDir ? {
             developmentOverride: {

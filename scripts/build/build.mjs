@@ -16,18 +16,20 @@ import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
 import { verifyPiRuntimeArtifact, verifyPiRuntimeRoles } from '../lib/pi-runtime-artifact.mjs';
 import { verifyBundledExtensionOutput } from './bundled-extension-verification.mjs';
 import { copyPreparedPlaywrightHeadlessPayload, copyPreparedPlaywrightRuntimePayload, parsePlaywrightPayloadOption, parsePlaywrightRuntimeOption, resolvePlaywrightHeadlessPayloadExpected, validatePlaywrightRuntimePayload, verifyPlaywrightHeadlessPayloadOutput, verifyPlaywrightRuntimePayloadOutput } from './tool-runtime-assets.mjs';
+import { validateNodeRuntimePayload, parseNodeRuntimeOption } from './node-runtime-payload.mjs';
 import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
 import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
 
 // Ordinary compilation never constructs a release or discovers installed Pie.
 // The legacy immutable lane remains explicitly selected for delivery/publication.
 const lifecycleArgs = process.argv.slice(2);
-const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir', '--managed-stage', '--managed-qualification-receipt', '--playwright-payload', '--playwright-runtime'].includes(arg)
-  || ['--pi-runtime=', '--output-dir=', '--managed-stage=', '--managed-qualification-receipt=', '--playwright-payload=', '--playwright-runtime='].some(prefix => arg.startsWith(prefix)));
+const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir', '--managed-stage', '--managed-qualification-receipt', '--playwright-payload', '--playwright-runtime', '--node-runtime'].includes(arg)
+  || ['--pi-runtime=', '--output-dir=', '--managed-stage=', '--managed-qualification-receipt=', '--playwright-payload=', '--playwright-runtime=', '--node-runtime='].some(prefix => arg.startsWith(prefix)));
 if (!deliverySelected) {
   // A private runtime selection is never inherited into mutable development output.
   process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY = '';
   process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME = '';
+  process.env.PIE_BUILD_NODE_RUNTIME_IDENTITY = '';
   const { buildDevelopment } = await import('./build-development.mjs');
   await buildDevelopment(lifecycleArgs);
   process.exit(0);
@@ -56,6 +58,7 @@ const requestedPiRuntime = piRuntimeOption === '--pi-runtime'
   : piRuntimeOption?.slice('--pi-runtime='.length);
 const requestedPlaywrightPayload = parsePlaywrightPayloadOption(cliArgs, { requireDelivery: true });
 const requestedPlaywrightRuntime = parsePlaywrightRuntimeOption(cliArgs, { requireDelivery: true });
+const requestedNodeRuntime = parseNodeRuntimeOption(cliArgs, { requireDelivery: true });
 if (requestedPlaywrightPayload && requestedPlaywrightRuntime) {
   throw new Error('--playwright-payload and --playwright-runtime are mutually exclusive.');
 }
@@ -72,6 +75,9 @@ const selectedPlaywrightPayload = requestedPlaywrightPayload
   : undefined;
 const selectedPlaywrightRuntime = requestedPlaywrightRuntime
   ? await validatePlaywrightRuntimePayload({ directory: requestedPlaywrightRuntime, repositoryRoot })
+  : undefined;
+const selectedNodeRuntime = requestedNodeRuntime
+  ? await validateNodeRuntimePayload({ directory: requestedNodeRuntime, repositoryRoot })
   : undefined;
 const managedResources = managedSelection ? await import('./bundled-managed-resources.mjs') : undefined;
 const skipTypecheck = cliArgs.includes('--skip-typecheck');
@@ -284,7 +290,38 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
     });
     if (copied.identity !== selectedPlaywrightRuntime.identity) throw new Error('Copied Playwright runtime does not match the selected prepared runtime.');
   }
+  if (selectedNodeRuntime) {
+    const copied = await validateNodeRuntimePayload({
+      directory: path.join(buildDir, 'resources/node-runtime'), repositoryRoot,
+    });
+    if (copied.identity !== selectedNodeRuntime.identity) throw new Error('Copied Node runtime does not match the selected prepared runtime.');
+  }
   console.log(`[build] Coordinated host/webview/bundled-extensions identity ${hostBuildId}`);
+}
+
+async function copyPreparedNodeRuntimePayload() {
+  if (!selectedNodeRuntime) return;
+  const sourceBeforeCopy = await validateNodeRuntimePayload({ directory: selectedNodeRuntime.directory, repositoryRoot });
+  if (sourceBeforeCopy.identity !== selectedNodeRuntime.identity) throw new Error('Prepared Node runtime identity changed before materialization.');
+  const resources = path.join(outDir, 'resources');
+  const resourcesInfo = await lstat(resources);
+  if (resourcesInfo.isSymbolicLink() || !resourcesInfo.isDirectory()) throw new Error('Node runtime output owner must be an emitted regular resources directory.');
+  const destination = path.join(resources, 'node-runtime');
+  let existing;
+  try { existing = await lstat(destination); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (existing) throw new Error(`Refusing to overwrite Node runtime output: ${destination}`);
+  await mkdir(destination);
+  for (const name of ['LICENSE', 'manifest.json', 'node.exe']) {
+    await copyFile(path.join(sourceBeforeCopy.directory, name), path.join(destination, name));
+  }
+  const [sourceAfterCopy, copied] = await Promise.all([
+    validateNodeRuntimePayload({ directory: selectedNodeRuntime.directory, repositoryRoot }),
+    validateNodeRuntimePayload({ directory: destination, repositoryRoot }),
+  ]);
+  if (sourceAfterCopy.identity !== sourceBeforeCopy.identity || copied.identity !== selectedNodeRuntime.identity) {
+    throw new Error('Prepared Node runtime changed while it was copied.');
+  }
 }
 
 async function copyArtifactEntries(source, destination) {
@@ -479,6 +516,7 @@ function spawnLocalCli(cli, args, label) {
       PIE_BUILD_MANAGED_IDENTITY: managedBuildIdentity ?? '',
       PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY: selectedPlaywrightRuntime?.identity ?? selectedPlaywrightPayload?.identity ?? '',
       PIE_BUILD_PLAYWRIGHT_RUNTIME: selectedPlaywrightRuntime ? '1' : '',
+      PIE_BUILD_NODE_RUNTIME_IDENTITY: selectedNodeRuntime?.identity ?? '',
     },
     stdio: 'inherit',
     windowsHide: true,
@@ -691,6 +729,9 @@ async function buildOnce() {
         expectedIdentity: selectedPlaywrightRuntime.identity,
       }));
   }
+  if (selectedNodeRuntime) {
+    await withBuildTiming('prepared Node runtime copy and verification', () => copyPreparedNodeRuntimePayload());
+  }
   if (managedSelection) {
     const emitted = await withBuildTiming('qualified managed resource emission', () =>
       managedResources.emitBundledManagedResources({
@@ -817,11 +858,17 @@ try {
       try {
         await withPiRuntime({ artifactDir: requestedPiRuntime, signal: cancellation.signal }, async (context) => {
           selectedPiRuntime = context;
-          if (selectedPlaywrightPayload || selectedPlaywrightRuntime) {
+          if (selectedPlaywrightPayload || selectedPlaywrightRuntime || selectedNodeRuntime) {
             const runtime = await verifyPiRuntimeArtifact(context.artifactDir);
-            if (runtime.identity !== context.identity) throw new Error('Selected Pi runtime changed before Playwright payload build selection.');
-            if (runtime.manifest.target.platform !== 'win32' || runtime.manifest.target.arch !== 'x64') {
+            if (runtime.identity !== context.identity) throw new Error('Selected Pi runtime changed before prepared payload build selection.');
+            if ((selectedPlaywrightPayload || selectedPlaywrightRuntime)
+              && (runtime.manifest.target.platform !== 'win32' || runtime.manifest.target.arch !== 'x64')) {
               throw new Error('A prepared Playwright payload is supported only for an explicitly selected win32/x64 build target.');
+            }
+            if (selectedNodeRuntime && (selectedNodeRuntime.manifest.target.platform !== runtime.manifest.target.platform
+              || selectedNodeRuntime.manifest.target.arch !== runtime.manifest.target.arch
+              || selectedNodeRuntime.manifest.target.nodeAbi !== runtime.manifest.target.nodeAbi)) {
+              throw new Error('Prepared Node runtime target does not match the selected Pi SDK target.');
             }
           }
           selectedTooling = undefined;
@@ -846,6 +893,12 @@ try {
               const canonicalPayload = await canonicalPath(selectedPlaywrightRuntime.directory);
               if (containsPath(canonicalPayload, canonicalOutput) || containsPath(canonicalOutput, canonicalPayload)) {
                 throw new Error('--output-dir must not overlap the prepared Playwright runtime payload.');
+              }
+            }
+            if (selectedNodeRuntime) {
+              const canonicalPayload = await canonicalPath(selectedNodeRuntime.directory);
+              if (containsPath(canonicalPayload, canonicalOutput) || containsPath(canonicalOutput, canonicalPayload)) {
+                throw new Error('--output-dir must not overlap the prepared Node runtime payload.');
               }
             }
             managedQualification = undefined;

@@ -46,6 +46,8 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   mkdirSync(controls);
   mkdirSync(installed);
   write(repo, 'package.json', '{"type":"module"}\n');
+  write(repo, '.node-version', '24.16.0\n');
+  write(repo, '.prototools', 'node = "24.16.0"\npnpm = "10.34.4"\n');
   write(owner, 'package.json', '{"name":"fixture","publisher":"fixture","version":"1.0.0"}\n');
   write(owner, 'tsconfig.json', '{"compilerOptions":{}}\n');
   writeFileSync(fingerprintFile, 'source-v1\n');
@@ -84,6 +86,11 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   write(repo, 'scripts/build/fixture-watch.mjs', fakeOutputWatcher());
   write(repo, 'scripts/build/bundled-extension-verification.mjs', readFileSync(path.join(checkout, 'scripts/build/bundled-extension-verification.mjs')));
   write(repo, 'scripts/build/tool-runtime-assets.mjs', readFileSync(path.join(checkout, 'scripts/build/tool-runtime-assets.mjs')));
+  write(repo, 'scripts/build/node-runtime-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/node-runtime-payload.mjs')));
+  write(repo, 'scripts/install/toolchain.mjs', readFileSync(path.join(checkout, 'scripts/install/toolchain.mjs')));
+  write(repo, 'scripts/lib/sdk-version.mjs', readFileSync(path.join(checkout, 'scripts/lib/sdk-version.mjs')));
+  write(repo, 'scripts/lib/process-watchdog.mjs', readFileSync(path.join(checkout, 'scripts/lib/process-watchdog.mjs')));
+  write(repo, 'lib/node-runtime/manifest.mjs', readFileSync(path.join(checkout, 'lib/node-runtime/manifest.mjs')));
   write(repo, 'scripts/build/playwright-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/playwright-payload.mjs')));
   write(repo, 'scripts/build/playwright-runtime-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/playwright-runtime-payload.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(runtimeContextSource));
