@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { verifyCandidateIdentity } from '../lib/vsix-candidate.mjs';
+import { BUNDLED_MANAGED_ROOT_RELATIVE_PATH } from '../../../lib/managed-packages/bundled-resources.mjs';
+import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, toolRuntimeManifest } from '../../build/tool-runtime-assets.mjs';
 
 const buildId = 'a'.repeat(20);
 const runtime = { identity: 'b'.repeat(64), manifest: { target: { platform: 'win32', arch: 'x64', nodeAbi: '127' } } };
@@ -49,6 +51,68 @@ test('candidate verifier enforces an explicitly expected full runtime identity',
   const root = await fixture(t);
   assert.equal((await verifyCandidateIdentity(root, { expectedRuntimeIdentity: runtime.identity }, deps)).piRuntimeIdentity, runtime.identity);
   await assert.rejects(verifyCandidateIdentity(root, { expectedRuntimeIdentity: 'c'.repeat(64) }, deps), /expected runtime identity/);
+});
+
+async function preparedV2Candidate(t, label, playwrightRuntimeIdentity) {
+  const root = await fixture(t);
+  const outDir = path.join(root, 'out');
+  await writeFile(path.join(outDir, 'pie-build-id.txt'), buildId);
+  await writeFile(path.join(outDir, 'webview/panel/pie-build-id.txt'), buildId);
+  const runtimeRoot = path.join(outDir, TOOL_RUNTIME_DIRECTORY);
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(path.join(runtimeRoot, 'manifest.json'), JSON.stringify(toolRuntimeManifest({ playwrightRuntimeIdentity })));
+  await Promise.all(TOOL_RUNTIME_FILES.map(async file => {
+    const asset = path.join(runtimeRoot, file);
+    await mkdir(path.dirname(asset), { recursive: true });
+    await writeFile(asset, `verified ${label} asset`);
+  }));
+  const inventory = { version: 1, extensions: Array.from({ length: 12 }, (_, index) => ({ id: `extension-${index}`, entry: `extension-${index}.js` })) };
+  await mkdir(path.join(outDir, 'resources'), { recursive: true });
+  await writeFile(path.join(outDir, 'resources/bundled-extensions-build-id.txt'), buildId);
+  await writeFile(path.join(outDir, 'resources/bundled-extensions.json'), JSON.stringify(inventory));
+  await Promise.all(inventory.extensions.map(item => writeFile(path.join(outDir, item.entry), 'module.exports = {};')));
+  await mkdir(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH), { recursive: true });
+  return root;
+}
+
+test('real bundled verifier accepts selected v2 Playwright manifest in managed staged and extracted candidates', async t => {
+  const playwrightRuntimeIdentity = 'f'.repeat(64);
+  const managedIntegration = { stageRoot: path.join(os.tmpdir(), 'selected-managed-stage'), receiptPath: path.join(os.tmpdir(), 'selected-managed-proof.json') };
+  const qualification = {
+    runtime,
+    stage: { root: managedIntegration.stageRoot, receipt: { inventorySha256: 'c'.repeat(64), inventory: [] } },
+    qualificationRecipeSha256: 'd'.repeat(64),
+  };
+  for (const label of ['staged', 'extracted']) {
+    const root = await preparedV2Candidate(t, label, playwrightRuntimeIdentity);
+    const verifyManaged = {
+      ...deps,
+      verifyManagedIntegrationQualification: async () => qualification,
+      verifyBundledManagedOutput: async () => {},
+    };
+    await assert.rejects(verifyCandidateIdentity(root, { managedIntegration }, verifyManaged), /Invalid code-only tool runtime manifest/);
+    const calls = [];
+    const identity = await verifyCandidateIdentity(root, {
+      managedIntegration, expectedRuntimeIdentity: runtime.identity, expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity,
+    }, {
+      ...deps,
+      verifyManagedIntegrationQualification: async args => {
+        calls.push(['qualification', args]);
+        return qualification;
+      },
+      verifyBundledManagedOutput: async (out, proof) => {
+        calls.push(['managed', out, proof]);
+      },
+    });
+    assert.equal(identity.playwrightRuntimeIdentity, playwrightRuntimeIdentity);
+    assert.deepEqual(identity.managedIntegration, {
+      runtimeIdentity: runtime.identity, closureInventorySha256: 'c'.repeat(64), qualificationRecipeSha256: 'd'.repeat(64),
+    });
+    assert.deepEqual(calls, [
+      ['qualification', { ...managedIntegration, artifactDir: path.join(root, 'out/pi-runtime') }],
+      ['managed', path.join(root, 'out'), qualification],
+    ]);
+  }
 });
 
 test('managed qualification must match selected runtime identity and target before payload validation', async t => {

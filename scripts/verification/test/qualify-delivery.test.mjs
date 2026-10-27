@@ -61,11 +61,22 @@ async function assertNoSuccessEvidence(f) {
 
 test('VSIX parser requires absolute paths, rejects duplicates and runtime combinations', () => {
   const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const playwrightRuntime = path.join(os.tmpdir(), 'prepared-playwright-runtime');
   assert.deepEqual(parseQualificationArgs(['--vsix', vsix]), { vsix });
   assert.deepEqual(parseQualificationArgs([`--vsix=${vsix}`]), { vsix });
+  assert.deepEqual(parseQualificationArgs(['--vsix', vsix, '--playwright-runtime', playwrightRuntime]), {
+    vsix, playwrightRuntimeDir: playwrightRuntime,
+  });
+  assert.deepEqual(parseQualificationArgs([`--playwright-runtime=${playwrightRuntime}`, `--vsix=${vsix}`]), {
+    vsix, playwrightRuntimeDir: playwrightRuntime,
+  });
   for (const args of [['--vsix'], ['--vsix='], ['--vsix', 'relative.vsix'],
     ['--vsix', vsix, `--vsix=${vsix}`], ['--vsix', vsix, '--pi-runtime', os.tmpdir()],
-    ['--pi-runtime', os.tmpdir(), '--vsix', vsix]]) assert.throws(() => parseQualificationArgs(args));
+    ['--pi-runtime', os.tmpdir(), '--vsix', vsix], ['--playwright-runtime', playwrightRuntime],
+    ['--vsix', vsix, '--playwright-runtime'], ['--vsix', vsix, '--playwright-runtime', 'relative'],
+    ['--vsix', vsix, '--playwright-runtime', playwrightRuntime, '--playwright-runtime', playwrightRuntime]]) {
+    assert.throws(() => parseQualificationArgs(args));
+  }
 });
 
 test('exact candidate runs only delivered hosts and retains identity/fingerprint evidence', async t => {
@@ -84,6 +95,51 @@ test('exact candidate runs only delivered hosts and retains identity/fingerprint
   assert.deepEqual(JSON.parse(await readFile(result.evidencePath, 'utf8')), { candidate: result.candidate, packageRoot: f.packageRoot, qualification: 'passed: private standalone and mocked VS Code adapters plus headless browser first paint', installed: false, published: false });
   assert.equal(f.events.includes('remove'), false);
   assert.ok(f.events.some(event => event.includes(`RETAINED ${f.packageRoot}`)));
+});
+
+test('exact VSIX validates selected Playwright identity and extracted bytes, recording only verified identity', async t => {
+  const vsix = path.join(os.tmpdir(), 'candidate.vsix');
+  const playwrightRuntimeDir = path.join(os.tmpdir(), 'prepared-playwright-runtime');
+  const playwrightRuntimeIdentity = 'f'.repeat(64);
+  const managedIntegration = { stageRoot: path.join(os.tmpdir(), 'managed-stage'), receiptPath: path.join(os.tmpdir(), 'managed-proof.json') };
+  const validations = [];
+  const outputChecks = [];
+  const f = await candidateFixture(t, {
+    validatePlaywrightRuntimePayload: async selection => {
+      validations.push(selection);
+      return { directory: selection.directory, identity: playwrightRuntimeIdentity };
+    },
+    verifyCandidateIdentity: async (destination, selection) => {
+      assert.equal(destination, f.packageRoot);
+      assert.deepEqual(selection, { managedIntegration, expectedPlaywrightRuntimeIdentity: playwrightRuntimeIdentity });
+      return { ...candidateIdentity, playwrightRuntimeIdentity, managedIntegration: { verified: true } };
+    },
+    verifyPlaywrightRuntimePayloadOutput: async (out, selection) => {
+      outputChecks.push({ out, selection });
+      return { identity: playwrightRuntimeIdentity };
+    },
+    qualifyRegistration: async selection => {
+      assert.equal(selection.candidateRoot, f.packageRoot);
+      assert.deepEqual(selection.managedIntegration, managedIntegration);
+      assert.equal(selection.expectedPlaywrightRuntimeIdentity, playwrightRuntimeIdentity);
+      return { evidencePath: 'registration-evidence' };
+    },
+  });
+  const result = await qualifyDelivery({ vsix, playwrightRuntimeDir, managedIntegration }, undefined, f.dependencies);
+  assert.deepEqual(validations, [
+    { directory: playwrightRuntimeDir, repositoryRoot: root },
+    { directory: playwrightRuntimeDir, repositoryRoot: root },
+  ]);
+  assert.deepEqual(outputChecks, [{
+    out: path.join(f.packageRoot, 'out'),
+    selection: { repositoryRoot: root, expectedIdentity: playwrightRuntimeIdentity },
+  }]);
+  assert.equal(result.candidate.playwrightRuntimeIdentity, playwrightRuntimeIdentity);
+  const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
+  assert.equal(evidence.candidate.playwrightRuntimeIdentity, playwrightRuntimeIdentity);
+  assert.equal(Object.hasOwn(evidence, 'readiness'), false);
+  assert.deepEqual(f.stages.map(item => item.stage.name), ['delivered-hosts']);
+  assert.equal(f.events.some(event => event.startsWith('verify:')), false);
 });
 
 test('candidate hash or size mutation rejects without success evidence', async t => {

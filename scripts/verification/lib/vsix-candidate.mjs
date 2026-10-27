@@ -214,7 +214,7 @@ export async function extractCandidate(file, destination) {
 }
 
 /** Verify the extracted extension and return only its release identity. */
-export async function verifyCandidateIdentity(destination, { managedIntegration, expectedRuntimeIdentity } = {}, deps = {}) {
+export async function verifyCandidateIdentity(destination, { managedIntegration, expectedRuntimeIdentity, expectedPlaywrightRuntimeIdentity } = {}, deps = {}) {
   const pkg = JSON.parse(await readFile(path.join(destination, 'package.json'), 'utf8'));
   if (pkg.publisher !== 'pie' || pkg.name !== 'pie' || pkg.main !== './runtime/bootstrap.cjs'
     || typeof pkg.version !== 'string' || !pkg.version.trim()) throw new Error('Invalid candidate package identity');
@@ -231,6 +231,11 @@ export async function verifyCandidateIdentity(destination, { managedIntegration,
   try { await lstat(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH)); managedPresent = true; }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   let managedBindings;
+  const verifyBundledExtension = deps.verifyBundledExtensionOutput ?? verifyBundledExtensionOutput;
+  const verifySelectedBundledExtension = async () => {
+    if (expectedPlaywrightRuntimeIdentity === undefined) await verifyBundledExtension(outDir, buildId);
+    else await verifyBundledExtension(outDir, buildId, { playwrightRuntimeIdentity: expectedPlaywrightRuntimeIdentity });
+  };
   if (managedIntegration !== undefined) {
     if (!managedIntegration || ![managedIntegration.stageRoot, managedIntegration.receiptPath].every(value => typeof value === 'string' && path.isAbsolute(value))) {
       throw new Error('Managed candidate requires explicit absolute stageRoot and receiptPath');
@@ -242,7 +247,7 @@ export async function verifyCandidateIdentity(destination, { managedIntegration,
       throw new Error('Managed qualification runtime identity or target does not match the selected candidate runtime');
     }
     await (deps.verifyBundledManagedOutput ?? verifyBundledManagedOutput)(outDir, qualification);
-    await (deps.verifyBundledExtensionOutput ?? verifyBundledExtensionOutput)(outDir, buildId);
+    await verifySelectedBundledExtension();
     managedBindings = {
       runtimeIdentity: qualification.runtime.identity,
       closureInventorySha256: qualification.stage.receipt.inventorySha256,
@@ -250,7 +255,10 @@ export async function verifyCandidateIdentity(destination, { managedIntegration,
     };
   } else if (managedPresent) {
     throw new Error('Managed candidate payload requires explicit stageRoot and receiptPath');
+  } else if (expectedPlaywrightRuntimeIdentity !== undefined) {
+    await verifySelectedBundledExtension();
   }
   return { extensionId: 'pie.pie', version: pkg.version, target: runtimeTargetPlatform(runtime.manifest.target), buildId, piRuntimeIdentity: runtime.identity,
+    ...(expectedPlaywrightRuntimeIdentity === undefined ? {} : { playwrightRuntimeIdentity: expectedPlaywrightRuntimeIdentity }),
     ...(managedBindings ? { managedIntegration: managedBindings } : {}) };
 }

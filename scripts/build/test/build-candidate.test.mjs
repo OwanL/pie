@@ -191,7 +191,9 @@ test('managed candidate with full Playwright runtime propagates expected SDK ide
     return { ...f.identity };
   };
   const result = await buildCandidate({ output: f.output, artifactDir, playwrightRuntimeDir, managedIntegration }, undefined, f.deps);
-  const expectedContext = { managedIntegration, expectedRuntimeIdentity: 'fixture-runtime' };
+  const expectedContext = {
+    managedIntegration, expectedRuntimeIdentity: 'fixture-runtime', expectedPlaywrightRuntimeIdentity: payloadIdentity,
+  };
   assert.deepEqual(f.calls.find(call => call[0] === 'identity').slice(1), [path.join(f.scratch, 'stage'), expectedContext]);
   assert.deepEqual(f.calls.find(call => call[0] === 'verify-candidate').slice(1), [
     path.join(f.scratch, 'candidate.vsix'), path.join(f.scratch, 'extracted'), expectedContext,
@@ -221,6 +223,10 @@ test('candidate forwards the composite runtime and rechecks source, staged and e
   const validations = f.calls.filter(call => call[0] === 'verify-playwright-runtime-output');
   assert.deepEqual(validations.map(call => call[1]), [path.join(f.scratch, 'stage', 'out'), path.join(f.scratch, 'extracted', 'out')]);
   assert.ok(validations.every(call => call[2].repositoryRoot === f.root && call[2].expectedIdentity === payloadIdentity));
+  const candidateVerifications = f.calls.filter(call => call[0] === 'verify-candidate');
+  assert.deepEqual(candidateVerifications.map(call => call[3]), [
+    { managedIntegration: undefined, expectedPlaywrightRuntimeIdentity: payloadIdentity },
+  ]);
   const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
   assert.equal(evidence.playwrightRuntimeIdentity, payloadIdentity);
   assert.equal(evidence.build.playwrightRuntimeIdentity, payloadIdentity);

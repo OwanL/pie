@@ -14,19 +14,21 @@ import { verificationChildEnv } from './verification-runtime.mjs';
 import { createOwnerRequire } from '../lib/package-resolution.mjs';
 import { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 import { parseManagedIntegrationSelection } from '../lib/managed-integration-selection.mjs';
+import { validatePlaywrightRuntimePayload, verifyPlaywrightRuntimePayloadOutput } from '../build/tool-runtime-assets.mjs';
 export { copyPackageSkeleton } from '../lib/delivery-package.mjs';
 
 import { extractCandidate, fingerprintCandidate, verifyCandidateIdentity, validateCandidateContainer } from './lib/vsix-candidate.mjs';
 import { qualifyDeliveryRegistration } from './lib/delivery-registration.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
-export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nManaged build selection requires explicit --pi-runtime; exact VSIX verifies the extracted runtime by payload identity.\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
+export const HELP = 'Usage: node scripts/verification/qualify-delivery.mjs [--pi-runtime <absolute artifact root> | --vsix <absolute candidate path>] [--playwright-runtime <absolute prepared root>] [--managed-stage <absolute stage> --managed-qualification-receipt <absolute receipt>]\nManaged build selection requires explicit --pi-runtime; exact VSIX verifies the extracted runtime by payload identity.\n--playwright-runtime is supported only with --vsix, where it asserts the selected prepared composite identity and extracted runtime bytes.\nVSIX: qualify the exact packaged candidate without building; retain extraction and qualification evidence.\nBuild and qualify a new private external delivery (both headless adapters + browser).\nDefault: gated Pi compilation, then fresh delivery build. Explicit runtime: verify/reuse, no Pi compilation.\nNo installation, publication, Electron, provider prompts or browser download.';
 
 export function parseQualificationArgs(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) return { help: true };
   const managedIntegration = parseManagedIntegrationSelection(argv);
   let artifactDir;
   let vsix;
+  let playwrightRuntimeDir;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--managed-stage' || arg === '--managed-qualification-receipt') { index += 1; continue; }
@@ -38,6 +40,13 @@ export function parseQualificationArgs(argv) {
       vsix = path.resolve(value);
       continue;
     }
+    if (arg === '--playwright-runtime' || arg.startsWith('--playwright-runtime=')) {
+      if (playwrightRuntimeDir !== undefined) throw new Error('--playwright-runtime may be specified only once.');
+      const value = arg === '--playwright-runtime' ? argv[++index] : arg.slice('--playwright-runtime='.length);
+      if (!value || value.startsWith('--') || !path.isAbsolute(value)) throw new Error('--playwright-runtime requires an absolute prepared directory.');
+      playwrightRuntimeDir = path.resolve(value);
+      continue;
+    }
     if (arg !== '--pi-runtime' && !arg.startsWith('--pi-runtime=')) throw new Error(`Unknown delivery qualification option: ${arg}`);
     if (artifactDir !== undefined) throw new Error('--pi-runtime may be specified only once.');
     const value = arg === '--pi-runtime' ? argv[++index] : arg.slice('--pi-runtime='.length);
@@ -45,8 +54,9 @@ export function parseQualificationArgs(argv) {
     artifactDir = path.resolve(value);
   }
   if (vsix !== undefined && artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
+  if (playwrightRuntimeDir !== undefined && vsix === undefined) throw new Error('--playwright-runtime is supported only with --vsix.');
   if (managedIntegration && vsix === undefined && artifactDir === undefined) throw new Error('Managed build selection requires explicit --pi-runtime.');
-  return { ...(vsix === undefined ? { artifactDir } : { vsix }), ...(managedIntegration ? { managedIntegration } : {}) };
+  return { ...(vsix === undefined ? { artifactDir } : { vsix }), ...(playwrightRuntimeDir === undefined ? {} : { playwrightRuntimeDir }), ...(managedIntegration ? { managedIntegration } : {}) };
 }
 
 // This is command composition, not another build graph or test runner.
@@ -136,8 +146,19 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     }
     if (selection.vsix !== undefined && selection.artifactDir !== undefined) throw new Error('--vsix and --pi-runtime are mutually exclusive.');
     if (selection.vsix !== undefined && !path.isAbsolute(selection.vsix)) throw new Error('--vsix requires an absolute candidate path.');
+    if (selection.playwrightRuntimeDir !== undefined && (!path.isAbsolute(selection.playwrightRuntimeDir) || selection.vsix === undefined)) {
+      throw new Error('--playwright-runtime requires an absolute prepared directory and --vsix.');
+    }
     const fingerprint = selection.vsix === undefined ? undefined
       : await (dependencies.fingerprintCandidate ?? fingerprintCandidate)(selection.vsix);
+    let playwrightRuntime;
+    if (selection.playwrightRuntimeDir !== undefined) {
+      status('playwright-runtime: verifying explicit prepared composite identity');
+      playwrightRuntime = await (dependencies.validatePlaywrightRuntimePayload ?? validatePlaywrightRuntimePayload)({
+        directory: selection.playwrightRuntimeDir, repositoryRoot: root,
+      });
+      signal?.throwIfAborted();
+    }
     // Resolve in the invoking environment, before native tests isolate browser
     // cache roots (LOCALAPPDATA/HOME), and before any expensive compilation.
     let browserExecutable;
@@ -175,8 +196,18 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     if (selection.vsix !== undefined) {
       const container = await (dependencies.extractCandidate ?? extractCandidate)(selection.vsix, packageRoot);
       signal?.throwIfAborted();
-      candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot, { managedIntegration: selection.managedIntegration });
+      candidateIdentity = await (dependencies.verifyCandidateIdentity ?? verifyCandidateIdentity)(packageRoot, {
+        managedIntegration: selection.managedIntegration,
+        ...(playwrightRuntime === undefined ? {} : { expectedPlaywrightRuntimeIdentity: playwrightRuntime.identity }),
+      });
       validateCandidateContainer(container, candidateIdentity);
+      if (playwrightRuntime !== undefined) {
+        const extractedRuntime = await (dependencies.verifyPlaywrightRuntimePayloadOutput ?? verifyPlaywrightRuntimePayloadOutput)(path.join(packageRoot, 'out'), {
+          repositoryRoot: root, expectedIdentity: playwrightRuntime.identity,
+        });
+        if (extractedRuntime.identity !== playwrightRuntime.identity) throw new Error('Extracted Playwright runtime identity does not match the selected prepared runtime.');
+        candidateIdentity = { ...candidateIdentity, playwrightRuntimeIdentity: extractedRuntime.identity };
+      }
     } else {
       await (dependencies.copySkeleton ?? copyPackageSkeleton)(root, packageRoot);
     }
@@ -200,6 +231,7 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
       safeToRemove = false;
       registration = await (dependencies.qualifyRegistration ?? qualifyDeliveryRegistration)({
         candidateRoot: packageRoot, managedIntegration: selection.managedIntegration,
+        ...(playwrightRuntime === undefined ? {} : { expectedPlaywrightRuntimeIdentity: playwrightRuntime.identity }),
         runStage: run, signal,
       });
       signal?.throwIfAborted();
@@ -207,6 +239,12 @@ export async function qualifyDelivery(selection = {}, signal, dependencies = {})
     if (selection.vsix !== undefined) {
       const after = await (dependencies.fingerprintCandidate ?? fingerprintCandidate)(selection.vsix);
       if (after.sha256 !== fingerprint.sha256 || after.size !== fingerprint.size) throw new Error('VSIX candidate changed during qualification; package retained.');
+      if (playwrightRuntime !== undefined) {
+        const selectedAgain = await (dependencies.validatePlaywrightRuntimePayload ?? validatePlaywrightRuntimePayload)({
+          directory: selection.playwrightRuntimeDir, repositoryRoot: root,
+        });
+        if (selectedAgain.identity !== playwrightRuntime.identity) throw new Error('Selected Playwright runtime changed during qualification; package retained.');
+      }
       signal?.throwIfAborted();
       const candidate = { path: selection.vsix, ...fingerprint, ...candidateIdentity };
       const evidencePath = path.join(packageRoot, 'qualification-evidence.json');

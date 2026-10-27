@@ -112,7 +112,7 @@ export async function collectRegistrationOutcome({launch,checks,writePostChecks,
   const report=await readReport(); validateRegistrationReport(report,defaults);
   return {completion,postChecks,report};
 }
-export async function qualifyDeliveryRegistration({candidateRoot,managedIntegration,runStage,signal,shell,hostEnv=process.env}) {
+export async function qualifyDeliveryRegistration({candidateRoot,managedIntegration,expectedPlaywrightRuntimeIdentity,runStage,signal,shell,hostEnv=process.env}) {
   assert.equal(process.platform,'win32','registration qualification currently requires Windows x64'); assert.equal(process.arch,'x64');
   assert.equal(typeof runStage,'function','canonical stage runner required');
   signal?.throwIfAborted();
@@ -120,7 +120,10 @@ export async function qualifyDeliveryRegistration({candidateRoot,managedIntegrat
   const stageRoot=await fs.realpath(path.join(candidateRoot,'out')),runtimeRoot=await fs.realpath(path.join(stageRoot,'pi-runtime'));
   const preparedStageRoot=await fs.realpath(managedIntegration.stageRoot),receiptPath=await fs.realpath(managedIntegration.receiptPath);
   const selection={stageRoot:preparedStageRoot,receiptPath};
-  const verify=()=>verifyCandidateIdentity(candidateRoot,{managedIntegration:selection});
+  const verify=()=>verifyCandidateIdentity(candidateRoot,{
+    managedIntegration:selection,
+    ...(expectedPlaywrightRuntimeIdentity===undefined?{}:{expectedPlaywrightRuntimeIdentity}),
+  });
   const identity=await verify();
   const q=await verifyManagedIntegrationQualification({...selection,artifactDir:runtimeRoot});
   const managed=verifyBundledManagedOutput(stageRoot,q);

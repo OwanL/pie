@@ -129,6 +129,7 @@ export async function buildCandidate(selection, signal, deps = {}) {
   const identityContext = {
     managedIntegration: selection.managedIntegration,
     ...(runtime === undefined ? {} : { expectedRuntimeIdentity: runtime.identity }),
+    ...(playwrightRuntime === undefined ? {} : { expectedPlaywrightRuntimeIdentity: playwrightRuntime.identity }),
   };
   let identity = await (deps.verifyIdentity ?? verifyCandidateIdentity)(stageRoot, identityContext);
   if (playwrightPayload) {
