@@ -175,6 +175,9 @@ if (require.main === module) {
       };
       fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
       fs.mkdirSync(context.storageUri.fsPath, { recursive: true });
+      if (process.env.PIE_DELIVERED_HOST_NODE_SELECTION === 'bundled') {
+        await vscode.workspace.getConfiguration('pie').update('nodePath', undefined);
+      }
       const activation = runtime.activate(context);
       const activationPromise = !!activation && typeof activation.then === 'function';
       try {
@@ -188,6 +191,7 @@ if (require.main === module) {
         bootstrapEntry,
         activationPromise,
         selectedRuntime,
+        configuredNodePath: vscode.workspace.getConfiguration('pie').get('nodePath'),
         lastLoadedMarker: context.globalState.get('pie.runtime.lastLoaded') ?? null,
         selectionWatcherCount: selectionWatchers.size,
         output,

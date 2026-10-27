@@ -126,7 +126,7 @@ async function allocatePort(excluded = new Set()) {
   }
 }
 
-async function createProfile(release, { adapter, browserPort } = {}) {
+async function createProfile(release, { adapter, browserPort, nodeSelection = 'explicit' } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pie-delivered-host-'));
   const profile = path.join(root, 'profile');
   const workspace = path.join(root, 'workspace');
@@ -182,6 +182,13 @@ async function createProfile(release, { adapter, browserPort } = {}) {
     PIE_VSCODE_FIXTURE_NETWORK_DENIED_FILE: networkLog,
     NODE_OPTIONS: `--require ${JSON.stringify(vscodePreloader.replaceAll('\\', '/'))}`,
   });
+  delete environment.PIE_DELIVERED_HOST_NODE_SELECTION;
+  if (nodeSelection === 'bundled') {
+    delete environment.PI_NODE_PATH;
+    environment.PIE_DELIVERED_HOST_NODE_SELECTION = 'bundled';
+  } else {
+    assert.equal(nodeSelection, 'explicit');
+  }
   if (browserPort !== undefined) environment.PIE_VSCODE_DEVELOPMENT_BROWSER_PORT = String(browserPort);
   else delete environment.PIE_VSCODE_DEVELOPMENT_BROWSER_PORT;
 
@@ -388,22 +395,37 @@ function waitForMessage(childState, type, timeoutMs = 20_000) {
   });
 }
 
-async function startRecordPathIsRelease(profile) {
-  return realpath(path.join(profile.environment.PIE_DELIVERED_HOST_ROOT, 'out/pi-runtime/node_modules/@earendil-works/pi-coding-agent'));
+async function startRecordPathIsRelease(profile, runtimeOutputDirectory = path.join(profile.environment.PIE_DELIVERED_HOST_ROOT, 'out')) {
+  return realpath(path.join(runtimeOutputDirectory, 'pi-runtime/node_modules/@earendil-works/pi-coding-agent'));
 }
 
-async function verifySdkRecords(profile) {
+async function verifySdkRecords(profile, runtimeOutputDirectory) {
   const raw = await readFile(profile.startLog, 'utf8');
   const records = raw.trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
   const recorded = records.filter(record => typeof record.sdkPath === 'string');
   assert.ok(recorded.length > 0, `expected at least one backend startup options record; saw:\n${raw}`);
-  const expected = await startRecordPathIsRelease(profile);
+  const expected = await startRecordPathIsRelease(profile, runtimeOutputDirectory);
   const checkout = await realpath(repositoryRoot);
   for (const record of recorded) {
     const selected = await realpath(record.sdkPath);
-    assert.ok(samePath(selected, expected), `production host selected SDK outside the private release: ${record.sdkPath}`);
+    assert.ok(samePath(selected, expected), `production host selected SDK outside the selected private runtime output: ${record.sdkPath}`);
     assert.equal(isWithin(checkout, selected), false, 'backend SDK may not resolve through the checkout alias.');
   }
+  return recorded;
+}
+
+async function deliveredBundledNode(release) {
+  const directory = path.join(release.output, 'resources', 'node-runtime');
+  let info;
+  try { info = await lstat(directory); }
+  catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), `delivered Node runtime must be a copied directory: ${directory}`);
+  const manifest = await requireRegularFile(path.join(directory, 'manifest.json'));
+  const executable = await requireRegularFile(path.join(directory, 'node.exe'));
+  return { directory: await realpath(directory), manifest, executable };
 }
 
 const skipReason = 'Set PIE_RUN_DELIVERED_HOST_TESTS=1 and PIE_DELIVERED_HOST_ROOT=<absolute external package root> to opt into the bounded delivered-host lane.';
@@ -452,13 +474,17 @@ test('delivered compiled standalone entry starts from one verified private relea
   }
 });
 
-test('delivered VS Code packaged main bootstrap activates against fake vscode and the same private release', { timeout: browserOptIn ? 210_000 : 120_000, skip: optIn ? false : skipReason }, async t => {
-  const release = await verifiedRelease();
-  const immutableBefore = await payloadFingerprint(t, release, 'BEFORE');
+async function exerciseDeliveredVscodeHost(t, release, {
+  nodeSelection = 'explicit',
+  bundledNode,
+  verifyBrowser = true,
+  verifyPayload = true,
+} = {}) {
+  const immutableBefore = verifyPayload ? await payloadFingerprint(t, release, 'BEFORE') : undefined;
   const profileStart = performance.now();
-  t.diagnostic('VS Code fixture create-profile started (after BEFORE snapshot).');
+  t.diagnostic(immutableBefore ? 'VS Code fixture create-profile started (after BEFORE snapshot).' : 'VS Code fixture create-profile started.');
   const browserPort = await allocatePort();
-  const profile = await createProfile(release, { adapter: 'vscode', browserPort });
+  const profile = await createProfile(release, { adapter: 'vscode', browserPort, nodeSelection });
   t.diagnostic(`VS Code fixture create-profile finished: ${Math.round(performance.now() - profileStart)} ms.`);
   let childState;
   let shutdownConfirmed = false;
@@ -478,18 +504,42 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
     assert.equal(activated.extensionPath, release.root);
     assert.equal(activated.bootstrapEntry, path.join(release.root, 'runtime', 'bootstrap.cjs'));
     assert.equal(activated.activationPromise, true, 'packaged main must return an awaited activation promise');
-    assert.deepEqual(activated.selectedRuntime, { runtimeOutDir: release.output, generation: null, publishedAt: 0 },
-      'packaged bootstrap must delegate using the verified flat out fallback, not a published generation');
-    assert.equal(activated.lastLoadedMarker, null, 'flat fallback must not counterfeit a loaded-generation marker');
+    const runtimeOutputDirectory = activated.selectedRuntime.runtimeOutDir;
+    assert.ok(path.isAbsolute(runtimeOutputDirectory));
+    assert.ok(isWithin(release.root, runtimeOutputDirectory), 'packaged bootstrap must delegate to a runtime output inside the verified private release.');
+    if (nodeSelection === 'explicit') {
+      assert.deepEqual(activated.selectedRuntime, { runtimeOutDir: release.output, generation: null, publishedAt: 0 },
+        'packaged bootstrap must delegate using the verified flat out fallback, not a published generation');
+      assert.equal(activated.lastLoadedMarker, null, 'flat fallback must not counterfeit a loaded-generation marker');
+    } else {
+      assert.equal(profile.environment.PI_NODE_PATH, undefined, 'bundled-node startup must not receive an explicit environment override.');
+      assert.equal(profile.environment.PIE_DELIVERED_HOST_NODE_SELECTION, 'bundled');
+      assert.equal(activated.configuredNodePath, undefined, 'fake VS Code must not supply pie.nodePath for the bundled-node case.');
+    }
     assert.equal(activated.selectionWatcherCount, 1, 'real bootstrap must watch private package selections');
     assert.equal(activated.progressCalls, 0, 'headless VS Code startup must not ask for a production host handoff.');
     assert.ok(isWithin(profile.profile, activated.globalStorage));
     assert.ok(isWithin(profile.profile, activated.storage));
     const baseUrl = `http://127.0.0.1:${browserPort}`;
     await verifyHealthAndAssets(baseUrl, childState);
-    await verifyOptionalBrowserFirstPaint(t, baseUrl, profile);
+    if (verifyBrowser) await verifyOptionalBrowserFirstPaint(t, baseUrl, profile);
     assertNoFixtureErrors(childState);
-    await verifySdkRecords(profile);
+    const records = await verifySdkRecords(profile, runtimeOutputDirectory);
+    if (nodeSelection === 'bundled') {
+      assert.ok(bundledNode, 'actual delivered Node payload must be present for the bundled-node host case.');
+      const selectedNodeManifestPath = await requireRegularFile(path.join(runtimeOutputDirectory, 'resources', 'node-runtime', 'manifest.json'));
+      const selectedNodeManifest = JSON.parse(await readFile(selectedNodeManifestPath, 'utf8'));
+      const qualifiedNodeManifest = JSON.parse(await readFile(bundledNode.manifest, 'utf8'));
+      assert.equal(selectedNodeManifest.payloadIdentity, qualifiedNodeManifest.payloadIdentity,
+        'selected runtime generation must contain the qualified delivered Node payload');
+      const selectedBundledNode = await requireRegularFile(path.join(runtimeOutputDirectory, 'resources', 'node-runtime', 'node.exe'));
+      for (const record of records) {
+        assert.equal(typeof record.command, 'string', 'backend startup record must include the executable passed to spawn.');
+        const backendExecutable = await realpath(record.command);
+        assert.ok(samePath(backendExecutable, selectedBundledNode),
+          `backend executable must come from this selected runtime generation's bundled Node: ${record.command}`);
+      }
+    }
     await assertNoExternalNetwork(profile);
 
     deactivationRequested = true;
@@ -497,8 +547,10 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
     childState.child.send({ type: 'deactivate' });
     const cleanup = await deactivated;
     assert.equal(cleanup.selectionWatcherCount, 0, 'bootstrap selection watcher close must be confirmed');
-    assert.deepEqual(cleanup.leases, [], 'flat fallback must leave no generation lease');
-    assert.deepEqual(cleanup.selections, [], 'startup must not publish a generation selection');
+    assert.deepEqual(cleanup.leases, [], 'startup generation leases must be released');
+    if (nodeSelection === 'explicit') {
+      assert.deepEqual(cleanup.selections, [], 'flat fallback must not publish a generation selection');
+    }
     const result = await withTimeout(childState.completion, 18_000);
     assert.ok(result, `compiled extension process did not close after awaited deactivate.\n${childState.output}`);
     assert.equal(result.code, 0, childState.output);
@@ -511,11 +563,36 @@ test('delivered VS Code packaged main bootstrap activates against fake vscode an
       }
     }, shutdownConfirmed);
     assert.ok(teardown.safe, `VS Code fixture process-tree shutdown was not confirmed; profile retained at ${profile.root}.`);
-    assert.deepEqual(await payloadFingerprint(t, release, 'AFTER teardown'), immutableBefore, 'packaged bootstrap must leave all out/SDK, runtime CJS and manifest bytes unchanged');
+    if (immutableBefore) {
+      assert.deepEqual(await payloadFingerprint(t, release, 'AFTER teardown'), immutableBefore, 'packaged bootstrap must leave all out/SDK, runtime CJS and manifest bytes unchanged');
+    }
     if (shutdownConfirmed) {
-      t.diagnostic(`Packaged main used flat out fallback and awaited activation; watcher closed, no generation leases/selections; ${immutableBefore.files} immutable payload files unchanged. Full Electron startup remains unqualified.`);
-    } else {
+      t.diagnostic(immutableBefore
+        ? `Packaged main used flat out fallback and awaited activation; watcher closed, no generation leases/selections; ${immutableBefore.files} immutable payload files unchanged. Full Electron startup remains unqualified.`
+        : 'Packaged main awaited activation with the selected generation bundled Node; watcher closed and process tree shut down. Full Electron startup remains unqualified.');
+    } else if (immutableBefore) {
       t.diagnostic(`Packaged main lifecycle confirmation failed; successful-deactivation summary suppressed. Payload bytes still verified: ${immutableBefore.files} immutable files unchanged.`);
     }
   }
+}
+
+test('delivered VS Code packaged main bootstrap activates against fake vscode and the same private release', { timeout: browserOptIn ? 210_000 : 120_000, skip: optIn ? false : skipReason }, async t => {
+  const release = await verifiedRelease();
+  await exerciseDeliveredVscodeHost(t, release);
+});
+
+test('delivered VS Code host starts its backend with the selected generation bundled Node when present', { timeout: browserOptIn ? 210_000 : 120_000, skip: optIn ? false : skipReason }, async t => {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    t.skip('delivered bundled node.exe is win32/x64 and is only executed by a matching host.');
+    return;
+  }
+  const release = await verifiedRelease();
+  const bundledNode = await deliveredBundledNode(release);
+  if (!bundledNode) {
+    t.skip('verified delivered package has no out/resources/node-runtime payload.');
+    return;
+  }
+  await exerciseDeliveredVscodeHost(t, release, {
+    nodeSelection: 'bundled', bundledNode, verifyBrowser: false, verifyPayload: false,
+  });
 });
