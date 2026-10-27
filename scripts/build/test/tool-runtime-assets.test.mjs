@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { createToolRuntimeAssetsPlugin, copyPreparedPlaywrightHeadlessPayload, parsePlaywrightPayloadOption, readToolRuntimeAssets, resolvePlaywrightHeadlessPayloadExpected, TOOL_RUNTIME_FILES, TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest, verifyPlaywrightHeadlessPayloadOutput } from '../tool-runtime-assets.mjs';
+import { createToolRuntimeAssetsPlugin, copyPreparedPlaywrightHeadlessPayload, parsePlaywrightPayloadOption, parsePlaywrightRuntimeOption, readToolRuntimeAssets, resolvePlaywrightHeadlessPayloadExpected, TOOL_RUNTIME_FILES, TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest, verifyPlaywrightHeadlessPayloadOutput } from '../tool-runtime-assets.mjs';
 import { verifyToolRuntimeOutput } from '../bundled-extension-verification.mjs';
 import { preparePlaywrightHeadlessPayload } from '../playwright-payload.mjs';
 
@@ -63,20 +63,29 @@ test('verifier rejects marker traversal, extras and missing marker', async t => 
   }
 });
 
-test('payload CLI selection requires an explicit absolute one-shot delivery input', () => {
+test('prepared Playwright CLI selections require explicit absolute one-shot delivery inputs', () => {
   const directory = path.resolve('prepared-playwright-payload');
+  const runtime = path.resolve('prepared-playwright-runtime');
   assert.equal(parsePlaywrightPayloadOption(['--delivery', '--playwright-payload', directory], { requireDelivery: true }), directory);
   assert.equal(parsePlaywrightPayloadOption(['--delivery', `--playwright-payload=${directory}`], { requireDelivery: true }), directory);
   assert.equal(parsePlaywrightPayloadOption(['--delivery']), undefined);
-  for (const argv of [
-    ['--playwright-payload', directory],
-    ['--delivery', '--playwright-payload', 'relative'],
-    ['--delivery', '--playwright-payload'],
-    ['--delivery', '--playwright-payload', directory, '--playwright-payload', directory],
-    ['--delivery', '--playwright-payload', directory, '--watch'],
-    ['--delivery', '--playwright-payload', directory, '--publish'],
-    ['--delivery', '--playwright-payload', directory, '--activate'],
-  ]) assert.throws(() => parsePlaywrightPayloadOption(argv, { requireDelivery: true }));
+  assert.equal(parsePlaywrightRuntimeOption(['--delivery', '--playwright-runtime', runtime], { requireDelivery: true }), runtime);
+  assert.equal(parsePlaywrightRuntimeOption(['--delivery', `--playwright-runtime=${runtime}`], { requireDelivery: true }), runtime);
+  assert.equal(parsePlaywrightRuntimeOption(['--delivery']), undefined);
+  for (const [parser, flag, value] of [
+    [parsePlaywrightPayloadOption, '--playwright-payload', directory],
+    [parsePlaywrightRuntimeOption, '--playwright-runtime', runtime],
+  ]) {
+    for (const argv of [
+      [flag, value],
+      ['--delivery', flag, 'relative'],
+      ['--delivery', flag],
+      ['--delivery', flag, value, flag, value],
+      ['--delivery', flag, value, '--watch'],
+      ['--delivery', flag, value, '--publish'],
+      ['--delivery', flag, value, '--activate'],
+    ]) assert.throws(() => parser(argv, { requireDelivery: true }));
+  }
 });
 
 function writeJson(file, value) {
@@ -133,6 +142,59 @@ async function outputOwner(temp, name) {
   fs.mkdirSync(path.join(output, TOOL_RUNTIME_DIRECTORY), { recursive: true });
   return output;
 }
+
+test('composite selection emits exact v2 availability while no-input and shell builds remain v1', async t => {
+  const temp = fixture(t);
+  const payloadIdentity = 'a'.repeat(64);
+  assert.deepEqual(toolRuntimeManifest(), {
+    version: 1, codeOnly: true,
+    entries: { 'computer-use': 'harness/tools/computer-use/sidecar.mjs', playwright: 'harness/tools/playwright/sidecar.mjs' },
+    files: [...TOOL_RUNTIME_FILES],
+  });
+  const expected = {
+    version: 2,
+    entries: { 'computer-use': 'harness/tools/computer-use/sidecar.mjs', playwright: 'harness/tools/playwright/sidecar.mjs' },
+    files: [...TOOL_RUNTIME_FILES],
+    availability: {
+      'computer-use': 'unavailable',
+      playwright: { state: 'prepared', payloadDirectory: 'playwright-runtime', identity: payloadIdentity },
+    },
+  };
+  assert.deepEqual(toolRuntimeManifest({ playwrightRuntimeIdentity: payloadIdentity }), expected);
+  assert.throws(() => toolRuntimeManifest({ playwrightRuntimeIdentity: 'not-an-identity' }), /SHA-256/);
+
+  const previousIdentity = process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY;
+  const previousRuntime = process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME;
+  try {
+    process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY = payloadIdentity;
+    process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME = '1';
+    const output = path.join(temp, 'composite-output');
+    const plugin = createToolRuntimeAssetsPlugin(root);
+    plugin.generateBundle.call({ emitFile({ fileName, source }) {
+      const target = path.join(output, fileName);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, source);
+    } });
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, TOOL_RUNTIME_MANIFEST), 'utf8')), expected);
+    await verifyToolRuntimeOutput(output, { playwrightRuntimeIdentity: payloadIdentity });
+    await assert.rejects(verifyToolRuntimeOutput(output), /Invalid code-only/);
+
+    process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME = '';
+    const shellOutput = path.join(temp, 'shell-output');
+    plugin.generateBundle.call({ emitFile({ fileName, source }) {
+      const target = path.join(shellOutput, fileName);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, source);
+    } });
+    await verifyToolRuntimeOutput(shellOutput);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(shellOutput, TOOL_RUNTIME_MANIFEST), 'utf8')), toolRuntimeManifest());
+  } finally {
+    if (previousIdentity === undefined) delete process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY;
+    else process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY = previousIdentity;
+    if (previousRuntime === undefined) delete process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME;
+    else process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME = previousRuntime;
+  }
+});
 
 test('complete prepared payload is copied, identity-checked and detects output tampering', async t => {
   const temp = fixture(t);

@@ -85,6 +85,7 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
   write(repo, 'scripts/build/bundled-extension-verification.mjs', readFileSync(path.join(checkout, 'scripts/build/bundled-extension-verification.mjs')));
   write(repo, 'scripts/build/tool-runtime-assets.mjs', readFileSync(path.join(checkout, 'scripts/build/tool-runtime-assets.mjs')));
   write(repo, 'scripts/build/playwright-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/playwright-payload.mjs')));
+  write(repo, 'scripts/build/playwright-runtime-payload.mjs', readFileSync(path.join(checkout, 'scripts/build/playwright-runtime-payload.mjs')));
   write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(runtimeContextSource));
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', fakeVerifier(trace));
   write(repo, 'scripts/lib/package-resolution.mjs', packageResolver());
@@ -179,6 +180,10 @@ function fakeVerifier(trace) {
         throw new Error('Invalid fixture runtime: incomplete SDK');
       }
       return { artifactDir: root, sdkPath, identity: manifest.identity, manifest };
+    }
+    export async function verifyPiRuntimeRoles(artifactDir) {
+      const runtime = await verifyPiRuntimeArtifact(artifactDir);
+      return { runtime, tooling: runtime };
     }
   `;
 }

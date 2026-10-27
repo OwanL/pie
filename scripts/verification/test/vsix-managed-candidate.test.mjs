@@ -45,6 +45,12 @@ test('managed selection verifies relocated SDK, payload and extension output and
   }
 });
 
+test('candidate verifier enforces an explicitly expected full runtime identity', async t => {
+  const root = await fixture(t);
+  assert.equal((await verifyCandidateIdentity(root, { expectedRuntimeIdentity: runtime.identity }, deps)).piRuntimeIdentity, runtime.identity);
+  await assert.rejects(verifyCandidateIdentity(root, { expectedRuntimeIdentity: 'c'.repeat(64) }, deps), /expected runtime identity/);
+});
+
 test('managed qualification must match selected runtime identity and target before payload validation', async t => {
   const root = await fixture(t);
   const managedIntegration = { stageRoot: root, receiptPath: path.join(root, 'proof.json') };

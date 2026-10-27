@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { verifyBundledExtensionOutput } from '../bundled-extension-verification.mjs';
+import { verifyBundledExtensionOutput, verifyToolRuntimeOutput } from '../bundled-extension-verification.mjs';
 import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_FILES, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest } from '../tool-runtime-assets.mjs';
 
 const identity = '0123456789abcdef0123';
@@ -42,6 +42,16 @@ test('bundled output requires matching identity, complete inventory and every fi
   await assert.rejects(verifyBundledExtensionOutput(root, identity), /count/);
 });
 
+test('bundled verifier accepts only the selected composite runtime identity', async t => {
+  const { root } = await fixture(t);
+  const payloadIdentity = 'a'.repeat(64);
+  await writeFile(path.join(root, TOOL_RUNTIME_MANIFEST), JSON.stringify(toolRuntimeManifest({ playwrightRuntimeIdentity: payloadIdentity })));
+  await verifyToolRuntimeOutput(root, { playwrightRuntimeIdentity: payloadIdentity });
+  await verifyBundledExtensionOutput(root, identity, { playwrightRuntimeIdentity: payloadIdentity });
+  await assert.rejects(verifyToolRuntimeOutput(root), /Invalid code-only/);
+  await assert.rejects(verifyToolRuntimeOutput(root, { playwrightRuntimeIdentity: 'b'.repeat(64) }), /Invalid prepared/);
+});
+
 test('missing bundled output rejects coordination', async t => {
   const { root } = await fixture(t);
   await rm(path.join(root, 'extension-11.js'));
@@ -54,9 +64,11 @@ test('dedicated one-shot pass follows both graphs and precedes verification/publ
   assert.ok(once.indexOf('if (failed) throw failed.reason') < once.indexOf("'bundled-extensions'"));
   assert.ok(once.indexOf("'bundled-extensions'") < once.indexOf('copyPreparedPlaywrightHeadlessPayload'));
   assert.ok(once.indexOf('copyPreparedPlaywrightHeadlessPayload') < once.indexOf('verifyCoordinatedBuildIdentity()'));
+  assert.ok(once.indexOf('copyPreparedPlaywrightRuntimePayload') < once.indexOf('verifyCoordinatedBuildIdentity()'));
   assert.ok(once.indexOf('verifyCoordinatedBuildIdentity()') < once.indexOf('publishToInstalledExtension()'));
   const watch = source.slice(source.indexOf('async function watchSelection()'));
   assert.ok(watch.indexOf('await buildOnce()') < watch.indexOf("runViteWatch('bundled-extensions')"));
   assert.match(source, /PIE_BUILD_PI_RUNTIME_IDENTITY: selectedPiRuntime\?\.identity/);
-  assert.match(source, /PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY: selectedPlaywrightPayload\?\.identity \?\? ''/);
+  assert.match(source, /PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY: selectedPlaywrightRuntime\?\.identity \?\? selectedPlaywrightPayload\?\.identity \?\? ''/);
+  assert.match(source, /PIE_BUILD_PLAYWRIGHT_RUNTIME: selectedPlaywrightRuntime \? '1' : ''/);
 });

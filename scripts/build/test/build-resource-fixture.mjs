@@ -15,6 +15,7 @@ export function installBuildResources(repo) {
     'scripts/build/bundled-extension-verification.mjs',
     'scripts/build/tool-runtime-assets.mjs',
     'scripts/build/playwright-payload.mjs',
+    'scripts/build/playwright-runtime-payload.mjs',
     'scripts/build/bundled-extension-assets.ts',
     'scripts/build/instruction-assets.ts',
     'harness/tools/catalog/bundled-extensions.ts',

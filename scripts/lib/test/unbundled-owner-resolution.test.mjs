@@ -37,6 +37,41 @@ test('copied code-only native owner refuses implicit roots before package resolu
   }
 });
 
+test('prepared Playwright owner resolves only inside the packaged module root', async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'pie-prepared-playwright-owner-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const out = path.join(temporary, 'out');
+  const payload = path.join(out, 'resources', 'tool-runtimes', 'playwright-runtime');
+  const moduleRoot = path.join(payload, 'node_modules');
+  for (const name of ['playwright', 'playwright-core', 'pngjs']) {
+    const packageRoot = path.join(moduleRoot, name);
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }));
+    writeFileSync(path.join(packageRoot, 'index.js'), `module.exports = ${JSON.stringify(name)};`);
+  }
+  const ambient = path.join(out, 'node_modules', 'ambient-only');
+  mkdirSync(ambient, { recursive: true });
+  writeFileSync(path.join(ambient, 'package.json'), JSON.stringify({ name: 'ambient-only', main: 'index.js' }));
+  writeFileSync(path.join(ambient, 'index.js'), 'module.exports = true;');
+
+  const owner = createNativeOwnerRequire('playwright', { moduleResolutionRoot: moduleRoot });
+  assert.equal(resolveNativeOwnerRoot('playwright', { moduleResolutionRoot: moduleRoot }), moduleRoot);
+  assert.equal(owner.resolve('playwright'), path.join(moduleRoot, 'playwright', 'index.js'));
+  assert.throws(() => owner.resolve('ambient-only'), /outside its prepared owner/);
+
+  const previous = process.env.PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT;
+  process.env.PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT = moduleRoot;
+  try {
+    const dependencyOwnerUrl = `${pathToFileURL(path.join(repositoryRoot, 'harness/tools/playwright/dependency-owner.mjs')).href}?prepared=${Date.now()}`;
+    const { requirePlaywrightDependency } = await import(dependencyOwnerUrl);
+    assert.equal(requirePlaywrightDependency('playwright'), 'playwright');
+    assert.equal(requirePlaywrightDependency.resolve('pngjs'), path.join(moduleRoot, 'pngjs', 'index.js'));
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT;
+    else process.env.PIE_PLAYWRIGHT_MODULE_RESOLUTION_ROOT = previous;
+  }
+});
+
 test('native and application dependency owners resolve from an OS-temp future source root', async (t) => {
   const futureRoot = makeFutureRoot(t);
   const repoOwnerOptions = { repositoryRoot: futureRoot };

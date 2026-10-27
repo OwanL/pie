@@ -214,7 +214,7 @@ export async function extractCandidate(file, destination) {
 }
 
 /** Verify the extracted extension and return only its release identity. */
-export async function verifyCandidateIdentity(destination, { managedIntegration } = {}, deps = {}) {
+export async function verifyCandidateIdentity(destination, { managedIntegration, expectedRuntimeIdentity } = {}, deps = {}) {
   const pkg = JSON.parse(await readFile(path.join(destination, 'package.json'), 'utf8'));
   if (pkg.publisher !== 'pie' || pkg.name !== 'pie' || pkg.main !== './runtime/bootstrap.cjs'
     || typeof pkg.version !== 'string' || !pkg.version.trim()) throw new Error('Invalid candidate package identity');
@@ -224,6 +224,9 @@ export async function verifyCandidateIdentity(destination, { managedIntegration 
   const outDir = path.join(destination, 'out');
   const artifactDir = path.join(outDir, 'pi-runtime');
   const runtime = await (deps.verifyPiRuntimeArtifact ?? verifyPiRuntimeArtifact)(artifactDir);
+  if (expectedRuntimeIdentity !== undefined && runtime.identity !== expectedRuntimeIdentity) {
+    throw new Error('Candidate runtime identity does not match the expected runtime identity');
+  }
   let managedPresent = false;
   try { await lstat(path.join(outDir, BUNDLED_MANAGED_ROOT_RELATIVE_PATH)); managedPresent = true; }
   catch (error) { if (error.code !== 'ENOENT') throw error; }

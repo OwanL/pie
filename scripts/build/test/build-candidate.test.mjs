@@ -43,13 +43,17 @@ test('candidate arguments require explicit absolute VSIX output and reject ambig
   const output = path.resolve('candidate.vsix');
   const artifactDir = path.resolve('runtime-fixture');
   const playwrightPayloadDir = path.resolve('prepared-playwright-payload');
+  const playwrightRuntimeDir = path.resolve('prepared-playwright-runtime');
   assert.deepEqual(parseCandidateArgs(['--output', output]), { output });
   assert.deepEqual(parseCandidateArgs([`--output=${output}`, `--pi-runtime=${artifactDir}`]), { output, artifactDir });
   assert.deepEqual(parseCandidateArgs(['--output', output, '--playwright-payload', playwrightPayloadDir]), { output, playwrightPayloadDir });
+  assert.deepEqual(parseCandidateArgs(['--output', output, '--playwright-runtime', playwrightRuntimeDir]), { output, playwrightRuntimeDir });
   assert.deepEqual(parseCandidateArgs(['--help']), { help: true });
   for (const args of [[], ['--output', 'relative.vsix'], ['--output', path.resolve('bad.zip')],
     ['--output'], ['--output', output, '--output', output], ['--output', output, '--pi-runtime', 'relative'],
     ['--output', output, '--playwright-payload', 'relative'], ['--output', output, '--playwright-payload', playwrightPayloadDir, '--playwright-payload', playwrightPayloadDir],
+    ['--output', output, '--playwright-runtime', 'relative'], ['--output', output, '--playwright-runtime', playwrightRuntimeDir, '--playwright-runtime', playwrightRuntimeDir],
+    ['--output', output, '--playwright-runtime', playwrightRuntimeDir, '--playwright-payload', playwrightPayloadDir],
     ['--output', output, '--unknown'], ['--output', output, '--pi-runtime', artifactDir, '--pi-runtime', artifactDir]]) {
     assert.throws(() => parseCandidateArgs(args));
   }
@@ -86,8 +90,9 @@ for (const valid of [true, false]) {
     const delivery = f.calls.find(call => call[0] === 'delivery-build')[1];
     assert.deepEqual(delivery.args.slice(-4), ['--managed-stage', managedIntegration.stageRoot, '--managed-qualification-receipt', managedIntegration.receiptPath]);
     assert.deepEqual(f.calls.map(call => call[0]), ['verify-runtime', 'delivery-build', 'stage', 'identity', 'candidate-package', 'verify-candidate']);
-    assert.deepEqual(f.calls.find(call => call[0] === 'identity').slice(1), [path.join(f.scratch, 'stage'), { managedIntegration }]);
-    assert.deepEqual(f.calls.at(-1).slice(1), [path.join(f.scratch, 'candidate.vsix'), path.join(f.scratch, 'extracted'), { managedIntegration }]);
+    const verificationContext = { managedIntegration, expectedRuntimeIdentity: 'fixture-runtime' };
+    assert.deepEqual(f.calls.find(call => call[0] === 'identity').slice(1), [path.join(f.scratch, 'stage'), verificationContext]);
+    assert.deepEqual(f.calls.at(-1).slice(1), [path.join(f.scratch, 'candidate.vsix'), path.join(f.scratch, 'extracted'), verificationContext]);
     const evidence = await readFile(result.evidencePath, 'utf8');
     for (const privatePath of Object.values(managedIntegration)) assert.equal(evidence.includes(privatePath.replaceAll('\\', '\\\\')), false);
     assert.equal(evidence.includes('managed-qualification-receipt'), false);
@@ -170,6 +175,74 @@ for (const mismatch of [false, true]) {
       'resolve-playwright-pins', 'validate-playwright-input', 'verify-runtime', 'delivery-build', 'stage', 'identity',
       'verify-playwright-output', 'candidate-package', 'verify-candidate', 'verify-playwright-output',
     ]);
+  });
+}
+
+test('managed candidate with full Playwright runtime propagates expected SDK identity to staged and extracted verification', async t => {
+  const f = await fixture(t);
+  const artifactDir = path.join(f.base, 'runtime');
+  const playwrightRuntimeDir = path.join(f.base, 'prepared-runtime');
+  const managedIntegration = { stageRoot: path.join(f.base, 'managed-stage'), receiptPath: path.join(f.base, 'managed-receipt.json') };
+  const payloadIdentity = 'e'.repeat(64);
+  f.deps.validatePlaywrightRuntimePayload = async selection => ({ directory: selection.directory, identity: payloadIdentity });
+  f.deps.verifyPlaywrightRuntimeOutput = async () => ({ identity: payloadIdentity });
+  f.deps.verifyCandidate = async (candidate, extracted, context) => {
+    f.calls.push(['verify-candidate', candidate, extracted, context]);
+    return { ...f.identity };
+  };
+  const result = await buildCandidate({ output: f.output, artifactDir, playwrightRuntimeDir, managedIntegration }, undefined, f.deps);
+  const expectedContext = { managedIntegration, expectedRuntimeIdentity: 'fixture-runtime' };
+  assert.deepEqual(f.calls.find(call => call[0] === 'identity').slice(1), [path.join(f.scratch, 'stage'), expectedContext]);
+  assert.deepEqual(f.calls.find(call => call[0] === 'verify-candidate').slice(1), [
+    path.join(f.scratch, 'candidate.vsix'), path.join(f.scratch, 'extracted'), expectedContext,
+  ]);
+  assert.equal(result.evidence.build.playwrightRuntimeIdentity, payloadIdentity);
+});
+
+test('candidate forwards the composite runtime and rechecks source, staged and extracted identities', async t => {
+  const f = await fixture(t);
+  const playwrightRuntimeDir = path.join(f.base, 'prepared-runtime');
+  const payloadIdentity = 'e'.repeat(64);
+  f.deps.validatePlaywrightRuntimePayload = async selection => {
+    f.calls.push(['validate-playwright-runtime-input', selection]);
+    return { directory: selection.directory, identity: payloadIdentity };
+  };
+  f.deps.verifyPlaywrightRuntimeOutput = async (output, selection) => {
+    f.calls.push(['verify-playwright-runtime-output', output, selection]);
+    return { identity: payloadIdentity };
+  };
+  f.deps.verifyCandidate = async (candidate, extracted, context) => {
+    f.calls.push(['verify-candidate', candidate, extracted, context]);
+    return { ...f.identity };
+  };
+  const result = await buildCandidate({ output: f.output, playwrightRuntimeDir }, undefined, f.deps);
+  const delivery = f.calls.find(call => call[0] === 'delivery-build')[1];
+  assert.deepEqual(delivery.args.slice(-2), ['--playwright-runtime', playwrightRuntimeDir]);
+  const validations = f.calls.filter(call => call[0] === 'verify-playwright-runtime-output');
+  assert.deepEqual(validations.map(call => call[1]), [path.join(f.scratch, 'stage', 'out'), path.join(f.scratch, 'extracted', 'out')]);
+  assert.ok(validations.every(call => call[2].repositoryRoot === f.root && call[2].expectedIdentity === payloadIdentity));
+  const evidence = JSON.parse(await readFile(result.evidencePath, 'utf8'));
+  assert.equal(evidence.playwrightRuntimeIdentity, payloadIdentity);
+  assert.equal(evidence.build.playwrightRuntimeIdentity, payloadIdentity);
+});
+
+for (const mismatch of ['stage', 'extracted']) {
+  test(`candidate rejects composite runtime identity mismatch in ${mismatch} output`, async t => {
+    const f = await fixture(t);
+    const playwrightRuntimeDir = path.join(f.base, 'prepared-runtime');
+    const payloadIdentity = 'e'.repeat(64);
+    let outputCount = 0;
+    f.deps.validatePlaywrightRuntimePayload = async selection => ({ directory: selection.directory, identity: payloadIdentity });
+    f.deps.verifyPlaywrightRuntimeOutput = async () => {
+      outputCount += 1;
+      return { identity: mismatch === 'stage' || outputCount === 2 ? 'f'.repeat(64) : payloadIdentity };
+    };
+    f.deps.verifyCandidate = async () => ({ ...f.identity });
+    const operation = buildCandidate({ output: f.output, playwrightRuntimeDir }, undefined, f.deps);
+    await assert.rejects(operation, mismatch === 'stage' ? /Staged Playwright runtime identity/ : /Packaged Playwright runtime identity/);
+    assert.equal(f.calls.some(call => call[0] === 'candidate-package'), mismatch === 'extracted');
+    await absent(f.output);
+    await absent(`${f.output}.evidence.json`);
   });
 }
 

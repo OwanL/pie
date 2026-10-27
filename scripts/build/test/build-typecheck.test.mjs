@@ -27,7 +27,7 @@ test('delivery build preflight resolves moved extension source through the owner
   t.after(() => rmSync(privateBuilds, { recursive: true, force: true }));
   const owner = path.join(fixture, 'application', 'hosts', 'vscode');
   const modules = path.join(owner, 'node_modules');
-  for (const file of ['build.mjs', 'publication.mjs', 'runtime-publication.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs']) {
+  for (const file of ['build.mjs', 'publication.mjs', 'runtime-publication.mjs', 'tool-runtime-assets.mjs', 'playwright-payload.mjs', 'playwright-runtime-payload.mjs']) {
     write(fixture, `scripts/build/${file}`, readFileSync(path.join(repositoryRoot, 'scripts', 'build', file)));
   }
   write(fixture, 'scripts/build/bundled-extension-verification.mjs', 'export async function verifyBundledExtensionOutput() {}\n');

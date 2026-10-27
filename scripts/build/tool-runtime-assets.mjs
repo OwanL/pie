@@ -9,7 +9,9 @@ import { validatePlaywrightHeadlessPayload } from './playwright-payload.mjs';
 export const TOOL_RUNTIME_DIRECTORY = 'resources/tool-runtimes';
 export const TOOL_RUNTIME_MANIFEST = `${TOOL_RUNTIME_DIRECTORY}/manifest.json`;
 export const PLAYWRIGHT_HEADLESS_OUTPUT_DIRECTORY = `${TOOL_RUNTIME_DIRECTORY}/playwright-headless-shell`;
+export const PLAYWRIGHT_RUNTIME_OUTPUT_DIRECTORY = `${TOOL_RUNTIME_DIRECTORY}/playwright-runtime`;
 const PLAYWRIGHT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const PLAYWRIGHT_TARGET = Object.freeze({ platform: 'win32', arch: 'x64' });
 export const TOOL_RUNTIME_FILES = Object.freeze([
   'harness/tools/computer-use/sidecar.mjs',
@@ -31,23 +33,46 @@ export const TOOL_RUNTIME_FILES = Object.freeze([
   'scripts/lib/native-owner.mjs',
 ]);
 
-export function parsePlaywrightPayloadOption(argv, { requireDelivery = false } = {}) {
-  const options = argv.filter(arg => arg === '--playwright-payload' || arg.startsWith('--playwright-payload='));
-  if (options.length > 1) throw new Error('--playwright-payload may only be supplied once.');
+function parsePreparedPlaywrightOption(argv, flag, { requireDelivery = false } = {}) {
+  const options = argv.filter(arg => arg === flag || arg.startsWith(`${flag}=`));
+  if (options.length > 1) throw new Error(`${flag} may only be supplied once.`);
   if (options.length === 0) return undefined;
   if (requireDelivery && !argv.includes('--delivery')) {
-    throw new Error('--playwright-payload requires explicit --delivery; it is unsupported for development builds.');
+    throw new Error(`${flag} requires explicit --delivery; it is unsupported for development builds.`);
   }
-  if (['--watch', '--publish', '--activate'].some(flag => argv.includes(flag))) {
-    throw new Error('--playwright-payload supports only one-shot, non-publishing delivery builds.');
+  if (['--watch', '--publish', '--activate'].some(option => argv.includes(option))) {
+    throw new Error(`${flag} supports only one-shot, non-publishing delivery builds.`);
   }
   const option = options[0];
   const index = argv.indexOf(option);
-  const value = option === '--playwright-payload' ? argv[index + 1] : option.slice('--playwright-payload='.length);
+  const value = option === flag ? argv[index + 1] : option.slice(flag.length + 1);
   if (!value || value.startsWith('--') || !path.isAbsolute(value)) {
-    throw new Error('--playwright-payload requires an explicit absolute prepared directory.');
+    throw new Error(`${flag} requires an explicit absolute prepared directory.`);
   }
   return path.resolve(value);
+}
+
+export function parsePlaywrightPayloadOption(argv, options) {
+  return parsePreparedPlaywrightOption(argv, '--playwright-payload', options);
+}
+
+export function parsePlaywrightRuntimeOption(argv, options) {
+  return parsePreparedPlaywrightOption(argv, '--playwright-runtime', options);
+}
+
+/** Validate one explicit composite runtime without acquisition or fallback. */
+export async function validatePlaywrightRuntimePayload({ directory, repositoryRoot }) {
+  const { validatePlaywrightRuntimePayload: validate } = await import('./playwright-runtime-payload.mjs');
+  return validate({ directory, repositoryRoot });
+}
+
+export async function verifyPlaywrightRuntimePayloadOutput(buildDirectory, { repositoryRoot, expectedIdentity } = {}) {
+  const directory = path.join(buildDirectory, PLAYWRIGHT_RUNTIME_OUTPUT_DIRECTORY);
+  const verified = await validatePlaywrightRuntimePayload({ directory, repositoryRoot });
+  if (expectedIdentity !== undefined && verified.identity !== expectedIdentity) {
+    throw new Error(`Copied Playwright runtime identity mismatch (${verified.identity} != ${expectedIdentity}).`);
+  }
+  return verified;
 }
 
 function readPackageManifest(file, expectedName) {
@@ -120,19 +145,19 @@ export async function verifyPlaywrightHeadlessPayloadOutput(buildDirectory, { ex
   return verified;
 }
 
-async function copyPreparedTree(source, destination) {
+async function copyPreparedTree(source, destination, label = 'Playwright payload') {
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
     const info = await lstat(from);
-    if (info.isSymbolicLink()) throw new Error(`Refusing to copy Playwright payload symlink: ${from}`);
+    if (info.isSymbolicLink()) throw new Error(`Refusing to copy ${label} symlink: ${from}`);
     if (info.isDirectory()) {
       await mkdir(to);
-      await copyPreparedTree(from, to);
+      await copyPreparedTree(from, to, label);
     } else if (info.isFile()) {
       await copyFile(from, to);
     } else {
-      throw new Error(`Refusing to copy non-regular Playwright payload entry: ${from}`);
+      throw new Error(`Refusing to copy non-regular ${label} entry: ${from}`);
     }
   }
 }
@@ -157,11 +182,53 @@ export async function copyPreparedPlaywrightHeadlessPayload({ directory, buildDi
   return verifyPlaywrightHeadlessPayloadOutput(buildDirectory, { expected, expectedIdentity: source.identity });
 }
 
-export function toolRuntimeManifest() {
-  return { version: 1, codeOnly: true, entries: {
+/** Copy an explicit prepared composite runtime, preserving the helper's exact inventory. */
+export async function copyPreparedPlaywrightRuntimePayload({ directory, buildDirectory, repositoryRoot, expectedIdentity }) {
+  const source = await validatePlaywrightRuntimePayload({ directory, repositoryRoot });
+  if (expectedIdentity !== undefined && source.identity !== expectedIdentity) {
+    throw new Error(`Prepared Playwright runtime identity changed (${source.identity} != ${expectedIdentity}).`);
+  }
+  const owner = path.join(buildDirectory, TOOL_RUNTIME_DIRECTORY);
+  const ownerInfo = await lstat(owner);
+  if (!ownerInfo.isDirectory() || ownerInfo.isSymbolicLink()) {
+    throw new Error('Playwright runtime output owner must be an emitted regular resources/tool-runtimes directory.');
+  }
+  const destination = path.join(buildDirectory, PLAYWRIGHT_RUNTIME_OUTPUT_DIRECTORY);
+  let destinationInfo;
+  try { destinationInfo = await lstat(destination); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (destinationInfo) throw new Error(`Refusing to overwrite Playwright runtime output: ${destination}`);
+  await mkdir(destination);
+  await copyPreparedTree(source.directory, destination, 'prepared Playwright runtime');
+  const sourceAfterCopy = await validatePlaywrightRuntimePayload({ directory, repositoryRoot });
+  if (sourceAfterCopy.identity !== source.identity) throw new Error('Prepared Playwright runtime changed while being copied.');
+  return verifyPlaywrightRuntimePayloadOutput(buildDirectory, { repositoryRoot, expectedIdentity: source.identity });
+}
+
+export function toolRuntimeManifest({ playwrightRuntimeIdentity } = {}) {
+  const entries = {
     'computer-use': 'harness/tools/computer-use/sidecar.mjs',
     playwright: 'harness/tools/playwright/sidecar.mjs',
-  }, files: [...TOOL_RUNTIME_FILES] };
+  };
+  if (playwrightRuntimeIdentity === undefined) {
+    return { version: 1, codeOnly: true, entries, files: [...TOOL_RUNTIME_FILES] };
+  }
+  if (typeof playwrightRuntimeIdentity !== 'string' || !SHA256_PATTERN.test(playwrightRuntimeIdentity)) {
+    throw new Error('Prepared Playwright runtime identity must be lowercase SHA-256.');
+  }
+  return {
+    version: 2,
+    entries,
+    files: [...TOOL_RUNTIME_FILES],
+    availability: {
+      'computer-use': 'unavailable',
+      playwright: {
+        state: 'prepared',
+        payloadDirectory: 'playwright-runtime',
+        identity: playwrightRuntimeIdentity,
+      },
+    },
+  };
 }
 
 /** Parse static and literal dynamic imports without evaluating sidecar/native code. */
@@ -211,7 +278,10 @@ export function createToolRuntimeAssetsPlugin(root) {
       for (const { file, source } of readToolRuntimeAssets(root)) {
         this.emitFile({ type: 'asset', fileName: `${TOOL_RUNTIME_DIRECTORY}/${file}`, source });
       }
-      this.emitFile({ type: 'asset', fileName: TOOL_RUNTIME_MANIFEST, source: `${JSON.stringify(toolRuntimeManifest(), null, 2)}\n` });
+      const manifest = process.env.PIE_BUILD_PLAYWRIGHT_RUNTIME === '1'
+        ? toolRuntimeManifest({ playwrightRuntimeIdentity: process.env.PIE_BUILD_PLAYWRIGHT_PAYLOAD_IDENTITY })
+        : toolRuntimeManifest();
+      this.emitFile({ type: 'asset', fileName: TOOL_RUNTIME_MANIFEST, source: `${JSON.stringify(manifest, null, 2)}\n` });
     },
   };
 }

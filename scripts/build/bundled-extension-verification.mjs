@@ -3,10 +3,15 @@ import path from 'node:path';
 import { TOOL_RUNTIME_DIRECTORY, TOOL_RUNTIME_MANIFEST, toolRuntimeManifest } from './tool-runtime-assets.mjs';
 import { isDeepStrictEqual } from 'node:util';
 
-export async function verifyToolRuntimeOutput(buildDir) {
+export async function verifyToolRuntimeOutput(buildDir, { playwrightRuntimeIdentity } = {}) {
+  const expected = toolRuntimeManifest({ playwrightRuntimeIdentity });
   const manifest = JSON.parse(await readFile(path.join(buildDir, TOOL_RUNTIME_MANIFEST), 'utf8'));
-  if (!isDeepStrictEqual(manifest, toolRuntimeManifest())) throw new Error('Invalid code-only tool runtime manifest.');
-  for (const file of toolRuntimeManifest().files) {
+  if (!isDeepStrictEqual(manifest, expected)) {
+    throw new Error(playwrightRuntimeIdentity === undefined
+      ? 'Invalid code-only tool runtime manifest.'
+      : 'Invalid prepared Playwright tool runtime manifest.');
+  }
+  for (const file of expected.files) {
     if (!(await stat(path.join(buildDir, TOOL_RUNTIME_DIRECTORY, file))).isFile()) {
       throw new Error(`Missing tool runtime asset: ${file}`);
     }
@@ -14,8 +19,8 @@ export async function verifyToolRuntimeOutput(buildDir) {
 }
 
 /** Plain Node boundary: consume the emitted inventory, never import the TS catalog. */
-export async function verifyBundledExtensionOutput(buildDir, expectedBuildId) {
-  await verifyToolRuntimeOutput(buildDir);
+export async function verifyBundledExtensionOutput(buildDir, expectedBuildId, { playwrightRuntimeIdentity } = {}) {
+  await verifyToolRuntimeOutput(buildDir, { playwrightRuntimeIdentity });
   const buildId = (await readFile(path.join(buildDir, 'resources/bundled-extensions-build-id.txt'), 'utf8')).trim();
   if (buildId !== expectedBuildId) throw new Error(`Bundled extensions build identity mismatch (${buildId} != ${expectedBuildId}).`);
   const inventory = JSON.parse(await readFile(path.join(buildDir, 'resources/bundled-extensions.json'), 'utf8'));

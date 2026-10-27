@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,13 +18,48 @@ function resolveRepositoryRoot(value) {
   return path.resolve(value);
 }
 
+function isWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function resolvePreparedModuleRoot(owner, value) {
+  if (owner !== 'playwright') {
+    throw new Error(`Prepared module resolution is unavailable for native dependency owner "${owner}"`);
+  }
+  if (typeof value !== 'string' || !path.isAbsolute(value)) {
+    throw new TypeError('moduleResolutionRoot must be an explicit absolute path inside the prepared Playwright payload');
+  }
+  const moduleRoot = path.resolve(value);
+  const payloadRoot = path.dirname(moduleRoot);
+  const toolRuntimeRoot = path.dirname(payloadRoot);
+  const resourcesRoot = path.dirname(toolRuntimeRoot);
+  if (path.basename(moduleRoot) !== 'node_modules' || path.basename(payloadRoot) !== 'playwright-runtime'
+    || path.basename(toolRuntimeRoot) !== 'tool-runtimes' || path.basename(resourcesRoot) !== 'resources') {
+    throw new Error('Prepared Playwright module resolution root must be resources/tool-runtimes/playwright-runtime/node_modules');
+  }
+  try {
+    const info = lstatSync(moduleRoot);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error('not a regular directory');
+  } catch (error) {
+    throw new Error(`Prepared Playwright module owner is missing or invalid: ${moduleRoot}`, { cause: error });
+  }
+  return moduleRoot;
+}
+
 /** Resolve one of the stable native dependency owners from the repository root. */
-export function resolveNativeOwnerRoot(owner, { repositoryRoot: root } = {}) {
+export function resolveNativeOwnerRoot(owner, options = {}) {
+  let root = options.repositoryRoot;
+  const { moduleResolutionRoot } = options;
   const ownerPath = Object.hasOwn(NATIVE_DEPENDENCY_OWNERS, owner)
     ? NATIVE_DEPENDENCY_OWNERS[owner]
     : undefined;
   if (!ownerPath) {
     throw new Error(`Unknown native dependency owner "${owner}" (expected computer-use or playwright)`);
+  }
+  if (moduleResolutionRoot !== undefined) {
+    if (root !== undefined) throw new TypeError('repositoryRoot and moduleResolutionRoot cannot both select a native dependency owner');
+    return resolvePreparedModuleRoot(owner, moduleResolutionRoot);
   }
   if (root === undefined) {
     const copiedRuntimeLayout = path.basename(repositoryRoot) === 'tool-runtimes'
@@ -51,7 +86,27 @@ export function resolveNativeOwnerPath(owner, relativeSegments, options = {}) {
   return target;
 }
 
+function createPreparedOwnerRequire(ownerRoot) {
+  const nativeRequire = createRequire(path.join(ownerRoot, 'package.json'));
+  const resolveOwned = (specifier, options) => {
+    const resolved = nativeRequire.resolve(specifier, options);
+    if (!isWithin(ownerRoot, resolved)) {
+      throw new Error(`Packaged Playwright dependency resolves outside its prepared owner: ${specifier}`);
+    }
+    return resolved;
+  };
+  const ownedRequire = (specifier, ...args) => {
+    resolveOwned(specifier);
+    return nativeRequire(specifier, ...args);
+  };
+  ownedRequire.resolve = resolveOwned;
+  return ownedRequire;
+}
+
 /** Create Node's ordinary package resolver anchored to the selected sidecar. */
 export function createNativeOwnerRequire(owner, options = {}) {
-  return createRequire(path.join(resolveNativeOwnerRoot(owner, options), 'package.json'));
+  const ownerRoot = resolveNativeOwnerRoot(owner, options);
+  return options.moduleResolutionRoot === undefined
+    ? createRequire(path.join(ownerRoot, 'package.json'))
+    : createPreparedOwnerRequire(ownerRoot);
 }
