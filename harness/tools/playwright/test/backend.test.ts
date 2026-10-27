@@ -8,17 +8,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 
-import { requirePlaywrightDependency } from '../dependency-owner.mjs';
-
 import { PlaywrightBackend } from '../backend.mjs';
 import { encodeSidecarRecord } from '../sidecar-core.mjs';
+import { browserTestsEligible } from './browser-availability.mjs';
 
-const { chromium } = requirePlaywrightDependency('playwright');
-
-function browserAvailable(): boolean {
-  try { return existsSync(chromium.executablePath()); } catch { return false; }
-}
-const HAS_BROWSER = browserAvailable();
+const HAS_BROWSER = browserTestsEligible();
 
 let server: Server;
 let baseUrl = '';

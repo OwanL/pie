@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -8,17 +7,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { requirePlaywrightDependency } from '../dependency-owner.mjs';
-
 import { PlaywrightBackend } from '../backend.mjs';
 import { RuntimeClient } from '../runtime-client.js';
+import { browserTestsEligible } from './browser-availability.mjs';
 
-const { chromium } = requirePlaywrightDependency('playwright');
-
-function browserAvailable(): boolean {
-  try { return existsSync(chromium.executablePath()); } catch { return false; }
-}
-const HAS_BROWSER = browserAvailable();
+const HAS_BROWSER = browserTestsEligible();
 
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -7,16 +6,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { requirePlaywrightDependency } from '../dependency-owner.mjs';
-
 import registerPlaywright from '../index.js';
 import { runtimeRegistry } from '../runtime-client.js';
-
-const { chromium } = requirePlaywrightDependency('playwright');
-
-function browserAvailable(): boolean {
-  try { return existsSync(chromium.executablePath()); } catch { return false; }
-}
+import { browserTestsEligible } from './browser-availability.mjs';
 function captureTool(): { tool: any; shutdown?: (event: unknown, ctx: unknown) => Promise<void> } {
   let tool: any; let shutdown: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   registerPlaywright({
@@ -38,7 +30,7 @@ function refFor(text: string, linePattern: RegExp): string {
   return match[1];
 }
 
-test('public playwright tool completes a rendered ref workflow without screenshots, then one explicit visual assertion', { skip: !browserAvailable(), timeout: 45_000 }, async () => {
+test('public playwright tool completes a rendered ref workflow without screenshots, then one explicit visual assertion', { skip: !browserTestsEligible(), timeout: 45_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pw-tool-dogfood-'));
   const sessionPath = path.join(root, 'durable-session.jsonl');
   await writeFile(sessionPath, '');

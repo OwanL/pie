@@ -3,7 +3,7 @@
 // wire constants in sync with types.ts.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createWriteStream, existsSync } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -50,6 +50,10 @@ function bound(value, maxChars) {
 }
 function firstLine(value) {
   return bound(String(value ?? '').split('\n').find((line) => line.trim().length > 0) ?? '', 500);
+}
+function isMissingBrowserExecutable(error) {
+  return error?.code === 'ENOENT'
+    || /\bExecutable doesn't exist at\b/i.test(String(error?.message ?? error));
 }
 function sanitizeName(value) {
   const cleaned = String(value).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
@@ -146,6 +150,7 @@ export class PlaywrightBackend {
     this.sessionTeardowns = new WeakMap();
     this.closeGraceMs = options.closeGraceMs ?? 5000;
     this.spawn = options.spawn ?? spawn;
+    this.chromium = options.chromium ?? chromium;
     this.limits = {
       imageBytes: options.maxImageArtifactBytes ?? MAX_IMAGE_ARTIFACT_BYTES,
       downloadBytes: options.maxDownloadArtifactBytes ?? MAX_DOWNLOAD_ARTIFACT_BYTES,
@@ -749,17 +754,6 @@ export class PlaywrightBackend {
 
   // ------------------------------------------------------------------- open
 
-  assertBrowserInstalled() {
-    let executable;
-    try { executable = chromium.executablePath(); } catch { executable = undefined; }
-    if (executable === undefined || !existsSync(executable)) {
-      throw coded(
-        'BROWSER_NOT_INSTALLED',
-        'The Playwright-pinned Chromium build is not installed. Repair from the pie repository root: npm run install:dependencies',
-      );
-    }
-  }
-
   async validateStorageStatePath(storageStatePath) {
     if (storageStatePath === undefined) return;
     let raw;
@@ -786,7 +780,6 @@ export class PlaywrightBackend {
 
   async open(params, signal) {
     this.assertSessionIdAvailable(params.sessionId);
-    this.assertBrowserInstalled();
     await this.validateStorageStatePath(params.storageStatePath);
     this.assertSessionIdAvailable(params.sessionId);
     const session = this.makeSession(params.sessionId, params);
@@ -799,8 +792,18 @@ export class PlaywrightBackend {
         // userDataDir, no channel fallback). launchServer gives this dedicated
         // tool session an explicit process handle for deterministic cleanup;
         // the subsequent connection is to that fresh local process only.
-        session.browserServer = await chromium.launchServer({ headless: true });
-        browser = await chromium.connect(session.browserServer.wsEndpoint());
+        session.browserServer = await this.chromium.launchServer({ headless: true });
+      } catch (error) {
+        if (isMissingBrowserExecutable(error)) {
+          throw coded(
+            'BROWSER_NOT_INSTALLED',
+            `The Playwright-pinned headless Chromium shell is not installed. Repair from the pie repository root: proto run pnpm -- --dir extensions/playwright exec playwright install --only-shell chromium. ${firstLine(error?.message ?? error)}`,
+          );
+        }
+        throw coded('BROWSER_LAUNCH_FAILED', `Headless Chromium failed to launch: ${firstLine(error?.message ?? error)}`);
+      }
+      try {
+        browser = await this.chromium.connect(session.browserServer.wsEndpoint());
       } catch (error) {
         throw coded('BROWSER_LAUNCH_FAILED', `Headless Chromium failed to launch: ${firstLine(error?.message ?? error)}`);
       }

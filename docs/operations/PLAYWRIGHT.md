@@ -283,13 +283,14 @@ The [extension manifest](../../extensions/playwright/package.json) declares runt
 
 Pi packages remain optional `peerDependencies` with `"*"` ranges. The shared workspace selects the local Pi packages; ordinary tests use the compiled workspace SDK and the artifact integration fixture uses a separately verified runtime.
 
-Repository setup includes `extensions/playwright/` but does not download browsers. Install Chromium explicitly when needed:
+Repository setup includes `extensions/playwright/` but does not download browsers. Install Chromium explicitly when needed; for this headless-only tool, Playwright also supports installing just its headless shell:
 
 ```bash
 proto run pnpm -- --dir extensions/playwright exec playwright install chromium
+proto run pnpm -- --dir extensions/playwright exec playwright install --only-shell chromium
 ```
 
-The runtime checks `chromium.executablePath()` and returns `BROWSER_NOT_INSTALLED` with the root repair command when the pinned executable is absent. It never falls back to machine Chrome or Edge.
+The backend lets `launchServer({ headless: true })` resolve the pinned headless shell. If Playwright reports that its executable is missing, the runtime returns `BROWSER_NOT_INSTALLED` with the shell-only repair command; other launch errors remain `BROWSER_LAUNCH_FAILED`. It never falls back to machine Chrome or Edge.
 
 ## Context-lean integration
 
@@ -300,6 +301,11 @@ The tool bounds semantic output before returning it. Generic tool-result pruning
 Tool prompt metadata is sufficient for operation without a separate skill. Every active guideline names `playwright`, because prompt guidelines are appended flat to Pi's global guideline list.
 
 ## Deterministic verification
+
+Browser-dependent tests retain their existing full-browser installation gate. For a
+shell-only installation, explicitly set `PIE_RUN_PLAYWRIGHT_TESTS=1`; this enables
+real browser tests, not an availability probe. Missing browsers then fail normally.
+Test discovery itself never launches a browser.
 
 Package commands:
 

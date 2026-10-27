@@ -5,15 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { requirePlaywrightDependency } from '../dependency-owner.mjs';
-
 import { PlaywrightBackend } from '../backend.mjs';
-
-const { chromium } = requirePlaywrightDependency('playwright');
-
-function browserAvailable(): boolean {
-  try { return existsSync(chromium.executablePath()); } catch { return false; }
-}
+import { browserTestsEligible } from './browser-availability.mjs';
 
 async function waitForExit(pid: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -25,7 +18,7 @@ async function waitForExit(pid: number, timeoutMs = 10_000): Promise<void> {
   throw new Error(`process ${pid} did not exit within ${timeoutMs}ms`);
 }
 
-test('real browser smoke: open -> AI ref snapshot -> click -> verified snapshot -> close', { skip: !browserAvailable(), timeout: 30_000 }, async () => {
+test('real browser smoke: open -> AI ref snapshot -> click -> verified snapshot -> close', { skip: !browserTestsEligible(), timeout: 30_000 }, async () => {
   const artifactDir = await mkdtemp(path.join(tmpdir(), 'pw-smoke-'));
   const backend = new PlaywrightBackend();
   try {
